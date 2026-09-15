@@ -385,8 +385,65 @@ static void test_key_pinning(void)
     sim_destroy(s);
 }
 
+static void test_diag_echo(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    CHECK_EQ(lg_node_send_diag(&s->nodes[0].node, TXT("grid ping")), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].diag_count, 0);     /* the sender does not report its own echo */
+    CHECK_EQ(s->nodes[1].diag_count, 1);
+    CHECK_EQ(s->nodes[1].diag_hops, 1);
+    CHECK_EQ(s->nodes[2].diag_count, 1);     /* crossed two hops exactly once */
+    CHECK_EQ(s->nodes[2].diag_hops, 2);
+
+    sim_link(s, 0, 2, true);
+    s->duplicate_backbone = true;
+    CHECK_EQ(lg_node_send_diag(&s->nodes[0].node, TXT("mesh ping")), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].diag_count, 2);
+    CHECK_EQ(s->nodes[2].diag_count, 2);
+    CHECK_EQ(s->nodes[2].diag_hops, 1);      /* direct path now */
+    CHECK_EQ(lg_node_send_diag(&s->nodes[0].node, (const uint8_t *)"", 0), LG_ERR_ARG);
+    sim_destroy(s);
+}
+
+static void test_time_announce(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* Every node restarted without time; Emma reconnects and is restricted. */
+    s->grid_time = 0;
+    sim_detach(s, EMMA);
+    s->clients[EMMA].clock = 0;
+    sim_attach(s, EMMA, 2);
+    CHECK(lg_client_time_restricted(cl(s, EMMA)));
+
+    /* The admin sets time on node A, which announces it grid-wide. */
+    s->nodes[0].time = T0 + 5;
+    lg_node_announce_time(&s->nodes[0].node, LG_TIME_AUTHORITATIVE);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].time, T0 + 5);
+    CHECK_EQ(s->nodes[2].time, T0 + 5);
+    CHECK_EQ(s->clients[EMMA].clock, T0 + 5);      /* pushed by node C after adopting */
+    CHECK(!lg_client_time_restricted(cl(s, EMMA)));
+    CHECK_EQ(s->clients[DAD].clock, T0 + 5);       /* pushed by node A directly */
+
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("Clock is back"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, DAD, "Clock is back"));
+    sim_destroy(s);
+}
+
 void test_messaging(void)
 {
+    test_diag_echo();
+    test_time_announce();
     test_registration_and_presence();
     test_direct_two_hops_encrypted();
     test_direct_same_node();

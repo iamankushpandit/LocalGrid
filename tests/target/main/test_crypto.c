@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "esp_timer.h"
 #include "lg_crypto.h"
 #include "lg_test.h"
 
@@ -81,6 +82,35 @@ static void test_hkdf_rfc5869(void)
     CHECK(memcmp(out, expect, sizeof(out)) == 0);
 }
 
+/* RFC 7914 section 11, plus a timing measurement for the admin password cost. */
+static void test_pbkdf2_rfc7914(void)
+{
+    uint8_t expect[64], out[64];
+    hex2bin("55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+            "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783", expect, sizeof(expect));
+    CHECK_EQ(lg_pbkdf2_sha256((const uint8_t *)"passwd", 6, (const uint8_t *)"salt", 4, 1, out, sizeof(out)), 0);
+    CHECK(memcmp(out, expect, sizeof(out)) == 0);
+
+    hex2bin("4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+            "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d", expect, sizeof(expect));
+    int64_t t0 = esp_timer_get_time();
+    CHECK_EQ(lg_pbkdf2_sha256((const uint8_t *)"Password", 8, (const uint8_t *)"NaCl", 4, 80000, out, sizeof(out)), 0);
+    int64_t t1 = esp_timer_get_time();
+    CHECK(memcmp(out, expect, sizeof(out)) == 0);
+    printf("pbkdf2: 80000 iterations x 2 blocks took %lld ms (%lld ms per 1000 iterations per block)\n",
+           (long long)((t1 - t0) / 1000), (long long)((t1 - t0) / 160000));
+
+    uint8_t salt[16] = { 0 }, hash[32];
+    t0 = esp_timer_get_time();
+    CHECK_EQ(lg_pbkdf2_sha256((const uint8_t *)"campfire-password", 17, salt, sizeof(salt), 8000, hash, sizeof(hash)), 0);
+    t1 = esp_timer_get_time();
+    printf("pbkdf2: admin login cost, 8000 iterations, %lld ms\n", (long long)((t1 - t0) / 1000));
+
+    CHECK(lg_pbkdf2_sha256((const uint8_t *)"", 0, salt, sizeof(salt), 1, hash, sizeof(hash)) < 0);
+    CHECK(lg_ct_equal((const uint8_t *)"abcd", (const uint8_t *)"abcd", 4));
+    CHECK(!lg_ct_equal((const uint8_t *)"abcd", (const uint8_t *)"abce", 4));
+}
+
 /* Pairwise keys agree in both directions and differ for a third party. */
 static void test_e2e_pairs(void)
 {
@@ -110,5 +140,6 @@ void test_crypto(void)
     test_chachapoly_rfc8439();
     test_x25519_rfc7748();
     test_hkdf_rfc5869();
+    test_pbkdf2_rfc7914();
     test_e2e_pairs();
 }

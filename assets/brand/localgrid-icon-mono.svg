@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="lg-mono-title">
+  <title id="lg-mono-title">LocalGrid</title>
+  <!-- Single color: inherits currentColor, transparent background. For favicons, themes, and 1-bit screens. -->
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24.2 14.2 A11 11 0 0 1 39.8 14.2" stroke-width="3"/>
+    <path d="M19.3 9.3 A18 18 0 0 1 44.7 9.3" stroke-width="3" opacity="0.5"/>
+    <path d="M32 22 L14 50 L50 50 Z" stroke-width="3"/>
+    <path d="M32 22 L32 39 M14 50 L32 39 L50 50" stroke-width="2" opacity="0.6"/>
+    <circle cx="32" cy="39" r="3.5" stroke-width="2"/>
+  </g>
+  <g fill="currentColor">
+    <circle cx="32" cy="22" r="4.5"/>
+    <circle cx="14" cy="50" r="4.5"/>
+    <circle cx="50" cy="50" r="4.5"/>
+  </g>
+</svg>

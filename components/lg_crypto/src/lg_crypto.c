@@ -147,6 +147,74 @@ int lg_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, siz
     return rc;
 }
 
+int lg_pbkdf2_sha256(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len,
+                     uint32_t iterations, uint8_t *out, size_t out_len)
+{
+    enum { MAX_SALT = 64, MAX_OUT = 64 };
+    if (password == NULL || password_len == 0 || password_len > 128 || (salt_len > 0 && salt == NULL) ||
+        salt_len > MAX_SALT || iterations == 0 || out == NULL || out_len == 0 || out_len > MAX_OUT) {
+        return LG_CRYPTO_ERR;
+    }
+    /* Import the password once as the HMAC key; every iteration reuses the key handle. */
+    psa_key_id_t id = 0;
+    if (import_key(PSA_KEY_TYPE_HMAC, password_len * 8u, PSA_KEY_USAGE_SIGN_MESSAGE, PSA_ALG_HMAC(PSA_ALG_SHA_256),
+                   password, password_len, &id) != PSA_SUCCESS) {
+        return LG_CRYPTO_ERR;
+    }
+    uint8_t block[MAX_SALT + 4];
+    uint8_t u_prev[32], u_next[32], t[32];
+    size_t done = 0;
+    uint32_t index = 1;
+    int rc = 0;
+    while (done < out_len && rc == 0) {
+        if (salt_len > 0) {
+            memcpy(block, salt, salt_len);
+        }
+        block[salt_len]     = (uint8_t)(index >> 24);
+        block[salt_len + 1] = (uint8_t)(index >> 16);
+        block[salt_len + 2] = (uint8_t)(index >> 8);
+        block[salt_len + 3] = (uint8_t)index;
+        size_t olen = 0;
+        if (psa_mac_compute(id, PSA_ALG_HMAC(PSA_ALG_SHA_256), block, salt_len + 4, u_prev, 32, &olen) != PSA_SUCCESS) {
+            rc = LG_CRYPTO_ERR;
+            break;
+        }
+        memcpy(t, u_prev, 32);
+        for (uint32_t j = 1; j < iterations; j++) {
+            if (psa_mac_compute(id, PSA_ALG_HMAC(PSA_ALG_SHA_256), u_prev, 32, u_next, 32, &olen) != PSA_SUCCESS) {
+                rc = LG_CRYPTO_ERR;
+                break;
+            }
+            for (size_t k = 0; k < 32; k++) {
+                t[k] ^= u_next[k];
+            }
+            memcpy(u_prev, u_next, 32);
+        }
+        size_t take = (out_len - done) < 32 ? (out_len - done) : 32;
+        memcpy(out + done, t, take);
+        done += take;
+        index++;
+    }
+    psa_destroy_key(id);
+    lg_secure_zero(block, sizeof(block));
+    lg_secure_zero(u_prev, sizeof(u_prev));
+    lg_secure_zero(u_next, sizeof(u_next));
+    lg_secure_zero(t, sizeof(t));
+    if (rc != 0) {
+        lg_secure_zero(out, out_len);
+    }
+    return rc;
+}
+
+bool lg_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
+{
+    uint8_t acc = 0;
+    for (size_t i = 0; i < len; i++) {
+        acc |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return acc == 0;
+}
+
 int lg_aead_seal(const uint8_t key[LG_AEAD_KEY_LEN], const uint8_t nonce[LG_AEAD_NONCE_LEN],
                  const uint8_t *aad, size_t aad_len, const uint8_t *pt, size_t pt_len, uint8_t *out)
 {

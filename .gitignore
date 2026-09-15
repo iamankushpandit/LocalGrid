@@ -1,6 +1,8 @@
 # ESP-IDF build output
 build/
 build-*/
+# ...but not the build skill, which shares the folder name
+!.claude/skills/build/
 sdkconfig
 sdkconfig.old
 sdkconfig.esp32*
@@ -23,3 +25,6 @@ logs/
 # Local build, flash, and serial logs
 *.log
 dependencies.lock
+
+# flash.py run lock
+tools/.flash.lock

@@ -32,6 +32,9 @@ typedef struct sim sim_t;
 typedef struct {
     sim_t    *sim;
     uint16_t  index;
+    uint32_t  time;          /* this node's grid time; 0 falls back to sim->grid_time */
+    uint32_t  diag_count;    /* diagnostic echoes reported to this node */
+    uint8_t   diag_hops;     /* hops of the last echo */
     lg_node_t node;
 } sim_node_t;
 
@@ -62,6 +65,10 @@ struct sim {
     size_t       capture_count;
 };
 
+/* Reserves the simulation's memory once at boot. On the classic ESP32 the state needs
+ * one block of about 136 KB, and the display driver fragments the heap region that
+ * holds it, so the reservation must come before the display starts. */
+bool   sim_reserve(void);
 sim_t *sim_create(void);
 void   sim_destroy(sim_t *s);
 void   sim_link(sim_t *s, int a, int b, bool up);

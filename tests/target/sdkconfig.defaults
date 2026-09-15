@@ -7,5 +7,20 @@ CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
 # The simulation keeps several node and client cores alive at once.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
+# LVGL for the results screen on handhelds (decision D23).
+# LVGL allocates through the C heap: its built-in 32 KB pool is a static array that
+# takes the classic ESP32's largest heap region, and the simulated grid needs one
+# 136 KB block there.
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+# CONFIG_LV_BUILD_EXAMPLES is not set
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../firmware/common/partitions_4mb.csv"
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y

@@ -45,6 +45,10 @@ typedef struct {
     bool     (*is_neighbor)(void *ctx, uint16_t node);
     uint32_t (*now_ms)(void *ctx);
     uint32_t (*grid_time)(void *ctx);  /* Unix seconds, 0 when grid time is unset */
+    /* Optional. A diagnostic echo arrived; hops = backbone hops travelled. */
+    void     (*on_diag)(void *ctx, uint16_t origin_node, uint8_t hops, const uint8_t *text, size_t len);
+    /* Optional. Another node announced grid time; glue decides whether to adopt it. */
+    void     (*on_time)(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality);
 } lg_node_io_t;
 
 typedef struct {
@@ -100,6 +104,16 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor);
 
 /* Sends TIME_SYNC to one attached device. */
 void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality);
+
+/*
+ * Floods this node's current grid time to every node and pushes it to every
+ * locally attached device. Receiving nodes call io.on_time, then push the time
+ * they hold afterwards to their own devices.
+ */
+void lg_node_announce_time(lg_node_t *n, uint8_t quality);
+
+/* Floods a diagnostic echo (1..LG_TEXT_MAX bytes of UTF-8); each other node reports it once. */
+int lg_node_send_diag(lg_node_t *n, const uint8_t *text, size_t len);
 
 const lg_presence_entry_t *lg_node_presence(const lg_node_t *n, uint32_t device);
 

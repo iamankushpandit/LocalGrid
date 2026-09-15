@@ -1,0 +1,2 @@
+# The Freenove FNK0104B has only native USB, so the console (and the "id" responder) uses USB-Serial/JTAG.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

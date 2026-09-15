@@ -10,11 +10,12 @@ static const lg_group_t proto_groups[] = {
     { LG_PROTO_LEADERS, "LEADERS" },
 };
 
+/* Placeholder names until handhelds are paired and named by the admin. */
 static const lg_user_t proto_users[] = {
-    { LG_PROTO_DAD,    "Dad",    BIT_FAMILY | BIT_LEADERS },
-    { LG_PROTO_EMMA,   "Emma",   BIT_FAMILY | BIT_KIDS    },
-    { LG_PROTO_ALEX,   "Alex",   BIT_FAMILY | BIT_KIDS    },
-    { LG_PROTO_RANGER, "Ranger", BIT_LEADERS              },
+    { LG_PROTO_DAD,    "Handheld 1", BIT_FAMILY | BIT_LEADERS },
+    { LG_PROTO_EMMA,   "Handheld 2", BIT_FAMILY | BIT_KIDS    },
+    { LG_PROTO_ALEX,   "Handheld 3", BIT_FAMILY | BIT_KIDS    },
+    { LG_PROTO_RANGER, "Handheld 4", BIT_LEADERS              },
 };
 
 static const lg_roster_t proto_roster = {

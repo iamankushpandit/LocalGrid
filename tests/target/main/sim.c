@@ -69,7 +69,27 @@ static uint32_t n_now(void *ctx)
 
 static uint32_t n_grid_time(void *ctx)
 {
-    return ((sim_node_t *)ctx)->sim->grid_time;
+    sim_node_t *sn = ctx;
+    return sn->time != 0 ? sn->time : sn->sim->grid_time;
+}
+
+static void n_on_diag(void *ctx, uint16_t origin_node, uint8_t hops, const uint8_t *text, size_t len)
+{
+    (void)origin_node;
+    (void)text;
+    (void)len;
+    sim_node_t *sn = ctx;
+    sn->diag_count++;
+    sn->diag_hops = hops;
+}
+
+static void n_on_time(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality)
+{
+    (void)origin_node;
+    sim_node_t *sn = ctx;
+    if (grid_time != 0 && quality > LG_TIME_UNSET) {
+        sn->time = grid_time;
+    }
 }
 
 /* ---- client io ---- */
@@ -121,9 +141,27 @@ static int c_open(void *ctx, uint32_t peer, const uint8_t *pub, const uint8_t *n
     return lg_e2e_open(&((sim_client_t *)ctx)->e2e, peer, pub, nonce, aad, aad_len, ct, ct_len, out);
 }
 
+static sim_t *s_reserved;       /* one simulation exists at a time; tests create and destroy in turn */
+static bool   s_reserved_in_use;
+
+bool sim_reserve(void)
+{
+    if (s_reserved == NULL) {
+        s_reserved = calloc(1, sizeof(sim_t));
+    }
+    return s_reserved != NULL;
+}
+
 sim_t *sim_create(void)
 {
-    sim_t *s = calloc(1, sizeof(sim_t));
+    sim_t *s;
+    if (s_reserved != NULL && !s_reserved_in_use) {
+        s = s_reserved;
+        s_reserved_in_use = true;
+        memset(s, 0, sizeof(*s));
+    } else {
+        s = calloc(1, sizeof(sim_t));
+    }
     if (s == NULL) {
         printf("FAIL sim_create: out of memory (%u bytes)\n", (unsigned)sizeof(sim_t));
         lg_failures++;
@@ -143,6 +181,8 @@ sim_t *sim_create(void)
             .is_neighbor = n_is_neighbor,
             .now_ms = n_now,
             .grid_time = n_grid_time,
+            .on_diag = n_on_diag,
+            .on_time = n_on_time,
         };
         lg_node_init(&sn->node, (uint16_t)i, 1, roster, &io);
     }
@@ -176,7 +216,11 @@ void sim_destroy(sim_t *s)
 {
     if (s != NULL) {
         lg_secure_zero(s, sizeof(*s));
-        free(s);
+        if (s == s_reserved) {
+            s_reserved_in_use = false;
+        } else {
+            free(s);
+        }
     }
 }
 

@@ -1,0 +1,109 @@
+{
+  "_comment": "Single source of truth for bench boards and the firmware each one runs. Used by tools/flash.py. No MAC addresses: boards are recognized by the LocalGrid device ID stored on the board and answered by its serial 'id' command. Ports are hints and shift when boards are re-plugged.",
+  "id_format": "LG-<role>-<board>-<10 base32 characters>",
+  "roles": {
+    "N": "infrastructure node",
+    "H": "handheld"
+  },
+  "boards": {
+    "ELG": {
+      "description": "Elegoo ESP32 dev board (CP2102, 4 MB flash, no PSRAM)",
+      "target": "esp32"
+    },
+    "HY3": {
+      "description": "Hosyond 3.2in ESP32 display (ST7789P3 240x320, resistive touch, CH340, 4 MB flash)",
+      "target": "esp32"
+    },
+    "F4B": {
+      "description": "Freenove FNK0104B 2.8in ESP32-S3 display (ILI9341, FT6336U touch, 16 MB flash, 8 MB PSRAM)",
+      "target": "esp32s3"
+    }
+  },
+  "firmware": {
+    "node": {
+      "project": "firmware/node",
+      "targets": [
+        "esp32"
+      ],
+      "roles": [
+        "N"
+      ],
+      "description": "Infrastructure node: SoftAP, TCP sessions, ESP-NOW backbone, BLE adverts, serial console. Node 0 also serves the admin page.",
+      "verify_ok": "\\[NET\\] Listening for handhelds",
+      "verify_timeout_s": 25
+    },
+    "tests": {
+      "project": "tests/target",
+      "targets": [
+        "esp32",
+        "esp32s3"
+      ],
+      "roles": [
+        "N",
+        "H"
+      ],
+      "description": "On-board tests: lg_core unit tests, RFC crypto vectors, simulated three-node grid.",
+      "verify_ok": "LG_TESTS_RESULT: PASS",
+      "verify_fail": "LG_TESTS_RESULT: FAIL",
+      "verify_timeout_s": 200
+    }
+  },
+  "devices": [
+    {
+      "name": "node-main",
+      "port": "COM16",
+      "role": "N",
+      "board": "ELG",
+      "firmware": "node",
+      "node_index": 0,
+      "node_name": "MAIN",
+      "id": "LG-N-ELG-1ME3HN5EDP",
+      "id_created": 1789492913,
+      "notes": "Master; admin page at http://192.168.4.1/"
+    },
+    {
+      "name": "node-north",
+      "port": "COM17",
+      "role": "N",
+      "board": "ELG",
+      "firmware": "node",
+      "node_index": 1,
+      "node_name": "NORTH",
+      "id": "LG-N-ELG-81NNZEH78W",
+      "id_created": 1789492998,
+      "notes": ""
+    },
+    {
+      "name": "node-south",
+      "port": "COM18",
+      "role": "N",
+      "board": "ELG",
+      "firmware": "node",
+      "node_index": 2,
+      "node_name": "SOUTH",
+      "id": "LG-N-ELG-276YMMKRDB",
+      "id_created": 1789493048,
+      "notes": ""
+    },
+    {
+      "name": "hosyond",
+      "port": "COM11",
+      "role": "H",
+      "board": "HY3",
+      "firmware": "tests",
+      "id": "LG-H-HY3-MPT765WSFG",
+      "id_created": 1789494151,
+      "notes": "Runs the test app until handheld firmware exists"
+    },
+    {
+      "name": "fnk0104b",
+      "port": "COM9",
+      "role": "H",
+      "board": "F4B",
+      "firmware": "tests",
+      "id": "LG-H-F4B-9DTCV8M0R1",
+      "id_created": 1789493922,
+      "notes": "Runs the test app until handheld firmware exists"
+    }
+  ]
+}

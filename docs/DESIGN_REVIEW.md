@@ -935,6 +935,13 @@ typedef struct {
 - **Orientation:** the profile maps the panel's native orientation to portrait, so a panel that is natively landscape still presents a portrait UI.
 - **Enforcement:** a CI check rejects numeric pixel arguments to LVGL position and size calls in `firmware/client/ui/`, and the UI is exercised at two resolutions (the FNK0104B and the Hosyond 3.2") before any UI milestone is accepted.
 
+**Themes (owner direction, 2026-09-15).** Phase 1 ships one theme, the terminal look: black background and green text. More themes come later, so theming is designed in from the start.
+
+- **One theme table** holds every visual choice: colors by role (background, surface, text, muted text, accent, warning, danger), font set per size class, spacing and radius scale factors, and keyboard key styling.
+- **Screens use roles, not values.** Screen code asks the theme for "accent color" or "body font", built once into shared LVGL styles. Color literals appear only in theme tables.
+- **Switching** a theme rebuilds the shared styles and invalidates the screen; no screen code changes. Theme choice is a per-handheld preference stored in NVS.
+- **Constraint:** themes must stay readable on the classic CYD's panel and fit its flash, so a theme may only reference fonts already in the build.
+
 Initial board files:
 
 | Board | Display | Touch | Audio out | Mic | SD | Battery | PSRAM |

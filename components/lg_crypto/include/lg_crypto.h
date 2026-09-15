@@ -39,6 +39,16 @@ int lg_x25519_shared(const uint8_t priv[LG_X25519_LEN], const uint8_t peer_pub[L
 int lg_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len,
                    const uint8_t *info, size_t info_len, uint8_t *out, size_t out_len);
 
+/*
+ * PBKDF2-HMAC-SHA256 (RFC 8018 section 5.2) for the admin password.
+ * password 1..128 bytes, salt 0..64 bytes, out 1..64 bytes, iterations >= 1.
+ */
+int lg_pbkdf2_sha256(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len,
+                     uint32_t iterations, uint8_t *out, size_t out_len);
+
+/* Constant-time equality for secrets such as password hashes and session tokens. */
+bool lg_ct_equal(const uint8_t *a, const uint8_t *b, size_t len);
+
 /* Returns pt_len + 16. out must hold that many bytes. */
 int lg_aead_seal(const uint8_t key[LG_AEAD_KEY_LEN], const uint8_t nonce[LG_AEAD_NONCE_LEN],
                  const uint8_t *aad, size_t aad_len, const uint8_t *pt, size_t pt_len, uint8_t *out);

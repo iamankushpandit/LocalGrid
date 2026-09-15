@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalGrid</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  /* Theme tokens (decision D10): every color and size below comes from these variables. */
+  :root {
+    --bg: #0b1310; --surface: #111d18; --line: #1f3329; --text: #d7efe0; --muted: #86a596;
+    --accent: #5fd38d; --accent-ink: #06120c; --warn: #f0b64a; --danger: #ef6b6b;
+    --radius: 10px; --gap: 14px; --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 18px 16px 40px; background: var(--bg); color: var(--text); font: 16px/1.5 var(--font); }
+  main { max-width: 760px; margin: 0 auto; display: grid; gap: var(--gap); }
+  header { display: flex; align-items: center; gap: 12px; }
+  header img { width: 40px; height: 40px; }
+  header h1 { font-size: 22px; margin: 0; letter-spacing: .02em; }
+  header .sub { color: var(--muted); font-size: 14px; }
+  header .spacer { flex: 1; }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg);
+          color: var(--text); font: inherit; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { padding: 11px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent);
+           color: var(--accent-ink); font: 600 15px var(--font); cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+  .hint { color: var(--muted); font-size: 14px; margin: 6px 0 0; }
+  .msg { margin-top: 10px; font-size: 14px; min-height: 1.2em; }
+  .msg.err { color: var(--danger); } .msg.ok { color: var(--accent); }
+  .clock { font: 600 34px var(--mono); letter-spacing: .02em; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+          border: 1px solid currentColor; }
+  .good { color: var(--accent); } .warn { color: var(--warn); } .bad { color: var(--danger); } .dim { color: var(--muted); }
+  .banner { border-color: var(--warn); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat .k { color: var(--muted); font-size: 13px; } .stat .v { font: 600 18px var(--mono); }
+  .table { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="/favicon.svg" alt="">
+    <div>
+      <h1 id="title">LocalGrid</h1>
+      <div class="sub" id="subtitle">Offline network</div>
+    </div>
+    <div class="spacer"></div>
+    <button class="ghost" id="logout" hidden>Log out</button>
+  </header>
+
+  <section id="loading"><p class="dim">Connecting to the master node…</p></section>
+
+  <!-- First-time setup -->
+  <section id="setup" hidden>
+    <h2>Set up LocalGrid</h2>
+    <form id="setup-form">
+      <label for="setup-name">Network name</label>
+      <input id="setup-name" maxlength="32" required placeholder="Smith Family Camping" autocomplete="off">
+      <label for="setup-password">Admin password</label>
+      <input id="setup-password" type="password" minlength="12" maxlength="64" required autocomplete="new-password">
+      <p class="hint">At least 12 characters. It protects this page; handhelds never need it.</p>
+      <label>Time</label>
+      <div class="clock" id="setup-clock">--:--:--</div>
+      <p class="hint">Taken from this device: <span id="setup-tz"></span></p>
+      <div class="row"><button type="submit" id="setup-submit">Create LocalGrid</button></div>
+      <div class="msg" id="setup-msg"></div>
+    </form>
+  </section>
+
+  <!-- Login -->
+  <section id="login" hidden>
+    <h2>Log in</h2>
+    <form id="login-form">
+      <label for="login-password">Admin password</label>
+      <input id="login-password" type="password" required autocomplete="current-password">
+      <div class="row"><button type="submit">Log in</button></div>
+      <div class="msg" id="login-msg"></div>
+    </form>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="time-card" hidden>
+    <h2>Grid time</h2>
+    <div class="clock" id="grid-clock">--:--:--</div>
+    <div class="row"><span class="pill" id="time-pill">--</span><span class="dim" id="grid-date"></span></div>
+    <p class="hint" id="time-hint"></p>
+    <div class="row">
+      <button id="use-device-time">Use this device's time</button>
+    </div>
+    <label for="manual-time">Or set it manually</label>
+    <div class="row" style="margin-top:0">
+      <input id="manual-time" type="datetime-local" step="1" style="flex:1; min-width: 220px">
+      <button class="ghost" id="set-manual">Set</button>
+    </div>
+    <div class="msg" id="time-msg"></div>
+  </section>
+
+  <section id="grid-card" hidden>
+    <h2>Master node</h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Node</div><div class="v" id="s-node">--</div></div>
+      <div class="stat"><div class="k">Uptime</div><div class="v" id="s-uptime">--</div></div>
+      <div class="stat"><div class="k">Handhelds here</div><div class="v" id="s-handhelds">--</div></div>
+      <div class="stat"><div class="k">Free memory</div><div class="v" id="s-heap">--</div></div>
+    </div>
+  </section>
+
+  <section id="nodes-card" hidden>
+    <h2>Infrastructure</h2>
+    <div class="table"><table>
+      <thead><tr><th>Node</th><th>Status</th><th>Signal</th><th>Last heard</th></tr></thead>
+      <tbody id="nodes-body"></tbody>
+    </table></div>
+  </section>
+
+  <section id="devices-card" hidden>
+    <h2>Handhelds</h2>
+    <p class="dim" id="devices-empty" hidden>No handhelds have connected yet.</p>
+    <div class="table" id="devices-table"><table>
+      <thead><tr><th>Name</th><th>Status</th><th>Connected to</th></tr></thead>
+      <tbody id="devices-body"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const NODE_NAMES = ["MAIN", "NORTH", "SOUTH"];
+  const $ = (id) => document.getElementById(id);
+  let csrf = "";
+  let poll = null;
+  let gridTime = 0;          // seconds, as of lastStatusAt
+  let lastStatusAt = 0;      // performance.now() when status arrived
+
+  const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; } };
+  const pad = (n) => String(n).padStart(2, "0");
+  const fmtClock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const nodeName = (n) => n < 0 ? "--" : (NODE_NAMES[n] || `NODE ${n}`);
+
+  function show(ids) {
+    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "devices-card"]) {
+      $(id).hidden = !ids.includes(id);
+    }
+    $("logout").hidden = !ids.includes("time-card");
+  }
+
+  function say(id, text, ok) {
+    const el = $(id);
+    el.textContent = text || "";
+    el.className = "msg " + (text ? (ok ? "ok" : "err") : "");
+  }
+
+  async function api(path, body) {
+    if (window.LG_MOCK_API) return window.LG_MOCK_API(path, body, csrf);   // hosted preview only
+    const opts = { method: body ? "POST" : "GET", headers: {}, credentials: "same-origin" };
+    if (body) {
+      opts.headers["Content-Type"] = "application/json";
+      if (csrf) opts.headers["X-CSRF"] = csrf;
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(path, opts);
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* empty body */ }
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
+    return data;
+  }
+
+  async function start() {
+    try {
+      const st = await api("/api/state");
+      csrf = st.csrf || "";
+      if (st.grid_name) { $("title").textContent = st.grid_name; document.title = st.grid_name + " · LocalGrid"; }
+      if (!st.configured) { beginSetup(); }
+      else if (!st.logged_in) { show(["login"]); $("login-password").focus(); }
+      else { beginDashboard(); }
+    } catch (e) {
+      $("loading").innerHTML = '<p class="bad">Cannot reach the master node. Make sure this device is on the LG-MAIN network, then reload.</p>';
+    }
+  }
+
+  function beginSetup() {
+    show(["setup"]);
+    $("setup-tz").textContent = tz() || "time zone unknown";
+    const tick = () => { $("setup-clock").textContent = fmtClock(new Date()); };
+    tick(); setInterval(tick, 1000);
+    $("setup-name").focus();
+  }
+
+  $("setup-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("setup-submit").disabled = true;
+    say("setup-msg", "Creating LocalGrid… this takes a few seconds.", true);
+    try {
+      const r = await api("/api/setup", {
+        grid_name: $("setup-name").value.trim(),
+        password: $("setup-password").value,
+        unix_ms: Date.now(),
+        timezone: tz(),
+      });
+      csrf = r.csrf;
+      $("setup-password").value = "";
+      $("title").textContent = $("setup-name").value.trim();
+      beginDashboard();
+    } catch (e) {
+      say("setup-msg", e.message, false);
+    } finally {
+      $("setup-submit").disabled = false;
+    }
+  });
+
+  $("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    say("login-msg", "Checking…", true);
+    try {
+      const r = await api("/api/login", { password: $("login-password").value });
+      csrf = r.csrf;
+      $("login-password").value = "";
+      say("login-msg", "");
+      beginDashboard();
+    } catch (e) {
+      say("login-msg", e.message, false);
+    }
+  });
+
+  $("logout").addEventListener("click", async () => {
+    try { await api("/api/logout", {}); } catch (e) { /* ignore */ }
+    csrf = ""; clearInterval(poll); show(["login"]);
+  });
+
+  async function setTime(unixMs, label) {
+    say("time-msg", "Setting time…", true);
+    try {
+      await api("/api/time", { unix_ms: unixMs, timezone: tz() });
+      say("time-msg", `Grid time set from ${label}. Handhelds sync automatically.`, true);
+      setTimeout(refresh, 800);
+    } catch (e) {
+      say("time-msg", e.message, false);
+    }
+  }
+
+  $("use-device-time").addEventListener("click", () => setTime(Date.now(), "this device"));
+  $("set-manual").addEventListener("click", () => {
+    const v = $("manual-time").value;
+    const t = v ? new Date(v).getTime() : NaN;
+    if (Number.isNaN(t)) { say("time-msg", "Pick a date and time first.", false); return; }
+    setTime(t, "manual entry");
+  });
+
+  function beginDashboard() {
+    show(["time-card", "grid-card", "nodes-card", "devices-card"]);
+    refresh();
+    clearInterval(poll);
+    poll = setInterval(refresh, 5000);
+  }
+
+  function renderClock() {
+    if (!gridTime) {
+      $("grid-clock").textContent = "--:--:--";
+      $("grid-date").textContent = "";
+      return;
+    }
+    const d = new Date((gridTime + (performance.now() - lastStatusAt) / 1000) * 1000);
+    $("grid-clock").textContent = fmtClock(d);
+    $("grid-date").textContent = d.toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric" });
+  }
+  setInterval(renderClock, 1000);
+
+  async function refresh() {
+    let s;
+    try { s = await api("/api/status"); }
+    catch (e) {
+      if (/Log in/.test(e.message)) { clearInterval(poll); show(["login"]); }
+      return;
+    }
+    gridTime = s.grid_time; lastStatusAt = performance.now(); renderClock();
+    const pill = $("time-pill");
+    if (!s.grid_time) {
+      pill.textContent = "NOT SET"; pill.className = "pill bad";
+      $("time-hint").textContent = "Handhelds can only receive messages and send urgent broadcasts until the time is set.";
+      $("time-card").classList.add("banner");
+    } else {
+      const drift = Math.round(s.grid_time - Date.now() / 1000);
+      pill.textContent = s.time_quality === 2 ? "SET BY ADMIN" : "CARRIED FROM NODE";
+      pill.className = "pill good";
+      $("time-hint").textContent = Math.abs(drift) > 120
+        ? `This device's clock differs from the grid by ${drift} s.` : "";
+      $("time-card").classList.remove("banner");
+    }
+    $("subtitle").textContent = s.timezone ? `Time zone ${s.timezone}` : "Offline network";
+    $("s-node").textContent = s.node_name;
+    const h = Math.floor(s.uptime_s / 3600), m = Math.floor(s.uptime_s % 3600 / 60);
+    $("s-uptime").textContent = `${h}h ${pad(m)}m`;
+    $("s-handhelds").textContent = s.handhelds;
+    $("s-heap").textContent = `${Math.round(s.heap_free / 1024)} KB`;
+
+    const nodes = [`<tr><td>${nodeName(s.node)}</td><td><span class="pill good">MASTER</span></td><td class="dim">this node</td><td class="dim">now</td></tr>`];
+    for (const l of s.links) {
+      const status = l.up ? '<span class="pill good">ONLINE</span>' : '<span class="pill warn">CONNECTING</span>';
+      const q = l.rssi >= -60 ? "good" : l.rssi >= -75 ? "warn" : "bad";
+      nodes.push(`<tr><td>${nodeName(l.node)}</td><td>${status}</td><td class="${q}">${l.rssi} dBm</td><td>${(l.age_ms / 1000).toFixed(1)} s ago</td></tr>`);
+    }
+    $("nodes-body").innerHTML = nodes.join("");
+
+    const rows = s.devices.map((d) => {
+      const cls = d.state === "ONLINE" ? "good" : "dim";
+      const where = d.state === "ONLINE" ? nodeName(d.node) : "--";
+      return `<tr><td>${d.name.replace(/[<&]/g, "")}</td><td><span class="pill ${cls}">${d.state}</span></td><td>${where}</td></tr>`;
+    });
+    $("devices-body").innerHTML = rows.join("");
+    $("devices-empty").hidden = rows.length > 0;
+    $("devices-table").hidden = rows.length === 0;
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>
