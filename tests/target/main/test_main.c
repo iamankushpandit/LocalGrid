@@ -3,6 +3,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -45,6 +46,28 @@ size_t hex2bin(const char *hex, uint8_t *out, size_t cap)
     return n;
 }
 
+/* The suites keep CPU 0 busy for minutes on a classic ESP32 (PBKDF2 vectors, simulated grid),
+ * which starves its idle task. The task watchdog stops watching idle tasks while they run, so it
+ * stays quiet without slowing the suites or skewing their timings. */
+static void watch_idle_tasks(bool watch)
+{
+    uint32_t mask = 0;
+#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+    mask |= 1u << 0;
+#endif
+#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+    mask |= 1u << 1;
+#endif
+    esp_task_wdt_config_t cfg = {
+        .timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u,
+        .idle_core_mask = watch ? mask : 0,
+#if CONFIG_ESP_TASK_WDT_PANIC
+        .trigger_panic = true,
+#endif
+    };
+    esp_task_wdt_reconfigure(&cfg);
+}
+
 typedef struct {
     const char *name;
     void (*run)(void);
@@ -76,10 +99,7 @@ void app_main(void)
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
            reserved ? "reserved" : "NOT reserved");
-    /* The suites stay CPU-bound for minutes on a classic ESP32 (PBKDF2 vectors, simulated grid).
-     * At idle priority they time-slice with the idle task, so the task watchdog stays fed. */
-    UBaseType_t priority = uxTaskPriorityGet(NULL);
-    vTaskPrioritySet(NULL, tskIDLE_PRIORITY);
+    watch_idle_tasks(false);
     CHECK_EQ(lg_crypto_init(), 0);
 
     static const suite_t suites[] = {
@@ -99,7 +119,7 @@ void app_main(void)
                elapsed_ms);
     }
 
-    vTaskPrioritySet(NULL, priority);
+    watch_idle_tasks(true);
 
     uint32_t min_heap = esp_get_minimum_free_heap_size();
     printf("LG_TESTS: %d checks, %d failures, min free heap %" PRIu32 " bytes\n", lg_checks, lg_failures, min_heap);

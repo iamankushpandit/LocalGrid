@@ -29,6 +29,8 @@ description: Build LocalGrid firmware without flashing — every firmware type, 
 
 - Output goes to `<project>/build-<target>/`, with the generated `<project>/sdkconfig.<target>` and a full log at `<project>/build-<target>.log`. Targets never share a folder, so switching chips needs no `set-target` dance after the first build.
 - Warnings fail the build, as they do when flashing. Fix the warning; keep the warning level.
+- Every run checks layering (decision D27) with `tools/check_layers.py`, before building and again after, when the build folders show what each project really compiled. Run it alone with `python tools/check_layers.py`.
+- A project that lists `components/` as a whole builds every component in it, and the component manager downloads their dependencies. Node firmware therefore lists its infrastructure components one by one.
 - Settings come from `sdkconfig.defaults` and `sdkconfig.defaults.<target>`. The generated `sdkconfig.<target>` wins over the defaults once it exists, so after editing a defaults file use `--clean` for that firmware type.
 - New firmware type: add a project folder and a `firmware` entry (`project`, `targets`, `roles`, `description`, and the `verify_*` fields `flash.py` uses). No script change is needed.
 - `build.py` and `flash.py` share one run lock (`tools/.flash.lock`). A running flash, possibly from another session, makes a build stop with `Another flash.py run (process N) is using the boards`; wait for it to finish.
@@ -42,3 +44,4 @@ description: Build LocalGrid firmware without flashing — every firmware type, 
 | Dependency download errors | A managed component (for example `lvgl/lvgl`) could not be fetched. The first build of a project needs Internet; later builds use `managed_components/`. |
 | `file is being used by another process` | Something outside the lock is building the same folder, such as a manual `idf.py` run. Let it finish. |
 | A setting from a defaults file has no effect | The generated `sdkconfig.<target>` predates the edit. Rebuild with `--clean`. |
+| `LAYER ...` lines and `Layer check failed` | Code or a build crossed a layer boundary, and the line names the file and rule. Move the code to the right component; do not relax the check. A node build folder that still holds UI components clears with `--clean` once the project is fixed. |

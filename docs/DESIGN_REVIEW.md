@@ -317,7 +317,7 @@ Wi-Fi carries everything in Phase 1:
 
 | Link | Mechanism | Why |
 |---|---|---|
-| Client ↔ node | 802.11 association, WPA2-PSK, TCP | Reliable ordered delivery, standard tools, laptops can act as test clients |
+| Client ↔ node | 802.11 association, WPA2-PSK, TCP | Reliable ordered delivery, standard tools |
 | Node ↔ node | ESP-NOW action frames on the same channel | No association, no tree, whole-message frames |
 | Admin phone ↔ master | 802.11 association, HTTP | Browser-native |
 | Discovery | Beacon vendor element in a single-channel scan | Free with the SoftAP |
@@ -346,7 +346,7 @@ Wi-Fi carries everything in Phase 1:
 - **Node-side per-client output limit of 1024 B unacknowledged.** Excess waits in the bounded application queue. This keeps a stalled client from pinning kernel send buffers.
 - `CONFIG_LWIP_MAX_SOCKETS` raised from 10 to 24. `CONFIG_LWIP_TCP_MSL` lowered from 60 s to 10 s so a client that reconnects repeatedly does not hold sockets in TIME_WAIT for two minutes.
 
-Why TCP over UDP with custom retransmission: TCP already gives ordering and hop-level retransmission, which the Noise session requires. Standard tools (a Python client on a laptop) can then drive stress tests. The heap risk of TCP buffers is handled by the output limit above.
+Why TCP over UDP with custom retransmission: TCP already gives ordering and hop-level retransmission, which the Noise session requires. The heap risk of TCP buffers is handled by the output limit above.
 
 **Node ↔ node: ESP-NOW frames.** Unicast gets MAC-layer acknowledgement and retries. A backbone `NODE_ACK` is returned for frames carrying messages, with retries at 300, 600, and 1200 ms before the node gives up on that neighbor. A single sender state machine keeps exactly one ESP-NOW frame in flight and advances on the send callback. That is the field-validated workaround for an open ESP-IDF bug where unpaced sends permanently wedge with `ESP_ERR_ESPNOW_NO_MEM`.
 
@@ -1020,7 +1020,6 @@ LocalGrid/
 │   ├── tests/                Unity unit tests
 │   └── sim/                  N-node / M-client simulator with loss, delay, duplication, partitions
 ├── tools/
-│   ├── lgctl.py              laptop test client over Wi-Fi (Noise + protobuf), stress driver
 │   ├── provision.py          bench provisioning over serial
 │   ├── logdecode.py          decodes binary diagnostic dumps
 │   └── tz/                   IANA → POSIX table generator
@@ -1030,7 +1029,7 @@ LocalGrid/
     └── adr/                  0001-esp-idf-v6.1.md, 0002-espnow-backbone.md, ...
 ```
 
-The simulator links the exact core code the firmware uses, with a fake transport. It covers the brief's simulation list: loss, delay, duplication, reordering, disconnect, partition, merge, master loss, and config updates. The laptop client matters too: because the client link is plain TCP, a Python script can impersonate 20 clients against one real node.
+The simulator links the exact core code the firmware uses, with a fake transport. It covers the brief's simulation list: loss, delay, duplication, reordering, disconnect, partition, merge, master loss, and config updates. All testing runs on ESP32 boards (decision D25); load beyond the two bench handhelds needs more ESP32 boards.
 
 ### 40. RAM and flash on classic ESP32
 
@@ -1169,7 +1168,7 @@ Each item states the problem, the reason, and the recommendation. None has been 
 
 **Testing without a PC compiler:** WSL on this machine has no C compiler, and installing one needs a sudo password. The protocol core's unit tests and multi-node simulation therefore run as an ESP-IDF test app on one Elegoo board, reporting over serial.
 
-**Each handheld is exactly one user.** There are only two handhelds, and "non-members do not receive a group message" needs at least three users. A laptop test script therefore emulates two more handhelds over Wi-Fi, each with its own device index, as if two extra CYDs were present. Because the client link is plain TCP, this costs little. The emulated devices are test tools only.
+**Each handheld is exactly one user.** There are only two handhelds, and "non-members do not receive a group message" needs at least three users. Nothing is tested from a laptop (decision D25). On hardware, the two handhelds cover group membership in two passes: a group containing both, then a group containing only one. The four-user cases run in the on-board simulator (`tests/target`).
 
 Prototype roster (hardcoded):
 
@@ -1177,17 +1176,17 @@ Prototype roster (hardcoded):
 |---|---|---|
 | Dad | Hosyond 3.2" CYD (COM11) | FAMILY, LEADERS |
 | Emma | Freenove FNK0104B (COM9) | FAMILY, KIDS |
-| Alex | emulated handheld on laptop | FAMILY, KIDS |
-| Ranger | emulated handheld on laptop | LEADERS |
+| Alex | simulated in `tests/target` only | FAMILY, KIDS |
+| Ranger | simulated in `tests/target` only | LEADERS |
 
 | Day | Work | Exit criterion |
 |---|---|---|
 | 1 | Back up the current flash of all five boards. Install ESP-IDF v6.1. Build and flash hello_world everywhere; confirm the CYD panel ID; record free heap. Write the pure-C protocol core (envelope, message IDs, dedup, group and broadcast fan-out) with host tests in WSL. | Five boards flash from the command line; host tests pass |
 | 2 | Node firmware: SoftAP on channel 6, TCP server for clients, ESP-NOW backbone with HELLO, flood and dedup, serial CLI. | Two nodes see each other within 4 s in either power-on order |
-| 3 | Client connection on laptop script first, then CYD and FNK0104B: scan, static IP, TCP, REGISTER, presence list across nodes. **Direct messages** with `sent` and `delivered` states. | Acceptance steps 19–23: "Where are you?" and "At the fire." across two nodes |
+| 3 | Client connection on the Hosyond and FNK0104B: scan, static IP, TCP, REGISTER, presence list across nodes. **Direct messages** with `sent` and `delivered` states. | Acceptance steps 19–23: "Where are you?" and "At the fire." across two nodes |
 | 4 | **Group and broadcast**: hardcoded groups, membership enforcement at every delivering node, delivered counts, broadcast rate limit. | Acceptance steps 24–29: FAMILY members get "Dinner at 7." and Ranger does not; everyone gets "Storm coming. Return to camp." |
 | 5 | Touch UI on both handhelds: status, people, groups, everyone, conversation, on-screen keyboard (LVGL). | All three message modes usable from the screens without the serial console |
-| 6 | Third node in a chain (reduced TX power to force A–B–C). Failure drills: power off a node with clients attached. Load: laptop script adds 13 extra sessions to one node. | Messages cross two hops exactly once; reconnect time measured; no crash with 15 stations |
+| 6 | Third node in a chain (reduced TX power to force A–B–C). Failure drills: power off a node with clients attached. Load: needs extra ESP32 boards (D25). | Messages cross two hops exactly once; reconnect time measured; no crash with 15 stations |
 | 7 | Measurements and write-up: CYD minimum free heap, reconnect time, ESP-NOW behavior under load. Update this review's estimates. | Backbone and classic-client UI stack confirmed or revised with data |
 
 **Pass / fail meaning:** if ESP-NOW on AP-only nodes misbehaves under client load, the messaging code above does not change. Only the node-to-node transport underneath it is swapped.
@@ -1213,7 +1212,7 @@ Each milestone ends with: code compiles for all targets, exact build and flash c
 | **1M Roaming** | RSSI filtering, triggers, hysteresis, backoff, blacklist, load awareness | Roam gap measured; no ping-pong over a 30-minute walk loop |
 | **1N Store-and-forward** | Origin queues, limits, full-queue rejection, flush pacing, URGENT broadcast queueing | Acceptance steps 33–36 |
 | **1O Failure handling** | Master loss, time quality levels, node restore, full power cycle, power-pull loop | Acceptance steps 37–50 |
-| **1P Stress** | Laptop script with 20 simulated clients, message floods, malformed-frame fuzzing on host and over the air, reconnect storms | No crash, bounded memory, correct rejections |
+| **1P Stress** | ESP32 load boards (D25) with many client sessions, message floods, malformed-frame fuzzing on host and over the air, reconnect storms | No crash, bounded memory, correct rejections |
 | **1Q Stability** | Several-hour then 24 h soak with continuous traffic across all boards | No downward heap trend after hour one |
 | **1R Field test** | Real campsite: trees, tents, bodies, pockets, distances; full 53-step acceptance test with internet absent | Acceptance test passes; coverage map recorded |
 

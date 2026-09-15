@@ -24,6 +24,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from flash import ROOT, acquire_lock, build, load_map, select  # noqa: E402
+import check_layers  # noqa: E402
 
 SIZE = re.compile(r"\.bin binary size (0x[0-9a-f]+) bytes\. Smallest app partition.*?\((\d+)%\) free", re.IGNORECASE)
 
@@ -63,6 +64,17 @@ def jobs_for(data, args):
     return jobs
 
 
+def layers_ok(when):
+    problems = check_layers.violations()
+    if problems:
+        print(f"\nLayer check failed {when} (decision D27):")
+        for p in problems:
+            print(f"  LAYER {p}")
+    else:
+        print(f"  layers ok {when}", flush=True)
+    return not problems
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("boards", nargs="*", help="build what these boards run (names, ports, or IDs from the device map)")
@@ -89,6 +101,8 @@ def main():
     jobs = jobs_for(data, args)
     if not jobs:
         sys.exit("Nothing to build for that selection.")
+    if not layers_ok("before building"):
+        return 1
     acquire_lock()
 
     results = []
@@ -105,7 +119,8 @@ def main():
     print("\nRESULT")
     for name, target, ok, detail in results:
         print(f"  {'OK  ' if ok else 'FAIL'} {name:<9} {target:<8} {detail}")
-    return 0 if all(ok for _, _, ok, _ in results) else 1
+    layers = layers_ok("after building")   # build folders show what each project really compiled
+    return 0 if layers and all(ok for _, _, ok, _ in results) else 1
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@
 #include "lg_board.h"
 #include "lg_display.h"
 #include "lg_theme.h"
-#include "lg_touch.h"
+#include "lg_bsp_touch.h"
+#include "lg_ui_input.h"
 
 #define SUITES  3
 #define TARGETS 5
@@ -295,7 +296,7 @@ static void build_check_screen(void)
         s_targets[i] = tg;
     }
 
-    bool can_calibrate = lg_touch_can_calibrate();
+    bool can_calibrate = lg_bsp_touch_can_calibrate();
     lv_obj_t *back = button(s_check, "Results", open_results);
     lv_obj_set_width(back, can_calibrate ? LV_PCT(45) : LV_PCT(60));
     lv_obj_align(back, can_calibrate ? LV_ALIGN_BOTTOM_LEFT : LV_ALIGN_BOTTOM_MID, can_calibrate ? t->pad : 0, -t->pad);
@@ -319,15 +320,15 @@ static void build_check_screen(void)
 
 void test_screen_touch_loop(void)
 {
-    if (!s_active || !lg_touch_present()) {
+    if (!s_active || !lg_bsp_touch_present()) {
         return;
     }
     lg_display_lock(1000);
     lv_label_set_text(s_hint, "Tap the screen to check touch");
     lg_display_unlock();
-    lg_touch_wait_press(NULL, NULL, 0);
-    while (lg_touch_needs_calibration()) {
-        lg_touch_calibrate();
+    lg_bsp_touch_wait_press(NULL, NULL, 0);
+    while (lg_bsp_touch_needs_calibration()) {
+        lg_ui_calibrate();
     }
 
     lg_display_lock(1000);
@@ -340,7 +341,7 @@ void test_screen_touch_loop(void)
     for (;;) {
         if (s_recalibrate) {
             s_recalibrate = false;
-            lg_touch_calibrate();
+            lg_ui_calibrate();
             lg_display_lock(1000);
             reset_targets();
             lg_display_unlock();

@@ -1,11 +1,11 @@
 /*
- * Touch controllers.
+ * Touch controller drivers.
  *
  * Provenance: FT6336U register use, the XPT2046 pressure formula and threshold, and
  * the affine calibration follow Braino (github.com/iamankushpandit/Gume, commit
  * 1e2a11f, src/hal/BoardTouch.cpp), measured on these boards by the owner.
  */
-#include "lg_touch.h"
+#include "lg_bsp_touch.h"
 
 #include <math.h>
 #include <string.h>
@@ -20,7 +20,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
-static const char *TAG = "UI";
+static const char *TAG = "BSP";
 
 #define CAL_NAMESPACE     "lgui"
 #define CAL_KEY           "tcal"
@@ -42,15 +42,12 @@ typedef struct {
     float    ax, bx, cx, ay, by, cy;
 } touch_cal_t;
 
-static const lg_board_t      *s_board;
-static SemaphoreHandle_t      s_lock;
+static const lg_board_t       *s_board;
+static SemaphoreHandle_t       s_lock;
 static i2c_master_dev_handle_t s_ft;
-static spi_device_handle_t    s_xpt;
-static touch_cal_t            s_cal;
-static bool                   s_calibrated;
-static volatile bool          s_suspended;
-static int16_t                s_last_x;
-static int16_t                s_last_y;
+static spi_device_handle_t     s_xpt;
+static touch_cal_t             s_cal;
+static bool                    s_calibrated;
 
 static esp_err_t ft_start(const lg_touch_profile_t *t)
 {
@@ -116,7 +113,7 @@ static uint16_t xpt_pressure(void)
     return (z1 > 0 && z2 > z1) ? (uint16_t)(z1 + 4095 - z2) : 0;
 }
 
-static bool read_raw_locked(lg_touch_raw_t *out)
+static bool read_raw_locked(lg_bsp_touch_raw_t *out)
 {
     const lg_touch_profile_t *t = &s_board->touch;
     if (t->kind == LG_TOUCH_FT6336_I2C) {
@@ -160,7 +157,7 @@ static bool read_raw_locked(lg_touch_raw_t *out)
     return false;
 }
 
-bool lg_touch_read_raw(lg_touch_raw_t *out)
+bool lg_bsp_touch_read_raw(lg_bsp_touch_raw_t *out)
 {
     memset(out, 0, sizeof(*out));
     if (s_lock == NULL || xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -180,8 +177,11 @@ static int16_t clamp(float v, uint16_t size)
     return (int16_t)(r >= size ? size - 1 : r);
 }
 
-static bool map_point(const lg_touch_raw_t *raw, int16_t *x, int16_t *y)
+bool lg_bsp_touch_map(const lg_bsp_touch_raw_t *raw, int16_t *x, int16_t *y)
 {
+    if (s_board == NULL || !raw->down) {
+        return false;
+    }
     const lg_panel_profile_t *p = &s_board->panel;
     const lg_touch_profile_t *t = &s_board->touch;
     float fx;
@@ -207,22 +207,6 @@ static bool map_point(const lg_touch_raw_t *raw, int16_t *x, int16_t *y)
     return true;
 }
 
-static void indev_read(lv_indev_t *indev, lv_indev_data_t *data)
-{
-    (void)indev;
-    lg_touch_raw_t raw;
-    int16_t x = 0;
-    int16_t y = 0;
-    bool down = !s_suspended && lg_touch_read_raw(&raw) && map_point(&raw, &x, &y);
-    if (down) {
-        s_last_x = x;
-        s_last_y = y;
-    }
-    data->point.x = s_last_x;
-    data->point.y = s_last_y;
-    data->state = down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-}
-
 static void load_calibration(void)
 {
     nvs_handle_t h;
@@ -239,7 +223,7 @@ static void load_calibration(void)
     nvs_close(h);
 }
 
-esp_err_t lg_touch_start(const lg_board_t *board, int spi_host)
+esp_err_t lg_bsp_touch_start(const lg_board_t *board, int spi_host)
 {
     if (board == NULL || board->touch.kind == LG_TOUCH_NONE) {
         return ESP_ERR_NOT_SUPPORTED;
@@ -260,47 +244,31 @@ esp_err_t lg_touch_start(const lg_board_t *board, int spi_host)
         load_calibration();
     }
     ESP_LOGI(TAG, "[UI] Touch %s ready%s", board->touch.kind == LG_TOUCH_FT6336_I2C ? "FT6336U" : "XPT2046",
-             lg_touch_needs_calibration() ? ", needs calibration" : "");
+             lg_bsp_touch_needs_calibration() ? ", needs calibration" : "");
     return ESP_OK;
 }
 
-void lg_touch_attach(lv_display_t *display)
-{
-    if (s_board == NULL) {
-        return;
-    }
-    lv_indev_t *indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, indev_read);
-    lv_indev_set_display(indev, display);
-}
-
-bool lg_touch_present(void)
+bool lg_bsp_touch_present(void)
 {
     return s_board != NULL;
 }
 
-bool lg_touch_can_calibrate(void)
+bool lg_bsp_touch_can_calibrate(void)
 {
     return s_board != NULL && s_board->touch.kind == LG_TOUCH_XPT2046_SPI;
 }
 
-bool lg_touch_needs_calibration(void)
+bool lg_bsp_touch_needs_calibration(void)
 {
-    return lg_touch_can_calibrate() && !s_calibrated;
+    return lg_bsp_touch_can_calibrate() && !s_calibrated;
 }
 
-void lg_touch_suspend(bool suspended)
-{
-    s_suspended = suspended;
-}
-
-bool lg_touch_wait_press(int16_t *raw_x, int16_t *raw_y, uint32_t timeout_ms)
+bool lg_bsp_touch_wait_press(int16_t *raw_x, int16_t *raw_y, uint32_t timeout_ms)
 {
     int64_t deadline = timeout_ms ? esp_timer_get_time() + (int64_t)timeout_ms * 1000 : INT64_MAX;
-    lg_touch_raw_t raw;
+    lg_bsp_touch_raw_t raw;
     while (esp_timer_get_time() < deadline) {
-        if (!lg_touch_read_raw(&raw)) {
+        if (!lg_bsp_touch_read_raw(&raw)) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -308,7 +276,7 @@ bool lg_touch_wait_press(int16_t *raw_x, int16_t *raw_y, uint32_t timeout_ms)
         int32_t sy = 0;
         int n = 0;
         for (int i = 0; i < 10; i++) {
-            if (lg_touch_read_raw(&raw)) {
+            if (lg_bsp_touch_read_raw(&raw)) {
                 sx += raw.x;
                 sy += raw.y;
                 n++;
@@ -319,7 +287,7 @@ bool lg_touch_wait_press(int16_t *raw_x, int16_t *raw_y, uint32_t timeout_ms)
             continue;   /* a brush, not a press */
         }
         for (int released = 0; released < 3 && esp_timer_get_time() < deadline;) {
-            released = lg_touch_read_raw(&raw) ? 0 : released + 1;
+            released = lg_bsp_touch_read_raw(&raw) ? 0 : released + 1;
             vTaskDelay(pdMS_TO_TICKS(20));
         }
         if (raw_x != NULL) {
@@ -333,9 +301,9 @@ bool lg_touch_wait_press(int16_t *raw_x, int16_t *raw_y, uint32_t timeout_ms)
     return false;
 }
 
-esp_err_t lg_touch_set_calibration(const int16_t raw[3][2], const int16_t screen[3][2])
+esp_err_t lg_bsp_touch_set_calibration(const int16_t raw[3][2], const int16_t screen[3][2])
 {
-    if (!lg_touch_can_calibrate()) {
+    if (!lg_bsp_touch_can_calibrate()) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     const float x0 = raw[0][0], y0 = raw[0][1];

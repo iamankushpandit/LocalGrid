@@ -10,6 +10,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - It shares `tools/flash.py`'s build step, which refuses warnings, and its run lock.
 - Build skill `.claude/skills/build`. The bench skill now points to it instead of spelling out `idf.py` commands.
 
+### Changed (layering)
+- Decision D27: the UI layer stays separate from the infrastructure. Display and touch drivers moved out of `lg_ui` into a new board-support component, `components/lg_bsp` (`lg_bsp_display`, `lg_bsp_touch`).
+- `lg_ui` now holds only LVGL glue, the theme, the pointer device (`lg_ui_input`), and the calibration screen (`lg_ui_calibrate`). It has no ESP-IDF driver dependencies.
+- Node firmware no longer builds the handheld UI stack. `firmware/node/CMakeLists.txt` had listed the whole `components/` folder, so the node build compiled `lg_board`, `lg_bsp`, `lg_ui`, and a downloaded copy of LVGL.
+  - LVGL was compiled but not linked: the binary went from 950 KB to 948 KB.
+  - The node now lists only `lg_core`, `lg_crypto`, and `lg_identity`, and sets `COMPONENTS main`. A clean build compiles exactly those three LocalGrid components and downloads nothing.
+- `tools/check_layers.py` enforces D27, and `tools/build.py` runs it before and after every build. It checks:
+  - UI or board-support includes or requirements in infrastructure code;
+  - LVGL in `lg_bsp`;
+  - driver includes in `lg_ui`;
+  - UI components in a node build folder.
+- Decision D26: voice is tested one way on the bench (FNK0104B talks, Hosyond listens) until a second FNK0104B arrives.
+
+### Changed (testing policy)
+- Decision D25: all testing runs on the ESP32 boards. The planned laptop test client (`lgctl.py`), its emulated handhelds, and the laptop load scripts are dropped from the design review, decisions, and `AGENTS.md`.
+- On hardware, group membership is checked with the two handhelds in two passes. Four-user and load cases stay in the on-board simulator until more ESP32 boards are added.
+
 ### Added (handheld display)
 Handheld displays come up for decision D23; test builds now draw their results on the handheld's own screen.
 - `components/lg_board` holds the board profiles for the Elegoo ESP32, Hosyond 3.2in (E32R32P), and Freenove FNK0104B: panel type, SPI pins, colour order, inversion, mirroring, backlight polarity, pixel density, and touch wiring.
@@ -60,7 +77,9 @@ Handheld displays come up for decision D23; test builds now draw their results o
 - Hosyond heap before the tests, with the simulation reserved and the display and touch running: 106.5 KB free, all of it one block.
 
 ### Fixed (handheld display)
-- The test suites logged task watchdog warnings every 5 s on both handhelds. The test task kept CPU 0 busy for minutes at a priority above the idle task. The suites now run at idle priority. Not yet reflashed, so the boards can keep running the touch check.
+- The test suites logged task watchdog warnings every 5 s on both handhelds. The test task kept CPU 0 busy for minutes at a priority above the idle task. The suites keep their normal priority, and the task watchdog stops watching idle tasks only while they run.
+- Verified on both handhelds: 360 checks and 0 failures with no watchdog warnings. The Hosyond runs faster than before, because the warnings' backtrace printing had been taking CPU time: encryption 72.9 s (was 87.8 s), messaging 31.9 s, and PBKDF2 at 406 ms per 1,000 iterations.
+- A first fix lowered the suites to idle priority. It stopped the warnings but halved their speed on the Hosyond (encryption 88 s to 173 s, messaging 32 s to 66 s), skewed the PBKDF2 timing measurement, and missed `flash.py`'s 200 s verify limit.
 
 ### Added
 - Node firmware (`firmware/node`) for the three Elegoo ESP32 boards:

@@ -1,8 +1,9 @@
-# lg_ui: display and touch bring-up, LVGL integration, and the theme (decisions D9, D10, D23).
+# lg_ui: LVGL integration, theme, pointer input, and calibration screen (decisions D9, D10, D23, D27).
+# Reaches hardware only through lg_bsp; never includes ESP-IDF drivers.
 idf_component_register(SRCS src/lg_display.c
                             src/lg_theme.c
-                            src/lg_touch.c
-                            src/lg_calibrate.c
+                            src/lg_ui_input.c
+                            src/lg_ui_calibrate.c
                        INCLUDE_DIRS include
-                       REQUIRES lvgl__lvgl lg_board
-                       PRIV_REQUIRES esp_lcd esp_driver_spi esp_driver_gpio esp_driver_i2c esp_timer nvs_flash)
+                       REQUIRES lvgl__lvgl lg_board lg_bsp
+                       PRIV_REQUIRES esp_timer)

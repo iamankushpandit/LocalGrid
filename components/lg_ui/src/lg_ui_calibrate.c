@@ -1,17 +1,19 @@
 /*
- * Touch calibration wizard for resistive panels.
+ * Touch calibration screen for resistive panels.
  *
  * Three targets at fixed fractions of the screen, far apart and clear of the edges
  * where resistive film is least linear. Pixel positions are derived from the
- * resolution at runtime; sizes and strokes come from the theme.
+ * resolution at runtime; sizes and strokes come from the theme. The fit itself and
+ * its storage belong to lg_bsp_touch.
  */
 #include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lg_bsp_touch.h"
 #include "lg_display.h"
 #include "lg_theme.h"
-#include "lg_touch.h"
+#include "lg_ui_input.h"
 
 #define CAL_POINTS     3
 #define CAL_TIMEOUT_MS 30000
@@ -37,9 +39,9 @@ static lv_obj_t *crosshair(lv_obj_t *parent)
     return c;
 }
 
-bool lg_touch_calibrate(void)
+bool lg_ui_calibrate(void)
 {
-    if (!lg_touch_can_calibrate()) {
+    if (!lg_bsp_touch_can_calibrate()) {
         return true;
     }
     const lg_theme_t *t = lg_theme();
@@ -77,7 +79,7 @@ bool lg_touch_calibrate(void)
     lv_screen_load(scr);
     lg_display_unlock();
 
-    lg_touch_suspend(true);
+    lg_ui_input_suspend(true);
     int16_t raw[CAL_POINTS][2];
     bool ok = true;
     char text[48];
@@ -87,14 +89,14 @@ bool lg_touch_calibrate(void)
         snprintf(text, sizeof(text), "Tap and hold the target, %d of %d", i + 1, CAL_POINTS);
         lv_label_set_text(hint, text);
         lg_display_unlock();
-        ok = lg_touch_wait_press(&raw[i][0], &raw[i][1], CAL_TIMEOUT_MS);
+        ok = lg_bsp_touch_wait_press(&raw[i][0], &raw[i][1], CAL_TIMEOUT_MS);
         if (ok) {
             printf("[UI] calibration point %d: raw %d,%d for screen %d,%d\n", i + 1, raw[i][0], raw[i][1],
                    screen[i][0], screen[i][1]);
         }
     }
-    esp_err_t err = ok ? lg_touch_set_calibration(raw, screen) : ESP_ERR_TIMEOUT;
-    ok = !lg_touch_needs_calibration();   /* applied, even if it could not be saved */
+    esp_err_t err = ok ? lg_bsp_touch_set_calibration(raw, screen) : ESP_ERR_TIMEOUT;
+    ok = !lg_bsp_touch_needs_calibration();   /* applied, even if it could not be saved */
 
     lg_display_lock(1000);
     lv_obj_add_flag(target, LV_OBJ_FLAG_HIDDEN);
@@ -108,6 +110,6 @@ bool lg_touch_calibrate(void)
     lv_screen_load(previous);
     lv_obj_delete(scr);
     lg_display_unlock();
-    lg_touch_suspend(false);
+    lg_ui_input_suspend(false);
     return ok;
 }
