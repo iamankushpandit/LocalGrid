@@ -1,0 +1,25 @@
+# ESP-IDF build output
+build/
+build-*/
+sdkconfig
+sdkconfig.old
+sdkconfig.esp32*
+managed_components/
+
+# Secrets: prototype keys and provisioning bundles must never be committed
+**/lg_secrets.h
+**/secrets/
+*.bundle.json
+
+# Flash dumps and logs
+*.bin.backup
+logs/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local build, flash, and serial logs
+*.log
+dependencies.lock

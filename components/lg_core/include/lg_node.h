@@ -1,0 +1,108 @@
+/*
+ * lg_node.h - infrastructure node messaging core (transport- and crypto-free).
+ *
+ * The node core owns presence, routing, group enforcement, broadcast rate
+ * limits, the owner's time rule, and duplicate suppression. Glue code owns
+ * sockets, ESP-NOW, and timers, and calls in with complete frames.
+ *
+ * Threading: not thread-safe. Call every function from one task.
+ * Memory: fixed-size struct, no heap use.
+ *
+ * Routing rules (docs/DESIGN_REVIEW.md answers 20-23):
+ *   DIRECT     local session if attached here; else backbone unicast to the
+ *              recipient's node if it is a neighbor; else flood with TTL.
+ *   GROUP      flood once; every node delivers to its locally attached members.
+ *   BROADCAST  flood once; every node delivers to all its local users.
+ *   Loops end at the dedup window and TTL; there is no forwarding state.
+ *
+ * DIRECT bodies are end-to-end ciphertext. Nodes never see 1:1 plaintext and
+ * reject DIRECT text that is not marked LG_FLAG_E2E_PAYLOAD.
+ */
+#pragma once
+
+#include "lg_body.h"
+#include "lg_dedup.h"
+#include "lg_envelope.h"
+#include "lg_roster.h"
+#include "lg_types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define LG_NODE_DEDUP_SLOTS       48u
+#define LG_BROADCAST_INTERVAL_MS  10000u   /* per user, routine broadcasts */
+#define LG_URGENT_INTERVAL_MS     2000u    /* per user, URGENT broadcasts */
+
+typedef struct {
+    void *ctx;
+    /* Deliver a frame to the session of a locally attached device. */
+    void     (*to_client)(void *ctx, uint32_t device, const uint8_t *frame, size_t len);
+    /* Send a frame to one neighbor node. */
+    void     (*backbone_unicast)(void *ctx, uint16_t node, const uint8_t *frame, size_t len);
+    /* Send a frame to every working neighbor except except_node (LG_NODE_NONE for all). */
+    void     (*backbone_flood)(void *ctx, uint16_t except_node, const uint8_t *frame, size_t len);
+    bool     (*is_neighbor)(void *ctx, uint16_t node);
+    uint32_t (*now_ms)(void *ctx);
+    uint32_t (*grid_time)(void *ctx);  /* Unix seconds, 0 when grid time is unset */
+} lg_node_io_t;
+
+typedef struct {
+    uint32_t device;
+    uint32_t epoch;
+    uint16_t node;
+    uint8_t  state;     /* lg_presence_state_t */
+    uint8_t  in_use;
+    uint8_t  pubkey[LG_PUBKEY_LEN];
+} lg_presence_entry_t;
+
+typedef struct {
+    uint32_t rx_client;
+    uint32_t rx_backbone;
+    uint32_t delivered_local;
+    uint32_t forwarded;
+    uint32_t duplicates;
+    uint32_t rejected;
+    uint32_t malformed;
+} lg_node_stats_t;
+
+typedef struct {
+    uint16_t            self;
+    uint32_t            boot;
+    uint32_t            seq;
+    const lg_roster_t  *roster;
+    lg_node_io_t        io;
+    lg_presence_entry_t presence[LG_MAX_DEVICES];
+    uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
+    bool                has_broadcast[LG_MAX_DEVICES];
+    lg_dedup_entry_t    dedup_slots[LG_NODE_DEDUP_SLOTS];
+    lg_dedup_t          dedup;
+    lg_node_stats_t     stats;
+} lg_node_t;
+
+void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, const lg_roster_t *roster, const lg_node_io_t *io);
+
+/*
+ * A frame arrived on a client session. *session_device is 0 until the session
+ * registers; the core sets it on a valid REGISTER. Frames whose author does not
+ * match the session's device are dropped.
+ */
+void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint8_t *frame, size_t len);
+
+/* The session for device closed or timed out. */
+void lg_node_on_session_closed(lg_node_t *n, uint32_t device);
+
+/* A frame arrived from neighbor node from_node. */
+void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *frame, size_t len);
+
+/* A neighbor link became usable: re-announce local presence so partitions reconcile. */
+void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor);
+
+/* Sends TIME_SYNC to one attached device. */
+void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality);
+
+const lg_presence_entry_t *lg_node_presence(const lg_node_t *n, uint32_t device);
+
+#ifdef __cplusplus
+}
+#endif
