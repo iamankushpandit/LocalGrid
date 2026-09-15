@@ -28,3 +28,7 @@ dependencies.lock
 
 # flash.py run lock
 tools/.flash.lock
+
+# Python bytecode
+__pycache__/
+*.pyc
