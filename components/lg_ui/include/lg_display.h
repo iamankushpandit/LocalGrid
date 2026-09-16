@@ -31,6 +31,14 @@ esp_err_t lg_display_start(const lg_board_t *board, lg_display_t *out);
 bool lg_display_lock(uint32_t timeout_ms);
 void lg_display_unlock(void);
 
+/*
+ * Bytes still unused on the drawing task's stack, at its worst point so far, or 0 before the
+ * display has started. Screens are built and refreshed on that task, and LVGL's layout
+ * recurses, so a screen that nests deeply can overflow it: a reading here says how close the
+ * boards that survive actually are, which a panic on the one that does not cannot.
+ */
+uint32_t lg_display_stack_headroom(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -28,13 +28,24 @@ typedef struct {
     lv_color_t      success;
     lv_color_t      error;
     lv_color_t      warning;
+    /*
+     * Delivery marker colours (D42). Separate roles rather than borrowed ones: reusing
+     * success and accent would bake marker meaning into unrelated roles, and those two are
+     * the same value today, which is why delivered and read were indistinguishable.
+     */
+    lv_color_t      mark_wait;        /* this handheld still holds it */
+    lv_color_t      mark_node;        /* a node took it; it may be stored for someone offline */
+    lv_color_t      mark_delivered;   /* the recipient's handheld confirmed it */
+    lv_color_t      mark_read;        /* that handheld showed it to its reader */
     uint8_t         radius;
 
     /* Derived from the screen by lg_theme_init. */
+    const lv_font_t *font_tiny;    /* markers and timestamps: smaller than body text */
     const lv_font_t *font_small;
     const lv_font_t *font_body;
     const lv_font_t *font_title;
     const lv_font_t *font_huge;
+    const lv_font_t *font_icon;   /* every icon is drawn at this one size */
     int16_t          pad;          /* outer padding */
     int16_t          gap;          /* space between stacked items */
     int16_t          touch_min;    /* smallest touch target, from 8 mm */

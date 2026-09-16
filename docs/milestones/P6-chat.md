@@ -80,3 +80,161 @@ master.
 - **Heap on the Hosyond** must be measured again with a chat screen open, because the screen and keyboard allocate on top of the 103 KB low-water mark.
 - **No unread marks** on the conversation list, and no notification when a message arrives while another screen is open.
 - **One user per handheld** (D7): conversations are with handhelds, and names come from the fixed prototype roster.
+
+## Drawing only what changed, and the magnified key (D29, D30)
+
+Build, flash, and read the boards:
+
+```
+python tools/build.py --firmware handheld
+python tools/flash.py --role H
+python tools/serial_capture.py --ports COM9 COM11 --seconds 40 --reset
+```
+
+Expected serial output on both handhelds:
+
+```
+[TEST] Self test: 47 checks passed in <ms> ms
+[GRID] Registered with node <n> as device <n> (Handheld <n>)
+[UI] Launcher ready: 240x320 panel, 109x126 tiles
+[NET] Online; free heap <n> KB, lowest <n> KB
+```
+
+Measured 2026-09-15: FNK0104B 47 checks in 1782 ms, 154 KB free and 149 KB lowest; Hosyond 47 checks in 2487 ms,
+116 KB free and 115 KB lowest. Flash use is 1207 KB on the ESP32 (21% of the app partition free) and 1187 KB on the
+ESP32-S3 (23% free).
+
+### What changed
+
+- `lg_ui_set_text()` writes a label only when the text differs. LVGL repaints the areas it is told changed, so writing
+  identical text was a needless invalidation, several times a second, on screens where most of the words stay the same.
+- The chat list keeps what it has drawn. New messages are appended, a delivery state that moved rewrites one note, and
+  nothing else is touched. The list is rebuilt only when the conversation changes or the 24-message ring has dropped the
+  oldest entry the screen was showing.
+- The launcher, Settings, and node screens refresh on a signature of the values they show, not on the service snapshot's
+  version counter, which changes every second whether or not anything on screen did.
+- A magnified keycap (`lg_ui_keycap_show`) appears above the finger while a key is held: one and a half times the touch
+  minimum, the glyph in the theme's largest font, clamped to the screen edges, hidden on release. Control keys (ABC,
+  More, space, backspace, enter) show none, because the bubble would only cover the row and the glyph is a word.
+- The theme's largest font gained the emoji fallback, which only `font_body` and `font_small` had. Without it a magnified
+  emoji key would have drawn a blank box.
+
+### Test procedure (on the handhelds, D25)
+
+1. Launcher: leave it up for half a minute. The tile text should sit still; only a tile whose value actually changed
+   should redraw.
+2. Settings: open it and wait. Rows should not blink. Change the node choice and only that row's value should change.
+3. Messages, then a conversation: send a 1:1. Only the new bubble should appear, and its note should move from pending
+   to accepted to delivered without the rest of the list repainting.
+4. Keyboard: press and hold a letter. A magnified keycap appears above the finger and follows the key under it; it
+   disappears on release. Press ABC, More, or backspace: no keycap.
+5. Emoji page: hold an emoji key. The magnified bubble shows the emoji glyph, not a box.
+
+### Known limitations
+
+- The keycap is placed at the touch point, not centred on the key rectangle, so it sits above the finger rather than
+  exactly above the key.
+- The emoji font is one 20 px size, so a magnified emoji is drawn at 20 px inside a 28 px line: larger than the key it
+  magnifies, but not scaled the way a letter is.
+- A chat list still rebuilds in full on a conversation change or a ring eviction. That is a real change of content, not
+  a refresh.
+- Heap was measured with the launcher up. The chat screen and the keyboard allocate on top of it, and the Hosyond's
+  116 KB free at Online is the tightest of the two boards.
+- Whether the screens still appear to flicker is the owner's call on the glass; serial can only show that the screens
+  built and that nothing crashed.
+
+## Keyboard pages, markers, read receipts, icons, screen saver (D32 to D36)
+
+Build, run the on-board suite, flash, and read the boards:
+
+```
+python tools/build.py
+python tools/flash.py hosyond --firmware tests --no-build --no-verify
+python tools/serial_capture.py --ports COM11 --seconds 220 --until "LG_TESTS_RESULT" --reset
+python tools/flash.py --role H
+python tools/serial_capture.py --ports COM9 COM11 --seconds 45 --reset
+```
+
+The suite runs first because this work reached into `lg_core` and into the node's ack forwarding, so
+`LG_TESTS_RESULT: PASS` is the gate the handhelds wait behind (AGENTS.md, definition of done 2).
+
+### What changed
+
+- **D32 keyboard.** The letters page dropped its digit row and its punctuation, so it is four rows and a
+  key is about 36 px tall instead of 22 px. Punctuation has its own six-column page. A phone keypad page
+  types by multi-tap the way SMS keypads did: three columns of about 78 px, `2 abc` to `9 wxyz`, a pause
+  of 900 ms ending the run. Three columns is the only way to make a key wide on a 240 px panel.
+- **D33 launcher.** Three icon tiles: Messages across the top, Status and Settings beneath. The self test
+  moved inside Status with its last result and a Run button, so it is in one place rather than three.
+- **D34 markers and read receipts.** Our own messages carry a marker instead of a sentence, and a received
+  1:1 message is reported read when the chat showing it is on the display.
+- **D35 screen saver.** A minute untouched fills the panel with green characters falling down it; the next
+  touch clears it and is swallowed so it cannot press what is underneath.
+- **D36 icons.** One size for every bar and control icon, through `lg_ui_icon_button()` and the theme's
+  `font_icon`. Launcher tiles keep the larger glyph, because there the icon is the tile's subject.
+
+### The protocol change
+
+A read report is the existing `MSG_ACK` message with a new status, `LG_ACK_READ = 9`, appended so no
+existing status moves. The body stays 13 bytes and its length check is unchanged. Three other places had
+to follow, and the first attempt missed one:
+
+- `lg_msg_ack_dec()` ends with a range check against the highest status it knows. Adding a status without
+  raising that bound made every read report malformed at the node and at the recipient. Nothing crashed
+  and nothing was logged; the on-board suite reported five failing checks and no read markers. Any future
+  status has to be named in that bound too, which the comment there now says.
+- The node's `handle_client_ack()` accepted only `DELIVERED` from a recipient and now accepts `READ`. The
+  backbone case has no status gate, so it needed nothing.
+- Received messages now carry the identity of what arrived (author, boot, sequence) in `lg_in_msg_t`,
+  because a read report names the message it is about. That costs the inbox 8 bytes per entry.
+
+Read state is 1:1 only: one report per member would multiply traffic on a group and say little.
+`hh_service_mark_read()` carries the request to the service task through its queue, so screens still never
+touch the client (D27), and each message is reported once.
+
+### Expected serial output
+
+```
+[TEST] Self test: 47 checks passed in <ms> ms
+[GRID] Registered with node <n> as device <n> (Handheld <n>)
+[NET] Online; free heap <n> KB, lowest <n> KB
+[UI] Launcher ready: 240x320 panel, tiles 224x126 and 109x126
+```
+
+### Measured 2026-09-16
+
+| | FNK0104B (ESP32-S3) | Hosyond 3.2in (ESP32) |
+|---|---|---|
+| Self test at boot | 47 checks, 1801 ms | 47 checks, 2463 ms |
+| Heap at Online | 151 KB free, 146 KB lowest | 115 KB free, 113 KB lowest |
+| Flash used | 1191 KB, 22% of the app partition free | 1211 KB, 21% free |
+
+On-board suite on the Hosyond: 405 checks, 0 failures, min free heap 96,204 bytes. The suite takes about
+two minutes there, mostly the 80,000-iteration PBKDF2 vector, which is why flashing it uses `--no-verify`
+and a capture with `--until`.
+
+### Test procedure (on the handhelds, D25)
+
+1. Launcher: three tiles, labels on one line, tile icons larger than the icons in any bar.
+2. Messages, then a conversation. Send a 1:1 with grid time set (D6) and watch the marker on your own
+   bubble: `↻` going out, one tick when a node takes it, two when the other handheld confirms it.
+3. Open that conversation on the receiving handheld. The sender's two ticks turn the accent colour, which
+   is the read report arriving. This needs both boards and a set grid time.
+4. Keyboard: hold a letter for the magnified keycap; `123` for the keypad, where tapping `2 abc` steps
+   a, b, c; `.,?` for punctuation; `ABC` back to letters.
+5. Urgent: the triangle is grey when off and amber when on, and only appears for Everyone.
+6. Leave a handheld untouched for a minute: green rain, cleared by one touch, and the screen underneath
+   comes back as it was.
+
+### Known limitations
+
+- Read reports cannot be turned off, and they tell the sender and the nodes that a message was opened.
+- The keypad types lower case only; there is no shift on that page yet.
+- The magnified keycap sits above the touch point rather than centred on the key: LVGL 9.5 has no public
+  getter for a key's rectangle, and its own popover shows the key at normal size rather than magnified.
+- A magnified emoji is drawn at 20 px inside a 28 px line, because the emoji font has one size.
+- The screen saver leaves the backlight alone, so it saves the panel and not the battery, and it writes
+  nothing to serial: only watching the panel proves it runs.
+- The Hosyond has 115 KB free with the launcher up. The chat screen, the keyboard and the saver's labels
+  allocate on top of that, and it is the tighter of the two boards.
+

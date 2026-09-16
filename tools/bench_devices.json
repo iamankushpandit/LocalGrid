@@ -57,7 +57,7 @@
         "H"
       ],
       "description": "Handheld: joins the grid over Wi-Fi, registers with a node, and shows link, grid time, people, and nodes on screen.",
-      "verify_ok": "\\[UI\\] Home screen ready",
+      "verify_ok": "\\[UI\\] Launcher ready",
       "verify_timeout_s": 30
     }
   },
@@ -76,7 +76,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM16",
+      "port": "COM17",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -88,7 +88,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM18",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",

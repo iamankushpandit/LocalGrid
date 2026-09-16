@@ -441,6 +441,57 @@ static void test_time_announce(void)
 }
 
 /* Keepalive: a handheld's PING is answered by its own node, and only to that session. */
+/*
+ * A read report travels the same path as a delivery report: recipient -> node -> author, with
+ * the message named by (author, boot, seq). It only moves a 1:1 message, it is counted once
+ * per reader however many times it arrives, and it never moves backwards to delivered.
+ */
+static void test_read_receipt(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Are you there?"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_DELIVERED);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].read_count, 0);
+
+    /* Emma's handheld keeps the identity of what it received, which is what it reports. */
+    const lg_in_msg_t *in = lg_client_inbox(cl(s, EMMA), 0);
+    CHECK(in != NULL);
+    CHECK_EQ(in->author, LG_PROTO_DAD);
+    CHECK(in->seq == cl(s, DAD)->outbox[slot].seq);
+    CHECK(in->boot == cl(s, DAD)->outbox[slot].boot);
+
+    CHECK(lg_client_mark_read(cl(s, EMMA), in->author, in->boot, in->seq));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_READ);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].read_count, 1);
+
+    /* Reported twice, counted once, and still read. */
+    CHECK(lg_client_mark_read(cl(s, EMMA), in->author, in->boot, in->seq));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].read_count, 1);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_READ);
+
+    /* A handheld does not report its own message read. */
+    CHECK(!lg_client_mark_read(cl(s, EMMA), LG_PROTO_EMMA, 1, 1));
+
+    /* A group message carries no read state: one report per member would say little. */
+    int g = lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("Dinner is ready."));
+    CHECK(g >= 0);
+    CHECK(sim_pump(s));
+    const lg_in_msg_t *gin = lg_client_inbox(cl(s, EMMA), 0);
+    CHECK(gin != NULL && gin->scope == LG_SCOPE_GROUP);
+    CHECK(lg_client_mark_read(cl(s, EMMA), gin->author, gin->boot, gin->seq));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[g].read_count, 1);
+    CHECK(cl(s, DAD)->outbox[g].state != LG_OUT_READ);
+    sim_destroy(s);
+}
+
 static void test_ping_pong(void)
 {
     sim_t *s = make_chain();
@@ -480,4 +531,5 @@ void test_messaging(void)
     test_node_refuses_unsafe_frames();
     test_key_pinning();
     test_ping_pong();
+    test_read_receipt();
 }

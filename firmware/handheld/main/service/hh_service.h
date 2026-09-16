@@ -48,6 +48,7 @@ typedef struct {
     uint16_t id;
     char     name[HH_NAME_MAX];
     bool     member;        /* this handheld belongs to the group */
+    uint8_t  members;       /* handhelds in the group, the denominator for a delivery count (D42) */
 } hh_group_t;
 
 typedef enum {
@@ -57,6 +58,7 @@ typedef enum {
     HH_MSG_DELIVERED,       /* ours, the recipient's handheld confirmed */
     HH_MSG_REJECTED,        /* ours, the grid rejected it; reject is an lg_ack_status_t */
     HH_MSG_REFUSED,         /* this handheld would not send it; reject is an hh_refuse_t */
+    HH_MSG_READ,            /* ours, 1:1, and the recipient's handheld showed it to them */
 } hh_msg_state_t;
 
 typedef enum {
@@ -76,7 +78,17 @@ typedef struct {
     bool     mine;
     bool     urgent;
     uint32_t grid_time;     /* 0 when grid time was unset */
-    uint32_t seq;           /* our sequence number, for matching delivery reports */
+    uint32_t seq;           /* sequence number: ours when sending, the author's when receiving */
+    uint32_t origin_boot;   /* received messages: the author's boot, to report them read */
+    bool     read_sent;     /* received 1:1: we have already told the author it was read */
+    /*
+     * Group and broadcast markers count people instead of naming a state (D42): a 1:1
+     * message has one recipient, so its state says everything, but "food is ready" to a
+     * group is only meaningful as how many have it and how many have opened it. Both stay
+     * 0 for 1:1, where state carries the answer.
+     */
+    uint8_t  delivered_count;   /* handhelds that confirmed delivery */
+    uint8_t  read_count;        /* handhelds that reported showing it to their reader */
     uint16_t len;
     char     text[HH_TEXT_MAX + 1];
 } hh_message_t;
@@ -139,3 +151,6 @@ size_t hh_service_messages(hh_message_t *out, size_t max);
  * handheld would not send it. Used by both the screens and the console, so the wording and
  * the reason codes live in one place. */
 const char *hh_message_state_text(const hh_message_t *m);
+
+/* Tells the author that one received 1:1 message has been shown. Reports each message once. */
+void hh_service_mark_read(uint32_t message_id);

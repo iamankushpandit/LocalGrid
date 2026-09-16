@@ -16,6 +16,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
+#include "esp_attr.h"
 #include "esp_netif.h"
 #include "lwip/ip4_addr.h"
 #include "esp_system.h"
@@ -208,6 +209,101 @@ static uint32_t next_boot_counter(void)
     return boot;
 }
 
+/*
+ * Why this board last restarted, kept so a crash leaves evidence.
+ *
+ * Opening a serial port restarts an AP, so a crash that happened an hour ago is gone by the
+ * time anybody looks. Each boot therefore reads esp_reset_reason() and adds one to a counter
+ * for that kind of restart in NVS, and `status` prints the counts. One NVS write per boot, next
+ * to the boot counter, so flash wear is unchanged in kind.
+ *
+ * On the classic ESP32 a pulse on EN (the serial tools' reset, or the button) reports the same
+ * as a power-on, so "power-on or reset" covers both. Crashes and watchdogs are distinct.
+ *
+ * How long the previous run lasted survives in RTC memory, which a crash or software restart
+ * keeps and a power loss clears; it is printed only when it is valid.
+ */
+typedef struct {
+    esp_reset_reason_t reason;
+    const char        *key;    /* NVS key, at most 15 characters */
+    const char        *text;
+} restart_kind_t;
+
+static const restart_kind_t RESTART_KINDS[] = {
+    { ESP_RST_POWERON,   "rr_power",    "power-on or reset" },
+    { ESP_RST_EXT,       "rr_ext",      "external reset" },
+    { ESP_RST_SW,        "rr_sw",       "software restart" },
+    { ESP_RST_PANIC,     "rr_panic",    "crash (panic)" },
+    { ESP_RST_INT_WDT,   "rr_int_wdt",  "crash (interrupt watchdog)" },
+    { ESP_RST_TASK_WDT,  "rr_task_wdt", "crash (task watchdog)" },
+    { ESP_RST_WDT,       "rr_wdt",      "crash (other watchdog)" },
+    { ESP_RST_BROWNOUT,  "rr_brownout", "low supply voltage (brownout)" },
+    { ESP_RST_DEEPSLEEP, "rr_sleep",    "wake from deep sleep" },
+    { ESP_RST_UNKNOWN,   "rr_unknown",  "unknown" },
+};
+
+#define RUN_MARK 0x4C475255u   /* "LGRU": the RTC record below was written by this firmware */
+
+static RTC_NOINIT_ATTR uint32_t s_run_mark;
+static RTC_NOINIT_ATTR uint32_t s_run_uptime_s;
+
+static const restart_kind_t *restart_kind(esp_reset_reason_t reason)
+{
+    for (size_t i = 0; i < sizeof(RESTART_KINDS) / sizeof(RESTART_KINDS[0]); i++) {
+        if (RESTART_KINDS[i].reason == reason) {
+            return &RESTART_KINDS[i];
+        }
+    }
+    return &RESTART_KINDS[sizeof(RESTART_KINDS) / sizeof(RESTART_KINDS[0]) - 1];
+}
+
+static void record_restart(void)
+{
+    const restart_kind_t *kind = restart_kind(esp_reset_reason());
+    nvs_handle_t h;
+    if (nvs_open("lg", NVS_READWRITE, &h) == ESP_OK) {
+        uint32_t n = 0;
+        (void)nvs_get_u32(h, kind->key, &n);
+        if (nvs_set_u32(h, kind->key, n + 1) == ESP_OK) {
+            (void)nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    bool ran = s_run_mark == RUN_MARK && kind->reason != ESP_RST_POWERON && kind->reason != ESP_RST_BROWNOUT;
+    if (ran) {
+        ESP_LOGW(TAG, "[GRID] Last restart: %s, after %" PRIu32 " s running", kind->text, s_run_uptime_s);
+    } else {
+        ESP_LOGI(TAG, "[GRID] Last restart: %s", kind->text);
+    }
+    s_run_mark = RUN_MARK;
+    s_run_uptime_s = 0;
+}
+
+/* Called once a second so a crash can say how long the board had been up. */
+static void note_uptime(void)
+{
+    s_run_uptime_s = app_now_ms() / 1000u;
+}
+
+static void print_restarts(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lg", NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    printf("Restarts since counting began:");
+    bool any = false;
+    for (size_t i = 0; i < sizeof(RESTART_KINDS) / sizeof(RESTART_KINDS[0]); i++) {
+        uint32_t n = 0;
+        if (nvs_get_u32(h, RESTART_KINDS[i].key, &n) == ESP_OK && n > 0) {
+            printf("%s %s %" PRIu32, any ? "," : "", RESTART_KINDS[i].text, n);
+            any = true;
+        }
+    }
+    printf("%s\n", any ? "" : " none recorded");
+    nvs_close(h);
+}
+
 static void identify_node(void)
 {
     if (lg_identity_load(&g_app.identity) != ESP_OK) {
@@ -318,6 +414,7 @@ static void print_status(void)
            " duplicates %" PRIu32 " rejected %" PRIu32 " malformed %" PRIu32 "\n",
            st->rx_client, st->rx_backbone, st->delivered_local, st->forwarded, st->duplicates, st->rejected,
            st->malformed);
+    print_restarts();
 }
 
 /* Decision D28: every device answers configuration questions over its serial port.
@@ -414,6 +511,7 @@ static void core_task(void *arg)
         }
         if (now - last_disc >= 1000) {
             last_disc = now;
+            note_uptime();
             refresh_discovery();
             if (g_app.index == 0) {
                 web_admin_publish_snapshot();
@@ -446,6 +544,7 @@ void app_main(void)
     g_app.boot = next_boot_counter();
     g_app.cmd_queue = xQueueCreate(4, sizeof(node_cmd_t));
     ESP_LOGI(TAG, "[GRID] LocalGrid node %u %s starting, boot %" PRIu32, g_app.index, g_app.name, g_app.boot);
+    record_restart();
 
     ESP_ERROR_CHECK(lg_crypto_init() == 0 ? ESP_OK : ESP_FAIL);
     wifi_start();

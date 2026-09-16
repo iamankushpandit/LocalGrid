@@ -371,7 +371,8 @@ static void handle_client_text(lg_node_t *n, const lg_env_t *e, const uint8_t *b
 static void handle_client_ack(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
 {
     lg_msg_ack_t a;
-    if (!lg_msg_ack_dec(body, e->body_len, &a) || a.status != LG_ACK_DELIVERED || a.author != e->target ||
+    if (!lg_msg_ack_dec(body, e->body_len, &a) || a.author != e->target ||
+        (a.status != LG_ACK_DELIVERED && a.status != LG_ACK_READ) ||
         lg_roster_user(n->roster, e->target) == NULL) {
         n->stats.malformed++;
         return;

@@ -38,7 +38,11 @@ typedef struct {
     uint16_t roster_version;
 } lg_register_ack_t;
 
-/* MSG_ACK: node -> author (ACCEPTED / REJECTED_*), recipient -> author (DELIVERED). */
+/*
+ * MSG_ACK: node -> author (ACCEPTED / REJECTED_*), recipient -> author (DELIVERED, then READ).
+ * The body is unchanged by READ: it is a status value, appended so the existing ones keep
+ * their numbers, and older code ignores a status it does not know (design review answer 24).
+ */
 #define LG_MSG_ACK_LEN 13u
 typedef enum {
     LG_ACK_ACCEPTED           = 1,
@@ -49,6 +53,7 @@ typedef enum {
     LG_ACK_REJ_TIME           = 6,
     LG_ACK_REJ_UNKNOWN_TARGET = 7,
     LG_ACK_REJ_INVALID        = 8,
+    LG_ACK_READ               = 9,   /* the recipient's handheld showed it to them */
 } lg_ack_status_t;
 typedef struct {
     uint32_t author;

@@ -87,6 +87,7 @@ typedef enum {
     EV_PREFER,
     EV_SCAN_NOW,
     EV_RECONNECT,
+    EV_MARK_READ,
 } ev_type_t;
 
 typedef struct {
@@ -95,6 +96,7 @@ typedef struct {
     uint8_t bssid[6];
     uint8_t payload[LG_DISC_LEN];
     int32_t value;                 /* disconnect reason, or preferred node */
+    uint32_t id[3];                /* EV_MARK_READ: author, boot, seq of the message read */
 } ev_t;
 
 typedef struct {
@@ -226,6 +228,7 @@ static uint8_t state_from_outbox(const lg_out_msg_t *o)
     switch (o->state) {
     case LG_OUT_ACCEPTED:  return HH_MSG_ACCEPTED;
     case LG_OUT_DELIVERED: return HH_MSG_DELIVERED;
+    case LG_OUT_READ:      return HH_MSG_READ;
     case LG_OUT_REJECTED:  return HH_MSG_REJECTED;
     default:               return HH_MSG_PENDING;
     }
@@ -242,6 +245,12 @@ static void ring_update_from_outbox(uint32_t slot)
         if (m->mine && m->seq == o->seq && o->seq != 0) {
             m->state = state_from_outbox(o);
             m->reject = o->reject_reason;
+            /* Counts, for a marker that says how many rather than which state (D42). The
+             * core keeps these per roster member for every scope; only 1:1 promotes state.
+             * Both fit a byte: the masks they are counted from are one bit per roster user,
+             * and LG_MAX_DEVICES is 32. */
+            m->delivered_count = (uint8_t)o->delivered_count;
+            m->read_count = (uint8_t)o->read_count;
             s.msg_version++;
             s.dirty = true;
             return;
@@ -336,6 +345,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             m->target = in->target;
             m->scope = in->scope;
             m->state = HH_MSG_IN;
+            m->seq = in->seq;
+            m->origin_boot = in->boot;
+            m->read_sent = false;
             m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
             m->grid_time = in->grid_time;
             ring_set_text(m, (const char *)in->text, in->len);
@@ -344,9 +356,18 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         }
         break;
     }
-    case LG_CEV_OUTBOX:
+    case LG_CEV_OUTBOX: {
+        /* Logged for the same reason as the read report: the only way to tell delivered from
+         * read on the bench was to ask the console, and by then the reason was gone. */
+        uint8_t was = ev->value < LG_OUTBOX_SIZE ? state_from_outbox(&s.client.outbox[ev->value]) : 0;
         ring_update_from_outbox(ev->value);
+        if (was == HH_MSG_READ) {
+            ESP_LOGI("MSG", "[MSG] Read by the other handheld: outbox slot %" PRIu32, ev->value);
+        } else if (was == HH_MSG_DELIVERED) {
+            ESP_LOGI("MSG", "[MSG] Delivered to the other handheld: outbox slot %" PRIu32, ev->value);
+        }
         break;
+    }
     case LG_CEV_DECRYPT_FAILED:
         ESP_LOGW("MSG", "[MSG] Could not decrypt a 1:1 message from device %" PRIu32, ev->value);
         break;
@@ -533,7 +554,7 @@ static void begin_join(int node, uint32_t now)
     wc.sta.mbo_enabled = 0;
     wc.sta.ft_enabled = 0;
     if (esp_wifi_set_config(WIFI_IF_STA, &wc) != ESP_OK || esp_wifi_connect() != ESP_OK) {
-        drop_link("Could not start joining a node", false);
+        drop_link("Could not start joining an AP", false);
         return;
     }
     s.wifi_associating = true;
@@ -646,7 +667,7 @@ static void on_scan_done(uint32_t now)
     }
     s.backoff_ms = s.backoff_ms == 0 ? BACKOFF_FIRST_MS : MIN_U32(s.backoff_ms * 2, BACKOFF_MAX_MS);
     s.next_attempt_ms = now + s.backoff_ms;
-    set_problem(found > 0 && s.preferred >= 0 ? "The chosen node is not in range" : "No LocalGrid node in range");
+    set_problem(found > 0 && s.preferred >= 0 ? "The chosen AP is not in range" : "No LocalGrid AP in range");
     ESP_LOGI(TAG, "[NET] Scan found %d usable node(s); scanning again in %" PRIu32 " s", found, s.backoff_ms / 1000);
 }
 
@@ -693,6 +714,15 @@ static void handle_event(const ev_t *ev, uint32_t now)
     case EV_RECONNECT:
         drop_link("Reconnecting on request", true);
         break;
+    case EV_MARK_READ: {
+        /* The reader has seen it, so tell the author. Logged because this path had no
+         * evidence at all: on the bench the receiver opened the conversation and the sender
+         * still showed delivered, with nothing to say whether the report was ever sent. */
+        bool told = lg_client_mark_read(&s.client, ev->id[0], ev->id[1], ev->id[2]);
+        ESP_LOGI("MSG", "[MSG] Read report to device %" PRIu32 " (boot %" PRIu32 " seq %" PRIu32 "): %s",
+                 ev->id[0], ev->id[1], ev->id[2], told ? "sent" : "refused");
+        break;
+    }
     default:
         break;
     }
@@ -897,6 +927,14 @@ static void publish(void)
         g->id = roster->groups[i].id;
         snprintf(g->name, sizeof(g->name), "%s", roster->groups[i].name);
         g->member = lg_roster_is_member(roster, s.device, g->id);
+        /* The denominator for a group delivery count (D42), counted here because the screens
+         * cannot see the roster. Every handheld in the group, this one included. */
+        g->members = 0;
+        for (size_t u = 0; u < roster->n_users; u++) {
+            if (lg_roster_is_member(roster, roster->users[u].device, g->id)) {
+                g->members++;
+            }
+        }
     }
     st->messages_version = s.msg_version;
     st->free_heap = esp_get_free_heap_size();
@@ -1095,6 +1133,43 @@ void hh_service_status(hh_status_t *out)
     xSemaphoreGive(s.lock);
 }
 
+/*
+ * The screen says a received 1:1 message has been shown; the service task owns the client, so
+ * the identity of that message goes to it through the queue (D27). Reported once per message.
+ */
+void hh_service_mark_read(uint32_t message_id)
+{
+    if (s.queue == NULL || s.lock == NULL) {
+        return;
+    }
+    ev_t ev = { .type = EV_MARK_READ };
+    bool found = false;
+    if (xSemaphoreTake(s.lock, portMAX_DELAY) == pdTRUE) {
+        for (uint8_t i = 0; i < s.ring_count; i++) {
+            /* Through the ring head, as every other reader does: indexing the array directly
+             * scans the wrong slots once the ring has wrapped, which would lose a read report
+             * rather than fail loudly. */
+            hh_message_t *m = &s.ring[(s.ring_head + i) % HH_MESSAGES];
+            /* Groups report reads as well as 1:1 (D42), so a group's read count can move.
+             * Broadcasts stay out: one report per handheld on the grid for every
+             * announcement is traffic nobody asked for. */
+            if (m->id == message_id && !m->mine && !m->read_sent &&
+                (m->scope == LG_SCOPE_DIRECT || m->scope == LG_SCOPE_GROUP)) {
+                m->read_sent = true;   /* one report per message, however often it is on screen */
+                ev.id[0] = m->author;
+                ev.id[1] = m->origin_boot;
+                ev.id[2] = m->seq;
+                found = true;
+                break;
+            }
+        }
+        xSemaphoreGive(s.lock);
+    }
+    if (found) {
+        xQueueSend(s.queue, &ev, 0);
+    }
+}
+
 void hh_service_prefer_node(int node)
 {
     if (s.queue == NULL) {
@@ -1127,6 +1202,7 @@ const char *hh_message_state_text(const hh_message_t *m)
     case HH_MSG_PENDING:   return "sending";
     case HH_MSG_ACCEPTED:  return m->scope == LG_SCOPE_DIRECT ? "sent, waiting for the other handheld" : "sent";
     case HH_MSG_DELIVERED: return "delivered";
+    case HH_MSG_READ:      return "read";
     case HH_MSG_REJECTED:
         switch (m->reject) {
         case LG_ACK_REJ_OFFLINE:        return "not delivered: that handheld is offline";

@@ -17,6 +17,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `components/lg_board` | Board profiles: pins and panel and touch facts, selected by the board code in the device ID. Data only. |
 | `components/lg_bsp` | Board support drivers: SPI and I2C buses, display panel, touch controllers. No LVGL. |
 | `components/lg_ui` | LVGL display glue, theme, pointer input, and the calibration screen. No drivers. |
+| `components/lg_selftest` | The quick boot check (D24): envelope, dedup, bodies, UTF-8, and the RFC crypto vectors. Reachable from Status. |
 | `firmware/node` | Infrastructure node firmware. |
 | `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui`, meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |

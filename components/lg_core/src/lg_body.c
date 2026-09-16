@@ -64,7 +64,9 @@ bool lg_msg_ack_dec(const uint8_t *in, size_t len, lg_msg_ack_t *v)
     v->boot   = lg_rd32(in + 4);
     v->seq    = lg_rd32(in + 8);
     v->status = in[12];
-    return v->status >= LG_ACK_ACCEPTED && v->status <= LG_ACK_REJ_INVALID;
+    /* The bound is the highest status this build knows, so appending a status to the enum
+     * means naming it here as well, or every frame carrying it is counted malformed. */
+    return v->status >= LG_ACK_ACCEPTED && v->status <= LG_ACK_READ;
 }
 
 size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out)
