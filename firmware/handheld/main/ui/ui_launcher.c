@@ -7,6 +7,7 @@
  * it. Each tile is an icon over a small label, and the label never wraps: at title size
  * "Self test" broke onto two lines and left its tile.
  */
+#include "ui_snapshot.h"
 #include "ui_launcher.h"
 
 #include <inttypes.h>
@@ -17,6 +18,7 @@
 #include "lg_display.h"
 #include "lg_theme.h"
 #include "lg_ui_widgets.h"
+#include "hh_mem.h"
 #include "ui_alert.h"
 #include "ui_chat.h"
 #include "ui_home.h"
@@ -96,14 +98,13 @@ static void refresh(lv_timer_t *timer)
     if (!s_ui.built || lv_screen_active() != s_ui.screen) {
         return;
     }
-    static hh_status_t st;
-    hh_service_status(&st);
+    const hh_status_t *st = ui_status();
     uint32_t unread = ui_notify_unread_total();
     /* Signature over what the tiles show, not the snapshot's version, which changes every
      * second: otherwise every tile's text is rewritten once a second for nothing. */
-    uint32_t signature = (uint32_t)st.link * 7u + unread * 31u + st.n_people * 101u + st.n_nodes * 1009u +
-                         (st.free_heap / 1024u) * 3u + (uint32_t)(st.preferred_node + 2) * 17u +
-                         (st.time_restricted ? 5u : 0u) + (st.grid_time / 60u) * 13u;
+    uint32_t signature = (uint32_t)st->link * 7u + unread * 31u + st->n_people * 101u + st->n_nodes * 1009u +
+                         (st->free_heap / 1024u) * 3u + (uint32_t)(st->preferred_node + 2) * 17u +
+                         (st->time_restricted ? 5u : 0u) + (st->grid_time / 60u) * 13u;
     if (signature == s_ui.shown_version) {
         return;
     }
@@ -113,18 +114,18 @@ static void refresh(lv_timer_t *timer)
     char text[128];   /* a roster name plus an SSID plus a clock reading */
 
     /* Header: who this handheld is and how it stands on the grid. */
-    if (st.link == HH_LINK_ONLINE) {
-        if (st.time_restricted) {
-            snprintf(text, sizeof(text), "%s on %s, no grid time", st.name, st.node_ssid);
+    if (st->link == HH_LINK_ONLINE) {
+        if (st->time_restricted) {
+            snprintf(text, sizeof(text), "%s on %s, no grid time", st->name, st->node_ssid);
             lv_obj_set_style_text_color(s_ui.status, t->warning, 0);
         } else {
-            uint32_t day = st.grid_time % 86400u;
-            snprintf(text, sizeof(text), "%s on %s, %02u:%02u", st.name, st.node_ssid,
+            uint32_t day = st->grid_time % 86400u;
+            snprintf(text, sizeof(text), "%s on %s, %02u:%02u", st->name, st->node_ssid,
                      (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u));
             lv_obj_set_style_text_color(s_ui.status, t->success, 0);
         }
-    } else if (st.problem[0] != '\0') {
-        snprintf(text, sizeof(text), "%s", st.problem);
+    } else if (st->problem[0] != '\0') {
+        snprintf(text, sizeof(text), "%s", st->problem);
         lv_obj_set_style_text_color(s_ui.status, t->error, 0);
     } else {
         snprintf(text, sizeof(text), "Looking for an AP");
@@ -136,16 +137,16 @@ static void refresh(lv_timer_t *timer)
         snprintf(text, sizeof(text), "%" PRIu32 " new", unread);
         lv_obj_set_style_text_color(s_ui.tiles[TILE_MESSAGES].detail, t->accent, 0);
     } else {
-        snprintf(text, sizeof(text), "%u known", st.n_people);
+        snprintf(text, sizeof(text), "%u known", st->n_people);
         lv_obj_set_style_text_color(s_ui.tiles[TILE_MESSAGES].detail, t->muted, 0);
     }
     lg_ui_set_text(s_ui.tiles[TILE_MESSAGES].detail, text);
 
-    snprintf(text, sizeof(text), "%u AP%s, %" PRIu32 " KB free", st.n_nodes, st.n_nodes == 1 ? "" : "s",
-             st.free_heap / 1024u);
+    snprintf(text, sizeof(text), "%u AP%s, %" PRIu32 " KB free", st->n_nodes, st->n_nodes == 1 ? "" : "s",
+             st->free_heap / 1024u);
     lg_ui_set_text(s_ui.tiles[TILE_STATUS].detail, text);
 
-    snprintf(text, sizeof(text), "%s", st.preferred_node < 0 ? "auto AP" : "fixed AP");
+    snprintf(text, sizeof(text), "%s", st->preferred_node < 0 ? "auto AP" : "fixed AP");
     lg_ui_set_text(s_ui.tiles[TILE_SETTINGS].detail, text);
 }
 
@@ -190,10 +191,15 @@ void ui_launcher_start(const lg_identity_t *identity)
     refresh(NULL);
     lg_display_unlock();
 
+    hh_mem_mark("after theme and launcher screen");
     ui_home_build(identity);   /* the Status screen, reached from its tile */
+    hh_mem_mark("after Status screen");
     ui_settings_build(identity);
+    hh_mem_mark("after Settings screen");
     ui_alert_start();   /* the announcement flash and the emergency takeover */
+    hh_mem_mark("after alert layer");
     ui_notify_start();
+    hh_mem_mark("after notifications");
     ESP_LOGI(TAG, "[UI] Launcher ready: %dx%d panel, tiles %dx%d and %dx%d", (int)w, (int)h, full_w, tile_h,
              half_w, tile_h);
 }

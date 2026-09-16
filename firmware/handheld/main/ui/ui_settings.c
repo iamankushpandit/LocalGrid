@@ -6,6 +6,7 @@
  * presses and the self test runs for tens of milliseconds, and this code runs on the
  * drawing task. Both are handed to the application task through ui_settings_take_job.
  */
+#include "ui_snapshot.h"
 #include "ui_settings.h"
 
 #include <inttypes.h>
@@ -24,6 +25,7 @@
 #include "ui_bar.h"
 #include "ui_launcher.h"
 #include "ui_list.h"
+#include "ui_screen.h"
 
 static const char *TAG = "UI";
 
@@ -41,10 +43,11 @@ static struct {
     lv_obj_t            *nodes_screen;
     lv_obj_t            *nodes_bar;
     lv_obj_t            *nodes_list;
-    volatile ui_job_t    job;
     uint32_t             shown_signature;
     uint32_t             shown_nodes_signature;
 } s_ui;
+
+static volatile ui_job_t s_job;   /* outside s_ui: freeing a screen must not lose a queued job */
 
 /*
  * The service republishes its snapshot every second, so refreshing on its version counter
@@ -103,11 +106,16 @@ static void on_back_to_settings(lv_event_t *e)
 
 /* ---- actions ---- */
 
+static void build_nodes_screen(void);
+
 static void on_choose_node(lv_event_t *e)
 {
     (void)e;
-    lv_screen_load(s_ui.nodes_screen);
+    if (s_ui.nodes_screen == NULL) {
+        build_nodes_screen();
+    }
     s_ui.shown_nodes_signature = 0;   /* draw it from the current snapshot */
+    lv_screen_load(s_ui.nodes_screen);
 }
 
 static void on_node_picked(lv_event_t *e)
@@ -146,7 +154,7 @@ static void on_saver(lv_event_t *e)
 static void on_calibrate(lv_event_t *e)
 {
     (void)e;
-    s_ui.job = UI_JOB_CALIBRATE;
+    s_job = UI_JOB_CALIBRATE;
 }
 
 static void on_restart(lv_event_t *e)
@@ -237,35 +245,51 @@ static void rebuild_nodes(const hh_status_t *st)
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
-    static hh_status_t st;
     lv_obj_t *active = lv_screen_active();
-    if (active != s_ui.screen && active != s_ui.nodes_screen) {
-        return;
+    if (active == NULL || (active != s_ui.screen && active != s_ui.nodes_screen)) {
+        return;   /* NULL screens never match a live one, so a freed screen is never touched */
     }
-    hh_service_status(&st);
+    const hh_status_t *st = ui_status();
     if (active == s_ui.screen) {
-        ui_bar_update(s_ui.bar, &st);   /* one short label, written only when it differs */
-        uint32_t signature = settings_signature(&st);
+        ui_bar_update(s_ui.bar, st);   /* one short label, written only when it differs */
+        uint32_t signature = settings_signature(st);
         if (signature != s_ui.shown_signature) {
             s_ui.shown_signature = signature;
-            rebuild_settings(&st);
+            rebuild_settings(st);
         }
     } else {
-        ui_bar_update(s_ui.nodes_bar, &st);
-        uint32_t signature = nodes_signature(&st);
+        ui_bar_update(s_ui.nodes_bar, st);
+        uint32_t signature = nodes_signature(st);
         if (signature != s_ui.shown_nodes_signature) {
             s_ui.shown_nodes_signature = signature;
-            rebuild_nodes(&st);
+            rebuild_nodes(st);
         }
     }
 }
 
-void ui_settings_build(const lg_identity_t *identity)
+static void forget_settings(void)
+{
+    s_ui.screen = NULL;
+    s_ui.bar = NULL;
+    s_ui.tabs = NULL;
+    s_ui.list = NULL;
+    s_ui.sound_list = NULL;
+    s_ui.screen_list = NULL;
+    s_ui.device_list = NULL;
+    s_ui.shown_signature = 0;
+}
+
+static void forget_nodes(void)
+{
+    s_ui.nodes_screen = NULL;
+    s_ui.nodes_bar = NULL;
+    s_ui.nodes_list = NULL;
+    s_ui.shown_nodes_signature = 0;
+}
+
+static void build_settings_screen(void)
 {
     const lg_theme_t *t = lg_theme();
-    s_ui.identity = identity;
-    lg_display_lock(1000);
-
     s_ui.screen = lv_obj_create(NULL);
     lg_theme_apply_screen(s_ui.screen);
     lv_obj_remove_flag(s_ui.screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -290,7 +314,12 @@ void ui_settings_build(const lg_identity_t *identity)
     s_ui.sound_list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Sound"));
     s_ui.screen_list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Screen"));
     s_ui.device_list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Device"));
+    ui_screen_free_on_leave(s_ui.screen, forget_settings);
+}
 
+static void build_nodes_screen(void)
+{
+    const lg_theme_t *t = lg_theme();
     s_ui.nodes_screen = lv_obj_create(NULL);
     lg_theme_apply_screen(s_ui.nodes_screen);
     lv_obj_remove_flag(s_ui.nodes_screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -299,17 +328,22 @@ void ui_settings_build(const lg_identity_t *identity)
     lv_obj_set_style_pad_row(s_ui.nodes_screen, t->gap, 0);
     s_ui.nodes_bar = ui_bar_create(s_ui.nodes_screen, "Which AP", on_back_to_settings);
     s_ui.nodes_list = ui_list_create(s_ui.nodes_screen);
+    ui_screen_free_on_leave(s_ui.nodes_screen, forget_nodes);
+}
 
+/* Screens are built when opened and freed when left (ui_screen.h); only the timer lives on. */
+void ui_settings_build(const lg_identity_t *identity)
+{
+    s_ui.identity = identity;
     lv_timer_create(refresh, REFRESH_MS, NULL);
-    lg_display_unlock();
 }
 
 void ui_settings_open(void)
 {
-    if (s_ui.screen == NULL) {
-        return;
-    }
     lg_display_lock(1000);
+    if (s_ui.screen == NULL) {
+        build_settings_screen();
+    }
     s_ui.shown_signature = 0;
     lv_screen_load(s_ui.screen);
     lg_display_unlock();
@@ -317,12 +351,12 @@ void ui_settings_open(void)
 
 void ui_settings_run_selftest(void)
 {
-    s_ui.job = UI_JOB_SELFTEST;
+    s_job = UI_JOB_SELFTEST;
 }
 
 ui_job_t ui_settings_take_job(void)
 {
-    ui_job_t job = s_ui.job;
-    s_ui.job = UI_JOB_NONE;
+    ui_job_t job = s_job;
+    s_job = UI_JOB_NONE;
     return job;
 }

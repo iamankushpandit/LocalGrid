@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hh_console.h"
+#include "hh_mem.h"
 #include "hh_service.h"
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
@@ -32,6 +33,7 @@ static const char *TAG = "HH";
 
 void app_main(void)
 {
+    hh_mem_mark("boot");
     static lg_identity_t identity;
     if (lg_identity_load(&identity) != ESP_OK) {
         identity.present = false;
@@ -69,10 +71,12 @@ void app_main(void)
      * so it cannot settle a 20 KB question; a settled `status` reading can.
      */
     lg_bsp_audio_start(board);
+    hh_mem_mark("after NVS and audio");
 
     if (hh_console_start(&identity) != ESP_OK) {   /* answers id, status, nodes, send, ... (D28) */
         ESP_LOGW(TAG, "serial console unavailable");
     }
+    hh_mem_mark("after console");
 
     /* NVS is started earlier now, above, because settings are read before this point. */
 
@@ -81,6 +85,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[NET] Network service not started: %s", esp_err_to_name(err));
     }
+    hh_mem_mark("after network service start (Wi-Fi driver)");
 
     /* Decision D24: the product firmware keeps the self test. This is the quick part, which
      * needs no simulated grid, so it runs at every boot. */
@@ -90,12 +95,14 @@ void app_main(void)
     } else {
         ESP_LOGE("TEST", "[TEST] Self test: %s", lg_selftest_summary());
     }
+    hh_mem_mark("after self test");
 
     static lg_display_t display;
     if (!lg_board_has_display(board) || lg_display_start(board, &display) != ESP_OK) {
         ESP_LOGE(TAG, "[UI] No display on this board; decision D23 needs one on every handheld");
         return;
     }
+    hh_mem_mark("after display, LVGL, touch");
     lg_theme_init(display.width, display.height, display.px_per_10mm);
     while (lg_bsp_touch_needs_calibration()) {
         lg_ui_calibrate();
@@ -107,11 +114,13 @@ void app_main(void)
     lg_display_lock(1000);
     lg_ui_screensaver_start(SCREENSAVER_IDLE_MS);
     lg_display_unlock();
+    hh_mem_mark("after screen saver");
 
     for (;;) {
         switch (ui_settings_take_job()) {
         case UI_JOB_CALIBRATE:
             lg_ui_calibrate();
+            ui_settings_open();   /* Settings was freed when calibration replaced it; build it again */
             break;
         case UI_JOB_SELFTEST:
             ESP_LOGI("TEST", "[TEST] Self test: %s", (lg_selftest_quick(), lg_selftest_summary()));

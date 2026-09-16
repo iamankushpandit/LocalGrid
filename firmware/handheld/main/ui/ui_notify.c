@@ -8,6 +8,7 @@
  *
  * Counts live in RAM with the messages themselves, so a reboot clears both.
  */
+#include "ui_snapshot.h"
 #include "ui_notify.h"
 
 #include <stdio.h>
@@ -139,13 +140,12 @@ static void conversation_title(const hh_status_t *st, uint8_t scope, uint32_t ta
 static void watch(lv_timer_t *timer)
 {
     (void)timer;
-    static hh_message_t msgs[HH_MESSAGES];
-    static hh_status_t st;
-    size_t n = hh_service_messages(msgs, HH_MESSAGES);
+    size_t n = 0;
+    const hh_message_t *msgs = ui_messages(&n);
     if (n == 0) {
         return;
     }
-    hh_service_status(&st);
+    const hh_status_t *st = ui_status();
 
     /* The list arrives newest first; walk it oldest first so counts follow arrival order. */
     const hh_message_t *newest_unseen = NULL;
@@ -177,10 +177,10 @@ static void watch(lv_timer_t *timer)
 
     s_notify.pending_scope = newest_scope;
     s_notify.pending_target = newest_target;
-    conversation_title(&st, newest_scope, newest_target, newest_unseen, s_notify.pending_title,
+    conversation_title(st, newest_scope, newest_target, newest_unseen, s_notify.pending_title,
                        sizeof(s_notify.pending_title));
     char text[HH_TEXT_MAX + 64];
-    const char *who = sender_name(&st, newest_unseen->author);
+    const char *who = sender_name(st, newest_unseen->author);
     if (newest_scope == LG_SCOPE_DIRECT) {
         snprintf(text, sizeof(text), "%s%s: %s", who, newest_unseen->urgent ? " (urgent)" : "", newest_unseen->text);
     } else {

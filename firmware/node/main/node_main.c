@@ -22,6 +22,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "grid_state.h"
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
 #include "lg_secrets.h"
@@ -39,6 +40,8 @@ static const uint8_t s_backbone_key[32] = LG_SECRET_BACKBONE_KEY;
 static uint8_t s_discriminator[4];
 static uint8_t s_last_disc_clients = 0xFF;
 static uint8_t s_last_disc_flags = 0xFF;
+
+_Static_assert(LG_PROTO_DHCP_INDICES == LG_MAX_NODES, "one phone DHCP block per possible AP index (D46)");
 
 #define STATUS_LOG_MS        30000u
 #define TIME_ANNOUNCE_MS     60000u
@@ -117,6 +120,12 @@ static void io_on_diag(void *ctx, uint16_t origin_node, uint8_t hops, const uint
     ESP_LOGI("BB", "[BB] Echo from node %u after %u hop(s): %.*s", origin_node, hops, (int)len, (const char *)text);
 }
 
+static void io_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
+{
+    (void)ctx;
+    grid_state_on_frame(origin_node, body, len);
+}
+
 static void io_on_time(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality)
 {
     (void)ctx;
@@ -141,6 +150,9 @@ static void on_link(uint16_t node, bool up)
 {
     if (up) {
         lg_node_on_neighbor_up(&g_app.core, node);
+        /* A returning or new AP learns everything it missed: settings first, so a time
+         * generation it has not seen demotes it before the time itself arrives (D45). */
+        grid_state_announce();
         if (g_app.time_quality != LG_TIME_UNSET) {
             lg_node_announce_time(&g_app.core, g_app.time_quality);
         }
@@ -154,6 +166,7 @@ static uint8_t clients_count(void)
 
 /* ---- discovery payload: beacons and BLE ---- */
 
+/* Fixed discovery part (LG_DISC_LEN bytes), shared by the Wi-Fi vendor IE and BLE. */
 static size_t build_discovery(uint8_t out[LG_DISC_LEN])
 {
     uint8_t clients = sess_registered_count();
@@ -162,7 +175,7 @@ static size_t build_discovery(uint8_t out[LG_DISC_LEN])
     out[2] = LG_DISC_VERSION;
     memcpy(out + 3, s_discriminator, 4);
     out[7] = (uint8_t)g_app.index;
-    out[8] = g_app.index == 0 ? 1 : 0;
+    out[8] = 0;   /* was the master flag; there is no master AP (D45) */
     out[9] = (uint8_t)(LG_PROTO_MAX_STATIONS - clients);
     out[10] = lgbb_link_count() > 0 ? LG_DISC_FLAG_BACKBONE : 0;
     out[11] = clients;
@@ -179,19 +192,27 @@ static void refresh_discovery(void)
     s_last_disc_clients = payload[11];
     s_last_disc_flags = payload[10];
 
+    /* Wi-Fi carries the AP name after the fixed part: every AP shares one SSID (D46), so this
+     * is the only per-AP label a handheld can show. BLE keeps the fixed part only. */
     static const uint8_t oui[3] = LG_VENDOR_OUI;
-    uint8_t ie[sizeof(vendor_ie_data_t) + LG_DISC_LEN];
+    uint8_t ie[sizeof(vendor_ie_data_t) + LG_DISC_WIFI_MAX];
+    size_t name_len = strnlen(g_app.name, LG_DISC_NAME_MAX);
+    size_t wifi_len = LG_DISC_LEN + 1 + name_len;
     vendor_ie_data_t *v = (vendor_ie_data_t *)ie;
     v->element_id = WIFI_VENDOR_IE_ELEMENT_ID;
-    v->length = (uint8_t)(4 + LG_DISC_LEN);
+    v->length = (uint8_t)(4 + wifi_len);
     memcpy(v->vendor_oui, oui, 3);
     v->vendor_oui_type = LG_VENDOR_OUI_TYPE;
     memcpy(ie + sizeof(vendor_ie_data_t), payload, LG_DISC_LEN);
+    ie[sizeof(vendor_ie_data_t) + LG_DISC_LEN] = (uint8_t)name_len;
+    memcpy(ie + sizeof(vendor_ie_data_t) + LG_DISC_LEN + 1, g_app.name, name_len);
     esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, NULL);
     esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, NULL);
     esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON, WIFI_VND_IE_ID_0, ie);
     esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, ie);
+#if NODE_BLE_ADV_ENABLED
     ble_adv_update(payload, LG_DISC_LEN);
+#endif
 }
 
 /* ---- identity and Wi-Fi ---- */
@@ -351,11 +372,14 @@ static void wifi_start(void)
     esp_netif_set_ip4_addr(&info.netmask, 255, 255, 255, 0);
     esp_netif_dhcps_stop(ap);
     ESP_ERROR_CHECK(esp_netif_set_ip_info(ap, &info));
-    /* DHCP serves phones only, .2 to .99. Handhelds use static .100 + device index (answer 10);
-     * the default pool would run to .101 and could hand out a handheld's address. */
+    /* DHCP serves phones only, from this AP's own block (D46: every AP shares the subnet, so the
+     * blocks never overlap). Handhelds use static .100 + device index (answer 10); the default
+     * pool would run to .101 and could hand out a handheld's address. */
+    uint8_t first, last;
+    lg_proto_dhcp_block(g_app.index, &first, &last);
     dhcps_lease_t lease = { .enable = true };
-    IP4_ADDR(&lease.start_ip, ip[0], ip[1], ip[2], 2);
-    IP4_ADDR(&lease.end_ip, ip[0], ip[1], ip[2], 99);
+    IP4_ADDR(&lease.start_ip, ip[0], ip[1], ip[2], first);
+    IP4_ADDR(&lease.end_ip, ip[0], ip[1], ip[2], last);
     ESP_ERROR_CHECK(esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease,
                                            sizeof(lease)));
     ESP_ERROR_CHECK(esp_netif_dhcps_start(ap));
@@ -366,23 +390,25 @@ static void wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
     wifi_config_t wc = { 0 };
-    int ssid_len = snprintf((char *)wc.ap.ssid, sizeof(wc.ap.ssid), "%s%s", LG_PROTO_SSID_PREFIX, g_app.name);
-    wc.ap.ssid_len = (uint8_t)ssid_len;
+    _Static_assert(sizeof(LG_PROTO_SSID) <= sizeof(wc.ap.ssid), "SSID too long");
+    memcpy(wc.ap.ssid, LG_PROTO_SSID, sizeof(LG_PROTO_SSID) - 1);
+    wc.ap.ssid_len = (uint8_t)(sizeof(LG_PROTO_SSID) - 1);
     strncpy((char *)wc.ap.password, LG_SECRET_WIFI_PASSPHRASE, sizeof(wc.ap.password) - 1);
     wc.ap.channel = LG_PROTO_CHANNEL;
     wc.ap.authmode = WIFI_AUTH_WPA2_PSK;
     wc.ap.max_connection = LG_PROTO_MAX_STATIONS;
     wc.ap.beacon_interval = 100;
     wc.ap.dtim_period = 1;
-    wc.ap.pmf_cfg.capable = true;
+    wc.ap.pmf_cfg.capable = NODE_PMF_CAPABLE;   /* node_app.h: A/B switch for reason-2 disassociations */
     wc.ap.pmf_cfg.required = false;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_inactive_time(WIFI_IF_AP, 30));
-    ESP_LOGI("NET", "[NET] SoftAP %s on channel %d at %u.%u.%u.%u", (char *)wc.ap.ssid, LG_PROTO_CHANNEL,
-             ip[0], ip[1], ip[2], ip[3]);
+    ESP_LOGI("NET", "[NET] SoftAP \"%s\" (AP %u %s) on channel %d at %u.%u.%u.%u, phone DHCP .%u to .%u, PMF %s",
+             LG_PROTO_SSID, g_app.index, g_app.name, LG_PROTO_CHANNEL, ip[0], ip[1], ip[2], ip[3], first, last,
+             NODE_PMF_CAPABLE ? "capable" : "off (A/B build)");
 }
 
 /* ---- console command handling (core task) ---- */
@@ -395,8 +421,8 @@ static const char *quality_name(uint8_t q)
 static void print_status(void)
 {
     const lg_node_stats_t *st = &g_app.core.stats;
-    printf("Node %u %s (%s), boot %" PRIu32 ", uptime %" PRIu32 " s\n", g_app.index, g_app.name,
-           g_app.index == 0 ? "MASTER" : "NODE", g_app.boot, app_now_ms() / 1000);
+    printf("AP %u %s, boot %" PRIu32 ", uptime %" PRIu32 " s\n", g_app.index, g_app.name, g_app.boot,
+           app_now_ms() / 1000);
     uint32_t t = app_grid_time();
     if (t != 0) {
         time_t tt = (time_t)t;
@@ -414,35 +440,40 @@ static void print_status(void)
            " duplicates %" PRIu32 " rejected %" PRIu32 " malformed %" PRIu32 "\n",
            st->rx_client, st->rx_backbone, st->delivered_local, st->forwarded, st->duplicates, st->rejected,
            st->malformed);
+    grid_state_print();
     print_restarts();
 }
 
 /* Decision D28: every device answers configuration questions over its serial port.
- * Read-only: settings change on the master's admin page. Secrets are never printed. */
+ * Read-only: settings change on the admin page of any AP (D45). Secrets are never printed. */
 static void print_config(void)
 {
     node_settings_t cfg;
-    bool have = settings_load(&cfg) == ESP_OK;
+    grid_state_settings(&cfg);
     uint8_t ip[4];
     lg_proto_node_ip(g_app.index, ip);
-    printf("Node configuration\n");
+    printf("AP configuration\n");
     printf("  id: %s\n", g_app.identity.present ? g_app.identity.id : "none");
-    printf("  node: index %u, name %s, role %s\n", g_app.index, g_app.name,
-           g_app.index == 0 ? "master" : "node");
-    printf("  network: SSID %s%s, channel %d, address %u.%u.%u.%u, up to %d handhelds\n",
-           LG_PROTO_SSID_PREFIX, g_app.name, LG_PROTO_CHANNEL, ip[0], ip[1], ip[2], ip[3],
-           LG_PROTO_MAX_STATIONS);
-    printf("  DHCP for phones: %u.%u.%u.2 to %u.%u.%u.99; handhelds are static at .%u plus device index\n",
-           ip[0], ip[1], ip[2], ip[0], ip[1], ip[2], (unsigned)LG_PROTO_HANDHELD_HOST_BASE);
-    if (have && cfg.configured) {
+    printf("  AP: index %u, name %s (every AP is equal; there is no master, D45)\n", g_app.index, g_app.name);
+    uint8_t first, last;
+    lg_proto_dhcp_block(g_app.index, &first, &last);
+    printf("  network: \"%s\" on every AP (D46), channel %d, address %u.%u.%u.%u on every AP, up to %d stations\n",
+           LG_PROTO_SSID, LG_PROTO_CHANNEL, ip[0], ip[1], ip[2], ip[3], LG_PROTO_MAX_STATIONS);
+    printf("  DHCP for phones on this AP: %u.%u.%u.%u to %u.%u.%u.%u; handhelds are static at .%u plus device index\n",
+           ip[0], ip[1], ip[2], first, ip[0], ip[1], ip[2], last, (unsigned)LG_PROTO_HANDHELD_HOST_BASE);
+    printf("  BLE advertising: %s; PMF: %s\n", NODE_BLE_ADV_ENABLED ? "on" : "off (A/B build)",
+           NODE_PMF_CAPABLE ? "capable" : "off (A/B build)");
+    if (cfg.configured) {
         printf("  grid name: %s\n", cfg.grid_name);
         printf("  time zone: %s (display only)\n", cfg.timezone[0] ? cfg.timezone : "not set");
         printf("  admin password: set, %" PRIu32 " PBKDF2 iterations\n", cfg.iterations);
     } else {
-        printf("  admin setup: not done; the master serves the setup page\n");
+        printf("  admin setup: not done; any AP serves the setup page\n");
     }
+    printf("  settings version %" PRIu32 ", made on AP %u; copied to every AP over the backbone\n", cfg.seq, cfg.author);
     printf("  grid time: %s\n", quality_name(g_app.time_quality));
-    printf("  settings change on the master page at http://192.168.4.1/, not over serial\n");
+    printf("  settings change on the admin page, http://%u.%u.%u.%u/ on any AP, not over serial\n", ip[0], ip[1],
+           ip[2], ip[3]);
 }
 
 static void print_devices(void)
@@ -468,6 +499,9 @@ static void handle_command(const node_cmd_t *cmd)
     case NODE_CMD_CONFIG:
         print_config();
         break;
+    case NODE_CMD_GRID_ANNOUNCE:
+        grid_state_announce();
+        break;
     case NODE_CMD_STATUS:
         print_status();
         break;
@@ -487,6 +521,8 @@ static void handle_command(const node_cmd_t *cmd)
         break;
     case NODE_CMD_TIME_SET:
         set_grid_time(cmd->value, LG_TIME_AUTHORITATIVE);
+        grid_state_time_set_here();
+        grid_state_announce();   /* the new generation goes first, so other APs stop defending theirs */
         lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
         printf("Grid time set to %" PRIu32 " and announced\n", cmd->value);
         break;
@@ -500,6 +536,7 @@ static void core_task(void *arg)
     (void)arg;
     uint32_t last_status = 0;
     uint32_t last_announce = 0;
+    uint32_t last_grid_state = 0;
     uint32_t last_disc = 0;
     node_cmd_t cmd;
     for (;;) {
@@ -513,9 +550,11 @@ static void core_task(void *arg)
             last_disc = now;
             note_uptime();
             refresh_discovery();
-            if (g_app.index == 0) {
-                web_admin_publish_snapshot();
-            }
+            web_admin_publish_snapshot();
+        }
+        if (now - last_grid_state >= GRID_STATE_ANNOUNCE_MS) {
+            last_grid_state = now;
+            grid_state_announce();
         }
         if (g_app.time_quality == LG_TIME_AUTHORITATIVE && now - last_announce >= TIME_ANNOUNCE_MS) {
             last_announce = now;
@@ -561,25 +600,30 @@ void app_main(void)
         .grid_time = io_grid_time,
         .on_diag = io_on_diag,
         .on_time = io_on_time,
+        .on_grid_state = io_on_grid_state,
     };
     lg_node_init(&g_app.core, g_app.index, g_app.boot, lg_roster_prototype(), &io);
 
+    grid_state_init(g_app.index);
     ESP_ERROR_CHECK(lgbb_init(g_app.index, g_app.boot, s_backbone_key, on_backbone_frame, on_link, clients_count));
     ESP_ERROR_CHECK(sess_init(LG_PROTO_TCP_PORT));
-    if (g_app.index == 0) {
-        if (web_admin_start() != ESP_OK) {
-            ESP_LOGE(TAG, "[WEB] Admin page failed to start");
-        } else {
-            web_admin_publish_snapshot();
-        }
+    /* Every AP serves the admin page (D45). */
+    if (web_admin_start() != ESP_OK) {
+        ESP_LOGE(TAG, "[WEB] Admin page failed to start");
+    } else {
+        web_admin_publish_snapshot();
     }
 
+#if NODE_BLE_ADV_ENABLED
     uint8_t payload[LG_DISC_LEN];
     build_discovery(payload);
     esp_log_level_set("BTDM_INIT", ESP_LOG_WARN);   /* controller init logs "Bluetooth MAC: ..." at INFO (D21) */
     if (ble_adv_init(payload, sizeof(payload)) != ESP_OK) {
         ESP_LOGE(TAG, "[BLE] Disabled: init failed");
     }
+#else
+    ESP_LOGW("BLE", "[BLE] Advertising disabled in this build (NODE_BLE_ADV_ENABLED 0, coexistence A/B test)");
+#endif
 
     xTaskCreate(core_task, "lg_core", 8192, NULL, 5, NULL);
     console_start();

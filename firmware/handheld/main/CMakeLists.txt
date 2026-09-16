@@ -1,9 +1,12 @@
 # service/ owns Wi-Fi, the node session, and lg_client; ui/ owns screens. They meet only in hh_service.h (D27).
 idf_component_register(SRCS "hh_main.c"
                             "hh_console.c"
+                            "hh_mem.c"
                             "service/hh_service.c"
                             "ui/ui_bar.c"
                             "ui/ui_list.c"
+                            "ui/ui_snapshot.c"
+                            "ui/ui_screen.c"
                             "ui/ui_launcher.c"
                             "ui/ui_settings.c"
                             "ui/ui_home.c"

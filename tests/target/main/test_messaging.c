@@ -410,6 +410,65 @@ static void test_diag_echo(void)
     sim_destroy(s);
 }
 
+/* D45: grid state floods from one AP to every other exactly once, opaque and intact. */
+static void test_grid_state(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    uint8_t body[LG_GRID_STATE_MAX];
+    for (size_t i = 0; i < sizeof(body); i++) {
+        body[i] = (uint8_t)(i * 7u + 1u);
+    }
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[0].node, body, 147), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].grid_state_count, 0);   /* the author does not hear its own */
+    CHECK_EQ(s->nodes[1].grid_state_count, 1);
+    CHECK_EQ(s->nodes[2].grid_state_count, 1);   /* two hops, once */
+    CHECK_EQ(s->nodes[2].grid_state_origin, 0);
+    CHECK_EQ(s->nodes[2].grid_state_len, 147u);
+    CHECK(memcmp(s->nodes[2].grid_state_last, body, 147) == 0);
+
+    /* A second path and duplicated backbone frames still report it once per node. */
+    sim_link(s, 0, 2, true);
+    s->duplicate_backbone = true;
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[2].node, body, sizeof(body)), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].grid_state_count, 1);
+    CHECK_EQ(s->nodes[1].grid_state_count, 2);
+    CHECK_EQ(s->nodes[2].grid_state_count, 1);
+    CHECK_EQ(s->nodes[0].grid_state_len, (size_t)LG_GRID_STATE_MAX);
+
+    /* Empty and oversize bodies are refused at the author. */
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[0].node, body, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[0].node, body, LG_GRID_STATE_MAX + 1u), LG_ERR_ARG);
+
+    /* An oversize body forged onto the backbone is counted malformed and goes no further. */
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.major = LG_PROTO_MAJOR;
+    e.minor = LG_PROTO_MINOR;
+    e.type = LG_T_GRID_STATE;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.ttl = LG_TTL_DEFAULT;
+    e.origin_id = LG_NODE_ID_BASE | 1u;
+    e.origin_node = 1;
+    e.origin_boot = 1;
+    e.origin_seq = 900;
+    static uint8_t big[LG_GRID_STATE_MAX + 1u];
+    static uint8_t frame[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, big, sizeof(big), frame, sizeof(frame));
+    CHECK(flen > 0);
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    uint32_t forwarded = s->nodes[0].node.stats.forwarded;
+    lg_node_on_backbone_frame(&s->nodes[0].node, 1, frame, (size_t)flen);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 1u);
+    CHECK_EQ(s->nodes[0].node.stats.forwarded, forwarded);
+    CHECK_EQ(s->nodes[0].grid_state_count, 1);
+    sim_destroy(s);
+}
+
 static void test_time_announce(void)
 {
     sim_t *s = make_chain();
@@ -519,6 +578,7 @@ static void test_ping_pong(void)
 void test_messaging(void)
 {
     test_diag_echo();
+    test_grid_state();
     test_time_announce();
     test_registration_and_presence();
     test_direct_two_hops_encrypted();

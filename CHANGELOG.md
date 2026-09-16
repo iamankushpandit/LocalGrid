@@ -5,6 +5,85 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (D46: one network, "LocalMesh Access Point")
+- Every AP broadcasts the same SSID, **"LocalMesh Access Point"**, and answers as **192.168.4.1/24**, so a phone that moves between APs keeps its gateway and the admin page. `lg_proto_node_ip()` ignores the index and keeps its signature. Handhelds keep static 192.168.4.(100 + device index) on every AP.
+- Phone DHCP pools are split per AP so two APs never lease the same address: 12 addresses per AP index from .2 to .97 (MAIN .2 to .13, NORTH .14 to .25, SOUTH .26 to .37). Compile-time checks keep the blocks below the handheld addresses and require one block per possible index (`LG_MAX_NODES`). Twelve is below the 15-station limit, which handhelds share.
+- The Wi-Fi vendor IE carries the AP name after the 12-byte discovery payload: a length byte, then up to 15 bytes. Receivers that only read the fixed part are unaffected, so `LG_DISC_VERSION` stays 1. BLE adverts keep the 12-byte payload, well inside the 31-byte legacy limit.
+- Handheld service: joins with the shared SSID plus the chosen BSSID, and names each AP from the IE ("AP n" if an AP sends no name), so screens and `status` still say MAIN, NORTH, SOUTH. The static array of 16 Wi-Fi scan records is gone, about 1.3 KB of internal RAM, because candidates now come from the IE alone. Layers ok.
+- `config` shows the network, this AP's DHCP block, and the BLE and PMF build switches. The admin page subtitle says "LocalMesh Access Point, served by AP MAIN", and its connection error names the network and 192.168.4.1. The discovery payload's master byte is always 0 now (D45).
+- An AP and a handheld from either side of this change only work together on MAIN, whose addresses did not change. Update APs and handhelds together.
+- Flashed to MAIN and verified over serial: `[NET] SoftAP "LocalMesh Access Point" (AP 0 MAIN) on channel 6 at 192.168.4.1, phone DHCP .2 to .13, PMF capable`. Both handhelds, still on older firmware, re-joined and registered as .101 and .102. Handheld firmware built for esp32 and esp32s3 with zero warnings; **not flashed**. **Not verified**: anything with more than one AP, and phone roaming. NORTH and SOUTH are unplugged while bench power is fixed.
+- `tools/wifi_scan.py` and the `wifi` skill still look for `LG-MAIN`, `LG-NORTH` and `LG-SOUTH`, so they will report every AP missing until they are updated.
+
+### Fixed (a few lost HELLOs no longer drop a backbone link)
+- The owner saw `Link lost ... (no HELLO for 6000 ms)`, followed by a relink 30 ms later, in one direction only. HELLOs are ESP-NOW broadcasts with no ACK and no retries, and the classic ESP32 shares its radio between Wi-Fi, ESP-NOW and BLE advertising, so three broadcasts in a row can be lost while the neighbour is fine.
+- Once a confirmed link has gone 3 s without a HELLO, the AP sends its HELLO to that neighbour as a unicast, once a second. Unicasts are retried and ACKed at MAC level, and the neighbour handles the probe as a HELLO, which repairs the other direction too. A link is dropped after 6 s with neither a HELLO nor an ACK, or after 20 s with no HELLO even if ACKs continue.
+- `nodes` prints per-AP counters that survive link loss: HELLOs, gaps (a HELLO more than 4 s after the previous), longest gap, probes, ACKs, saves (links kept by ACKs), ups, losses. It also prints `tx_fail` and `rx_queue_full`. A kept link logs `[BB] No HELLO from node N for M ms, but it ACKs keepalives; link kept`.
+- BLE advertising is no longer stopped and restarted to change its data. `ble_adv_update()` returns when the payload is unchanged and otherwise updates the data in place, which the controller allows while advertising.
+- Built with zero warnings and running on MAIN. **Not verified**: the probe path itself, which needs a second AP.
+
+### Added (A/B switches for BLE advertising and PMF)
+- `firmware/node/main/Kconfig.projbuild`: `CONFIG_LG_NODE_BLE_ADV` (BLE advertising, D4) and `CONFIG_LG_NODE_PMF_CAPABLE` (SoftAP offers PMF). Both default on in `sdkconfig.defaults`, so normal builds are unchanged. Boot and `config` say when either is off.
+- Use them to compare backbone counters with and without BLE on the radio, and handheld reason-2 disassociations with and without PMF. `docs/milestones/P7-ap-mesh.md` has the out-of-tree build and flash commands.
+
+### Verified (D45 on MAIN, alone)
+- `tests/target` on MAIN, including `test_grid_state`: `LG_TESTS: 433 checks, 0 failures, min free heap 127568 bytes`, `LG_TESTS_RESULT: PASS`.
+- AP firmware flashed back with settings kept. MAIN's version 1 record migrated: `[GRID] Settings version 1 from AP 0 (set up)`, `[WEB] Admin page at http://192.168.4.1/ (configured)`, and `config` shows the grid name, time zone, and a password record with 4000 PBKDF2 iterations.
+- `status` on MAIN shows `Restarts since counting began: power-on or reset 16, low supply voltage (brownout) 269`. That is consistent with the USB hub the owner saw brown out all three APs.
+- After MAIN restarted, it logged 165 `wifi:no need to send deauth when softap is sending deauth` warnings within about a second, just before both handhelds rejoined. Both handhelds offer PMF. The PMF A/B should show whether PMF causes these warnings.
+- **Not verified**: replication between APs, time demotion, split and rejoin. These need NORTH or SOUTH. `docs/milestones/P7-ap-mesh.md` lists the procedure.
+
+### Changed (handheld RAM: three fixes, measured on both boards)
+- **One copy instead of many.** Screens share one status snapshot and one message list (`ui/ui_snapshot.c`, drawing task only), and console commands share another pair. Before, there were 17 static status copies and 3 message-list copies, about 46 KB. The Status screen compares a signature of its lists instead of keeping a whole previous snapshot.
+- **Screens exist only while shown** (`ui/ui_screen.c`). Status, Settings, the AP chooser, the conversation list and the chat screen with its keyboard are built when opened and freed when another screen replaces them. Their refresh timers stay and check for a live screen first. The top bar no longer keeps a table of bars, so screens can be rebuilt any number of times. The screen saver builds its sixty labels when it starts and frees them when touched. Touch calibration no longer returns to a screen that was freed underneath it; the Settings job builds Settings again afterwards.
+- **Wi-Fi and lwIP trimmed for a station** that carries a few small frames a second: 4 static receive buffers, no A-MPDU, 12 management buffers, no SoftAP, WPA3 or enterprise support, 4 sockets.
+- Measured with `[MEM]` marks and `mem`, same bench, before and after (KB of internal heap):
+
+  | | Hosyond before | Hosyond after | FNK0104B before | FNK0104B after |
+  |---|---|---|---|---|
+  | Free at boot | 183 | 216 | 241 | 273 |
+  | Wi-Fi driver start | −49 | −43 | −51 | −45 |
+  | Screens built at start | −27 | −5 | −29 | −5 |
+  | Idle, online | 58 | 123 | 113 | 178 |
+  | With Settings open | 48 | 108 | 103 | 164 |
+  | With a chat open | 35 | 116 | 91 | 171 |
+
+  Leaving a screen gives its memory back: the Hosyond returns to 124 KB after Settings and a chat. Screens opened and left repeatedly from the console, including Settings, Status and chat, with no crash.
+- Both handheld builds have 0 warnings and layers ok. Flashed to both handhelds, which registered through NORTH on the shared SSID.
+
+### Verified on hardware (D45 and D46 across three APs)
+- All three APs run the AP firmware. NORTH and SOUTH started from no settings, adopted MAIN's version 1 over the backbone, and kept it in flash: after a restart all three log `[GRID] Settings version 1 from AP 0 (set up)`. NORTH's `config` shows grid name LocalGrid and the shared network.
+- Both handhelds joined "LocalMesh Access Point" by BSSID and registered with NORTH, the strongest AP (`Registered with node 1 as device 1` and `device 2`). `nodes` names the APs from the vendor IE.
+- Not yet exercised: setting time on one AP and watching the others follow it, a split grid rejoining, phone roaming, and the link keepalive under loss.
+
+### Added (where handheld RAM goes, measured)
+- `hh_mem_mark()` logs `[MEM] <stage>: free, change since the last mark, lowest, largest block` at each handheld boot stage, and the `mem` console command prints it on demand. Flashed to both handhelds; builds with zero warnings, layers ok.
+- Hosyond (classic ESP32, no PSRAM), heap in KB: 183 free at boot. Console −7, **Wi-Fi driver −49**, joining and the TCP session about −9, **display and LVGL −21**, launcher −4, Status screen −7, Settings screen −7, screen saver −8. That leaves **58 idle**; opening Settings takes another −10 and opening a chat −12, down to **35 free**.
+- FNK0104B (ESP32-S3): 241 free at boot, 113 idle, 91 with Settings and a chat open. Its 8 MB PSRAM is not used for any of this.
+- Before the heap is counted at all, the handheld app's own static variables take **81.5 KB** of the same internal RAM (`idf.py size-components`). About 26 KB of that is 17 separate static copies of the service status (1740 B each), 20 KB is three static copies of the message list (6720 B each), and 27.8 KB is the service state, including its message ring. LVGL's own static RAM is under 1 KB; its cost is heap for objects and buffers.
+
+### Changed (D45: no master AP; every AP holds the settings and serves the page)
+- Every AP serves the admin page at its own address, and every AP keeps a full copy of the admin settings: grid name, time zone, and the password's PBKDF2 hash and salt. Before, only MAIN had them, so when MAIN was down there was no page and no way to set time, and every handheld was held to urgent broadcasts (D6).
+- New backbone message `LG_T_GRID_STATE` (0x51), AP to AP only. `lg_core` floods it and hands the body to `io.on_grid_state`, treating it as opaque (1 to `LG_GRID_STATE_MAX` = 256 bytes). The AP firmware defines the 147-byte layout in `firmware/node/main/grid_state.c` and accepts only that exact length.
+- Each AP announces its grid state when a backbone link comes up and every 30 s. An AP that was away catches up on everything it missed as soon as it links again, and the same path will carry any setting added later. A copy replaces another only when its (version, AP) pair is higher, so the newest change wins, including after a split grid rejoins.
+- Grid time can be set on any AP. Setting it starts a new time generation, which is announced before the time itself. Any AP still holding an older AUTHORITATIVE time steps down to CARRIED and follows the newer one instead of defending its own.
+- First-time setup on an AP that has working links waits until it has heard another AP's grid state. Otherwise a fresh AP could accept a new password that would then override the grid's existing one.
+- Settings records gain `seq` and `author` (layout version 2). MAIN's existing version 1 record is read once and carried forward as version 1 made on AP 0, so the admin password survives the upgrade.
+- Console `config` and `status` show the settings version and time generation; human-readable text says AP (D43). Login sessions belong to the AP that issued them.
+- Built with zero warnings (AP firmware and `tests/target`, with a new `test_grid_state`). Not yet run on a board: waiting for the AP capture to finish.
+
+### Added (APs record why they restarted)
+- The owner saw MAIN keep forgetting grid time, which lives only in RAM (D6), so every restart of an AP loses it unless a neighbour still holds it. MAIN had restarted twice and NORTH about six times with no tool attached, and MAIN's USB port never dropped, so power loss did not explain it.
+- Every AP now counts its restarts by cause in NVS: power-on or reset, software restart, crash (panic), interrupt watchdog, task watchdog, other watchdog, brownout. Boot logs `[GRID] Last restart: <cause>`, and after a crash or software restart it adds how long the previous run lasted, kept in RTC memory that such a restart preserves. `status` prints the counts, so a crash is still on record after a serial tool has restarted the board to look.
+- On the classic ESP32 a pulse on EN, which is what opening a serial port does, reports the same cause as a real power-on, so "power-on or reset" covers both.
+- Flashed to all three APs. MAIN's first flash lost its serial link partway through the write (`No more data to read from the serial port`) and left the app half-written. A second flash with `--trust-port` restored it, with its admin setup intact.
+- `tools/serial_capture.py` writes UTF-8. On Windows with output redirected to a file, a board line the cp1252 code page could not encode killed that port's reader thread partway through a capture.
+
+### Fixed (touch is believed twice before it counts)
+- A press now has to be seen on two consecutive polls before it is reported, and so does a release. `indev_read` was the least sceptical reader of the panel in the firmware: the calibration screen in the *same driver* asks for six agreeing samples out of ten before it believes a press and three consecutive misses before a lift, while the path driving every real tap asked for one. A single noisy conversion on the resistive panel therefore became a genuine LVGL click, and one dropped sample mid-press became a released key.
+- Two polls is about 30 ms at LVGL's rate — below noticing, and no finger is on the glass for less. Coordinates still move only while a sample says down, so a spurious miss cannot drag the pointer elsewhere.
+- This is the best remaining explanation for a notification banner being "tapped" with nobody in the room, which is what sent a false read receipt: the banner is clickable, its handler opens the conversation, and opening the conversation reported the message read. Stated as the likeliest mechanism rather than a diagnosis — the false read no longer reproduces, but it was never proven to be this. Three earlier explanations were checked and discarded: the toast's auto-hide timer (15 s, not the ~4 s observed), the screen saver (a minute of idle, and it had not appeared), and a `status` read that could not answer the question it was asked.
+
 ### Changed (D42: one icon per state, and read means seen)
 - A message's marker is **one icon showing the furthest state it reached**, each state its own shape: a clock while this handheld still holds it, an up arrow once an AP has taken it, a down arrow once the recipient's handheld confirms, an open eye once that handheld has shown it to its reader.
 - Ticks are gone, and the reason is measurable rather than aesthetic: `accent` and `success` are **the same value** in this theme (`0x5FD38D`), so "delivered grey, read green" and "delivered green, read green" were asking one colour to carry two meanings. The pair of ticks was not hard to read, it was impossible. The owner had also been reading the *appearance* of the second tick on delivery as "they have seen it", which is exactly what it did not mean.

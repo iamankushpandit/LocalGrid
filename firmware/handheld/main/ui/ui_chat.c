@@ -7,6 +7,8 @@
  * (decision D8). Messages and sending go through hh_service.h alone (D27); sizes, fonts,
  * and colours come from the theme, and positions are fractions of the screen (D9, D10).
  */
+#include "ui_screen.h"
+#include "ui_snapshot.h"
 #include "ui_chat.h"
 
 #include <inttypes.h>
@@ -336,8 +338,8 @@ static void update_message_note(shown_msg_t *shown, const hh_message_t *m, const
  */
 static void refresh_messages(const hh_status_t *st, bool force)
 {
-    static hh_message_t msgs[HH_MESSAGES];
-    size_t n = hh_service_messages(msgs, HH_MESSAGES);
+    size_t n = 0;
+    const hh_message_t *msgs = ui_messages(&n);
 
     /* Oldest first, only this conversation's messages. */
     const hh_message_t *mine[HH_MESSAGES];
@@ -842,8 +844,7 @@ static void on_key_let_go(lv_event_t *e)
 static void on_back_to_list(lv_event_t *e)
 {
     (void)e;
-    s_ui.in_chat = false;
-    lv_screen_load(s_ui.list_screen);
+    ui_chat_open_list();   /* the list was freed when the chat replaced it; this builds it again */
 }
 
 static void on_back_home(lv_event_t *e)
@@ -853,10 +854,56 @@ static void on_back_home(lv_event_t *e)
     ui_launcher_open();
 }
 
+/* The chat screen is being freed (ui_screen.h): drop every pointer into it. The conversation
+ * list, the open conversation, and the Urgent choice are state, not widgets, and stay. */
+static void forget_chat(void)
+{
+    lg_ui_keycap_hide();
+    if (s_ui.t9_timer != NULL) {
+        lv_timer_delete(s_ui.t9_timer);
+        s_ui.t9_timer = NULL;
+    }
+    s_ui.t9_key = T9_NONE;
+    s_ui.chat_screen = NULL;
+    s_ui.chat_title = NULL;
+    s_ui.chat_hint = NULL;
+    s_ui.chat_rows = NULL;
+    s_ui.input = NULL;
+    s_ui.urgent_button = NULL;
+    s_ui.urgent_label = NULL;
+    s_ui.keyboard = NULL;
+    s_ui.keyboard_label = NULL;
+    s_ui.controls = NULL;
+    s_ui.empty_note = NULL;
+    s_ui.shown_count = 0;
+    s_ui.in_chat = false;
+}
+
+static void forget_list(void)
+{
+    s_ui.list_screen = NULL;
+    s_ui.list_rows = NULL;
+    s_ui.shown_status = 0;
+}
+
+static void refresh(lv_timer_t *timer);
+
+/* One refresh timer for both screens, created on first use and kept: it checks which of
+ * them, if either, is on the panel before touching anything. */
+static void ensure_timer(void)
+{
+    static bool started;
+    if (!started) {
+        started = true;
+        lv_timer_create(refresh, REFRESH_MS, NULL);
+    }
+}
+
 static void build_chat_screen(void)
 {
     const lg_theme_t *t = lg_theme();
     s_ui.chat_screen = lv_obj_create(NULL);
+    ui_screen_free_on_leave(s_ui.chat_screen, forget_chat);
     lg_theme_apply_screen(s_ui.chat_screen);
     lv_obj_remove_flag(s_ui.chat_screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(s_ui.chat_screen, LV_FLEX_FLOW_COLUMN);
@@ -937,13 +984,12 @@ static void open_chat(const conv_t *conv)
     if (s_ui.chat_screen == NULL) {
         build_chat_screen();
     }
-    static hh_status_t st;
-    hh_service_status(&st);
+    const hh_status_t *st = ui_status();
     lg_ui_set_text(s_ui.chat_title, conv->title);
     lv_textarea_set_text(s_ui.input, "");
-    update_hint(&st);
-    refresh_messages(&st, true);   /* a different conversation: start the list again */
-    s_ui.shown_messages = st.messages_version;
+    update_hint(st);
+    refresh_messages(st, true);   /* a different conversation: start the list again */
+    s_ui.shown_messages = st->messages_version;
     ui_notify_mark_seen(conv->scope, conv->target);
     lv_screen_load(s_ui.chat_screen);
     ESP_LOGI(TAG, "[UI] Chat opened: %s", conv->title);
@@ -954,10 +1000,8 @@ void ui_chat_open_conversation(uint8_t scope, uint32_t target, const char *title
 {
     conv_t conv = { .scope = scope, .target = target };
     snprintf(conv.title, sizeof(conv.title), "%s", title != NULL ? title : "Chat");
-    if (s_ui.list_screen == NULL) {
-        ui_chat_open_list();   /* builds the screens and the refresh timer */
-    }
     lg_display_lock(1000);
+    ensure_timer();
     open_chat(&conv);
     lg_display_unlock();
 }
@@ -1058,18 +1102,21 @@ static void rebuild_list(const hh_status_t *st)
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
-    static hh_status_t st;
-    hh_service_status(&st);
-    if (s_ui.in_chat) {
-        if (st.messages_version != s_ui.shown_messages) {
-            refresh_messages(&st, false);
-            s_ui.shown_messages = st.messages_version;
+    lv_obj_t *active = lv_screen_active();
+    if (active == NULL || (active != s_ui.chat_screen && active != s_ui.list_screen)) {
+        return;   /* neither is on the panel; a freed screen is NULL and never matches */
+    }
+    const hh_status_t *st = ui_status();
+    if (active == s_ui.chat_screen) {
+        if (st->messages_version != s_ui.shown_messages) {
+            refresh_messages(st, false);
+            s_ui.shown_messages = st->messages_version;
             ui_notify_mark_seen(s_ui.open.scope, s_ui.open.target);
         }
-        update_hint(&st);
-    } else if (st.version != s_ui.shown_status) {
-        rebuild_list(&st);
-        s_ui.shown_status = st.version;
+        update_hint(st);
+    } else if (st->version != s_ui.shown_status) {
+        rebuild_list(st);
+        s_ui.shown_status = st->version;
     }
 }
 
@@ -1089,12 +1136,12 @@ void ui_chat_open_list(void)
         lg_ui_icon_button(head, LV_SYMBOL_HOME, on_back_home, NULL);
 
         s_ui.list_rows = lg_ui_column(s_ui.list_screen, t->gap);
-        lv_timer_create(refresh, REFRESH_MS, NULL);
+        ui_screen_free_on_leave(s_ui.list_screen, forget_list);
     }
-    static hh_status_t st;
-    hh_service_status(&st);
-    rebuild_list(&st);
-    s_ui.shown_status = st.version;
+    ensure_timer();
+    const hh_status_t *st = ui_status();
+    rebuild_list(st);
+    s_ui.shown_status = st->version;
     s_ui.in_chat = false;
     lv_screen_load(s_ui.list_screen);
     lg_display_unlock();

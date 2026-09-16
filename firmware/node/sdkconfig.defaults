@@ -35,3 +35,11 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+
+# ---- A/B switches for link robustness (main/Kconfig.projbuild); both stay on in normal builds ----
+# BLE advertising shares the radio with Wi-Fi and ESP-NOW. To test without it, add a line
+#   CONFIG_LG_NODE_BLE_ADV=n
+# and build with a fresh sdkconfig (see docs/milestones/P7-ap-mesh.md).
+CONFIG_LG_NODE_BLE_ADV=y
+# PMF capable on the SoftAP. For the reason-2 disassociation A/B, set CONFIG_LG_NODE_PMF_CAPABLE=n.
+CONFIG_LG_NODE_PMF_CAPABLE=y

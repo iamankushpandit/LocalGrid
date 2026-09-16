@@ -12,19 +12,9 @@
 #include "lg_theme.h"
 #include "lg_ui_widgets.h"
 
-typedef struct {
-    lv_obj_t *title;
-    lv_obj_t *status;
-} bar_parts_t;
-
-static bar_parts_t s_parts[4];   /* one per screen that has a bar */
-static uint8_t     s_count;
-
-static bar_parts_t *parts_of(lv_obj_t *bar)
-{
-    uint8_t index = (uint8_t)(uintptr_t)lv_obj_get_user_data(bar);
-    return index < s_count ? &s_parts[index] : NULL;
-}
+/* The bar's children, in the order ui_bar_create adds them. Reading the status label by
+ * position keeps no table of bars, so screens can be built and freed any number of times. */
+#define BAR_CHILD_STATUS 2
 
 lv_obj_t *ui_bar_create(lv_obj_t *screen, const char *title, lv_event_cb_t on_home)
 {
@@ -48,21 +38,14 @@ lv_obj_t *ui_bar_create(lv_obj_t *screen, const char *title, lv_event_cb_t on_ho
     lv_obj_set_flex_grow(label, 1);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 
-    lv_obj_t *status = lg_ui_text(bar, t->font_small, t->bar_text, "");
-
-    if (s_count < (uint8_t)(sizeof(s_parts) / sizeof(s_parts[0]))) {
-        s_parts[s_count].title = label;
-        s_parts[s_count].status = status;
-        lv_obj_set_user_data(bar, (void *)(uintptr_t)s_count);
-        s_count++;
-    }
+    (void)lg_ui_text(bar, t->font_small, t->bar_text, "");   /* status, child BAR_CHILD_STATUS */
     return bar;
 }
 
 void ui_bar_update(lv_obj_t *bar, const hh_status_t *st)
 {
-    bar_parts_t *p = bar != NULL ? parts_of(bar) : NULL;
-    if (p == NULL) {
+    lv_obj_t *status = bar != NULL ? lv_obj_get_child(bar, BAR_CHILD_STATUS) : NULL;
+    if (status == NULL) {
         return;
     }
     const lg_theme_t *t = lg_theme();
@@ -71,16 +54,16 @@ void ui_bar_update(lv_obj_t *bar, const hh_status_t *st)
         uint32_t day = st->grid_time % 86400u;
         snprintf(text, sizeof(text), "%d dBm  %02u:%02u", st->rssi, (unsigned)(day / 3600u),
                  (unsigned)(day / 60u % 60u));
-        lv_obj_set_style_text_color(p->status, t->bar_text, 0);
+        lv_obj_set_style_text_color(status, t->bar_text, 0);
     } else if (st->link == HH_LINK_ONLINE) {
         snprintf(text, sizeof(text), "%d dBm  no time", st->rssi);
-        lv_obj_set_style_text_color(p->status, t->warning, 0);
+        lv_obj_set_style_text_color(status, t->warning, 0);
     } else if (st->link == HH_LINK_SEARCHING || st->link == HH_LINK_STOPPED) {
         snprintf(text, sizeof(text), "offline");
-        lv_obj_set_style_text_color(p->status, t->error, 0);
+        lv_obj_set_style_text_color(status, t->error, 0);
     } else {
         snprintf(text, sizeof(text), "joining");
-        lv_obj_set_style_text_color(p->status, t->warning, 0);
+        lv_obj_set_style_text_color(status, t->warning, 0);
     }
-    lg_ui_set_text(p->status, text);   /* only a changed cluster invalidates the bar */
+    lg_ui_set_text(status, text);   /* only a changed cluster invalidates the bar */
 }

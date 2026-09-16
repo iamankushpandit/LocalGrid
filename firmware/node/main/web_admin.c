@@ -12,7 +12,9 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/semphr.h"
+#include "grid_state.h"
 #include "lg_crypto.h"
+#include "lg_proto_config.h"
 #include "node_app.h"
 #include "sessions.h"
 #include "settings.h"
@@ -70,7 +72,6 @@ typedef struct {
 static struct {
     SemaphoreHandle_t lock;
     snapshot_t        snap;
-    node_settings_t   settings;
     admin_session_t   sessions[ADMIN_SESSIONS];
     uint32_t          login_failures;
     uint32_t          locked_until_ms;
@@ -329,14 +330,14 @@ static esp_err_t send_session(httpd_req_t *req, const admin_session_t *s)
     return send_json(req, "200 OK", body);
 }
 
-static bool password_matches(const char *password)
+static bool password_matches(const node_settings_t *cfg, const char *password)
 {
     uint8_t hash[SETTINGS_HASH_LEN];
-    if (lg_pbkdf2_sha256((const uint8_t *)password, strlen(password), w.settings.salt, SETTINGS_SALT_LEN,
-                         w.settings.iterations, hash, sizeof(hash)) != 0) {
+    if (lg_pbkdf2_sha256((const uint8_t *)password, strlen(password), cfg->salt, SETTINGS_SALT_LEN,
+                         cfg->iterations, hash, sizeof(hash)) != 0) {
         return false;
     }
-    bool ok = lg_ct_equal(hash, w.settings.hash, sizeof(hash));
+    bool ok = lg_ct_equal(hash, cfg->hash, sizeof(hash));
     lg_secure_zero(hash, sizeof(hash));
     return ok;
 }
@@ -421,19 +422,30 @@ static esp_err_t h_icon(httpd_req_t *req)
 static esp_err_t h_state(httpd_req_t *req)
 {
     admin_session_t *s = session_from_request(req);
+    static node_settings_t cfg;   /* httpd runs one handler at a time */
+    grid_state_settings(&cfg);
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
-    json_escape(w.settings.grid_name, name, sizeof(name));
-    char body[256];
-    snprintf(body, sizeof(body), "{\"configured\":%s,\"logged_in\":%s,\"csrf\":\"%s\",\"grid_name\":\"%s\"}",
-             w.settings.configured ? "true" : "false", s != NULL ? "true" : "false",
-             s != NULL ? s->csrf : "", w.settings.configured ? name : "");
+    json_escape(cfg.grid_name, name, sizeof(name));
+    char ap[2 * 16 + 8];
+    json_escape(g_app.name, ap, sizeof(ap));
+    char body[320];
+    snprintf(body, sizeof(body),
+             "{\"configured\":%s,\"logged_in\":%s,\"csrf\":\"%s\",\"grid_name\":\"%s\",\"ap\":%u,\"ap_name\":\"%s\"}",
+             cfg.configured ? "true" : "false", s != NULL ? "true" : "false",
+             s != NULL ? s->csrf : "", cfg.configured ? name : "", g_app.index, ap);
     return send_json(req, "200 OK", body);
 }
 
 static esp_err_t h_setup(httpd_req_t *req)
 {
-    if (w.settings.configured) {
+    static node_settings_t cfg;
+    grid_state_settings(&cfg);
+    if (cfg.configured) {
         return send_error(req, "409 Conflict", "LocalGrid is already set up. Log in instead.");
+    }
+    if (!grid_state_setup_allowed()) {
+        /* Another AP may already hold the grid's settings: set up only once it has said so. */
+        return send_error(req, "503 Service Unavailable", "Checking with the other APs. Try again in a few seconds.");
     }
     char body[ADMIN_BODY_MAX];
     char name[SETTINGS_GRID_NAME_MAX + 2], password[ADMIN_PASSWORD_MAX + 2], tz[SETTINGS_TZ_MAX + 2] = "";
@@ -465,10 +477,9 @@ static esp_err_t h_setup(httpd_req_t *req)
               lg_pbkdf2_sha256((const uint8_t *)password, strlen(password), ns.salt, sizeof(ns.salt), ns.iterations,
                                ns.hash, sizeof(ns.hash)) == 0;
     lg_secure_zero(password, sizeof(password));
-    if (!ok || settings_save(&ns) != ESP_OK) {
+    if (!ok || grid_state_commit(&ns) != ESP_OK) {
         return send_error(req, "500 Internal Server Error", "Could not save settings. Try again.");
     }
-    w.settings = ns;
     (void)post_time(unix_ms);
     ESP_LOGI(TAG, "[WEB] Setup complete: grid \"%s\", time zone %s", ns.grid_name, ns.timezone);
     admin_session_t *s = session_create();
@@ -477,7 +488,9 @@ static esp_err_t h_setup(httpd_req_t *req)
 
 static esp_err_t h_login(httpd_req_t *req)
 {
-    if (!w.settings.configured) {
+    static node_settings_t cfg;
+    grid_state_settings(&cfg);
+    if (!cfg.configured) {
         return send_error(req, "409 Conflict", "LocalGrid is not set up yet.");
     }
     uint32_t wait_s = 0;
@@ -492,7 +505,7 @@ static esp_err_t h_login(httpd_req_t *req)
         return send_error(req, "400 Bad Request", "Password is required.");
     }
     lg_secure_zero(body, sizeof(body));
-    bool ok = password_matches(password);
+    bool ok = password_matches(&cfg, password);
     lg_secure_zero(password, sizeof(password));
     if (!ok) {
         login_failed();
@@ -526,13 +539,15 @@ static esp_err_t h_status(httpd_req_t *req)
     xSemaphoreGive(w.lock);
 
     static char out[3072];
+    static node_settings_t cfg;
+    grid_state_settings(&cfg);
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
-    json_escape(w.settings.grid_name, name, sizeof(name));
+    json_escape(cfg.grid_name, name, sizeof(name));
     int n = snprintf(out, sizeof(out),
                      "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
                      ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
                      ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,\"links\":[",
-                     name, w.settings.timezone, s.node, s.node_name, s.boot, s.uptime_s, s.grid_time, s.time_quality,
+                     name, cfg.timezone, s.node, s.node_name, s.boot, s.uptime_s, s.grid_time, s.time_quality,
                      s.heap_free, s.heap_min, s.handhelds);
     for (size_t i = 0; i < s.n_links && n > 0 && (size_t)n < sizeof(out); i++) {
         n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"node\":%u,\"up\":%s,\"rssi\":%d,\"age_ms\":%" PRIu32 "}",
@@ -572,12 +587,15 @@ static esp_err_t h_time(httpd_req_t *req)
     if (!read_body(req, body, sizeof(body)) || !json_uint64(body, "unix_ms", &unix_ms) || unix_ms < 1700000000000ull) {
         return send_error(req, "400 Bad Request", "A valid time is required.");
     }
-    if (json_string(body, "timezone", tz, sizeof(tz)) && valid_timezone(tz) && strcmp(tz, w.settings.timezone) != 0) {
-        strncpy(w.settings.timezone, tz, SETTINGS_TZ_MAX);
-        (void)settings_save(&w.settings);
+    static node_settings_t cfg;
+    grid_state_settings(&cfg);
+    if (json_string(body, "timezone", tz, sizeof(tz)) && valid_timezone(tz) && strcmp(tz, cfg.timezone) != 0) {
+        memset(cfg.timezone, 0, sizeof(cfg.timezone));
+        strncpy(cfg.timezone, tz, SETTINGS_TZ_MAX);
+        (void)grid_state_commit(&cfg);
     }
     if (!post_time(unix_ms)) {
-        return send_error(req, "503 Service Unavailable", "The node is busy. Try again.");
+        return send_error(req, "503 Service Unavailable", "The AP is busy. Try again.");
     }
     ESP_LOGI(TAG, "[WEB] Admin set grid time to %" PRIu64, unix_ms / 1000u);
     return send_json(req, "200 OK", "{\"ok\":true}");
@@ -589,12 +607,6 @@ esp_err_t web_admin_start(void)
     if (w.lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    esp_err_t err = settings_load(&w.settings);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "[WEB] Settings unreadable (%s); starting in setup mode", esp_err_to_name(err));
-        memset(&w.settings, 0, sizeof(w.settings));
-    }
-
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
     config.max_uri_handlers = 12;
@@ -602,7 +614,7 @@ esp_err_t web_admin_start(void)
     config.lru_purge_enable = true;
 
     httpd_handle_t server = NULL;
-    err = httpd_start(&server, &config);
+    esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
         return err;
     }
@@ -619,7 +631,11 @@ esp_err_t web_admin_start(void)
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         httpd_register_uri_handler(server, &routes[i]);
     }
-    ESP_LOGI(TAG, "[WEB] Admin page at http://192.168.4.1/ (%s)",
-             w.settings.configured ? "configured" : "setup mode");
+    static node_settings_t cfg;
+    grid_state_settings(&cfg);
+    uint8_t ip[4];
+    lg_proto_node_ip(g_app.index, ip);
+    ESP_LOGI(TAG, "[WEB] Admin page at http://%u.%u.%u.%u/ (%s)", ip[0], ip[1], ip[2], ip[3],
+             cfg.configured ? "configured" : "setup mode");
     return ESP_OK;
 }

@@ -39,6 +39,11 @@ static lv_obj_t *crosshair(lv_obj_t *parent)
     return c;
 }
 
+static void delete_when_left(lv_event_t *e)
+{
+    lv_obj_delete_async(lv_event_get_target_obj(e));
+}
+
 bool lg_ui_calibrate(void)
 {
     if (!lg_bsp_touch_can_calibrate()) {
@@ -107,8 +112,14 @@ bool lg_ui_calibrate(void)
     vTaskDelay(pdMS_TO_TICKS(1500));
 
     lg_display_lock(1000);
-    lv_screen_load(previous);
-    lv_obj_delete(scr);
+    if (previous != NULL && lv_obj_is_valid(previous)) {
+        lv_screen_load(previous);
+        lv_obj_delete(scr);
+    } else {
+        /* The screen underneath was freed when this one replaced it (screens that exist only
+         * while shown). Stay up until the caller loads the next screen, then go. */
+        lv_obj_add_event_cb(scr, delete_when_left, LV_EVENT_SCREEN_UNLOADED, NULL);
+    }
     lg_display_unlock();
     lg_ui_input_suspend(false);
     return ok;

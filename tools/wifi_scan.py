@@ -18,12 +18,17 @@ here is a grid participant -- but it is not guaranteed to be passive either.
 Decision D21 stands too: BSSIDs are hardware addresses, so they are never printed. Radios
 are counted and their signals aggregated per SSID instead.
 
-  python tools/wifi_scan.py                     which of the expected APs are up
+Since D46 every AP broadcasts the same SSID, "LocalMesh Access Point", like a home mesh
+router. A Wi-Fi scan therefore cannot say which AP is which (their names travel in a vendor
+element Windows does not show); it counts how many radios answer on that SSID. Which AP is
+missing comes from the APs' own `nodes` output or a handheld's Status screen.
+
+  python tools/wifi_scan.py                     is the grid SSID up, and on how many APs
+  python tools/wifi_scan.py --aps 2             expect two APs instead of three
   python tools/wifi_scan.py --all               every network in range, LocalGrid or not
   python tools/wifi_scan.py --watch 120         keep looking for two minutes, log changes
-  python tools/wifi_scan.py --expect LG-MAIN    only insist on this one
 
-Exit code is 0 when every expected AP was seen, 1 when any was missing, 2 when the scan
+Exit code is 0 when the expected number of APs was heard, 1 when fewer were, 2 when the scan
 itself could not run. So it can gate a flash: `python tools/flash.py --role N && python
 tools/wifi_scan.py`.
 
@@ -36,11 +41,11 @@ import subprocess
 import sys
 import time
 
-# The prototype grid. AP n owns 192.168.(4 + n).0/24 and sits at .1, so MAIN is the master
-# at 192.168.4.1 -- and the master is the only one that serves the admin page, which is why
-# MAIN missing is worse than any other AP missing.
-DEFAULT_EXPECT = ["LG-MAIN", "LG-NORTH", "LG-SOUTH"]
-ADMIN = {"LG-MAIN": "http://192.168.4.1/"}
+# One SSID on every AP (D46), every AP at 192.168.4.1, and no master (D45): any AP serves
+# the admin page, so a missing AP reduces coverage but blocks nothing on its own.
+GRID_SSID = "LocalMesh Access Point"
+DEFAULT_APS = 3
+ADMIN_URL = "http://192.168.4.1/"
 
 # D21: a hardware address never reaches the output, even if netsh prints one.
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
@@ -119,51 +124,42 @@ def describe(name, info):
             f"channel {chans}  {info['auth']}{radios}")
 
 
-def report(nets, expect, show_all):
-    found = [n for n in expect if n in nets]
-    missing = [n for n in expect if n not in nets]
+def report(nets, aps, show_all):
+    info = nets.get(GRID_SSID)
+    heard = info["radios"] if info else 0
 
-    print("LocalGrid APs on the air")
-    if not expect:
-        print("  (nothing expected; --all lists everything heard)")
-    for name in expect:
-        if name in nets:
-            print(f"  UP      {describe(name, nets[name])}")
-        else:
-            extra = f"  <- the admin page lives here ({ADMIN[name]})" if name in ADMIN else ""
-            print(f"  MISSING {name}{extra}")
-
-    others = sorted(n for n in nets if n.startswith("LG-") and n not in expect)
-    for name in others:
-        print(f"  EXTRA   {describe(name, nets[name])}")
+    print("LocalGrid on the air")
+    if info:
+        print(f"  UP      {describe(GRID_SSID, info)}")
+        print(f"          admin page on whichever AP you join: {ADMIN_URL}")
+    else:
+        print(f"  MISSING {GRID_SSID}")
+    old = sorted(n for n in nets if n.startswith("LG-"))
+    for name in old:
+        print(f"  OLD     {describe(name, nets[name])}  <- firmware from before D46 (one SSID)")
 
     if show_all:
         print("\nEverything else in range")
-        for name in sorted(n for n in nets if not n.startswith("LG-")):
+        for name in sorted(n for n in nets if n != GRID_SSID and not n.startswith("LG-")):
             print(f"  {describe(name, nets[name])}")
 
-    print(f"\n{len(found)} of {len(expect)} expected AP(s) heard, {len(nets)} network(s) in range.")
-    if missing:
-        print("Missing: " + ", ".join(missing))
-        if "LG-MAIN" in missing:
-            print("  LG-MAIN is the master and the only AP that serves the admin page, so grid")
-            print("  time cannot be set while it is off the air (D28). Nothing that needs grid")
-            print("  time can be tested until it is back.")
-    return 0 if not missing else 1
+    print(f"\n{heard} of {aps} expected AP radio(s) heard on \"{GRID_SSID}\", {len(nets)} network(s) in range.")
+    if heard < aps:
+        print("  Fewer APs than expected. Which one is missing: run `nodes` on an AP's console,")
+        print("  or look at a handheld's Status screen, which names each AP.")
+    return 0 if heard >= aps else 1
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--expect", action="append",
-                    help="SSID that must be present (repeatable); defaults to the prototype grid")
+    ap.add_argument("--aps", type=int, default=DEFAULT_APS,
+                    help=f"how many APs should answer on the grid SSID (default {DEFAULT_APS})")
     ap.add_argument("--all", action="store_true", help="also list networks that are not LocalGrid's")
     ap.add_argument("--watch", type=float, metavar="SECONDS",
                     help="keep scanning for this long and report every change")
     ap.add_argument("--interval", type=float, default=10.0, help="seconds between scans while watching")
     args = ap.parse_args()
-
-    expect = args.expect if args.expect else DEFAULT_EXPECT
 
     text = netsh()
     if text is None:
@@ -175,30 +171,26 @@ def main():
         return 2
 
     nets = parse(MAC_RE.sub("(address withheld)", text))
-    rc = report(nets, expect, args.all)
+    rc = report(nets, args.aps, args.all)
 
     if args.watch:
         # Watching matters because the symptom being chased is an AP that comes and goes:
         # one scan cannot tell "never there" from "there a moment ago".
         print(f"\nWatching for {args.watch:.0f}s, a scan every {args.interval:.0f}s. Changes only.")
         deadline = time.time() + args.watch
-        seen = {n for n in nets if n.startswith("LG-")}
+        count = nets[GRID_SSID]["radios"] if GRID_SSID in nets else 0
         while time.time() < deadline:
             time.sleep(args.interval)
             text = netsh()
             if text is None:
                 continue
             now = parse(MAC_RE.sub("(address withheld)", text))
-            lg = {n for n in now if n.startswith("LG-")}
-            stamp = time.strftime("%H:%M:%S")
-            for name in sorted(lg - seen):
-                print(f"  {stamp}  APPEARED  {describe(name, now[name])}")
-            for name in sorted(seen - lg):
-                print(f"  {stamp}  VANISHED  {name}")
-            if lg != seen:
-                seen = lg
-        print(f"  done; LocalGrid APs heard at the end: {', '.join(sorted(seen)) or 'none'}")
-        rc = 0 if all(n in seen for n in expect) else 1
+            n = now[GRID_SSID]["radios"] if GRID_SSID in now else 0
+            if n != count:
+                print(f"  {time.strftime('%H:%M:%S')}  {count} -> {n} AP radio(s) on \"{GRID_SSID}\"")
+                count = n
+        print(f"  done; {count} AP radio(s) heard at the end")
+        rc = 0 if count >= args.aps else 1
 
     return rc
 

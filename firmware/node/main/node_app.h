@@ -13,6 +13,19 @@
 #include "freertos/queue.h"
 #include "lg_identity.h"
 #include "lg_node.h"
+#include "sdkconfig.h"
+
+/* Build-time A/B switches (main/Kconfig.projbuild, see sdkconfig.defaults). Both default on. */
+#ifdef CONFIG_LG_NODE_BLE_ADV
+#define NODE_BLE_ADV_ENABLED  1
+#else
+#define NODE_BLE_ADV_ENABLED  0
+#endif
+#ifdef CONFIG_LG_NODE_PMF_CAPABLE
+#define NODE_PMF_CAPABLE      1
+#else
+#define NODE_PMF_CAPABLE      0
+#endif
 
 typedef enum {
     NODE_CMD_STATUS,
@@ -22,6 +35,7 @@ typedef enum {
     NODE_CMD_TIME_SHOW,
     NODE_CMD_TIME_SET,
     NODE_CMD_CONFIG,
+    NODE_CMD_GRID_ANNOUNCE,   /* settings changed on this AP: flood grid state now */
 } node_cmd_type_t;
 
 typedef struct {

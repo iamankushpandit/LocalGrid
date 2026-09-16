@@ -49,6 +49,9 @@ typedef struct {
     void     (*on_diag)(void *ctx, uint16_t origin_node, uint8_t hops, const uint8_t *text, size_t len);
     /* Optional. Another node announced grid time; glue decides whether to adopt it. */
     void     (*on_time)(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality);
+    /* Optional. Another node flooded its grid state (D45). The body is opaque to the core:
+     * 1..LG_GRID_STATE_MAX bytes whose layout the AP firmware defines and checks. */
+    void     (*on_grid_state)(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len);
 } lg_node_io_t;
 
 typedef struct {
@@ -114,6 +117,12 @@ void lg_node_announce_time(lg_node_t *n, uint8_t quality);
 
 /* Floods a diagnostic echo (1..LG_TEXT_MAX bytes of UTF-8); each other node reports it once. */
 int lg_node_send_diag(lg_node_t *n, const uint8_t *text, size_t len);
+
+/*
+ * Floods this node's grid state (1..LG_GRID_STATE_MAX opaque bytes) to every other node, each of
+ * which reports it once through io.on_grid_state. Never sent to a handheld session.
+ */
+int lg_node_announce_grid_state(lg_node_t *n, const uint8_t *body, size_t len);
 
 const lg_presence_entry_t *lg_node_presence(const lg_node_t *n, uint32_t device);
 

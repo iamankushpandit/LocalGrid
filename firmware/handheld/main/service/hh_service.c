@@ -12,6 +12,7 @@
  * Not yet: BLE observer (D4), proactive roaming (answer 11), messaging screens (P6).
  * BSSIDs stay in memory and are never logged (D21).
  */
+#include "hh_mem.h"
 #include "hh_service.h"
 
 #include <errno.h>
@@ -50,7 +51,6 @@ static const char *TAG = "NET";
 #define TASK_PRIORITY         5
 #define QUEUE_LEN             24
 #define SEND_QUEUE_LEN        4
-#define SCAN_RECORDS_MAX      16
 #define SCAN_DWELL_MIN_MS     40
 #define SCAN_DWELL_MAX_MS     120   /* beacons come every 102 ms */
 #define NODE_FRESH_MS         15000
@@ -95,6 +95,7 @@ typedef struct {
     int8_t  rssi;
     uint8_t bssid[6];
     uint8_t payload[LG_DISC_LEN];
+    char    name[LG_DISC_NAME_MAX + 1];   /* EV_BEACON: AP name from the vendor IE tail, or empty */
     int32_t value;                 /* disconnect reason, or preferred node */
     uint32_t id[3];                /* EV_MARK_READ: author, boot, seq of the message read */
 } ev_t;
@@ -106,7 +107,7 @@ typedef struct {
     uint8_t  clients;
     uint8_t  free_slots;
     uint8_t  flags;
-    char     ssid[HH_SSID_MAX];
+    char     ssid[HH_SSID_MAX];   /* the AP's name as shown on screens, from its vendor IE (D46) */
     uint32_t heard_ms;
 } node_cand_t;
 
@@ -310,6 +311,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
     (void)ctx;
     switch (ev->type) {
     case LG_CEV_REGISTERED:
+        if (s.joins == 0) {
+            hh_mem_mark("first registration (Wi-Fi joined, TCP session up)");
+        }
         s.link = HH_LINK_ONLINE;
         s.joins++;
         s.online_since_ms = now_ms();
@@ -409,6 +413,14 @@ static void on_vendor_ie(void *ctx, wifi_vendor_ie_type_t type, const uint8_t sa
     ev_t ev = { .type = EV_BEACON, .rssi = (int8_t)rssi };
     memcpy(ev.bssid, sa, 6);
     memcpy(ev.payload, ie->payload, LG_DISC_LEN);
+    /* Optional tail (D46): u8 length and the AP name. Every AP shares one SSID, so this is the label. */
+    size_t tail = (size_t)ie->length - 4u - LG_DISC_LEN;
+    if (tail >= 1u) {
+        size_t n = ie->payload[LG_DISC_LEN];
+        if (n <= LG_DISC_NAME_MAX && n <= tail - 1u) {
+            memcpy(ev.name, ie->payload + LG_DISC_LEN + 1u, n);
+        }
+    }
     xQueueSend(s.queue, &ev, 0);
 }
 
@@ -538,8 +550,10 @@ static void begin_join(int node, uint32_t now)
         return;
     }
 
+    /* One network (D46): every AP has the same SSID, and the BSSID picks this one. */
     wifi_config_t wc = { 0 };
-    memcpy(wc.sta.ssid, c->ssid, strnlen(c->ssid, sizeof(wc.sta.ssid)));
+    _Static_assert(sizeof(LG_PROTO_SSID) <= sizeof(wc.sta.ssid), "SSID too long");
+    memcpy(wc.sta.ssid, LG_PROTO_SSID, sizeof(LG_PROTO_SSID) - 1);
     _Static_assert(sizeof(LG_SECRET_WIFI_PASSPHRASE) <= sizeof(wc.sta.password), "Wi-Fi passphrase too long");
     memcpy(wc.sta.password, LG_SECRET_WIFI_PASSPHRASE, sizeof(LG_SECRET_WIFI_PASSPHRASE) - 1);
     wc.sta.scan_method = WIFI_FAST_SCAN;
@@ -619,6 +633,11 @@ static void on_beacon(const ev_t *ev, uint32_t now)
         memcpy(c->bssid, ev->bssid, 6);
         c->valid = true;
     }
+    if (ev->name[0] != '\0') {
+        snprintf(c->ssid, sizeof(c->ssid), "%s", ev->name);
+    } else if (c->ssid[0] == '\0') {
+        snprintf(c->ssid, sizeof(c->ssid), "AP %u", (unsigned)p[7]);   /* AP firmware older than the name tail */
+    }
     c->rssi = ev->rssi;
     c->free_slots = p[9];
     c->flags = p[10];
@@ -629,12 +648,13 @@ static void on_beacon(const ev_t *ev, uint32_t now)
 static void on_scan_done(uint32_t now)
 {
     s_scanning = false;
-    static wifi_ap_record_t records[SCAN_RECORDS_MAX];
-    uint16_t n = SCAN_RECORDS_MAX;
-    if (esp_wifi_scan_get_ap_records(&n, records) != ESP_OK) {
+    /* Candidates come from the vendor IE alone (name included, D46), so the driver's scan
+     * records are only counted and freed. */
+    uint16_t n = 0;
+    if (esp_wifi_scan_get_ap_num(&n) != ESP_OK) {
         n = 0;
-        esp_wifi_clear_ap_list();
     }
+    esp_wifi_clear_ap_list();
     int found = 0;
     for (int i = 0; i < HH_MAX_NODES; i++) {
         node_cand_t *c = &s.cand[i];
@@ -644,11 +664,6 @@ static void on_scan_done(uint32_t now)
         if (now - c->heard_ms > NODE_EXPIRE_MS) {
             memset(c, 0, sizeof(*c));
             continue;
-        }
-        for (uint16_t r = 0; r < n; r++) {
-            if (memcmp(records[r].bssid, c->bssid, 6) == 0) {
-                snprintf(c->ssid, sizeof(c->ssid), "%s", (const char *)records[r].ssid);
-            }
         }
         found += node_usable(c, now) ? 1 : 0;
         ESP_LOGI(TAG, "[NET] Heard node %d \"%s\" %d dBm, %u attached, %u free, backbone %s, %" PRIu32 " ms ago", i,

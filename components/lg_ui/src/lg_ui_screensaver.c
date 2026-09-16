@@ -12,6 +12,8 @@
  */
 #include "lg_ui_screensaver.h"
 
+#include <string.h>
+
 #include "lg_bsp_settings.h"
 #include "lg_theme.h"
 
@@ -112,8 +114,41 @@ static void animate(void)
     }
 }
 
+static void on_touch(lv_event_t *e);
+
+/*
+ * The rain's sixty labels exist only while it falls. Kept hidden for the life of the handheld
+ * they cost about 8 KB on the Hosyond, which has none to spare, for something shown after a
+ * minute of nobody touching the panel. Built on show, freed on hide.
+ */
+static void build_cover(void)
+{
+    const lg_theme_t *t = lg_theme();
+    s.cover = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s.cover);
+    lv_obj_set_size(s.cover, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s.cover, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s.cover, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s.cover, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s.cover, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s.cover, on_touch, LV_EVENT_PRESSED, NULL);
+
+    for (uint8_t i = 0; i < s.columns; i++) {
+        s.tail[i] = lv_label_create(s.cover);
+        lv_obj_set_style_text_font(s.tail[i], t->font_small, 0);
+        lv_obj_set_style_text_color(s.tail[i], t->success, 0);
+        lv_obj_set_style_text_line_space(s.tail[i], 0, 0);
+        s.head[i] = lv_label_create(s.cover);
+        lv_obj_set_style_text_font(s.head[i], t->font_small, 0);
+        lv_obj_set_style_text_color(s.head[i], t->text, 0);   /* the head is the bright one */
+    }
+}
+
 static void show(void)
 {
+    if (s.cover == NULL) {
+        build_cover();
+    }
     s.showing = true;
     for (uint8_t i = 0; i < s.columns; i++) {
         fill_column(i);
@@ -129,7 +164,13 @@ static void show(void)
 static void hide(void)
 {
     s.showing = false;
-    lv_obj_add_flag(s.cover, LV_OBJ_FLAG_HIDDEN);
+    if (s.cover != NULL) {
+        /* Async: hide() also runs from the cover's own touch event. */
+        lv_obj_delete_async(s.cover);
+        s.cover = NULL;
+        memset(s.head, 0, sizeof(s.head));
+        memset(s.tail, 0, sizeof(s.tail));
+    }
     lv_timer_set_period(s.timer, IDLE_CHECK_MS);
 }
 
@@ -188,7 +229,7 @@ void lg_ui_screensaver_dismiss(void)
 
 void lg_ui_screensaver_start(uint32_t idle_ms)
 {
-    if (s.cover != NULL) {
+    if (s.timer != NULL) {
         s.idle_ms = idle_ms;
         return;
     }
@@ -209,25 +250,5 @@ void lg_ui_screensaver_start(uint32_t idle_ms)
     int32_t fit = char_w > 0 ? w / char_w : 8;
     s.columns = (uint8_t)(fit > COLUMNS_MAX ? COLUMNS_MAX : (fit < 4 ? 4 : fit));
 
-    s.cover = lv_obj_create(lv_layer_top());
-    lv_obj_remove_style_all(s.cover);
-    lv_obj_set_size(s.cover, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_color(s.cover, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s.cover, LV_OPA_COVER, 0);
-    lv_obj_add_flag(s.cover, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(s.cover, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(s.cover, on_touch, LV_EVENT_PRESSED, NULL);
-
-    for (uint8_t i = 0; i < s.columns; i++) {
-        s.tail[i] = lv_label_create(s.cover);
-        lv_obj_set_style_text_font(s.tail[i], t->font_small, 0);
-        lv_obj_set_style_text_color(s.tail[i], t->success, 0);
-        lv_obj_set_style_text_line_space(s.tail[i], 0, 0);
-        s.head[i] = lv_label_create(s.cover);
-        lv_obj_set_style_text_font(s.head[i], t->font_small, 0);
-        lv_obj_set_style_text_color(s.head[i], t->text, 0);   /* the head is the bright one */
-    }
-
-    lv_obj_add_flag(s.cover, LV_OBJ_FLAG_HIDDEN);
     s.timer = lv_timer_create(tick, IDLE_CHECK_MS, NULL);
 }
