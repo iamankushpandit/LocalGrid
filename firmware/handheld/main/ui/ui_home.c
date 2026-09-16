@@ -17,6 +17,8 @@
 #include "lg_display.h"
 #include "lg_theme.h"
 #include "lg_ui_widgets.h"
+#include "ui_chat.h"
+#include "ui_notify.h"
 
 static const char *TAG = "UI";
 
@@ -33,6 +35,8 @@ static struct {
     lv_obj_t   *people;
     lv_obj_t   *nodes;
     lv_obj_t   *memory;
+    lv_obj_t   *messages_label;
+    lv_obj_t   *screen;
     bool        shown;
     hh_status_t last;          /* snapshot currently on screen */
 } s_ui;
@@ -51,6 +55,12 @@ static const char *node_label(const hh_status_t *st, int node, char *buf, size_t
 static const char *signal_word(int rssi)
 {
     return rssi >= -60 ? "strong" : rssi >= -72 ? "good" : rssi >= -80 ? "weak" : "poor";
+}
+
+static void on_messages(lv_event_t *e)
+{
+    (void)e;
+    ui_chat_open_list();
 }
 
 static void on_node_clicked(lv_event_t *e)
@@ -139,11 +149,19 @@ static void rebuild_lists(const hh_status_t *st)
     }
 }
 
+lv_obj_t *ui_home_screen(void)
+{
+    return s_ui.screen;
+}
+
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
     static hh_status_t st;
     hh_service_status(&st);
+    if (lv_screen_active() != s_ui.screen && s_ui.shown) {
+        return;   /* another screen is up; nothing to repaint here */
+    }
     if (s_ui.shown && st.version == s_ui.last.version) {
         return;
     }
@@ -220,6 +238,14 @@ static void refresh(lv_timer_t *timer)
              (unsigned)(st.min_free_heap / 1024u));
     lv_label_set_text(s_ui.memory, text);
 
+    uint32_t unread = ui_notify_unread_total();
+    if (unread > 0) {
+        snprintf(text, sizeof(text), "Messages (%" PRIu32 " new)", unread);
+    } else {
+        snprintf(text, sizeof(text), "Messages");
+    }
+    lv_label_set_text(s_ui.messages_label, text);
+
     s_ui.last = st;
     s_ui.shown = true;
 }
@@ -237,6 +263,10 @@ void ui_home_start(const lg_identity_t *identity)
     lv_obj_t *head = lg_ui_row(scr);
     lg_ui_text(head, t->font_title, t->accent, "LocalGrid");
     s_ui.chip = lg_ui_text(head, t->font_small, t->warning, "Starting");
+
+    lv_obj_t *messages = lg_ui_button(scr, "Messages", on_messages, NULL);
+    lv_obj_set_width(messages, LV_PCT(100));
+    s_ui.messages_label = lv_obj_get_child(messages, 0);
 
     lv_obj_t *me = lg_ui_card(scr, "This handheld");
     s_ui.name = lg_ui_label(me, t->font_body, t->text, "");
@@ -260,8 +290,10 @@ void ui_home_start(const lg_identity_t *identity)
 
     s_ui.memory = lg_ui_label(scr, t->font_small, t->muted, "");
 
+    s_ui.screen = scr;
     lv_screen_load(scr);
     lv_timer_create(refresh, REFRESH_MS, NULL);
+    ui_notify_start();   /* banners for messages that arrive while another screen is up */
     refresh(NULL);
     lg_display_unlock();
     ESP_LOGI(TAG, "[UI] Home screen ready");

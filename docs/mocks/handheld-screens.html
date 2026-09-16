@@ -1,0 +1,511 @@
+<title>LocalGrid Handheld Screens</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Page chrome: tokens for both host themes. The device screens keep the firmware's
+     fixed palette, because a 240x320 panel is black whatever the reader's theme is. */
+  :root {
+    --page-bg: #f2f5f2;
+    --page-panel: #ffffff;
+    --page-ink: #14201a;
+    --page-muted: #55665e;
+    --page-rule: #d3ded7;
+    --page-accent: #1f7a4d;
+    --page-warn: #8a5a00;
+    --page-bad: #a32b2b;
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --page-bg: #0b0f0d;
+      --page-panel: #121815;
+      --page-ink: #e2ece6;
+      --page-muted: #94a69c;
+      --page-rule: #24312b;
+      --page-accent: #5fd38d;
+      --page-warn: #f0b64a;
+      --page-bad: #ff8b8b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #0b0f0d;
+    --page-panel: #121815;
+    --page-ink: #e2ece6;
+    --page-muted: #94a69c;
+    --page-rule: #24312b;
+    --page-accent: #5fd38d;
+    --page-warn: #f0b64a;
+    --page-bad: #ff8b8b;
+  }
+
+  /* Firmware theme (components/lg_ui/src/lg_theme.c), 240 px short side. */
+  .screen {
+    --bg: #000000;
+    --bar: #0b1a12;
+    --bar-text: #5fd38d;
+    --surface: #0a140f;
+    --outline: #1f3a2a;
+    --text: #d2f5de;
+    --muted: #7fa78f;
+    --accent: #5fd38d;
+    --success: #5fd38d;
+    --error: #ff6b6b;
+    --warning: #f0b64a;
+    --radius: 6px;
+    --pad: 8px;
+    --gap: 5px;
+    --touch: 39px;   /* Hosyond: 49 px per 10 mm x 8 mm */
+    --stroke: 2px;
+    --hairline: 1px;
+    --f-small: 12px;
+    --f-body: 14px;
+    --f-title: 20px;
+    --f-huge: 28px;
+  }
+
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 64px; }
+  h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.1; margin: 0 0 8px; text-wrap: balance; letter-spacing: -0.02em; }
+  .lede { max-width: 62ch; color: var(--page-muted); margin: 0 0 24px; }
+  h2 { font-size: 20px; margin: 48px 0 4px; letter-spacing: -0.01em; }
+  h2 + p { margin: 0 0 20px; color: var(--page-muted); max-width: 66ch; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; padding: 0; list-style: none; }
+  .facts li {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px;
+    border: 1px solid var(--page-rule); border-radius: 999px; padding: 4px 10px; color: var(--page-muted);
+  }
+
+  .frames { display: grid; gap: 28px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  figure { margin: 0; background: var(--page-panel); border: 1px solid var(--page-rule); border-radius: 10px; padding: 16px; }
+  figcaption { margin-top: 12px; }
+  .cap-title { font-weight: 600; font-size: 15px; }
+  .cap-note { color: var(--page-muted); font-size: 13px; margin-top: 2px; }
+  .measure { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11.5px; color: var(--page-muted); margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+  .measure b { color: var(--page-ink); font-weight: 500; }
+  .measure .bad { color: var(--page-bad); }
+  .measure .warn { color: var(--page-warn); }
+
+  /* A 240x320 device screen, rendered at true size then scaled for reading. */
+  .stage { width: 480px; height: 640px; max-width: 100%; aspect-ratio: 240 / 320; overflow: hidden; border-radius: 12px; border: 1px solid var(--page-rule); }
+  .stage.small { width: 240px; height: 320px; }
+  .stage.small .screen { transform: none; }
+  .screen {
+    width: 240px; height: 320px; transform: scale(2); transform-origin: top left;
+    background: var(--bg); color: var(--text);
+    font-family: Montserrat, system-ui, sans-serif; font-size: var(--f-body);
+    display: flex; flex-direction: column; gap: calc(var(--gap) * 2); padding: var(--pad);
+    box-sizing: border-box; overflow: hidden; position: relative;
+  }
+  .screen.chat { gap: var(--gap); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); }
+  .col { display: flex; flex-direction: column; gap: var(--gap); }
+  .title { font-size: var(--f-title); color: var(--accent); font-weight: 500; }
+  .small { font-size: var(--f-small); color: var(--muted); }
+  .card { background: var(--surface); border: var(--hairline) solid var(--outline); border-radius: var(--radius); padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
+  .btn { border: var(--hairline) solid var(--accent); background: var(--surface); color: var(--text); border-radius: var(--radius); min-height: var(--touch); display: flex; align-items: center; justify-content: center; }
+  .btn.small-btn { font-size: var(--f-small); min-height: calc(var(--touch) * 0.75); padding: calc(var(--gap) / 2) var(--gap); }
+  .listrow { border: var(--hairline) solid var(--outline); background: var(--surface); border-radius: var(--radius); min-height: var(--touch); display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: var(--gap); }
+  .listrow.sel { border: var(--stroke) solid var(--accent); }
+  .listrow .rt { font-size: var(--f-small); color: var(--muted); }
+  .msgs { flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--gap); overflow: hidden; min-height: 0; }
+  .bubble { max-width: 85%; background: var(--surface); border: var(--hairline) solid var(--outline); border-radius: var(--radius); padding: var(--gap); }
+  .bubble.mine { align-self: flex-end; }
+  .bubble.urgent { border: var(--stroke) solid var(--warning); }
+  .bubble .note { font-size: var(--f-small); color: var(--muted); }
+  .bubble.urgent .note { color: var(--warning); }
+  .field { flex: 1 1 auto; min-height: var(--touch); border: var(--hairline) solid var(--outline); background: var(--surface); border-radius: var(--radius); display: flex; align-items: center; padding-inline: var(--gap); color: var(--muted); }
+  .kb { display: grid; gap: 2px; background: var(--bg); }
+  .kb.letters { height: 144px; grid-template-rows: repeat(4, 1fr); }
+  .kb.emoji { height: 144px; grid-template-rows: repeat(9, 1fr); }
+  .kb .krow { display: grid; gap: 2px; }
+  .kb .key { background: var(--surface); border: var(--hairline) solid var(--outline); border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: var(--f-body); }
+  .kb.emoji .key { font-size: 13px; }
+  .kb .key.wide { grid-column: span 2; font-size: var(--f-small); }
+  .banner { position: absolute; left: 50%; transform: translateX(-50%); top: var(--pad); width: 94%; background: var(--bar); border: var(--stroke) solid var(--accent); border-radius: var(--radius); padding: var(--gap); color: var(--bar-text); font-size: var(--f-small); }
+  .chip { font-size: var(--f-small); }
+  .chip.ok { color: var(--success); }
+  .chip.warn { color: var(--warning); }
+  .overflowed { outline: 2px dashed var(--error); outline-offset: -2px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--page-rule); }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--page-muted); font-weight: 600; }
+  td.num { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .findings { display: grid; gap: 12px; padding: 0; margin: 0; list-style: none; }
+  .findings li { background: var(--page-panel); border: 1px solid var(--page-rule); border-left: 3px solid var(--page-accent); border-radius: 8px; padding: 12px 14px; }
+  .findings li.bad { border-left-color: var(--page-bad); }
+  .findings li.warn { border-left-color: var(--page-warn); }
+  .findings h3 { margin: 0 0 4px; font-size: 14.5px; }
+  .findings p { margin: 0; color: var(--page-muted); font-size: 13.5px; }
+  .scroll-x { overflow-x: auto; }
+</style>
+
+<div class="wrap">
+  <h1>LocalGrid handheld screens</h1>
+  <p class="lede">
+    Every screen the handheld firmware draws, at the true panel size of 240&times;320, using the same
+    palette, fonts, padding and touch sizes as <code>components/lg_ui</code>. Shown at 2&times; for reading;
+    the measurements under each frame are taken from the real 240&times;320 layout.
+  </p>
+  <ul class="facts">
+    <li>240 &times; 320 portrait</li>
+    <li>Hosyond touch target 39 px</li>
+    <li>FNK0104B touch target 44 px</li>
+    <li>padding 8 px, gap 5 px</li>
+    <li>text 12 / 14 / 20 / 28 px</li>
+    <li>Terminal theme</li>
+  </ul>
+
+  <h2>Home</h2>
+  <p>What the owner sees at boot. It is taller than the panel, so it scrolls; the frame shows the first screenful.</p>
+  <div class="frames">
+    <figure>
+      <div class="stage"><div class="screen" id="s-home">
+        <div class="row">
+          <span class="title">LocalGrid</span>
+          <span class="chip ok">Online</span>
+        </div>
+        <div class="btn" data-m="Messages button">Messages (2 new)</div>
+        <div class="card" data-m="This handheld card">
+          <span class="small">This handheld</span>
+          <span>Handheld 2</span>
+          <span class="small">LG-H-HY3-MPT765WSFG</span>
+        </div>
+        <div class="card" data-m="Connection card">
+          <span class="small">Connection</span>
+          <span>Online on LG-NORTH</span>
+          <span class="small">Signal -47 dBm (strong), address 192.168.5.102</span>
+        </div>
+        <div class="card" data-m="Grid time card">
+          <span class="small">Grid time</span>
+          <span class="title">03:14:07 UTC</span>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Home, scrolled to top</div>
+        <div class="cap-note">People and nodes cards sit below the fold, then the memory line.</div>
+        <ul class="measure" data-for="s-home"></ul>
+      </figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen" id="s-home-banner">
+        <div class="banner">Handheld 1 in Everyone (urgent): everyone urgent test</div>
+        <div class="row">
+          <span class="title">LocalGrid</span>
+          <span class="chip ok">Online</span>
+        </div>
+        <div class="btn">Messages (3 new)</div>
+        <div class="card">
+          <span class="small">This handheld</span>
+          <span>Handheld 2</span>
+          <span class="small">LG-H-HY3-MPT765WSFG</span>
+        </div>
+        <div class="card">
+          <span class="small">Connection</span>
+          <span>Online on LG-NORTH</span>
+          <span class="small">Signal -47 dBm (strong), address 192.168.5.102</span>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Notification banner</div>
+        <div class="cap-note">Drawn on LVGL's top layer, above any screen; tapping it opens that conversation. It hides itself after six seconds.</div>
+      </figcaption>
+    </figure>
+  </div>
+
+  <h2>Conversations</h2>
+  <p>Everyone, the groups this handheld belongs to, then every handheld it has heard about. Unread counts replace the right-hand note.</p>
+  <div class="frames">
+    <figure>
+      <div class="stage"><div class="screen" id="s-list">
+        <div class="row">
+          <span class="title">Messages</span>
+          <span class="btn small-btn">Home</span>
+        </div>
+        <div class="col" data-m="Conversation rows">
+          <div class="listrow"><span>Everyone</span><span class="rt">2 new</span></div>
+          <div class="listrow"><span>FAMILY</span><span class="rt">group</span></div>
+          <div class="listrow"><span>LEADERS</span><span class="rt">group</span></div>
+          <div class="listrow"><span>Handheld 1</span><span class="rt">online, encrypted</span></div>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Conversation list</div>
+        <div class="cap-note">KIDS is absent: this handheld is not a member, so it could neither send nor read it.</div>
+        <ul class="measure" data-for="s-list"></ul>
+      </figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen chat" id="s-chat">
+        <div class="row" data-m="Header">
+          <span class="title">Handheld 1</span>
+          <span class="btn small-btn">Back</span>
+        </div>
+        <div class="msgs" data-m="Message list">
+          <div class="bubble"><div>Are you at the tent?</div><div class="note">03:12, Handheld 1</div></div>
+          <div class="bubble mine"><div>On my way</div><div class="note">03:13, delivered</div></div>
+          <div class="bubble"><div>Bring the torch</div><div class="note">03:14, Handheld 1</div></div>
+        </div>
+        <div class="row" data-m="Controls">
+          <span class="btn small-btn">Emoji</span>
+          <span class="btn small-btn">Keys</span>
+          <span class="btn small-btn">Urgent off</span>
+          <span class="btn small-btn">Home</span>
+        </div>
+        <div class="row" data-m="Entry">
+          <span class="field">Message</span>
+          <span class="btn" style="padding-inline:var(--gap)">Send</span>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Chat, keyboard down</div>
+        <div class="cap-note">The keyboard is hidden until the field, Keys or Emoji is tapped, so messages get the whole panel.</div>
+        <ul class="measure" data-for="s-chat"></ul>
+      </figcaption>
+    </figure>
+  </div>
+
+  <h2>Chat with the keyboard up</h2>
+  <p>
+    Left: what the firmware did before, and why messages appeared to vanish. Right: what it does now.
+    Floating the keyboard over the panel was considered and rejected, because it covers the field and Send,
+    so the owner cannot see what they are typing.
+  </p>
+  <div class="frames">
+    <figure>
+      <div class="stage"><div class="screen chat" id="s-kb-stacked">
+        <div class="row" data-m="Header">
+          <span class="title">Handheld 1</span>
+          <span class="btn small-btn">Back</span>
+        </div>
+        <div class="msgs" data-m="Message list">
+          <div class="bubble"><div>Bring the torch</div><div class="note">03:14, Handheld 1</div></div>
+        </div>
+        <div class="row" data-m="Controls">
+          <span class="btn small-btn">Emoji</span>
+          <span class="btn small-btn">Hide keys</span>
+          <span class="btn small-btn">Urgent off</span>
+          <span class="btn small-btn">Home</span>
+        </div>
+        <div class="row" data-m="Entry">
+          <span class="field">On my w</span>
+          <span class="btn" style="padding-inline:var(--gap)">Send</span>
+        </div>
+        <div class="kb letters" data-m="Keyboard 45%">
+          <div class="krow" style="grid-template-columns:repeat(10,1fr)"><span class="key">q</span><span class="key">w</span><span class="key">e</span><span class="key">r</span><span class="key">t</span><span class="key">y</span><span class="key">u</span><span class="key">i</span><span class="key">o</span><span class="key">p</span></div>
+          <div class="krow" style="grid-template-columns:repeat(10,1fr)"><span class="key">a</span><span class="key">s</span><span class="key">d</span><span class="key">f</span><span class="key">g</span><span class="key">h</span><span class="key">j</span><span class="key">k</span><span class="key">l</span><span class="key">&#9003;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(10,1fr)"><span class="key">z</span><span class="key">x</span><span class="key">c</span><span class="key">v</span><span class="key">b</span><span class="key">n</span><span class="key">m</span><span class="key">.</span><span class="key">,</span><span class="key">?</span></div>
+          <div class="krow" style="grid-template-columns:repeat(5,1fr)"><span class="key wide">ABC</span><span class="key wide">1#</span><span class="key">&#9166;</span></div>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Before: 45% keyboard, controls still shown</div>
+        <div class="cap-note">Header, four controls, entry and a 144 px keyboard consumed the panel, leaving the message list almost nothing. This is the layout the owner saw as "messages do not show".</div>
+        <ul class="measure" data-for="s-kb-stacked"></ul>
+      </figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen chat" id="s-kb-float">
+        <div class="row" data-m="Header">
+          <span class="title">Handheld 1</span>
+          <span class="btn small-btn">Back</span>
+        </div>
+        <div class="msgs" data-m="Message list">
+          <div class="bubble"><div>Are you at the tent?</div><div class="note">03:12, Handheld 1</div></div>
+          <div class="bubble mine"><div>On my way</div><div class="note">03:13, delivered</div></div>
+        </div>
+        <div class="row" data-m="Entry">
+          <span class="field">On my w</span>
+          <span class="btn" style="padding-inline:var(--gap)">Send</span>
+        </div>
+        <div class="kb letters" data-m="Keyboard 40%" style="height:128px">
+          <div class="krow" style="grid-template-columns:repeat(12,1fr)"><span class="key">1#</span><span class="key">q</span><span class="key">w</span><span class="key">e</span><span class="key">r</span><span class="key">t</span><span class="key">y</span><span class="key">u</span><span class="key">i</span><span class="key">o</span><span class="key">p</span><span class="key">&#9003;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(11,1fr)"><span class="key">ABC</span><span class="key">a</span><span class="key">s</span><span class="key">d</span><span class="key">f</span><span class="key">g</span><span class="key">h</span><span class="key">j</span><span class="key">k</span><span class="key">l</span><span class="key">&#9166;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(10,1fr)"><span class="key">z</span><span class="key">x</span><span class="key">c</span><span class="key">v</span><span class="key">b</span><span class="key">n</span><span class="key">m</span><span class="key">.</span><span class="key">,</span><span class="key">?</span></div>
+          <div class="krow" style="grid-template-columns:repeat(5,1fr)"><span class="key">&#9000;</span><span class="key">&#9664;</span><span class="key">space</span><span class="key">&#9654;</span><span class="key">&#10003;</span></div>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Now: 40% keyboard, controls hidden while typing</div>
+        <div class="cap-note">The controls row goes away, so the list keeps two bubbles and the field and Send stay visible. The keyboard's own keys cover hide, cursor, space and send.</div>
+        <ul class="measure" data-for="s-kb-float"></ul>
+      </figcaption>
+    </figure>
+  </div>
+
+  <h2>Emoji page</h2>
+  <p>Forty-eight glyphs from the embedded Noto Emoji subset. Left: all of them at once, which was unusable. Right: what shipped.</p>
+  <div class="frames">
+    <figure>
+      <div class="stage"><div class="screen chat" id="s-emoji">
+        <div class="row" data-m="Header">
+          <span class="title">Handheld 1</span>
+          <span class="btn small-btn">Back</span>
+        </div>
+        <div class="msgs" data-m="Message list">
+          <div class="bubble mine"><div>&#9749; &#127836;</div><div class="note">03:15, delivered</div></div>
+        </div>
+        <div class="row" data-m="Entry">
+          <span class="field">&#128077;</span>
+          <span class="btn" style="padding-inline:var(--gap)">Send</span>
+        </div>
+        <div class="kb emoji" data-m="Emoji keyboard 45%" style="position:absolute; left:0; right:0; bottom:0; padding:2px">
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128578;</span><span class="key">&#128515;</span><span class="key">&#128514;</span><span class="key">&#128521;</span><span class="key">&#128525;</span><span class="key">&#128539;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128532;</span><span class="key">&#128546;</span><span class="key">&#128544;</span><span class="key">&#128558;</span><span class="key">&#128560;</span><span class="key">&#128564;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128077;</span><span class="key">&#128078;</span><span class="key">&#128076;</span><span class="key">&#128075;</span><span class="key">&#128591;</span><span class="key">&#128170;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#10084;</span><span class="key">&#128293;</span><span class="key">&#11088;</span><span class="key">&#9989;</span><span class="key">&#10060;</span><span class="key">&#10071;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#9888;</span><span class="key">&#127384;</span><span class="key">&#128721;</span><span class="key">&#128657;</span><span class="key">&#128658;</span><span class="key">&#128110;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#9978;</span><span class="key">&#127968;</span><span class="key">&#128506;</span><span class="key">&#129517;</span><span class="key">&#128294;</span><span class="key">&#128267;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128246;</span><span class="key">&#128222;</span><span class="key">&#128172;</span><span class="key">&#128339;</span><span class="key">&#127783;</span><span class="key">&#9728;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#127769;</span><span class="key">&#10052;</span><span class="key">&#127836;</span><span class="key">&#9749;</span><span class="key">&#128688;</span><span class="key">&#128701;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(4,1fr)"><span class="key wide">ABC</span><span class="key">&#9003;</span><span class="key">&#9166;</span></div>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Before: all 48 on one page</div>
+        <div class="cap-note">Nine rows inside 144 px gave each key about 14 px of height, well under a fingertip.</div>
+        <ul class="measure" data-for="s-emoji"></ul>
+      </figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen chat" id="s-emoji-fix">
+        <div class="row" data-m="Header">
+          <span class="title">Handheld 1</span>
+          <span class="btn small-btn">Back</span>
+        </div>
+        <div class="msgs" data-m="Message list">
+          <div class="bubble mine"><div>&#9749; &#127836;</div><div class="note">03:15, delivered</div></div>
+        </div>
+        <div class="row" data-m="Entry">
+          <span class="field">&#128077;</span>
+          <span class="btn" style="padding-inline:var(--gap)">Send</span>
+        </div>
+        <div class="kb emoji" data-m="Emoji keyboard 52%, paged" style="padding:2px; height:166px; grid-template-rows:repeat(5,1fr)">
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128578;</span><span class="key">&#128515;</span><span class="key">&#128514;</span><span class="key">&#128521;</span><span class="key">&#128525;</span><span class="key">&#128539;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128532;</span><span class="key">&#128546;</span><span class="key">&#128544;</span><span class="key">&#128558;</span><span class="key">&#128560;</span><span class="key">&#128564;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#128077;</span><span class="key">&#128078;</span><span class="key">&#128076;</span><span class="key">&#128075;</span><span class="key">&#128591;</span><span class="key">&#128170;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key">&#10084;</span><span class="key">&#128293;</span><span class="key">&#11088;</span><span class="key">&#9989;</span><span class="key">&#10060;</span><span class="key">&#9888;</span></div>
+          <div class="krow" style="grid-template-columns:repeat(6,1fr)"><span class="key wide">ABC</span><span class="key wide">More</span><span class="key">&#9003;</span><span class="key">&#10003;</span></div>
+        </div>
+      </div></div>
+      <figcaption>
+        <div class="cap-title">Now: 24 per page, two pages</div>
+        <div class="cap-note">Twenty-four per page in a 166 px keyboard: keys reach about 33 px, close to a fingertip. More turns the page, ABC returns to letters. The firmware handles these keys itself, because LVGL's handler would type "More" into the message.</div>
+        <ul class="measure" data-for="s-emoji-fix"></ul>
+      </figcaption>
+    </figure>
+  </div>
+
+  <h2>What the mock-ups showed, and what shipped</h2>
+  <p>
+    Each point below is measured from the frames above. The device confirmed the fix: with the keyboard down
+    the firmware logs its message list as <span class="num">224 &times; 182 px</span>, where the old layout left
+    about 38 px.
+  </p>
+  <ul class="findings" id="findings"></ul>
+
+  <h2>Geometry the firmware uses</h2>
+  <div class="scroll-x">
+    <table>
+      <thead><tr><th>Token</th><th>Hosyond, 240&times;320</th><th>FNK0104B, 240&times;320</th><th>Where it comes from</th></tr></thead>
+      <tbody>
+        <tr><td>padding</td><td class="num">8 px</td><td class="num">8 px</td><td>short side / 30</td></tr>
+        <tr><td>gap</td><td class="num">5 px</td><td class="num">5 px</td><td>short side / 48</td></tr>
+        <tr><td>touch target</td><td class="num">39 px</td><td class="num">44 px</td><td>8 mm at the panel's pixel density</td></tr>
+        <tr><td>stroke / hairline</td><td class="num">2 / 1 px</td><td class="num">2 / 1 px</td><td>short side / 120</td></tr>
+        <tr><td>text sizes</td><td class="num">12 / 14 / 20 / 28</td><td class="num">12 / 14 / 20 / 28</td><td>compact screen, Montserrat</td></tr>
+        <tr><td>keyboard, letters</td><td class="num">128 px (40%)</td><td class="num">128 px (40%)</td><td>decision D8 allows up to half</td></tr>
+        <tr><td>keyboard, emoji page</td><td class="num">166 px (52%)</td><td class="num">166 px (52%)</td><td>taller, so 24 keys stay tappable</td></tr>
+        <tr><td>message list floor</td><td class="num">39 px</td><td class="num">44 px</td><td>one bubble, so the column cannot overflow</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  // Measure the real 240x320 layout and report it, so the captions carry facts rather than guesses.
+  const regions = document.querySelectorAll("[data-m]");
+  const byScreen = new Map();
+  regions.forEach((el) => {
+    const screen = el.closest(".screen");
+    if (!screen || !screen.id) return;
+    if (!byScreen.has(screen.id)) byScreen.set(screen.id, []);
+    byScreen.get(screen.id).push(el);
+  });
+
+  const touch = 39;
+  document.querySelectorAll(".measure").forEach((list) => {
+    const id = list.dataset.for;
+    const items = byScreen.get(id) || [];
+    list.innerHTML = items.map((el) => {
+      const h = Math.round(el.getBoundingClientRect().height / 2);   // frames render at 2x
+      const name = el.dataset.m;
+      const tight = name === "Message list" && h < touch * 2;
+      const cls = tight ? " class=\"bad\"" : "";
+      const flag = tight ? " &nbsp;too short for one message" : "";
+      return `<li${cls}><b>${name}</b> ${h} px${flag}</li>`;
+    }).join("");
+  });
+
+  function height(screenId, name) {
+    const items = byScreen.get(screenId) || [];
+    const el = items.find((x) => x.dataset.m === name);
+    return el ? Math.round(el.getBoundingClientRect().height / 2) : 0;
+  }
+
+  const stacked = height("s-kb-stacked", "Message list");
+  const floating = height("s-kb-float", "Message list");
+  const emojiKey = Math.round(height("s-emoji", "Emoji keyboard 45%") / 9);
+  const emojiKeyFix = Math.round(height("s-emoji-fix", "Emoji keyboard 52%, paged") / 5);
+  const listRows = height("s-list", "Conversation rows");
+
+  const findings = [
+    {
+      kind: "bad",
+      title: `Fixed: the old layout left the message list ${stacked} px`,
+      body: `A bubble with its timestamp needs about 40 px, so nothing readable fitted, which is why messages
+             looked missing while the keyboard was up. Hiding the controls row while typing and trimming the
+             keyboard to 40% gives the list ${floating} px, about two bubbles, with the field and Send still
+             visible. The handheld measured 182 px with the keyboard down.`,
+    },
+    {
+      kind: "bad",
+      title: `Fixed: emoji keys were about ${emojiKey} px tall`,
+      body: `Eight rows of six plus a control row inside 144 px, against a 39 px fingertip. Twenty-four per page
+             in a 166 px keyboard now gives about ${emojiKeyFix} px per key, over two pages.`,
+    },
+    {
+      kind: "warn",
+      title: "Rejected: floating the keyboard over the panel",
+      body: `It would keep the list at full height, but the keyboard then covers the field and Send, so the
+             owner cannot see what they are typing. Hiding the controls row costs less and keeps the entry in
+             view.`,
+    },
+    {
+      kind: "ok",
+      title: `Conversation rows are comfortable at ${listRows} px for four`,
+      body: `Each row is a full 39 px touch target with the unread count on the right, and the list scrolls when
+             more handhelds appear.`,
+    },
+    {
+      kind: "ok",
+      title: "Urgent messages read differently",
+      body: `A 2 px warning-coloured outline and a warning-coloured note, rather than colour alone, so an urgent
+             broadcast is distinguishable on a washed-out panel in daylight.`,
+    },
+  ];
+
+  document.getElementById("findings").innerHTML = findings.map((f) => `
+    <li class="${f.kind === "ok" ? "" : f.kind}">
+      <h3>${f.title}</h3>
+      <p>${f.body}</p>
+    </li>`).join("");
+</script>

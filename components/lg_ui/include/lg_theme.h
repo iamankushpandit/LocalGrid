@@ -53,6 +53,9 @@ void lg_theme_apply_screen(lv_obj_t *screen);
 /* Styles a button from the theme. */
 void lg_theme_style_button(lv_obj_t *button);
 
+/* A secondary button: small text and tight padding, still a full touch target tall. */
+void lg_theme_style_button_small(lv_obj_t *button);
+
 #ifdef __cplusplus
 }
 #endif

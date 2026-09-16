@@ -49,10 +49,25 @@ def choose(data, key):
     return found
 
 
+def write_line(ser, text):
+    """Types one line. The ESP32-S3's native USB port refuses writes while it re-enumerates
+    after the reset that opening the port causes, so a timeout is retried, not fatal."""
+    import serial
+
+    for attempt in range(4):
+        try:
+            ser.write((text + "\r\n").encode())
+            return True
+        except serial.SerialTimeoutException:
+            time.sleep(0.4 * (attempt + 1))
+    return False
+
+
 def send_and_read(ser, command, raw):
     """Types a command and collects the reply until the board goes quiet."""
     ser.reset_input_buffer()
-    ser.write((command + "\r\n").encode())
+    if not write_line(ser, command):
+        return []
     reply = ""
     last = time.time()
     stop = time.time() + REPLY_MAX_S
@@ -81,16 +96,23 @@ def ask(device, command, trust_port, raw=False):
     except serial.SerialException as e:
         return False, f"serial error: {e}"
     try:
-        # Identify first, exactly as flashing does.
+        # Every device prints its ID at boot, and opening the port resets the board. Listen
+        # first: typing into a port that is still coming up is lost, and on the ESP32-S3's
+        # native USB it fails outright while the device re-enumerates.
         text = ""
         answered = None
         deadline = time.time() + ID_WAIT_S
-        ser.write(b"\r\n")
-        ser.write(b"id\r\n")
         while time.time() < deadline and answered is None:
             text += ser.read(512).decode("utf-8", "replace")
             m = LGID.search(text)
             answered = m.group(1) if m else None
+        if answered is None:
+            write_line(ser, "id")   # already running and quiet: ask for it
+            deadline = time.time() + ID_WAIT_S
+            while time.time() < deadline and answered is None:
+                text += ser.read(512).decode("utf-8", "replace")
+                m = LGID.search(text)
+                answered = m.group(1) if m else None
         expected = device.get("id")
         if answered is None and not trust_port:
             return False, "board did not answer 'id'; check the port or pass --trust-port"
@@ -128,6 +150,11 @@ def main():
     failures = 0
     for device in chosen:
         print(f"== {device['name']} ({device['port']}) <- {command}", flush=True)
+        if device["role"] == "N":
+            # Opening a port resets these boards, and grid time lives only in RAM: this node
+            # comes back with time UNSET and re-adopts it from a neighbour within a minute.
+            print("  note: this resets the node, so it loses grid time until a neighbour announces it",
+                  flush=True)
         ok, reply = ask(device, command, args.trust_port, args.raw)
         print(reply if ok else f"  FAILED: {reply}", flush=True)
         failures += 0 if ok else 1

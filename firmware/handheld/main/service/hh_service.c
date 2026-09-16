@@ -31,6 +31,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lg_body.h"
 #include "lg_client.h"
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
@@ -48,6 +49,7 @@ static const char *TAG = "NET";
 #define TASK_STACK            8192
 #define TASK_PRIORITY         5
 #define QUEUE_LEN             24
+#define SEND_QUEUE_LEN        4
 #define SCAN_RECORDS_MAX      16
 #define SCAN_DWELL_MIN_MS     40
 #define SCAN_DWELL_MAX_MS     120   /* beacons come every 102 ms */
@@ -106,6 +108,14 @@ typedef struct {
     uint32_t heard_ms;
 } node_cand_t;
 
+typedef struct {
+    uint8_t  scope;
+    bool     urgent;
+    uint32_t target;
+    uint16_t len;
+    char     text[HH_TEXT_MAX + 1];
+} send_req_t;
+
 static struct {
     uint32_t          device;
     const lg_user_t  *user;
@@ -147,6 +157,13 @@ static struct {
     uint16_t  rx_fill;
     uint8_t   rx[2 + LG_FRAME_MAX];
     uint8_t   tx[2 + LG_FRAME_MAX];
+
+    QueueHandle_t send_queue;
+    hh_message_t  ring[HH_MESSAGES];   /* oldest at ring_head */
+    uint8_t       ring_head;
+    uint8_t       ring_count;
+    uint32_t      msg_version;
+    uint32_t      msg_counter;
 } s = { .sock = -1, .joining = -1, .last_node = -1, .preferred = -1 };
 
 static volatile bool s_scanning;
@@ -171,6 +188,65 @@ static const char *roster_name(uint32_t device)
 {
     const lg_user_t *u = lg_roster_user(lg_roster_prototype(), device);
     return u != NULL ? u->name : "Unknown handheld";
+}
+
+/* ---- message list (service task only; readers take the lock) ---- */
+
+static hh_message_t *ring_add(void)
+{
+    uint8_t pos;
+    if (s.ring_count < HH_MESSAGES) {
+        pos = (uint8_t)((s.ring_head + s.ring_count) % HH_MESSAGES);
+        s.ring_count++;
+    } else {
+        pos = s.ring_head;
+        s.ring_head = (uint8_t)((s.ring_head + 1u) % HH_MESSAGES);
+    }
+    hh_message_t *m = &s.ring[pos];
+    memset(m, 0, sizeof(*m));
+    m->id = ++s.msg_counter;
+    s.msg_version++;
+    s.dirty = true;
+    return m;
+}
+
+static void ring_set_text(hh_message_t *m, const char *text, size_t len)
+{
+    if (len > HH_TEXT_MAX) {
+        len = HH_TEXT_MAX;
+    }
+    memcpy(m->text, text, len);
+    m->text[len] = '\0';
+    m->len = (uint16_t)len;
+}
+
+/* Our own message: its state follows the outbox entry it was queued into. */
+static uint8_t state_from_outbox(const lg_out_msg_t *o)
+{
+    switch (o->state) {
+    case LG_OUT_ACCEPTED:  return HH_MSG_ACCEPTED;
+    case LG_OUT_DELIVERED: return HH_MSG_DELIVERED;
+    case LG_OUT_REJECTED:  return HH_MSG_REJECTED;
+    default:               return HH_MSG_PENDING;
+    }
+}
+
+static void ring_update_from_outbox(uint32_t slot)
+{
+    if (slot >= LG_OUTBOX_SIZE) {
+        return;
+    }
+    const lg_out_msg_t *o = &s.client.outbox[slot];
+    for (uint8_t i = 0; i < s.ring_count; i++) {
+        hh_message_t *m = &s.ring[(s.ring_head + i) % HH_MESSAGES];
+        if (m->mine && m->seq == o->seq && o->seq != 0) {
+            m->state = state_from_outbox(o);
+            m->reject = o->reject_reason;
+            s.msg_version++;
+            s.dirty = true;
+            return;
+        }
+    }
 }
 
 /* ---- lg_client io (service task only) ---- */
@@ -251,6 +327,28 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         } else {
             ESP_LOGI("TIME", "[TIME] Grid time %" PRIu32, ev->value);
         }
+        break;
+    case LG_CEV_MESSAGE: {
+        const lg_in_msg_t *in = lg_client_inbox(&s.client, 0);
+        if (in != NULL) {
+            hh_message_t *m = ring_add();
+            m->author = in->author;
+            m->target = in->target;
+            m->scope = in->scope;
+            m->state = HH_MSG_IN;
+            m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
+            m->grid_time = in->grid_time;
+            ring_set_text(m, (const char *)in->text, in->len);
+            ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
+                     m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+        }
+        break;
+    }
+    case LG_CEV_OUTBOX:
+        ring_update_from_outbox(ev->value);
+        break;
+    case LG_CEV_DECRYPT_FAILED:
+        ESP_LOGW("MSG", "[MSG] Could not decrypt a 1:1 message from device %" PRIu32, ev->value);
         break;
     case LG_CEV_KEY_CHANGED:
         ESP_LOGW("GRID", "[GRID] Device %" PRIu32 " advertised a different key; the pinned key is kept", ev->value);
@@ -637,6 +735,40 @@ static void poll_socket(uint32_t wait_ms)
     }
 }
 
+/* Sending happens here: lg_client belongs to this task alone. */
+static void drain_send_queue(void)
+{
+    static send_req_t req;
+    while (s.send_queue != NULL && xQueueReceive(s.send_queue, &req, 0) == pdTRUE) {
+        uint16_t flags = LG_FLAG_ACK_REQUESTED | (req.urgent ? LG_FLAG_URGENT : 0);
+        int rc = lg_client_send_text(&s.client, req.scope, req.target, flags, (const uint8_t *)req.text, req.len);
+        hh_message_t *m = ring_add();
+        m->author = s.device;
+        m->target = req.scope == LG_SCOPE_BROADCAST ? LG_TARGET_ALL : req.target;
+        m->scope = req.scope;
+        m->mine = true;
+        m->urgent = req.urgent;
+        ring_set_text(m, req.text, req.len);
+        if (rc >= 0) {
+            const lg_out_msg_t *o = &s.client.outbox[rc];
+            m->seq = o->seq;
+            m->grid_time = o->grid_time;
+            m->state = state_from_outbox(o);
+            ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
+                     req.scope == LG_SCOPE_DIRECT ? "device" : req.scope == LG_SCOPE_GROUP ? "group" : "everyone",
+                     m->target, m->text);
+        } else {
+            m->state = HH_MSG_REFUSED;
+            m->reject = rc == LG_ERR_TIME ? HH_REFUSE_TIME : rc == LG_ERR_FULL ? HH_REFUSE_FULL : HH_REFUSE_INVALID;
+            ESP_LOGW("MSG", "[MSG] Not sent (%s): %s",
+                     m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
+                     : m->reject == HH_REFUSE_FULL ? "outbox full"
+                                                   : "not allowed: unknown target, bad text, or no key yet",
+                     m->text);
+        }
+    }
+}
+
 static void step(uint32_t now)
 {
     if (s.send_failed) {
@@ -759,6 +891,14 @@ static void publish(void)
         o->node = p->node;
         o->online = s.link == HH_LINK_ONLINE && p->state == LG_PRES_ONLINE;
     }
+    st->n_groups = 0;
+    for (size_t i = 0; i < roster->n_groups && st->n_groups < LG_MAX_GROUPS; i++) {
+        hh_group_t *g = &st->groups[st->n_groups++];
+        g->id = roster->groups[i].id;
+        snprintf(g->name, sizeof(g->name), "%s", roster->groups[i].name);
+        g->member = lg_roster_is_member(roster, s.device, g->id);
+    }
+    st->messages_version = s.msg_version;
     st->free_heap = esp_get_free_heap_size();
     st->min_free_heap = esp_get_minimum_free_heap_size();
     xSemaphoreGive(s.lock);
@@ -784,6 +924,7 @@ static void service_task(void *arg)
             poll_socket(50);
         }
         now = now_ms();
+        drain_send_queue();
         step(now);
         if (s.dirty || now - s.last_publish_ms >= PUBLISH_MS) {
             publish();
@@ -890,7 +1031,8 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
 {
     s.lock = xSemaphoreCreateMutex();
     s.queue = xQueueCreate(QUEUE_LEN, sizeof(ev_t));
-    if (s.lock == NULL || s.queue == NULL) {
+    s.send_queue = xQueueCreate(SEND_QUEUE_LEN, sizeof(send_req_t));
+    if (s.lock == NULL || s.queue == NULL || s.send_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
     s.status.node = -1;
@@ -976,4 +1118,59 @@ void hh_service_reconnect(void)
         ev_t ev = { .type = EV_RECONNECT };
         xQueueSend(s.queue, &ev, 0);
     }
+}
+
+const char *hh_message_state_text(const hh_message_t *m)
+{
+    switch (m->state) {
+    case HH_MSG_IN:        return "received";
+    case HH_MSG_PENDING:   return "sending";
+    case HH_MSG_ACCEPTED:  return m->scope == LG_SCOPE_DIRECT ? "sent, waiting for the other handheld" : "sent";
+    case HH_MSG_DELIVERED: return "delivered";
+    case HH_MSG_REJECTED:
+        switch (m->reject) {
+        case LG_ACK_REJ_OFFLINE:        return "not delivered: that handheld is offline";
+        case LG_ACK_REJ_NOT_MEMBER:     return "not sent: you are not in that group";
+        case LG_ACK_REJ_RATE:           return "not sent: too many messages, wait a moment";
+        case LG_ACK_REJ_TIME:           return "not sent: the clocks disagree by more than two minutes";
+        case LG_ACK_REJ_UNKNOWN_TARGET: return "not sent: the grid does not know that handheld";
+        case LG_ACK_REJ_INVALID:        return "not sent: the node refused the message";
+        default:                        return "not sent: the grid rejected it";
+        }
+    default:
+        switch (m->reject) {
+        case HH_REFUSE_TIME: return "not sent: grid time is not set, so only urgent broadcasts go out";
+        case HH_REFUSE_FULL: return "not sent: too many messages waiting";
+        default:             return "not sent: unknown handheld, empty text, or no encryption key yet";
+        }
+    }
+}
+
+esp_err_t hh_service_send(uint8_t scope, uint32_t target, bool urgent, const char *text)
+{
+    if (s.send_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    size_t len = text != NULL ? strlen(text) : 0;
+    if (len == 0 || len > HH_TEXT_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    send_req_t req = { .scope = scope, .urgent = urgent, .target = target, .len = (uint16_t)len };
+    memcpy(req.text, text, len);
+    return xQueueSend(s.send_queue, &req, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+size_t hh_service_messages(hh_message_t *out, size_t max)
+{
+    if (s.lock == NULL || max == 0) {
+        return 0;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    size_t n = s.ring_count < max ? s.ring_count : max;
+    for (size_t i = 0; i < n; i++) {
+        /* newest first */
+        out[i] = s.ring[(s.ring_head + s.ring_count - 1u - i) % HH_MESSAGES];
+    }
+    xSemaphoreGive(s.lock);
+    return n;
 }

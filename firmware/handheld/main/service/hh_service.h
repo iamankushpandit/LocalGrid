@@ -2,8 +2,8 @@
  * hh_service.h - the handheld's network service, and the only interface the UI uses (D27).
  *
  * One task owns Wi-Fi, the node session, and lg_client. The UI reads a status snapshot
- * and sends commands; it never touches sockets or lg_client, and the service never
- * touches LVGL.
+ * and a message list, and sends commands; it never touches sockets or lg_client, and the
+ * service never touches LVGL.
  */
 #pragma once
 
@@ -18,6 +18,8 @@
 #define HH_NAME_MAX     24
 #define HH_SSID_MAX     33
 #define HH_PROBLEM_MAX  72
+#define HH_MESSAGES     24
+#define HH_TEXT_MAX     LG_TEXT_MAX
 
 typedef enum {
     HH_LINK_STOPPED = 0,    /* not started, or cannot run; see problem */
@@ -43,7 +45,45 @@ typedef struct {
 } hh_person_t;
 
 typedef struct {
+    uint16_t id;
+    char     name[HH_NAME_MAX];
+    bool     member;        /* this handheld belongs to the group */
+} hh_group_t;
+
+typedef enum {
+    HH_MSG_IN = 0,          /* received */
+    HH_MSG_PENDING,         /* ours, no node has taken it yet */
+    HH_MSG_ACCEPTED,        /* ours, a node took it */
+    HH_MSG_DELIVERED,       /* ours, the recipient's handheld confirmed */
+    HH_MSG_REJECTED,        /* ours, the grid rejected it; reject is an lg_ack_status_t */
+    HH_MSG_REFUSED,         /* this handheld would not send it; reject is an hh_refuse_t */
+} hh_msg_state_t;
+
+typedef enum {
+    HH_REFUSE_NONE = 0,
+    HH_REFUSE_TIME,         /* grid time unset: only urgent broadcasts (D6) */
+    HH_REFUSE_FULL,         /* outbox full */
+    HH_REFUSE_INVALID,      /* unknown target, empty or bad text, or 1:1 without a key */
+} hh_refuse_t;
+
+typedef struct {
+    uint32_t id;            /* grows with every message this handheld records; 0 is never used */
+    uint32_t author;        /* device that wrote it */
+    uint32_t target;        /* device, group id, or LG_TARGET_ALL */
+    uint8_t  scope;         /* lg_scope_t */
+    uint8_t  state;         /* hh_msg_state_t */
+    uint8_t  reject;        /* see HH_MSG_REJECTED and HH_MSG_REFUSED */
+    bool     mine;
+    bool     urgent;
+    uint32_t grid_time;     /* 0 when grid time was unset */
+    uint32_t seq;           /* our sequence number, for matching delivery reports */
+    uint16_t len;
+    char     text[HH_TEXT_MAX + 1];
+} hh_message_t;
+
+typedef struct {
     uint32_t       version;                  /* changes whenever the snapshot is republished */
+    uint32_t       messages_version;         /* changes when the message list changes */
     hh_link_t      link;
     char           problem[HH_PROBLEM_MAX];  /* why the handheld is not online; empty when fine */
     uint32_t       device;
@@ -60,6 +100,8 @@ typedef struct {
     hh_node_seen_t nodes[HH_MAX_NODES];
     uint8_t        n_people;
     hh_person_t    people[LG_MAX_DEVICES];
+    uint8_t        n_groups;
+    hh_group_t     groups[LG_MAX_GROUPS];
     uint32_t       free_heap;
     uint32_t       min_free_heap;
 } hh_status_t;
@@ -78,3 +120,22 @@ void hh_service_scan_now(void);
 
 /* Drops the node session and joins again from a fresh scan. */
 void hh_service_reconnect(void);
+
+/*
+ * Queues a text message. scope is LG_SCOPE_DIRECT (target = device index),
+ * LG_SCOPE_GROUP (target = group id), or LG_SCOPE_BROADCAST. urgent marks a broadcast
+ * that may go out while grid time is unset (decision D6).
+ *
+ * Returns ESP_OK once queued; the outcome then appears in the message list, because only
+ * the network task may touch lg_client. ESP_ERR_INVALID_ARG for text that is empty or too
+ * long, ESP_ERR_NO_MEM when the queue is full.
+ */
+esp_err_t hh_service_send(uint8_t scope, uint32_t target, bool urgent, const char *text);
+
+/* Copies up to max messages, newest first; returns how many were copied. */
+size_t hh_service_messages(hh_message_t *out, size_t max);
+
+/* One short sentence for a message's state, including why the grid rejected it or why this
+ * handheld would not send it. Used by both the screens and the console, so the wording and
+ * the reason codes live in one place. */
+const char *hh_message_state_text(const hh_message_t *m);

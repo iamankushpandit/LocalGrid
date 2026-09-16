@@ -12,6 +12,8 @@
 
 #include "esp_console.h"
 #include "esp_system.h"
+#include "lg_envelope.h"
+#include "ui_chat.h"
 #include "hh_service.h"
 #include "lg_identity.h"
 
@@ -171,6 +173,173 @@ static int cmd_time(int argc, char **argv)
     return 0;
 }
 
+static void print_target(const hh_message_t *m, const hh_status_t *st)
+{
+    if (m->scope == LG_SCOPE_BROADCAST) {
+        printf("everyone");
+        return;
+    }
+    if (m->scope == LG_SCOPE_GROUP) {
+        for (uint8_t i = 0; i < st->n_groups; i++) {
+            if (st->groups[i].id == (uint16_t)m->target) {
+                printf("group %s", st->groups[i].name);
+                return;
+            }
+        }
+        printf("group %" PRIu32, m->target);
+        return;
+    }
+    printf("device %" PRIu32, m->target);
+}
+
+static const char *person_name(const hh_status_t *st, uint32_t device)
+{
+    for (uint8_t i = 0; i < st->n_people; i++) {
+        if (st->people[i].device == device) {
+            return st->people[i].name;
+        }
+    }
+    return "unknown handheld";
+}
+
+static int cmd_msgs(int argc, char **argv)
+{
+    size_t want = 10;
+    if (argc == 2) {
+        long v = strtol(argv[1], NULL, 10);
+        if (v > 0 && v <= HH_MESSAGES) {
+            want = (size_t)v;
+        }
+    }
+    static hh_message_t msgs[HH_MESSAGES];
+    static hh_status_t st;
+    hh_service_status(&st);
+    size_t n = hh_service_messages(msgs, want);
+    printf("Messages, newest first: %u\n", (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        const hh_message_t *m = &msgs[i];
+        if (m->mine) {
+            printf("  to ");
+            print_target(m, &st);
+        } else {
+            printf("  from %s (device %" PRIu32 ")", person_name(&st, m->author), m->author);
+            if (m->scope == LG_SCOPE_GROUP || m->scope == LG_SCOPE_BROADCAST) {
+                printf(" to ");
+                print_target(m, &st);
+            }
+        }
+        printf("%s [%s]: %s\n", m->urgent ? " URGENT" : "", hh_message_state_text(m), m->text);
+    }
+    return 0;
+}
+
+static int cmd_groups(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    static hh_status_t st;
+    hh_service_status(&st);
+    printf("Groups in the grid roster: %u\n", st.n_groups);
+    printf("  ID  NAME              THIS HANDHELD\n");
+    for (uint8_t i = 0; i < st.n_groups; i++) {
+        printf("  %-2u  %-16s  %s\n", st.groups[i].id, st.groups[i].name,
+               st.groups[i].member ? "member" : "not a member");
+    }
+    return 0;
+}
+
+/* send <device index | group name | all | urgent> <text...> */
+static int cmd_send(int argc, char **argv)
+{
+    if (argc < 3) {
+        printf("usage: send <device index | group name | all | urgent> <text>\n");
+        return 1;
+    }
+    static hh_status_t st;
+    hh_service_status(&st);
+
+    uint8_t scope = LG_SCOPE_DIRECT;
+    uint32_t target = 0;
+    bool urgent = false;
+    const char *who = argv[1];
+    char *end = NULL;
+    long device = strtol(who, &end, 10);
+    if (end != who && *end == '\0' && device > 0) {
+        target = (uint32_t)device;
+    } else if (strcmp(who, "all") == 0 || strcmp(who, "urgent") == 0) {
+        scope = LG_SCOPE_BROADCAST;
+        urgent = strcmp(who, "urgent") == 0;
+    } else {
+        int found = -1;
+        for (uint8_t i = 0; i < st.n_groups; i++) {
+            if (strcmp(st.groups[i].name, who) == 0) {
+                found = st.groups[i].id;
+            }
+        }
+        if (found < 0) {
+            printf("unknown target '%s'; run 'groups' or 'people'\n", who);
+            return 1;
+        }
+        scope = LG_SCOPE_GROUP;
+        target = (uint32_t)found;
+    }
+
+    char text[HH_TEXT_MAX + 1] = { 0 };
+    size_t len = 0;
+    for (int i = 2; i < argc && len < HH_TEXT_MAX; i++) {
+        if (i > 2) {
+            text[len++] = ' ';
+        }
+        size_t part = strlen(argv[i]);
+        if (len + part > HH_TEXT_MAX) {
+            part = HH_TEXT_MAX - len;
+        }
+        memcpy(text + len, argv[i], part);
+        len += part;
+    }
+    esp_err_t err = hh_service_send(scope, target, urgent, text);
+    if (err != ESP_OK) {
+        printf("not queued: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("queued; run 'msgs' to see whether the grid accepted it\n");
+    return 0;
+}
+
+/* chat <device index | group name | all>: opens that conversation on the screen, so the
+ * screens can be driven from serial while testing (decisions D23, D25, D28). */
+static int cmd_chat(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("usage: chat <device index | group name | all>\n");
+        return 1;
+    }
+    static hh_status_t st;
+    hh_service_status(&st);
+    const char *who = argv[1];
+    char *end = NULL;
+    long device = strtol(who, &end, 10);
+    if (strcmp(who, "all") == 0) {
+        ui_chat_open_conversation(LG_SCOPE_BROADCAST, LG_TARGET_ALL, "Everyone");
+        printf("opened Everyone\n");
+        return 0;
+    }
+    if (end != who && *end == '\0' && device > 0) {
+        ui_chat_open_conversation(LG_SCOPE_DIRECT, (uint32_t)device, person_name(&st, (uint32_t)device));
+        printf("opened the chat with device %ld\n", device);
+        return 0;
+    }
+    for (uint8_t i = 0; i < st.n_groups; i++) {
+        if (strcmp(st.groups[i].name, who) == 0) {
+            ui_chat_open_conversation(LG_SCOPE_GROUP, st.groups[i].id, st.groups[i].name);
+            printf("opened group %s\n", st.groups[i].name);
+            return 0;
+        }
+    }
+    printf("unknown conversation '%s'; run 'groups' or 'people'\n", who);
+    return 1;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     (void)argc;
@@ -206,6 +375,10 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "node",      .help = "node <index> | node auto: choose which node to use",      .func = cmd_node },
         { .command = "scan",      .help = "Scan the grid channel now",                               .func = cmd_scan },
         { .command = "reconnect", .help = "Drop the node session and join again",                    .func = cmd_reconnect },
+        { .command = "groups",    .help = "Groups in the roster and whether this handheld belongs",  .func = cmd_groups },
+        { .command = "send",      .help = "send <device|group|all|urgent> <text>: send a message",   .func = cmd_send },
+        { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
+        { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },
         { .command = "reboot",    .help = "Restart this handheld",                                   .func = cmd_reboot },
     };

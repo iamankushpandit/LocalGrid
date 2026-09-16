@@ -1,5 +1,7 @@
 #include "lg_theme.h"
 
+#include "lg_emoji.h"
+
 /* Fonts that are not enabled in Kconfig fall back to the always-on 14 px face. */
 #if LV_FONT_MONTSERRAT_12
 #define FONT_12 (&lv_font_montserrat_12)
@@ -23,6 +25,21 @@
 #endif
 
 static lg_theme_t s_theme;
+
+/*
+ * Text fonts that fall back to the emoji font: LVGL looks a missing glyph up in the
+ * fallback, so one label can carry letters and emoji. These are copies of the built-in
+ * fonts, which are const and shared, with only the fallback pointer changed.
+ */
+static lv_font_t s_body_emoji;
+static lv_font_t s_small_emoji;
+
+static const lv_font_t *with_emoji(lv_font_t *copy, const lv_font_t *base)
+{
+    *copy = *base;
+    copy->fallback = &lg_font_emoji_20;
+    return copy;
+}
 
 void lg_theme_init(uint16_t width, uint16_t height, uint16_t px_per_10mm)
 {
@@ -52,6 +69,8 @@ void lg_theme_init(uint16_t width, uint16_t height, uint16_t px_per_10mm)
     s_theme.pad = (int16_t)(short_side / 30);    /* 8 px on a 240 px side */
     s_theme.gap = (int16_t)(short_side / 48);    /* 5 px on a 240 px side */
     s_theme.touch_min = (int16_t)((px_per_10mm * 8u) / 10u);
+    s_theme.font_body = with_emoji(&s_body_emoji, s_theme.font_body);
+    s_theme.font_small = with_emoji(&s_small_emoji, s_theme.font_small);
     s_theme.stroke = (int16_t)(short_side / 120 > 2 ? short_side / 120 : 2);
     s_theme.hairline = (int16_t)(s_theme.stroke / 2);
 }
@@ -67,6 +86,16 @@ void lg_theme_apply_screen(lv_obj_t *screen)
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(screen, s_theme.text, 0);
     lv_obj_set_style_text_font(screen, s_theme.font_body, 0);
+}
+
+void lg_theme_style_button_small(lv_obj_t *button)
+{
+    lg_theme_style_button(button);
+    lv_obj_set_style_text_font(button, s_theme.font_small, 0);
+    lv_obj_set_style_pad_hor(button, s_theme.gap, 0);
+    lv_obj_set_style_pad_ver(button, s_theme.gap / 2, 0);
+    lv_obj_set_height(button, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(button, s_theme.touch_min * 3 / 4, 0);
 }
 
 void lg_theme_style_button(lv_obj_t *button)

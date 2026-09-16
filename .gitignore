@@ -32,3 +32,6 @@ tools/.flash.lock
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Font build cache (downloaded fonts)
+tools/.cache/

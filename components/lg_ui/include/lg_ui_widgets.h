@@ -30,6 +30,17 @@ lv_obj_t *lg_ui_card(lv_obj_t *parent, const char *title);
 /* Themed button at least one touch target tall, with a centred label. */
 lv_obj_t *lg_ui_button(lv_obj_t *parent, const char *text, lv_event_cb_t on_click, void *user_data);
 
+/* Secondary button: small text, tight padding, content width. Returns the button; its
+ * label is its first child, for callers that change the text. */
+lv_obj_t *lg_ui_button_small(lv_obj_t *parent, const char *text, lv_event_cb_t on_click, void *user_data);
+
+/*
+ * Shows one shared banner on LVGL's top layer, above whatever screen is displayed, and
+ * hides it after a few seconds. on_click is registered the first time only, so the caller
+ * keeps whatever the tap should act on. Call with the display locked.
+ */
+void lg_ui_toast(const char *text, lv_event_cb_t on_click);
+
 #ifdef __cplusplus
 }
 #endif
