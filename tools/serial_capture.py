@@ -26,6 +26,32 @@ def parse_send(spec):
     return port, float(delay), command
 
 
+def release(ser):
+    """Drop both control lines, then close. A plain close holds CP210x and CH340 boards in reset."""
+    try:
+        ser.dtr = False
+        ser.rts = False
+        time.sleep(0.1)
+    except (OSError, ValueError):
+        pass
+    ser.close()
+
+
+def pulse_reset(ser):
+    """Pulse EN through RTS with IO0 left high (DTR low).
+
+    Windows' usbser.sys driver, used by the ESP32-S3 USB-Serial/JTAG port, sends a line-state
+    change only when DTR is written as well, so DTR is rewritten after each RTS change, as esptool
+    does. On CP210x and CH340 boards the extra writes change nothing.
+    """
+    ser.dtr = False
+    ser.rts = True
+    ser.dtr = False
+    time.sleep(0.2)
+    ser.rts = False
+    ser.dtr = False
+
+
 def reader(port, ser, stop, out_lock, until, hit):
     buf = b""
     while not stop.is_set():
@@ -57,12 +83,16 @@ def main():
     stop, hit, out_lock = threading.Event(), threading.Event(), threading.Lock()
     sers, threads = {}, []
     for port in args.ports:
-        ser = serial.Serial(port, args.baud, timeout=0.1, write_timeout=0.5)
+        try:
+            ser = serial.Serial(port, args.baud, timeout=0.1, write_timeout=0.5)
+        except serial.SerialException as e:
+            # Release every port already opened: a plain close holds auto-reset boards in reset,
+            # so one bad port name must not leave nodes dead.
+            for opened in sers.values():
+                release(opened)
+            sys.exit(f"{port}: {e}")
         if args.reset:
-            ser.dtr = False
-            ser.rts = True
-            time.sleep(0.1)
-            ser.rts = False
+            pulse_reset(ser)
         sers[port] = ser
         t = threading.Thread(target=reader, args=(port, ser, stop, out_lock, args.until, hit), daemon=True)
         t.start()
@@ -82,10 +112,7 @@ def main():
             with out_lock:
                 print(f"[{port}] >>> {'RESET' if kind == 'reset' else command}  (t={now:.1f}s)", flush=True)
             if kind == "reset":
-                sers[port].dtr = False
-                sers[port].rts = True
-                time.sleep(0.1)
-                sers[port].rts = False
+                pulse_reset(sers[port])
             else:
                 try:
                     sers[port].write((command + "\r\n").encode())
@@ -100,14 +127,7 @@ def main():
     for t in threads:
         t.join(timeout=1)
     for ser in sers.values():
-        # A plain close holds CP210x/CH340 auto-reset boards in reset; release both lines first.
-        try:
-            ser.dtr = False
-            ser.rts = False
-            time.sleep(0.1)
-        except (OSError, ValueError):
-            pass
-        ser.close()
+        release(ser)
     return 0
 
 

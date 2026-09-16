@@ -10,6 +10,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - It shares `tools/flash.py`'s build step, which refuses warnings, and its run lock.
 - Build skill `.claude/skills/build`. The bench skill now points to it instead of spelling out `idf.py` commands.
 
+### Added (P5: handheld joins the grid)
+- `firmware/handheld` is the first handheld firmware, for the Hosyond (ESP32) and the FNK0104B (ESP32-S3).
+- Its network service task owns Wi-Fi, the node session, and `lg_client`:
+  - Single-channel active scan. Nodes are recognised by the beacon element's grid discriminator.
+  - Node selection by signal, stickiness, load, and backbone health (design review answer 10).
+  - Static address 192.168.(4+n).(100+device), TCP to .1:7300, then REGISTER.
+  - PING every 10 s. A Wi-Fi drop, 25 s without PONG, or a socket error starts a new search, backing off from 1 s to 10 s.
+  - The boot counter is committed to NVS before any frame is sent. The X25519 key is created once, after Wi-Fi starts, and kept in NVS namespace `lghh`.
+- The home screen shows:
+  - this handheld's roster name and ID;
+  - connection state, node, signal, and address;
+  - grid time, or the D6 restriction when it is not set;
+  - the handhelds it has heard about, with no placeholders;
+  - nodes in range: tap one to use only that node, or Automatic.
+- The screen and the service meet only in `hh_service.h`, a status snapshot plus a command queue (D27).
+- `lg_client_ping()` and `last_pong_ms` in `lg_core`, because nodes close sessions silent for 30 s. New simulator test `test_ping_pong`.
+- Handheld device index in the identity partition (`device_idx`), shown in `LGID:` output.
+  - `tools/flash.py --update-identity` rewrites identity from the device map without erasing settings.
+  - Bench map: FNK0104B is device 1 ("Handheld 1") and Hosyond is device 2. Both are assigned the new `handheld` firmware type.
+- `LG_SECRET_DISCRIMINATOR` in `lg_secrets.h`, added by `python tools/gen_secrets.py --update` without changing keys. Handheld firmware never references the backbone key, and `tools/check_layers.py` fails if it does.
+- `lg_ui_widgets` in `lg_ui`: column, row, label, text, card, and button helpers.
+- `lg_proto_handheld_ip()` in `firmware/common/lg_proto_config.h`.
+
+### Fixed (P5)
+- A handheld that rebooted and rejoined the same node lost its first `REGISTER_ACK`. The node's `sess_send()` wrote to the first session slot for that device, which was the previous, still-open session. The handheld waited 5 s and registered on the retry. Replies now go to the newest session for the device.
+- `tools/serial_capture.py --reset-at` did not reset the ESP32-S3 once its port was open. Windows' `usbser.sys` driver sends RTS changes only when DTR is written too, so both resets now rewrite DTR after RTS, as esptool does.
+
+### Added (D28: serial console on every device)
+- Handhelds now have a full console, not just `id`: `status` (device, link, signal, address, grid time, node choice, memory, problem), `nodes` (nodes in range with signal, load, and backbone health), `people` (handhelds heard about), `node <index>|auto`, `scan`, `reconnect`, `time`, and `reboot`. It runs over the Hosyond's UART and the FNK0104B's native USB.
+- Node consoles gain read-only `config`: device ID, node index and name, SSID, channel, address, DHCP range, grid name, time zone, whether an admin password is set with its iteration count, and grid time quality. No secrets are printed, and grid settings still change only on the master's admin page.
+- `tools/console.py <board|all|N|H> <command>` asks any bench board a console command by name, checking its device ID first, masking MAC addresses, and sharing the flash run lock.
+  - Opening a port resets the board, so the tool waits for the `grid>` prompt before typing and retries once. Keystrokes sent while a board is still booting are lost.
+  - Replies hide ESP-IDF log lines; `--raw` keeps them.
+- Verified on hardware: `config` and `status` answered on LG-MAIN over its UART, and `status`, `nodes`, and `people` answered on both handhelds, including the FNK0104B's native USB port. The node reported grid name, time zone, and that an admin password is set with 4,000 iterations, with no secrets in the output.
+
+### Fixed (bench tooling and privacy)
+- The node logged a joining station's MAC address, against decision D21. It now logs the association id and the disconnect reason only.
+- `tools/serial_capture.py` releases every port it already opened when a later port cannot be opened. A five-port capture had failed on a port that disappeared when a board was replugged, and the skipped cleanup left the boards it had opened held in reset. A node stuck that way looks like "no LocalGrid node in range" on a handheld.
+- The Elegoo boards' CP2102 chips carry no unique serial number, so Windows renumbers their COM ports after a replug. The device map's port hints for MAIN and NORTH were corrected; `flash.py --identify` reports which board answers on each port.
+
+### Verified on hardware (P5)
+- Core tests on the FNK0104B: 373 checks, 0 failures, including `test_ping_pong`.
+- Both handhelds join, register, and show each other across nodes: the Hosyond on LG-MAIN and the FNK0104B on LG-SOUTH. Boot to Online takes 2.8 s on the Hosyond and 2.9 s on the FNK0104B.
+- After a reboot on the same node, the FNK0104B's registration succeeded on the first attempt, and LG-SOUTH logged `Replacing stale session ... for device 1`, confirming the `sess_send()` fix.
+- After a reboot the Hosyond rejoined on another node (LG-NORTH), registering on the first attempt 2.2 s after boot. The other handheld saw it move, and the old node closed the stale session without marking it offline.
+- Heap while online: Hosyond 155 KB free, 147 KB lowest; FNK0104B 208 KB free, 206 KB lowest. Node heap is unchanged.
+
+### Changed (P5)
+- Node DHCP serves .2 to .99 only. The default pool ran to .101 and could give a phone a handheld's static address.
+- `tools/check_layers.py` also checks the handheld's service and UI folders.
+
 ### Changed (layering)
 - Decision D27: the UI layer stays separate from the infrastructure. Display and touch drivers moved out of `lg_ui` into a new board-support component, `components/lg_bsp` (`lg_bsp_display`, `lg_bsp_touch`).
 - `lg_ui` now holds only LVGL glue, the theme, the pointer device (`lg_ui_input`), and the calibration screen (`lg_ui_calibrate`). It has no ESP-IDF driver dependencies.

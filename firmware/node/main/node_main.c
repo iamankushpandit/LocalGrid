@@ -3,7 +3,7 @@
  *
  * SoftAP on a fixed channel for handhelds, TCP control sessions, ESP-NOW
  * backbone to other nodes, BLE discovery adverts, serial console.
- * Node identity comes from the MAC table in lg_proto_config.h.
+ * Node index and name come from the identity partition (decisions D20, D21).
  */
 #include <inttypes.h>
 #include <string.h>
@@ -15,7 +15,9 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "dhcpserver/dhcpserver.h"
 #include "esp_netif.h"
+#include "lwip/ip4_addr.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -25,6 +27,7 @@
 #include "node_app.h"
 #include "nvs_flash.h"
 #include "sessions.h"
+#include "settings.h"
 #include "web_admin.h"
 
 static const char *TAG = "GRID";
@@ -228,12 +231,11 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)base;
     if (id == WIFI_EVENT_AP_STACONNECTED) {
         const wifi_event_ap_staconnected_t *e = data;
-        ESP_LOGI("NET", "[NET] Station %02x:%02x:%02x:%02x:%02x:%02x joined (aid %u)",
-                 e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->aid);
+        /* Decision D21: no hardware addresses in output; the association id is enough to follow a station. */
+        ESP_LOGI("NET", "[NET] Station joined (aid %u)", e->aid);
     } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
         const wifi_event_ap_stadisconnected_t *e = data;
-        ESP_LOGI("NET", "[NET] Station %02x:%02x:%02x:%02x:%02x:%02x left (reason %u)",
-                 e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->reason);
+        ESP_LOGI("NET", "[NET] Station left (aid %u, reason %u)", e->aid, e->reason);
     }
 }
 
@@ -253,6 +255,13 @@ static void wifi_start(void)
     esp_netif_set_ip4_addr(&info.netmask, 255, 255, 255, 0);
     esp_netif_dhcps_stop(ap);
     ESP_ERROR_CHECK(esp_netif_set_ip_info(ap, &info));
+    /* DHCP serves phones only, .2 to .99. Handhelds use static .100 + device index (answer 10);
+     * the default pool would run to .101 and could hand out a handheld's address. */
+    dhcps_lease_t lease = { .enable = true };
+    IP4_ADDR(&lease.start_ip, ip[0], ip[1], ip[2], 2);
+    IP4_ADDR(&lease.end_ip, ip[0], ip[1], ip[2], 99);
+    ESP_ERROR_CHECK(esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease,
+                                           sizeof(lease)));
     ESP_ERROR_CHECK(esp_netif_dhcps_start(ap));
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -311,6 +320,34 @@ static void print_status(void)
            st->malformed);
 }
 
+/* Decision D28: every device answers configuration questions over its serial port.
+ * Read-only: settings change on the master's admin page. Secrets are never printed. */
+static void print_config(void)
+{
+    node_settings_t cfg;
+    bool have = settings_load(&cfg) == ESP_OK;
+    uint8_t ip[4];
+    lg_proto_node_ip(g_app.index, ip);
+    printf("Node configuration\n");
+    printf("  id: %s\n", g_app.identity.present ? g_app.identity.id : "none");
+    printf("  node: index %u, name %s, role %s\n", g_app.index, g_app.name,
+           g_app.index == 0 ? "master" : "node");
+    printf("  network: SSID %s%s, channel %d, address %u.%u.%u.%u, up to %d handhelds\n",
+           LG_PROTO_SSID_PREFIX, g_app.name, LG_PROTO_CHANNEL, ip[0], ip[1], ip[2], ip[3],
+           LG_PROTO_MAX_STATIONS);
+    printf("  DHCP for phones: %u.%u.%u.2 to %u.%u.%u.99; handhelds are static at .%u plus device index\n",
+           ip[0], ip[1], ip[2], ip[0], ip[1], ip[2], (unsigned)LG_PROTO_HANDHELD_HOST_BASE);
+    if (have && cfg.configured) {
+        printf("  grid name: %s\n", cfg.grid_name);
+        printf("  time zone: %s (display only)\n", cfg.timezone[0] ? cfg.timezone : "not set");
+        printf("  admin password: set, %" PRIu32 " PBKDF2 iterations\n", cfg.iterations);
+    } else {
+        printf("  admin setup: not done; the master serves the setup page\n");
+    }
+    printf("  grid time: %s\n", quality_name(g_app.time_quality));
+    printf("  settings change on the master page at http://192.168.4.1/, not over serial\n");
+}
+
 static void print_devices(void)
 {
     const lg_roster_t *r = g_app.core.roster;
@@ -331,6 +368,9 @@ static void print_devices(void)
 static void handle_command(const node_cmd_t *cmd)
 {
     switch (cmd->type) {
+    case NODE_CMD_CONFIG:
+        print_config();
+        break;
     case NODE_CMD_STATUS:
         print_status();
         break;

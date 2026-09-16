@@ -8,6 +8,10 @@ Rules:
   3. lg_ui never includes ESP-IDF driver, esp_lcd, NVS, or heap-caps headers; it reaches
      hardware only through lg_bsp.
   4. A node build folder contains no UI-side components, and no LVGL was downloaded for it.
+  5. The handheld's network service never includes UI or board-support headers, and its
+     screens never include networking; they meet only in hh_service.h.
+  6. Handheld firmware never references the backbone key; it recognises nodes with
+     LG_SECRET_DISCRIMINATOR.
 
 tools/build.py runs this before and after every build.
   python tools/check_layers.py
@@ -26,6 +30,11 @@ NODE_PROJECT = "firmware/node"
 UI_SIDE_INCLUDE = re.compile(r'#\s*include\s*[<"](lvgl|lg_display|lg_theme|lg_ui_input|lg_bsp_\w+)\b')
 LVGL_OR_UI_INCLUDE = re.compile(r'#\s*include\s*[<"](lvgl|lg_display|lg_theme|lg_ui_input)\b')
 DRIVER_INCLUDE = re.compile(r'#\s*include\s*[<"](driver/|esp_lcd|nvs|esp_heap_caps)')
+NETWORK_INCLUDE = re.compile(r'#\s*include\s*[<"](lwip/|esp_wifi|esp_netif|esp_event|lg_client|sys/socket)')
+BACKBONE_KEY = re.compile(r"LG_SECRET_BACKBONE_KEY")
+HANDHELD = "firmware/handheld"
+HANDHELD_SERVICE = "firmware/handheld/main/service"
+HANDHELD_UI = "firmware/handheld/main/ui"
 UI_SIDE_COMPONENT = re.compile(r"\b(lg_bsp|lg_ui|lvgl\w*)\b")
 
 
@@ -61,6 +70,9 @@ def violations():
                 found.append(f"{rel}:{n}: infrastructure requires a UI-side component: {line.strip()}")
     found += scan("components/lg_bsp", LVGL_OR_UI_INCLUDE, "lg_bsp includes LVGL or UI headers")
     found += scan("components/lg_ui", DRIVER_INCLUDE, "lg_ui includes a driver header; go through lg_bsp")
+    found += scan(HANDHELD_SERVICE, UI_SIDE_INCLUDE, "handheld service includes a UI or board-support header")
+    found += scan(HANDHELD_UI, NETWORK_INCLUDE, "handheld UI includes networking; go through hh_service.h")
+    found += scan(HANDHELD, BACKBONE_KEY, "handheld firmware references the backbone key; use LG_SECRET_DISCRIMINATOR")
 
     node = ROOT / NODE_PROJECT
     for build in sorted(node.glob("build-*/esp-idf")):

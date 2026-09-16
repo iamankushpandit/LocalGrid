@@ -11,7 +11,7 @@
  *          the MAC cannot be recovered from it and is never stored in the repository
  *
  * The tool writes the ID to the "lgid" NVS partition (namespace "lgid"). Node boards
- * also receive their node index and name there. Firmware prints the identity at boot
+ * also receive their node index and name there; handhelds receive their device index. Firmware prints the identity at boot
  * and answers the serial command "id" with a line starting "LGID: ".
  */
 #pragma once
@@ -37,6 +37,8 @@ typedef struct {
     bool     has_node;
     uint8_t  node_index;
     char     node_name[LG_IDENTITY_NAME_MAX];
+    bool     has_device;
+    uint32_t device_index;                     /* handheld's address in the grid roster (one user per handheld) */
 } lg_identity_t;
 
 /* Reads the identity partition. A missing partition or record yields present == false and ESP_OK. */

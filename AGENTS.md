@@ -18,6 +18,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `components/lg_bsp` | Board support drivers: SPI and I2C buses, display panel, touch controllers. No LVGL. |
 | `components/lg_ui` | LVGL display glue, theme, pointer input, and the calibration screen. No drivers. |
 | `firmware/node` | Infrastructure node firmware. |
+| `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui`, meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
 | `tests/target` | On-board test app with a simulated three-node grid. |
 | `tools/` | Secrets generator and multi-port serial capture. |

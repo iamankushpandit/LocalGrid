@@ -51,6 +51,14 @@ static int cmd_devices(int argc, char **argv)
     return post(NODE_CMD_DEVICES, 0, NULL);
 }
 
+/* Read-only: a node's settings are changed on the master's admin page, never over serial. */
+static int cmd_config(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return post(NODE_CMD_CONFIG, 0, NULL);
+}
+
 static int cmd_ping(int argc, char **argv)
 {
     char text[LG_TEXT_MAX + 1] = "ping";
@@ -98,6 +106,7 @@ void console_start(void)
         { .command = "status",  .help = "Node identity, time, memory, links, sessions", .func = cmd_status },
         { .command = "nodes",   .help = "Backbone links and counters",                   .func = cmd_nodes },
         { .command = "devices", .help = "Grid presence table and local sessions",       .func = cmd_devices },
+        { .command = "config",  .help = "Grid name, time zone, network, admin state (read-only)", .func = cmd_config },
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every node", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
     };

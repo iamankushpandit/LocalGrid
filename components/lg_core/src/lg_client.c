@@ -145,6 +145,16 @@ void lg_client_disconnected(lg_client_t *c)
     c->registered = false;
 }
 
+void lg_client_ping(lg_client_t *c)
+{
+    if (!c->connected) {
+        return;
+    }
+    lg_env_t e;
+    base_env(c, &e, LG_T_PING, LG_SCOPE_SYSTEM, 0);
+    (void)send_frame(c, &e, NULL, 0);
+}
+
 bool lg_client_time_restricted(const lg_client_t *c)
 {
     return !c->grid_time_known || c_local_time(c) == 0;
@@ -468,6 +478,9 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         emit(c, LG_CEV_PRESENCE, p.device);
         break;
     }
+    case LG_T_PONG:
+        c->last_pong_ms = c_now_ms(c);
+        break;
     case LG_T_TIME_SYNC: {
         lg_time_sync_t t;
         if (lg_time_sync_dec(body, e.body_len, &t)) {

@@ -19,7 +19,7 @@ Format `LG-<role>-<board>-<10 base32 characters>`, for example `LG-N-ELG-7K3QX9P
 ## Steps
 
 1. **Load ESP-IDF** in PowerShell: `. C:\esp\v6.1\esp-idf\export.ps1`.
-2. **Check the map.** `python tools/flash.py --list`. Add a new board as a device entry with `name`, `port`, `role`, `board`, `firmware` (nodes also `node_index` and `node_name`) and an empty `id`. Done when every board you will flash is listed with the firmware it should run.
+2. **Check the map.** `python tools/flash.py --list`. Add a new board as a device entry with `name`, `port`, `role`, `board`, `firmware` (nodes also `node_index` and `node_name`; handhelds also `device_index`, their address in the grid roster) and an empty `id`. Done when every board you will flash is listed with the firmware it should run.
 3. **Flash**:
 
    | Goal | Command |
@@ -31,6 +31,7 @@ Format `LG-<role>-<board>-<10 base32 characters>`, for example `LG-N-ELG-7K3QX9P
    | Factory reset: erase everything, keep the ID | `python tools/flash.py hosyond --erase` |
    | Replace a board's ID | `python tools/flash.py hosyond --erase --new-id` |
    | Different firmware this run | `python tools/flash.py hosyond --firmware tests` |
+   | Apply a changed `node_index`, `node_name`, or `device_index` without erasing | `python tools/flash.py hosyond --update-identity` |
 
    The script checks the board answers the expected ID, and that the chip matches the board type. A board without an ID is provisioned with a new one. The script builds each firmware once per target and refuses builds with warnings. Handhelds flash first, then nodes one at a time with 10 s between them so the grid keeps its time.
 4. **Read the RESULT table.** Done when every selected board shows `OK` and `id ok`.
@@ -41,6 +42,7 @@ Format `LG-<role>-<board>-<10 base32 characters>`, for example `LG-N-ELG-7K3QX9P
 | Mode | Keeps | Clears |
 |---|---|---|
 | default | admin setup, boot counter, device ID | nothing except the app |
+| `--update-identity` | admin setup, boot counter, touch calibration, keys, device ID | nothing; the identity partition is rewritten from the map |
 | `--erase` | device ID (rewritten from the map) | admin setup, boot counter, all saved settings |
 | `--erase --new-id` | nothing | everything, and the old ID is retired |
 

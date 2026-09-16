@@ -440,6 +440,31 @@ static void test_time_announce(void)
     sim_destroy(s);
 }
 
+/* Keepalive: a handheld's PING is answered by its own node, and only to that session. */
+static void test_ping_pong(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    s->now_ms = 5000;
+    CHECK_EQ(cl(s, EMMA)->last_pong_ms, 0u);
+    lg_client_ping(cl(s, EMMA));
+    sim_pump(s);
+    CHECK_EQ(cl(s, EMMA)->last_pong_ms, 5000u);
+    CHECK_EQ(cl(s, DAD)->last_pong_ms, 0u);
+    CHECK_EQ(cl(s, ALEX)->last_pong_ms, 0u);
+
+    /* A handheld that is not connected sends nothing and records nothing. */
+    sim_detach(s, EMMA);
+    lg_client_disconnected(cl(s, EMMA));
+    s->now_ms = 9000;
+    lg_client_ping(cl(s, EMMA));
+    sim_pump(s);
+    CHECK_EQ(cl(s, EMMA)->last_pong_ms, 5000u);
+    sim_destroy(s);
+}
+
 void test_messaging(void)
 {
     test_diag_echo();
@@ -454,4 +479,5 @@ void test_messaging(void)
     test_time_rule();
     test_node_refuses_unsafe_frames();
     test_key_pinning();
+    test_ping_pong();
 }

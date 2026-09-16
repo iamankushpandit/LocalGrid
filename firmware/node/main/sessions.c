@@ -219,11 +219,17 @@ void sess_send(uint32_t device, const uint8_t *frame, size_t len)
     if (len > LG_FRAME_MAX) {
         return;
     }
+    /* A handheld that rebooted can still have its old session here while it registers again;
+     * the replies (REGISTER_ACK first) belong to the newest session, not the first slot. */
+    sess_t *newest = NULL;
     for (size_t i = 0; i < SESS_MAX; i++) {
-        sess_t *x = &s_sess[i];
-        if (x->fd < 0 || x->device != device) {
-            continue;
+        sess_t *c = &s_sess[i];
+        if (c->fd >= 0 && c->device == device && (newest == NULL || c->opened_ms >= newest->opened_ms)) {
+            newest = c;
         }
+    }
+    if (newest != NULL) {
+        sess_t *x = newest;
         uint8_t out[2 + LG_FRAME_MAX];
         lg_wr16(out, (uint16_t)len);
         memcpy(out + 2, frame, len);

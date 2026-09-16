@@ -54,6 +54,9 @@ esp_err_t lg_identity_load(lg_identity_t *out)
                 snprintf(out->node_name, sizeof(out->node_name), "NODE%u", out->node_index);
             }
         }
+        if (nvs_get_u32(h, "device_idx", &out->device_index) == ESP_OK && out->device_index != 0) {
+            out->has_device = true;
+        }
     } else {
         memset(out, 0, sizeof(*out));
     }
@@ -69,6 +72,8 @@ void lg_identity_print(const lg_identity_t *id)
     }
     if (id->has_node) {
         printf("LGID: %s role=%s board=%s node=%u %s\n", id->id, id->role, id->board, id->node_index, id->node_name);
+    } else if (id->has_device) {
+        printf("LGID: %s role=%s board=%s device=%" PRIu32 "\n", id->id, id->role, id->board, id->device_index);
     } else {
         printf("LGID: %s role=%s board=%s\n", id->id, id->role, id->board);
     }

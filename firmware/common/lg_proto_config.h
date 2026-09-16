@@ -34,3 +34,12 @@ static inline void lg_proto_node_ip(uint16_t index, uint8_t out[4])
     out[2] = (uint8_t)(4u + index);
     out[3] = 1;
 }
+
+/* Handhelds use static addresses on their node's subnet: .100 + device index (answer 10).
+ * Node DHCP serves .2 to .99 only, for phones. */
+#define LG_PROTO_HANDHELD_HOST_BASE 100u
+static inline void lg_proto_handheld_ip(uint16_t node, uint32_t device, uint8_t out[4])
+{
+    lg_proto_node_ip(node, out);
+    out[3] = (uint8_t)(LG_PROTO_HANDHELD_HOST_BASE + device);
+}

@@ -21,6 +21,7 @@ typedef enum {
     NODE_CMD_PING,
     NODE_CMD_TIME_SHOW,
     NODE_CMD_TIME_SET,
+    NODE_CMD_CONFIG,
 } node_cmd_type_t;
 
 typedef struct {

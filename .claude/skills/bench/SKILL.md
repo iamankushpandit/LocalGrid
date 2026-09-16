@@ -32,8 +32,12 @@ A new checkout first needs `python tools/gen_secrets.py`; every board in one gri
 
 - An unrelated build or flash run holding a COM port makes the next flash fail with a port-busy error; only one process may open a port.
 - Flashing the node firmware over a board replaces whatever it ran before, including the test app.
-- Node console commands: `status`, `nodes`, `devices`, `ping [text]`, `time`, `time set <unix>`.
+- Every device has a serial console (decision D28). Ask one board or many with `python tools/console.py <board|all|N|H> <command>`; it checks the board's device ID first, so a renumbered port cannot mislead it.
+  - Nodes: `id`, `status`, `nodes`, `devices`, `config`, `ping [text]`, `time`, `time set <unix>`.
+  - Handhelds: `id`, `status`, `nodes`, `people`, `node <index>|auto`, `scan`, `reconnect`, `time`, `reboot`.
+  - Grid settings change on the master's admin page; `config` on a node is read-only.
 - The development PC reaches the Internet only over Wi-Fi. Joining an `LG-*` network from it cuts the agent's own connection, so anything that needs a Wi-Fi client (the admin web page, TCP sessions) is tested from the owner's phone or a handheld, with a written procedure.
 - Opening a serial port resets the Elegoo boards through their auto-reset circuit, even with DTR and RTS preset low.
+- `tools/serial_capture.py --reset-at PORT@SECONDS` (repeatable) reboots a board mid-capture, including the ESP32-S3's native USB port. Use it to reboot a handheld while nodes keep running.
 - Closing a port the plain way holds auto-reset boards in reset, so a node looks dead or "loses links" after a tool exits. Set DTR and RTS to False, wait about 0.1 s, then close; `tools/flash.py` (`release_and_close()`) and `tools/serial_capture.py` already do this. A board stuck this way recovers when its port is opened and release-closed once. Grid time lives only in RAM, so a reset of every node at once loses it until the admin sets it again.
 - To update nodes without losing grid time, flash them one at a time with about 10 s between boards: each rebooted node re-adopts time from its still-running neighbors on link-up. Read state from NORTH or SOUTH rather than opening the master's port.

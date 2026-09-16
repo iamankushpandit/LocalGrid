@@ -23,6 +23,7 @@ Modes:
   default   flash the app; the board keeps its saved settings and its ID
   --erase   erase the whole flash first (factory reset), then flash and rewrite the ID
   --new-id  mint a new ID for the board (implies rewriting the identity partition)
+  --update-identity  rewrite the identity partition from the map (node index, handheld device index), keeping the ID
 """
 import argparse
 import atexit
@@ -272,6 +273,8 @@ def write_identity(device, port):
             ["board", "data", "string", device["board"]], ["created", "data", "u32", str(device["id_created"])]]
     if device["role"] == "N":
         rows += [["node_idx", "data", "u8", str(device["node_index"])], ["node_name", "data", "string", device["node_name"]]]
+    if device["role"] == "H" and device.get("device_index"):
+        rows += [["device_idx", "data", "u32", str(device["device_index"])]]
     with tempfile.TemporaryDirectory() as tmp:
         csv_path = pathlib.Path(tmp) / "lgid.csv"
         bin_path = pathlib.Path(tmp) / "lgid.bin"
@@ -330,7 +333,7 @@ def verify(device, fw, expected_id):
     if got_id != expected_id:
         return False, f"firmware started but answered id {got_id or 'nothing'}, expected {expected_id}"
     summary = [l.strip() for l in buf.decode("utf-8", "replace").splitlines()
-               if re.search(r"LG_TESTS:|\[WEB\] Admin|\[BB\] Link up", l)]
+               if re.search(r"LG_TESTS:|\[WEB\] Admin|\[BB\] Link up|\[GRID\] Registered", l)]
     return True, "; ".join(["id ok"] + summary[:3])
 
 
@@ -411,8 +414,8 @@ def flash_board(data, d, args, built):
     if run(idf(fw["project"], target, "-p", d["port"], "flash"), log) != 0:
         return False, f"flash failed:\n    {tail(log)}"
 
-    # 5. Identity partition: only for new IDs or after an erase.
-    if mint or args.erase:
+    # 5. Identity partition: for new IDs, after an erase, or when asked to rewrite it from the map.
+    if mint or args.erase or args.update_identity:
         ok, detail = write_identity(d, d["port"])
         if not ok:
             return False, detail
@@ -432,6 +435,8 @@ def main():
     ap.add_argument("--firmware", help="flash this firmware type instead of each board's assignment")
     ap.add_argument("--erase", action="store_true", help="factory reset: erase all flash first; the ID is kept")
     ap.add_argument("--new-id", action="store_true", help="mint a new device ID for the selected boards")
+    ap.add_argument("--update-identity", action="store_true",
+                    help="rewrite the identity partition from the map, keeping the ID and all settings")
     ap.add_argument("--no-build", action="store_true", help="flash the existing build")
     ap.add_argument("--no-verify", action="store_true", help="skip the serial check after flashing")
     ap.add_argument("--trust-port", action="store_true", help="flash a provisioned board that does not answer 'id'")

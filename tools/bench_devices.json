@@ -46,12 +46,25 @@
       "verify_ok": "LG_TESTS_RESULT: PASS",
       "verify_fail": "LG_TESTS_RESULT: FAIL",
       "verify_timeout_s": 200
+    },
+    "handheld": {
+      "project": "firmware/handheld",
+      "targets": [
+        "esp32",
+        "esp32s3"
+      ],
+      "roles": [
+        "H"
+      ],
+      "description": "Handheld: joins the grid over Wi-Fi, registers with a node, and shows link, grid time, people, and nodes on screen.",
+      "verify_ok": "\\[UI\\] Home screen ready",
+      "verify_timeout_s": 30
     }
   },
   "devices": [
     {
       "name": "node-main",
-      "port": "COM16",
+      "port": "COM19",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -63,7 +76,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM17",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -90,20 +103,22 @@
       "port": "COM11",
       "role": "H",
       "board": "HY3",
-      "firmware": "tests",
+      "firmware": "handheld",
       "id": "LG-H-HY3-MPT765WSFG",
       "id_created": 1789494151,
-      "notes": "Runs the test app until handheld firmware exists"
+      "notes": "Prototype roster user 'Handheld 2'. Run the test app with --firmware tests.",
+      "device_index": 2
     },
     {
       "name": "fnk0104b",
       "port": "COM9",
       "role": "H",
       "board": "F4B",
-      "firmware": "tests",
+      "firmware": "handheld",
       "id": "LG-H-F4B-9DTCV8M0R1",
       "id_created": 1789493922,
-      "notes": "Runs the test app until handheld firmware exists"
+      "notes": "Prototype roster user 'Handheld 1'. Run the test app with --firmware tests.",
+      "device_index": 1
     }
   ]
 }

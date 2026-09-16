@@ -125,6 +125,7 @@ typedef struct {
     lg_dedup_entry_t   dedup_slots[LG_CLIENT_DEDUP_SLOTS];
     lg_dedup_t         dedup;
     uint32_t           decrypt_failures;
+    uint32_t           last_pong_ms;       /* now_ms when the node last answered a PING, 0 never */
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
@@ -133,6 +134,10 @@ void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_
 /* The transport reached the node: sends REGISTER. */
 void lg_client_connected(lg_client_t *c);
 void lg_client_disconnected(lg_client_t *c);
+
+/* Sends a keepalive PING while connected. The node answers PONG, recorded in last_pong_ms.
+ * Nodes close sessions that stay silent for 30 s, so call it every few seconds. */
+void lg_client_ping(lg_client_t *c);
 
 void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len);
 
