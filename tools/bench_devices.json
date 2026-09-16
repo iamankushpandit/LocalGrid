@@ -76,7 +76,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM17",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -88,7 +88,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM16",
+      "port": "COM18",
       "role": "N",
       "board": "ELG",
       "firmware": "node",

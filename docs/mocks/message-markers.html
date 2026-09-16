@@ -232,8 +232,8 @@
       unmistakable from each other at 13&nbsp;px, which is the whole problem with ticks.
     </p>
     <div class="states">
-      <div class="state" style="border-style:dashed"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-dot"/></svg></span>
-        <span class="nm">still choosing</span><span class="what">Waiting &mdash; see below</span></div>
+      <div class="state"><span class="big w-wait" style="font-size:26px">&#x1F553;</span>
+        <span class="nm">U+1F553 (emoji font)</span><span class="what">Waiting</span></div>
       <div class="state"><span class="big w-node"><svg class="ic" style="width:30px;height:30px"><use href="#i-upload"/></svg></span>
         <span class="nm">LV_SYMBOL_UPLOAD</span><span class="what">On the grid</span></div>
       <div class="state"><span class="big w-del"><svg class="ic" style="width:30px;height:30px"><use href="#i-download"/></svg></span>
@@ -280,12 +280,27 @@
   </div>
 </div>
 
-<h2>The waiting glyph &mdash; the one still open</h2>
+<h2>The waiting glyph &mdash; settled: the clock</h2>
 <p>
-  The turning arrow is out, and for a good reason: <code>LV_SYMBOL_REFRESH</code> already means
-  <em>retry</em> on this handheld &mdash; it is the Reconnect action's shape &mdash; so using it for
-  "not sent yet" asks one glyph to carry two unrelated meanings. There is no clock glyph in this
-  font, which is what a phone would use here, so the honest candidates are a quiet mark or none.
+  <b>Decided and shipped: a clock face, <code>U+1F553</code> from the emoji font.</b> The turning
+  arrow was rejected for a good reason &mdash; <code>LV_SYMBOL_REFRESH</code> already means
+  <em>retry</em> on this handheld, being the Reconnect action's shape, so using it for "not sent yet"
+  asked one glyph to carry two unrelated meanings. A clock says "time passing", which is what this
+  state is.
+</p>
+<p>
+  It costs nothing extra: <code>U+1F553</code> was already in the committed Noto Emoji subset, so no
+  font was regenerated and no glyph embedded. A true hourglass (<code>U+231B</code>) was the first
+  choice and was dropped once its price was clear &mdash; the font generator emits one size only, so
+  an hourglass would have meant a second font target, a second generated <code>.c</code>, and a
+  second <code>LV_FONT_DECLARE</code>. The clock also forced one real design consequence: the emoji
+  font has exactly one size, 20&nbsp;px, so the marker glyph is drawn at <code>font_icon</code> while
+  the timestamp beside it stays at <code>font_tiny</code>. Asked for inside a 10&nbsp;px line, it
+  would not have drawn at all.
+</p>
+<p class="lede" style="max-width:68ch">
+  The candidates below are kept as the record of what was considered. None of them is in the
+  firmware.
 </p>
 <div class="states">
   <div class="state"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-dot"/></svg></span>
@@ -435,7 +450,11 @@
     refusals stay as text in the error colour.</li>
 </ul>
 <p class="lede">
-  <b>Decided:</b> Set A, and violet for read. <b>Still open:</b> the waiting glyph &mdash; dot, held,
-  dash, or nothing. Once that is settled this becomes a decision entry and then screen code: no wire
-  change, no reflashing of nodes, and one line widened so group reads are reported as well as 1:1.
+  <b>All settled and built:</b> Set A, violet for read, and a clock for waiting. Recorded as D42 and
+  on both handhelds. It needed no wire change and no reflashing of APs &mdash; screens, four new theme
+  roles, and one line widened so group reads are reported as well as 1:1.
+  <br><br>
+  <b>Still unproven on hardware:</b> the group counts and the group read reports, and whether the
+  clock glyph draws at all. Serial output reports states and counts, never pixels, so that last one
+  needs somebody to look at a panel.
 </p>
