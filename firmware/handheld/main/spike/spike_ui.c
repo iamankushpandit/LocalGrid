@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -24,7 +25,9 @@
 #include "hh_service.h"
 #include "lg_draw.h"
 #include "lg_emoji.h"
+#include "lg_envelope.h"
 #include "spike_chat.h"
+#include "spike_nav.h"
 
 static const char *TAG = "UI";
 
@@ -44,7 +47,17 @@ static const char *TAG = "UI";
 #define PAD          8
 #define GAP          5
 
-typedef enum { SCREEN_LAUNCHER, SCREEN_STATUS, SCREEN_CHAT } screen_t;
+typedef enum {
+    SCREEN_LAUNCHER,
+    SCREEN_STATUS,
+    SCREEN_CHAT,
+    SCREEN_CONVS,
+    SCREEN_GROUPS,
+    SCREEN_GROUP_EDIT,
+    SCREEN_SETTINGS,
+    SCREEN_WHICH_AP,
+    SCREEN_RENAME,
+} screen_t;
 
 enum { TILE_MESSAGES, TILE_GROUPS, TILE_STATUS, TILE_SETTINGS, TILE_COUNT };
 
@@ -70,7 +83,28 @@ static struct {
     int         pressed;          /* tile or -2 for back, -1 none */
     hh_status_t st;
     bool        marked_status;
+    /* A screen change asked for by a screen, done after its touch or refresh returns. */
+    bool        nav_pending;
+    spike_nav_t nav_to;
+    uint8_t     nav_scope;
+    uint32_t    nav_target;
+    char        nav_title[40];
 } s;
+
+const hh_status_t *spike_status(void)
+{
+    hh_service_status(&s.st);
+    return &s.st;
+}
+
+void spike_go(spike_nav_t to, uint8_t scope, uint32_t target, const char *title)
+{
+    s.nav_pending = true;
+    s.nav_to = to;
+    s.nav_scope = scope;
+    s.nav_target = target;
+    snprintf(s.nav_title, sizeof(s.nav_title), "%s", title != NULL ? title : "");
+}
 
 static lg_box_t text_box(int16_t x, int16_t y, int16_t w, int16_t h, const lv_font_t *font, lg_color_t fg,
                          lg_color_t bg, uint8_t align, const char *text)
@@ -133,9 +167,7 @@ static void build_launcher(void)
 
 static void show_launcher(void)
 {
-    if (s.screen == SCREEN_CHAT) {
-        spike_chat_close();
-    }
+    lg_draw_scroll_area(0, 0);   /* whatever came before may have scrolled the panel */
     s.screen = SCREEN_LAUNCHER;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
@@ -164,9 +196,7 @@ static void build_status(void)
 
 static void show_status(void)
 {
-    if (s.screen == SCREEN_CHAT) {
-        spike_chat_close();
-    }
+    lg_draw_scroll_area(0, 0);
     s.screen = SCREEN_STATUS;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
@@ -193,11 +223,17 @@ static const char *link_word(hh_link_t link)
 
 static void refresh(void)
 {
-    hh_service_status(&s.st);
-    const hh_status_t *st = &s.st;
-    if (s.screen == SCREEN_CHAT) {
-        spike_chat_refresh(st);
-        return;
+    const hh_status_t *st = spike_status();
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    switch (s.screen) {
+    case SCREEN_CHAT:       spike_chat_refresh(st); return;
+    case SCREEN_CONVS:      spike_convs_refresh(); return;
+    case SCREEN_GROUPS:     spike_groups_refresh(); return;
+    case SCREEN_GROUP_EDIT: spike_group_edit_refresh(now); return;
+    case SCREEN_SETTINGS:   spike_settings_refresh(); return;
+    case SCREEN_WHICH_AP:   spike_which_ap_refresh(); return;
+    case SCREEN_RENAME:     return;
+    default:                break;
     }
     char text[128];   /* lg_draw_set_text keeps what fits in a box */
     uint32_t day = st->grid_time % 86400u;
@@ -248,8 +284,73 @@ static void refresh(void)
     }
 }
 
+static void apply_nav(void)
+{
+    if (!s.nav_pending) {
+        return;
+    }
+    s.nav_pending = false;
+    s.pressed = -1;
+    static const char *const NAMES[] = { "home", "status", "conversations", "chat", "groups", "group editor",
+                                         "settings", "which AP", "rename", "calibration" };
+    ESP_LOGI(TAG, "[UI] Spike screen: %s%s%s; free %" PRIu32 " KB", NAMES[s.nav_to], s.nav_title[0] ? " " : "",
+             s.nav_title, (uint32_t)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024u));
+    lg_draw_scroll_area(0, 0);   /* every screen starts unscrolled; list screens set their own area */
+    switch (s.nav_to) {
+    case NAV_HOME:
+        show_launcher();
+        refresh();
+        break;
+    case NAV_STATUS:
+        show_status();
+        refresh();
+        break;
+    case NAV_CONVERSATIONS:
+        s.screen = SCREEN_CONVS;
+        spike_convs_open(s.w, s.h);
+        break;
+    case NAV_CHAT:
+        s.screen = SCREEN_CHAT;
+        spike_chat_open(s.w, s.h, s.nav_scope, s.nav_target, s.nav_title);
+        break;
+    case NAV_GROUPS:
+        s.screen = SCREEN_GROUPS;
+        spike_groups_open(s.w, s.h);
+        break;
+    case NAV_GROUP_EDIT:
+        s.screen = SCREEN_GROUP_EDIT;
+        spike_group_edit_open(s.w, s.h, (uint16_t)s.nav_target);
+        break;
+    case NAV_SETTINGS:
+        s.screen = SCREEN_SETTINGS;
+        spike_settings_open(s.w, s.h, (uint8_t)s.nav_target);
+        break;
+    case NAV_WHICH_AP:
+        s.screen = SCREEN_WHICH_AP;
+        spike_which_ap_open(s.w, s.h);
+        break;
+    case NAV_RENAME:
+        s.screen = SCREEN_RENAME;
+        spike_rename_open(s.w, s.h);
+        break;
+    case NAV_CALIBRATE:
+        spike_calibrate_run(s.w, s.h);   /* asks for Settings when it is done */
+        apply_nav();
+        break;
+    }
+}
+
 static void on_tap(int16_t x, int16_t y, bool down)
 {
+    switch (s.screen) {
+    case SCREEN_CONVS:      spike_convs_touch(x, y, down); return;
+    case SCREEN_GROUPS:     spike_groups_touch(x, y, down); return;
+    case SCREEN_GROUP_EDIT: spike_group_edit_touch(x, y, down); return;
+    case SCREEN_SETTINGS:   spike_settings_touch(x, y, down); return;
+    case SCREEN_WHICH_AP:   spike_which_ap_touch(x, y, down); return;
+    case SCREEN_RENAME:     spike_rename_touch(x, y, down); return;
+    default:                break;
+    }
     if (s.screen == SCREEN_LAUNCHER) {
         int hit = -1;
         for (int i = 0; i < TILE_COUNT; i++) {
@@ -263,21 +364,17 @@ static void on_tap(int16_t x, int16_t y, bool down)
         } else if (!down && s.pressed >= 0) {
             int was = s.pressed;
             s.pressed = -1;
-            if (was == TILE_STATUS && hit == TILE_STATUS) {
-                show_status();
-                refresh();
-            } else if (was == TILE_MESSAGES && hit == TILE_MESSAGES) {
-                hh_service_status(&s.st);
-                s.screen = SCREEN_CHAT;
-                spike_chat_open(s.w, s.h, &s.st);
+            if (was == hit) {
+                static const spike_nav_t TILE_NAV[TILE_COUNT] = { NAV_CONVERSATIONS, NAV_GROUPS, NAV_STATUS,
+                                                                  NAV_SETTINGS };
+                spike_go(TILE_NAV[hit], 0, 0, NULL);
             } else {
                 draw_tile(&s.tiles[was], false);
             }
         }
     } else if (s.screen == SCREEN_CHAT) {
         if (spike_chat_touch(x, y, down)) {
-            show_launcher();
-            refresh();
+            spike_go(NAV_CONVERSATIONS, 0, 0, NULL);
         }
     } else {
         bool on_back = lg_rect_hit(&s.back.rect, x, y);
@@ -286,8 +383,7 @@ static void on_tap(int16_t x, int16_t y, bool down)
         } else if (!down && s.pressed == -2) {
             s.pressed = -1;
             if (on_back) {
-                show_launcher();
-                refresh();
+                spike_go(NAV_HOME, 0, 0, NULL);
             }
         }
     }
@@ -306,11 +402,26 @@ static void handle_request(const spike_req_t *r)
         show_status();
         refresh();
         break;
-    case SPIKE_CHAT:
-        hh_service_status(&s.st);
-        s.screen = SCREEN_CHAT;
-        spike_chat_open(s.w, s.h, &s.st);
+    case SPIKE_CHAT: {
+        const hh_status_t *st = spike_status();
+        if (st->n_people > 0) {
+            spike_go(NAV_CHAT, LG_SCOPE_DIRECT, st->people[0].device, st->people[0].name);
+        } else {
+            spike_go(NAV_CHAT, LG_SCOPE_BROADCAST, LG_TARGET_ALL, "Everyone");
+        }
         break;
+    }
+    case SPIKE_GO:
+        spike_go((spike_nav_t)r->arg, 0, 0, NULL);
+        break;
+    case SPIKE_TAP: {
+        int16_t x = (int16_t)(r->arg >> 16);
+        int16_t y = (int16_t)(r->arg & 0xFFFF);
+        on_tap(x, y, true);
+        apply_nav();
+        on_tap(x, y, false);   /* a tap: down, then up at the same place */
+        break;
+    }
     case SPIKE_SCROLL:
         if (s.screen == SCREEN_CHAT) {
             spike_chat_scroll_by((int16_t)r->arg);
@@ -351,11 +462,13 @@ static void spike_task(void *arg)
         bool down = lg_draw_touch(&x, &y);
         if (down || was_down) {
             on_tap(x, y, down);
+            apply_nav();
         }
         was_down = down;
         spike_req_t req;
         while (xQueueReceive(s_requests, &req, 0) == pdTRUE) {
             handle_request(&req);
+            apply_nav();
         }
         if (s.screen == SCREEN_CHAT) {
             spike_chat_tick(now);
@@ -363,6 +476,7 @@ static void spike_task(void *arg)
         if (now - last_refresh >= REFRESH_MS) {
             last_refresh = now;
             refresh();
+            apply_nav();
         }
         if (now - last_stats >= STATS_MS) {
             last_stats = now;
@@ -392,7 +506,7 @@ esp_err_t spike_ui_start(const lg_board_t *board)
     build_status();
     show_launcher();
     hh_mem_mark("after spike launcher");
-    if (xTaskCreate(spike_task, "spike_ui", 4096, NULL, 4, NULL) != pdPASS) {
+    if (xTaskCreate(spike_task, "spike_ui", 6144, NULL, 4, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG, "[UI] Spike launcher ready: %ux%u, no LVGL", s.w, s.h);

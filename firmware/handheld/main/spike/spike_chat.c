@@ -8,8 +8,9 @@
  *   shown there. The colours are the theme's marker roles.
  * - A message that arrives while the reader is scrolled up does not move the list. A down arrow
  *   flashes slowly in the middle of the list instead, and goes when the reader reaches the end.
- * - The keyboard has letters with shift (tap once for one capital, twice for caps lock), a
- *   numbers and symbols page, and two emoji pages. A press repaints one key.
+ * - The keyboard is spike_kb: letters with shift, numbers and symbols, and emoji.
+ * - Any conversation: 1:1 (end-to-end encrypted by the service), a group, or everyone. A group
+ *   message counts delivered and read handhelds instead of naming one state (D42).
  *
  * RAM holds a layout per message (id, position, height, side), never its text: a bubble fetches
  * its message from the service when painted.
@@ -26,34 +27,20 @@
 #include "lg_draw.h"
 #include "lg_emoji.h"
 #include "lg_envelope.h"
+#include "spike_kb.h"
+#include "spike_nav.h"
+#include "spike_theme.h"
 
 static const char *TAG = "UI";
-
-/* Theme roles (lg_theme.c), as RGB565: the spike's copy of the table. */
-#define C_BG         lg_rgb(0x000000)
-#define C_SURFACE    lg_rgb(0x0A140F)
-#define C_OUTLINE    lg_rgb(0x1F3A2A)
-#define C_TEXT       lg_rgb(0xD2F5DE)
-#define C_MUTED      lg_rgb(0x7FA78F)
-#define C_ACCENT     lg_rgb(0x5FD38D)
-#define C_MARK_WAIT  lg_rgb(0x7FA78F)
-#define C_MARK_NODE  lg_rgb(0x4A8FD4)
-#define C_MARK_DELIV lg_rgb(0x5FD38D)
-#define C_MARK_READ  lg_rgb(0xB98CFF)
-#define C_ERROR      lg_rgb(0xFF6B6B)
 
 #define PAD          6
 #define GAP          4
 #define HEAD_H       30
 #define INPUT_H      30
-#define KEY_ROW_H    32
-#define KEY_ROWS     4
 #define LINES_MAX    12
 #define DRAG_START   6       /* pixels a finger moves before a press becomes a scroll */
-#define KEYS_MAX     40
 #define FLASH_MS     700     /* the new-message arrow: on this long, off this long */
 #define ARROW_SIZE   36
-#define EMOJI_PER_PAGE 24u
 
 #define MARK_WAIT      "\xF0\x9F\x95\x93"   /* U+1F553 clock: this handheld still holds it */
 
@@ -64,44 +51,18 @@ typedef struct {
     bool     mine;
 } bubble_t;
 
-typedef enum {
-    K_TEXT,
-    K_BACKSPACE,
-    K_HIDE,
-    K_SHIFT,
-    K_PAGE_LETTERS,
-    K_PAGE_NUMBERS,
-    K_PAGE_EMOJI,
-    K_EMOJI_PREV,
-    K_EMOJI_NEXT,
-} key_action_t;
-
-typedef struct {
-    lg_rect_t rect;
-    char      label[8];
-    char      text[8];    /* UTF-8 inserted by K_TEXT */
-    uint8_t   action;
-} key_t;
-
-typedef enum { PAGE_LETTERS, PAGE_NUMBERS, PAGE_EMOJI } page_t;
-
 static struct {
     uint16_t   w;
     uint16_t   h;
-    uint32_t   peer;
-    char       title[HH_NAME_MAX];
+    uint8_t    scope;
+    uint32_t   target;
+    char       title[40];
     lg_rect_t  list;
     lg_rect_t  field;
     lg_rect_t  send;
     lg_rect_t  back;
     lg_rect_t  arrow;
     bool       keyboard;
-    page_t     page;
-    uint8_t    shift;            /* 0 off, 1 next letter only, 2 caps lock */
-    uint8_t    emoji_page;
-    key_t      keys[KEYS_MAX];
-    uint8_t    n_keys;
-    int        pressed_key;      /* -1 none */
     bubble_t   bubbles[HH_MESSAGES];
     uint8_t    n_bubbles;
     int16_t    content_h;
@@ -123,8 +84,6 @@ static struct {
     uint64_t   list_us;
     uint32_t   scroll_steps;
     uint64_t   scroll_us;
-    uint32_t   key_paints;
-    uint64_t   key_us;
 } s;
 
 static const lv_font_t *body_font(void)
@@ -139,7 +98,55 @@ static int16_t bubble_text_w(void)
 
 static bool in_conversation(const hh_message_t *m)
 {
-    return m->scope == LG_SCOPE_DIRECT && (m->mine ? m->target == s.peer : m->author == s.peer);
+    if (m->scope != s.scope) {
+        return false;
+    }
+    switch (s.scope) {
+    case LG_SCOPE_BROADCAST: return true;
+    case LG_SCOPE_GROUP:     return m->target == s.target;
+    default:                 return m->mine ? m->target == s.target : m->author == s.target;
+    }
+}
+
+/* A group message's delivered and read counts (D42): everyone in the group but the sender. */
+static void count_text(const hh_message_t *m, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (!m->mine || m->scope == LG_SCOPE_DIRECT || m->state == HH_MSG_REJECTED || m->state == HH_MSG_REFUSED) {
+        return;
+    }
+    const hh_status_t *st = spike_status();
+    uint8_t total = 0;
+    for (uint8_t i = 0; i < st->n_groups && m->scope == LG_SCOPE_GROUP; i++) {
+        if (st->groups[i].id == (uint16_t)m->target) {
+            total = st->groups[i].members > 0 ? (uint8_t)(st->groups[i].members - 1u) : 0u;
+        }
+    }
+    if (total > 0 && m->read_count >= total) {
+        snprintf(out, cap, "all read");
+        return;
+    }
+    if (total > 0) {
+        snprintf(out, cap, "%u/%u", (unsigned)m->delivered_count, (unsigned)total);
+    } else if (m->delivered_count > 0) {
+        snprintf(out, cap, "%u", (unsigned)m->delivered_count);   /* everyone: no denominator */
+    }
+    if (m->read_count > 0 && out[0] != '\0') {
+        size_t used = strlen(out);
+        snprintf(out + used, cap - used, " %s%u", LV_SYMBOL_EYE_OPEN, (unsigned)m->read_count);
+    }
+}
+
+/* Who wrote a received message, for group and everyone chats. */
+static const char *author_name(uint32_t device)
+{
+    const hh_status_t *st = spike_status();
+    for (uint8_t i = 0; i < st->n_people; i++) {
+        if (st->people[i].device == device) {
+            return st->people[i].name;
+        }
+    }
+    return "unknown handheld";
 }
 
 static bool fetch(uint32_t id, hh_message_t *out)
@@ -169,6 +176,11 @@ static void layout(void)
     for (size_t i = total; i > 0 && s.n_bubbles < HH_MESSAGES; i--) {
         if (!hh_service_message(i - 1u, &m) || !in_conversation(&m)) {
             continue;
+        }
+        /* It is on this screen, so its reader has it in front of them: tell the author (D34, D42).
+         * Everyone messages do not report reads. */
+        if (!m.mine && !m.read_sent && (m.scope == LG_SCOPE_DIRECT || m.scope == LG_SCOPE_GROUP)) {
+            hh_service_mark_read(m.id);
         }
         uint8_t lines = lg_text_wrap(body_font(), &lg_font_emoji_14, m.text, bubble_text_w(), starts, LINES_MAX);
         bubble_t *b = &s.bubbles[s.n_bubbles++];
@@ -241,12 +253,25 @@ static void paint_list_content(const lg_canvas_t *c, bool with_arrow)
             int16_t lw = lg_draw_text_width(body_font(), &lg_font_emoji_14, line);
             widest = lw > widest ? lw : widest;
         }
-        char clock[8];
+        char clock[48];
         uint32_t day = m.grid_time % 86400u;
-        snprintf(clock, sizeof(clock), "%02u:%02u", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u));
+        char counts[24];
+        count_text(&m, counts, sizeof(counts));
+        if (!m.mine && s.scope != LG_SCOPE_DIRECT) {
+            snprintf(clock, sizeof(clock), "%02u:%02u %s", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u),
+                     author_name(m.author));
+        } else {
+            snprintf(clock, sizeof(clock), "%02u:%02u%s%s", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u),
+                     counts[0] ? "  " : "", counts);
+        }
         lg_color_t mark_colour = C_MUTED;
-        const char *mark = m.mine ? marker(&m, &mark_colour) : NULL;
-        int16_t note_w = (int16_t)(lg_draw_text_width(&lv_font_montserrat_10, NULL, clock) +
+        /* A group or everyone message shows counts, not a state; a refusal keeps the warning icon. */
+        const char *mark = !m.mine ? NULL
+                         : (s.scope == LG_SCOPE_DIRECT || m.state == HH_MSG_REJECTED || m.state == HH_MSG_REFUSED ||
+                            m.state == HH_MSG_PENDING)
+                               ? marker(&m, &mark_colour)
+                               : NULL;
+        int16_t note_w = (int16_t)(lg_draw_text_width(&lv_font_montserrat_10, F_EMOJI, clock) +
                                    (mark ? 4 + lg_draw_text_width(&lv_font_montserrat_12, &lg_font_emoji_14, mark) : 0));
         int16_t bw = (int16_t)((widest > note_w ? widest : note_w) + 2 * PAD);
         bw = bw > bw_max ? bw_max : bw;
@@ -259,7 +284,7 @@ static void paint_list_content(const lg_canvas_t *c, bool with_arrow)
         }
         int16_t note_top = (int16_t)(top + PAD + (lines ? lines : 1) * line_h);
         int16_t nx = (int16_t)(box.x + box.w - PAD - note_w);
-        lg_paint_text(c, &s.list, nx, (int16_t)(note_top + 1), &lv_font_montserrat_10, NULL, C_MUTED, clock,
+        lg_paint_text(c, &s.list, nx, (int16_t)(note_top + 1), &lv_font_montserrat_10, F_EMOJI, C_MUTED, clock,
                       strlen(clock));
         if (mark != NULL) {
             lg_paint_text(c, &s.list, (int16_t)(nx + note_w - lg_draw_text_width(&lv_font_montserrat_12,
@@ -376,134 +401,10 @@ static void draw_field(void)
     lg_draw_region(&row, paint_field, NULL);
 }
 
-static void paint_key(const lg_canvas_t *c, void *ctx)
-{
-    const key_t *k = ctx;
-    bool pressed = s.pressed_key >= 0 && &s.keys[s.pressed_key] == k;
-    bool locked = k->action == K_SHIFT && s.shift == 2;
-    lg_paint_panel(c, &k->rect, &k->rect, pressed || locked ? C_OUTLINE : C_SURFACE, C_BG,
-                   locked ? C_ACCENT : C_OUTLINE, 1, 4);
-    const lv_font_t *f = k->action == K_TEXT ? &lv_font_montserrat_14 : &lv_font_montserrat_16;
-    const lv_font_t *fb = s.page == PAGE_EMOJI ? &lg_font_emoji_20 : &lg_font_emoji_14;
-    lg_color_t fg = (k->action == K_SHIFT && s.shift > 0) ? C_ACCENT : C_TEXT;
-    int16_t tw = lg_draw_text_width(f, fb, k->label);
-    lg_paint_text(c, &k->rect, (int16_t)(k->rect.x + (k->rect.w - tw) / 2),
-                  (int16_t)(k->rect.y + (k->rect.h - f->line_height) / 2), f, fb, fg, k->label, strlen(k->label));
-}
-
-static void draw_key(const key_t *k)
-{
-    int64_t t0 = esp_timer_get_time();
-    lg_draw_region(&k->rect, paint_key, (void *)k);
-    s.key_paints++;
-    s.key_us += (uint64_t)(esp_timer_get_time() - t0);
-}
-
-static void paint_keyboard(const lg_canvas_t *c, void *ctx)
-{
-    const lg_rect_t *area = ctx;
-    lg_paint_panel(c, area, area, C_BG, C_BG, C_BG, 0, 0);
-    for (uint8_t i = 0; i < s.n_keys; i++) {
-        const key_t *k = &s.keys[i];
-        if (k->rect.y < c->band.y + c->band.h && k->rect.y + k->rect.h > c->band.y) {
-            paint_key(c, (void *)k);
-        }
-    }
-}
-
-static lg_rect_t keyboard_area(void)
-{
-    return (lg_rect_t){ 0, (int16_t)(s.field.y + s.field.h), (int16_t)s.w, (int16_t)(s.h - s.field.y - s.field.h) };
-}
-
-static void draw_keyboard(void)
-{
-    lg_rect_t area = keyboard_area();
-    lg_draw_region(&area, paint_keyboard, &area);
-}
-
-static key_t *add_key(uint8_t action, const char *label, const char *text, int16_t x, int16_t y, int16_t w)
-{
-    if (s.n_keys >= KEYS_MAX) {
-        return NULL;
-    }
-    key_t *k = &s.keys[s.n_keys++];
-    k->rect = (lg_rect_t){ x, y, (int16_t)(w - 2), (int16_t)(KEY_ROW_H - 3) };
-    snprintf(k->label, sizeof(k->label), "%s", label);
-    snprintf(k->text, sizeof(k->text), "%s", text != NULL ? text : "");
-    k->action = action;
-    return k;
-}
-
-/* One row of single-character keys, upper case when shift is on. */
-static void add_chars(const char *chars, int16_t x, int16_t y, int16_t kw, bool upper)
-{
-    for (const char *p = chars; *p != '\0'; p++) {
-        char one[2] = { upper && *p >= 'a' && *p <= 'z' ? (char)(*p - 'a' + 'A') : *p, '\0' };
-        add_key(K_TEXT, one, one, (int16_t)(x + (p - chars) * kw), y, kw);
-    }
-}
-
-static void build_keys(void)
-{
-    s.n_keys = 0;
-    if (!s.keyboard) {
-        return;
-    }
-    int16_t kw = (int16_t)(s.w / 10);
-    int16_t x0 = (int16_t)((s.w - 10 * kw) / 2);
-    int16_t y0 = (int16_t)(s.h - KEY_ROWS * KEY_ROW_H);
-    int16_t r3 = (int16_t)(y0 + 3 * KEY_ROW_H);
-    int16_t wide = (int16_t)(kw * 3 / 2);
-    switch (s.page) {
-    case PAGE_LETTERS: {
-        bool upper = s.shift > 0;
-        add_chars("qwertyuiop", x0, y0, kw, upper);
-        add_chars("asdfghjkl", (int16_t)(x0 + kw / 2), (int16_t)(y0 + KEY_ROW_H), kw, upper);
-        add_key(K_SHIFT, LV_SYMBOL_UP, NULL, x0, (int16_t)(y0 + 2 * KEY_ROW_H), wide);
-        add_chars("zxcvbnm", (int16_t)(x0 + wide), (int16_t)(y0 + 2 * KEY_ROW_H), kw, upper);
-        add_key(K_BACKSPACE, LV_SYMBOL_BACKSPACE, NULL, (int16_t)(x0 + wide + 7 * kw), (int16_t)(y0 + 2 * KEY_ROW_H),
-                wide);
-        add_key(K_PAGE_NUMBERS, "123", NULL, x0, r3, wide);
-        break;
-    }
-    case PAGE_NUMBERS:
-        add_chars("1234567890", x0, y0, kw, false);
-        add_chars("-/:;()$&@", (int16_t)(x0 + kw / 2), (int16_t)(y0 + KEY_ROW_H), kw, false);
-        add_chars("_.,?!'\"", (int16_t)(x0 + wide), (int16_t)(y0 + 2 * KEY_ROW_H), kw, false);
-        add_key(K_TEXT, "#", "#", x0, (int16_t)(y0 + 2 * KEY_ROW_H), wide);
-        add_key(K_BACKSPACE, LV_SYMBOL_BACKSPACE, NULL, (int16_t)(x0 + wide + 7 * kw), (int16_t)(y0 + 2 * KEY_ROW_H),
-                wide);
-        add_key(K_PAGE_LETTERS, "ABC", NULL, x0, r3, wide);
-        break;
-    case PAGE_EMOJI: {
-        uint8_t first = (uint8_t)(s.emoji_page * EMOJI_PER_PAGE);
-        int16_t ew = (int16_t)(s.w / 8);
-        for (uint8_t i = 0; i < EMOJI_PER_PAGE && first + i < LG_EMOJI_COUNT; i++) {
-            add_key(K_TEXT, LG_EMOJI[first + i], LG_EMOJI[first + i], (int16_t)(i % 8 * ew),
-                    (int16_t)(y0 + (i / 8) * KEY_ROW_H), ew);
-        }
-        add_key(K_PAGE_LETTERS, "ABC", NULL, x0, r3, wide);
-        add_key(K_EMOJI_PREV, LV_SYMBOL_LEFT, NULL, (int16_t)(x0 + wide), r3, kw);
-        add_key(K_EMOJI_NEXT, LV_SYMBOL_RIGHT, NULL, (int16_t)(x0 + wide + kw), r3, kw);
-        add_key(K_TEXT, "space", " ", (int16_t)(x0 + wide + 2 * kw), r3, (int16_t)(4 * kw));
-        add_key(K_BACKSPACE, LV_SYMBOL_BACKSPACE, NULL, (int16_t)(x0 + wide + 6 * kw), r3, kw);
-        add_key(K_HIDE, LV_SYMBOL_DOWN, NULL, (int16_t)(x0 + wide + 7 * kw), r3, wide);
-        return;
-    }
-    }
-    /* The bottom row of the letters and numbers pages. */
-    add_key(K_PAGE_EMOJI, LG_EMOJI[0], NULL, (int16_t)(x0 + wide), r3, kw);
-    add_key(K_TEXT, ",", ",", (int16_t)(x0 + wide + kw), r3, kw);
-    add_key(K_TEXT, "space", " ", (int16_t)(x0 + wide + 2 * kw), r3, (int16_t)(4 * kw));
-    add_key(K_TEXT, ".", ".", (int16_t)(x0 + wide + 6 * kw), r3, kw);
-    add_key(K_HIDE, LV_SYMBOL_DOWN, NULL, (int16_t)(x0 + wide + 7 * kw), r3, wide);
-}
-
 static void place(bool keyboard)
 {
     s.keyboard = keyboard;
-    int16_t kb_h = keyboard ? (int16_t)(KEY_ROWS * KEY_ROW_H + GAP) : 0;
+    int16_t kb_h = keyboard ? (int16_t)(spike_kb_height() + GAP) : 0;
     int16_t input_y = (int16_t)(s.h - kb_h - INPUT_H - GAP);
     s.back = (lg_rect_t){ (int16_t)(s.w - 40), 0, 40, HEAD_H };
     s.list = (lg_rect_t){ 0, HEAD_H, (int16_t)s.w, (int16_t)(input_y - HEAD_H - GAP) };
@@ -511,7 +412,9 @@ static void place(bool keyboard)
                            ARROW_SIZE, ARROW_SIZE };
     s.field = (lg_rect_t){ PAD, input_y, (int16_t)(s.w - 2 * PAD - 36), INPUT_H };
     s.send = (lg_rect_t){ (int16_t)(s.w - PAD - 32), input_y, 32, INPUT_H };
-    build_keys();
+    if (keyboard) {
+        spike_kb_open(s.w, s.h, s.input, sizeof(s.input));
+    }
     if (s.scroll > max_scroll()) {
         s.scroll = max_scroll();
     }
@@ -542,22 +445,19 @@ static void draw_all(void)
     lg_draw_fill(&gap, C_BG);
     draw_field();
     if (s.keyboard) {
-        draw_keyboard();
+        spike_kb_draw();
     }
 }
 
-void spike_chat_open(uint16_t w, uint16_t h, const hh_status_t *st)
+void spike_chat_open(uint16_t w, uint16_t h, uint8_t scope, uint32_t target, const char *title)
 {
     memset(&s, 0, sizeof(s));
     s.w = w;
     s.h = h;
-    s.pressed_key = -1;
-    if (st->n_people > 0) {
-        s.peer = st->people[0].device;
-        snprintf(s.title, sizeof(s.title), "%s", st->people[0].name);
-    } else {
-        snprintf(s.title, sizeof(s.title), "No one seen yet");
-    }
+    s.scope = scope;
+    s.target = target;
+    snprintf(s.title, sizeof(s.title), "%s", title != NULL ? title : "Chat");
+    const hh_status_t *st = spike_status();
     place(false);
     layout();
     s.scroll = max_scroll();   /* newest at the bottom, in view */
@@ -606,87 +506,37 @@ void spike_chat_tick(uint32_t now_ms)
     draw_arrow(s.arrow_on);
 }
 
-static void type_text(const char *text)
+static void keyboard_event(kb_event_t ev)
 {
-    size_t n = strlen(text);
-    if (s.input_len + n > HH_TEXT_MAX) {
-        return;
-    }
-    memcpy(s.input + s.input_len, text, n);
-    s.input_len += n;
-    s.input[s.input_len] = '\0';
-}
-
-static void press_key(const key_t *k)
-{
-    switch (k->action) {
-    case K_TEXT:
-        type_text(k->text);
-        if (s.page == PAGE_LETTERS && s.shift == 1) {
-            s.shift = 0;   /* one capital, then back to lower case */
-            build_keys();
-            draw_keyboard();
-        }
+    s.input_len = strlen(s.input);
+    if (ev == KB_TEXT_CHANGED) {
         draw_field();
-        break;
-    case K_BACKSPACE:
-        while (s.input_len > 0) {
-            char c = s.input[--s.input_len];
-            if ((c & 0xC0) != 0x80) {
-                break;   /* removed the start of a character */
-            }
-        }
-        s.input[s.input_len] = '\0';
-        draw_field();
-        break;
-    case K_SHIFT:
-        s.shift = (uint8_t)((s.shift + 1u) % 3u);   /* off, one capital, caps lock */
-        build_keys();
-        draw_keyboard();
-        break;
-    case K_PAGE_LETTERS:
-    case K_PAGE_NUMBERS:
-    case K_PAGE_EMOJI:
-        s.page = k->action == K_PAGE_LETTERS ? PAGE_LETTERS : k->action == K_PAGE_NUMBERS ? PAGE_NUMBERS : PAGE_EMOJI;
-        build_keys();
-        draw_keyboard();
-        break;
-    case K_EMOJI_PREV:
-    case K_EMOJI_NEXT: {
-        uint8_t pages = (uint8_t)((LG_EMOJI_COUNT + EMOJI_PER_PAGE - 1u) / EMOJI_PER_PAGE);
-        s.emoji_page = (uint8_t)((s.emoji_page + (k->action == K_EMOJI_NEXT ? 1u : pages - 1u)) % pages);
-        build_keys();
-        draw_keyboard();
-        break;
-    }
-    case K_HIDE:
+    } else if (ev == KB_HIDE) {
         place(false);
         draw_all();
-        break;
-    default:
-        break;
     }
 }
 
 bool spike_chat_touch(int16_t x, int16_t y, bool down)
 {
+    if (s.keyboard) {
+        kb_event_t kev;
+        if (spike_kb_touch(x, y, down, &kev)) {
+            keyboard_event(kev);
+            return false;
+        }
+    }
     if (down && !s.was_down) {
         s.was_down = true;
         s.down_x = x;
         s.down_y = y;
         s.down_scroll = s.scroll;
         s.dragging = false;
-        for (uint8_t i = 0; i < s.n_keys; i++) {
-            if (lg_rect_hit(&s.keys[i].rect, x, y)) {
-                s.pressed_key = i;
-                draw_key(&s.keys[i]);   /* the pressed look: one key repainted */
-            }
-        }
         return false;
     }
     if (down) {
         int16_t dy = (int16_t)(y - s.down_y);
-        if (!s.dragging && s.pressed_key < 0 && lg_rect_hit(&s.list, s.down_x, s.down_y) &&
+        if (!s.dragging && lg_rect_hit(&s.list, s.down_x, s.down_y) &&
             (dy > DRAG_START || dy < -DRAG_START)) {
             s.dragging = true;
         }
@@ -699,16 +549,6 @@ bool spike_chat_touch(int16_t x, int16_t y, bool down)
         return false;
     }
     s.was_down = false;
-    if (s.pressed_key >= 0) {
-        int idx = s.pressed_key;
-        s.pressed_key = -1;
-        key_t k = s.keys[idx];
-        draw_key(&s.keys[idx]);
-        if (lg_rect_hit(&k.rect, x, y)) {
-            press_key(&k);
-        }
-        return false;
-    }
     if (s.dragging) {
         s.dragging = false;
         return false;
@@ -721,8 +561,8 @@ bool spike_chat_touch(int16_t x, int16_t y, bool down)
     } else if (lg_rect_hit(&s.field, x, y) && !s.keyboard) {
         place(true);
         draw_all();
-    } else if (lg_rect_hit(&s.send, x, y) && s.input_len > 0 && s.peer != 0) {
-        esp_err_t err = hh_service_send(LG_SCOPE_DIRECT, s.peer, false, s.input);
+    } else if (lg_rect_hit(&s.send, x, y) && s.input_len > 0 && (s.scope != LG_SCOPE_DIRECT || s.target != 0)) {
+        esp_err_t err = hh_service_send(s.scope, s.target, false, s.input);
         ESP_LOGI(TAG, "[UI] Spike chat send: %s", err == ESP_OK ? "queued" : esp_err_to_name(err));
         if (err == ESP_OK) {
             s.input_len = 0;
@@ -746,33 +586,26 @@ void spike_chat_keyboard(bool show)
 
 void spike_chat_type(const char *text)
 {
-    for (const char *p = text; *p != '\0'; p++) {
-        for (uint8_t i = 0; i < s.n_keys; i++) {
-            if (s.keys[i].action == K_TEXT && s.keys[i].text[0] == *p && s.keys[i].text[1] == '\0') {
-                s.pressed_key = i;
-                draw_key(&s.keys[i]);
-                s.pressed_key = -1;
-                key_t k = s.keys[i];
-                draw_key(&s.keys[i]);   /* press and release, as a finger would */
-                press_key(&k);
-                break;
-            }
-        }
+    if (s.keyboard) {
+        keyboard_event(spike_kb_type(text));
     }
 }
 
 void spike_chat_page(int page)
 {
-    key_t k = { .action = page == 1 ? K_PAGE_NUMBERS : page == 2 ? K_PAGE_EMOJI : page == 3 ? K_SHIFT
-                                                                                          : K_PAGE_LETTERS };
-    press_key(&k);
+    if (s.keyboard) {
+        spike_kb_page(page);
+    }
 }
 
 void spike_chat_log(void)
 {
+    uint32_t key_paints = 0;
+    uint64_t key_us = 0;
+    spike_kb_stats(&key_paints, &key_us);
     ESP_LOGI(TAG, "[UI] Spike chat: %u bubbles, content %d px, full list paints %" PRIu32 " (avg %" PRIu64
              " ms), scroll steps %" PRIu32 " (avg %" PRIu64 " ms), key paints %" PRIu32 " (avg %" PRIu64 " ms)",
              s.n_bubbles, s.content_h, s.list_paints, s.list_paints ? s.list_us / s.list_paints / 1000u : 0u,
-             s.scroll_steps, s.scroll_steps ? s.scroll_us / s.scroll_steps / 1000u : 0u, s.key_paints,
-             s.key_paints ? s.key_us / s.key_paints / 1000u : 0u);
+             s.scroll_steps, s.scroll_steps ? s.scroll_us / s.scroll_steps / 1000u : 0u, key_paints,
+             key_paints ? key_us / key_paints / 1000u : 0u);
 }

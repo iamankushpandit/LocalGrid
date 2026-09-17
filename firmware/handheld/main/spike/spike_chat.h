@@ -9,8 +9,9 @@
 
 #include "hh_service.h"
 
-/* Opens a chat with the first handheld in the status snapshot and draws the whole screen. */
-void spike_chat_open(uint16_t w, uint16_t h, const hh_status_t *st);
+/* Opens a conversation (LG_SCOPE_DIRECT with a device, LG_SCOPE_GROUP with a group id, or
+ * LG_SCOPE_BROADCAST) and draws the whole screen. */
+void spike_chat_open(uint16_t w, uint16_t h, uint8_t scope, uint32_t target, const char *title);
 
 /* Leaves the chat: turns the hardware scroll area off before another screen draws. */
 void spike_chat_close(void);
@@ -24,7 +25,7 @@ void spike_chat_tick(uint32_t now_ms);
 /* Console: 0 letters, 1 numbers, 2 emoji, 3 press shift. */
 void spike_chat_page(int page);
 
-/* A touch sample: true when the back arrow was tapped. */
+/* A touch sample: true when the back arrow was tapped (back to the conversation list). */
 bool spike_chat_touch(int16_t x, int16_t y, bool down);
 
 /* Console-driven measurements: scroll, show or hide the keyboard, type through the keys. */

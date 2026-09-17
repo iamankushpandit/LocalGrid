@@ -567,12 +567,29 @@ static int cmd_spike(int argc, char **argv)
         spike_ui_request_cmd(SPIKE_TYPE, 0, argv[2]);
     } else if (argc >= 2 && strcmp(argv[1], "log") == 0) {
         spike_ui_request_cmd(SPIKE_LOG, 0, NULL);
+    } else if (argc == 3 && strcmp(argv[1], "go") == 0) {
+        static const char *const names[] = { "home", "status", "messages", "chat", "groups", "edit", "settings" };
+        int to = -1;
+        for (int i = 0; i < 7; i++) {
+            if (strcmp(argv[2], names[i]) == 0) {
+                to = i;
+            }
+        }
+        if (to < 0 || to == 3 || to == 5) {
+            printf("go home|status|messages|groups|settings\n");
+            return 1;
+        }
+        spike_ui_request_cmd(SPIKE_GO, to, NULL);
+    } else if (argc == 4 && strcmp(argv[1], "tap") == 0) {
+        long x = strtol(argv[2], NULL, 10);
+        long y = strtol(argv[3], NULL, 10);
+        spike_ui_request_cmd(SPIKE_TAP, (int)((x << 16) | (y & 0xFFFF)), NULL);
     } else if (argc == 3 && strcmp(argv[1], "page") == 0) {
         int page = strcmp(argv[2], "numbers") == 0 ? 1 : strcmp(argv[2], "emoji") == 0 ? 2
                  : strcmp(argv[2], "shift") == 0 ? 3 : 0;
         spike_ui_request_cmd(SPIKE_PAGE, page, NULL);
     } else {
-        printf("usage: spike chat | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | log\n");
+        printf("usage: spike chat | go <screen> | tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | log\n");
         return 1;
     }
     return 0;

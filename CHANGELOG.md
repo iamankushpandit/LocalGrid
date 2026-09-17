@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (no-LVGL UI: Messages, Groups, and Settings on both handhelds)
+- Owner, after the scrolling test: add the Groups and Settings screens. The spike is now a whole handheld UI apart from the screen saver and the self test.
+- `spike_kb.c`: the keyboard, shared by chat, group names, and renaming. `spike_list.c`: a list screen (header with home or back and an optional +, optional tabs, and section, fact, action, choice, button, note, checkbox, and text-field rows) that scrolls with the panel's hardware scroll, repaints one row for a press or a typed character, and only rebuilds when what it shows changed. `spike_nav.h`: screens ask to move with `spike_go()`, and the spike task switches once the touch or refresh that asked has returned.
+- Messages opens a conversation list: Everyone, the groups this handheld is in, and every handheld heard from. The chat works for all three. Group messages show delivered and read counts ("2/3", then an eye count, then "all read"), and received group or everyone messages name their author. Opening a conversation reports its messages read (D34, D42), as the LVGL chat did.
+- Groups: every group with its members ("you" for this handheld; groups this handheld is not in are muted); + makes one. The editor has the name field with the keyboard, a checkbox per known handheld (the maker cannot untick themselves), Save, and Remove with a second tap; it waits for the AP's answer, then returns to Groups or shows the refusal.
+- Settings: Grid (Which AP, Reconnect, Look for APs, connected AP, grid time), Sound (volume Off/Low/Med/High, Test sound, Test urgent), Screen (screen saver setting, Calibrate touch), Device (Name, device number, memory and PSRAM, Restart with a second tap). Which AP and Name are their own screens; calibration draws three targets with `lg_bsp_touch_wait_press()`.
+- Not carried over yet: the screen saver (its setting is kept, the rain is not drawn), the self test, notifications and alerts outside the chat.
+- Console for driving it without a finger: `spike go <home|status|messages|groups|settings>`, `spike tap <x> <y>`.
+- Verified over serial on both handhelds with taps: conversations, the Everyone chat and back, Groups, a new group's editor with the keyboard shown and hidden, all four Settings tabs, Which AP and back, home; no crash. Internal RAM free on a list screen: Hosyond 133 KB, Freenove 166 KB. **Not verified by touch.**
+
+
 ### Changed (spike chat: hardware scroll, a full keyboard, delivery icons, a new-message arrow, and the Freenove)
 - Owner, after trying the spike: scrolling should be smooth with hardware scroll, the new keyboard is much better and should be on the Freenove too, and it needs capitals, numbers and emoji; delivery icons were missing; a message arriving while scrolled up needs a slowly flashing down arrow that goes when the reader reaches the end.
 - `lg_bsp_display_scroll_area()` and `lg_bsp_display_scroll_to()` send VSCRDEF (0x33) and VSCRSADD (0x37), the same on the ST7789 and the ILI9341; neither board mirrors rows. `lg_draw_scroll_area()` and `lg_draw_scroll()` make the chat list the scrolling window, and every send maps screen rows onto the panel's circular memory rows, split where they wrap, so painters stay in screen coordinates.
