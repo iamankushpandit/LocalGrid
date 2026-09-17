@@ -194,7 +194,7 @@ static inline lg_color_t get(const uint8_t *row, int16_t x)
 static void send(int16_t x, int16_t y, int16_t w, int16_t h)
 {
     xSemaphoreTake(s.done, 0);   /* clear a stale completion */
-    (void)lg_bsp_display_draw(x, y, x + w, y + h, s.buf);
+    (void)lg_bsp_display_draw(x, y, x + w - 1, y + h - 1, s.buf);   /* the driver takes inclusive corners */
     xSemaphoreTake(s.done, pdMS_TO_TICKS(200));
     s.stats.pixels += (uint64_t)w * (uint64_t)h;
 }
