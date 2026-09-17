@@ -66,7 +66,7 @@ bool lg_msg_ack_dec(const uint8_t *in, size_t len, lg_msg_ack_t *v)
     v->status = in[12];
     /* The bound is the highest status this build knows, so appending a status to the enum
      * means naming it here as well, or every frame carrying it is counted malformed. */
-    return v->status >= LG_ACK_ACCEPTED && v->status <= LG_ACK_READ;
+    return v->status >= LG_ACK_ACCEPTED && v->status <= LG_ACK_REJ_NOT_ALLOWED;
 }
 
 size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out)
@@ -245,7 +245,8 @@ size_t lg_groups_enc(const lg_groups_t *v, uint8_t *out)
     lg_wr32(out, v->seq);
     lg_wr16(out + 4, v->author);
     lg_wr16(out + 6, v->next_id);
-    out[8] = count;
+    lg_wr32(out + 8, v->announcers);
+    out[12] = count;
     for (size_t i = 0; i < count; i++) {
         uint8_t *p = out + LG_GROUPS_HEAD_LEN + i * LG_GROUP_ENTRY_LEN;
         const lg_group_t *g = &v->groups[i];
@@ -264,7 +265,7 @@ bool lg_groups_dec(const uint8_t *in, size_t len, lg_groups_t *v)
     if (len < LG_GROUPS_HEAD_LEN) {
         return false;
     }
-    uint8_t count = in[8];
+    uint8_t count = in[12];
     if (count > LG_MAX_GROUPS || len != LG_GROUPS_HEAD_LEN + count * LG_GROUP_ENTRY_LEN) {
         return false;
     }
@@ -273,6 +274,7 @@ bool lg_groups_dec(const uint8_t *in, size_t len, lg_groups_t *v)
     t.seq     = lg_rd32(in);
     t.author  = lg_rd16(in + 4);
     t.next_id = lg_rd16(in + 6);
+    t.announcers = lg_rd32(in + 8);
     t.count   = count;
     for (size_t i = 0; i < count; i++) {
         const uint8_t *p = in + LG_GROUPS_HEAD_LEN + i * LG_GROUP_ENTRY_LEN;

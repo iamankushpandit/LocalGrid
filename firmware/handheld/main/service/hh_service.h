@@ -76,6 +76,7 @@ typedef enum {
     HH_REFUSE_TIME,         /* grid time unset: only urgent broadcasts (D6) */
     HH_REFUSE_FULL,         /* outbox full */
     HH_REFUSE_INVALID,      /* unknown target, empty or bad text, or 1:1 without a key */
+    HH_REFUSE_ANNOUNCE,     /* the admin page does not let this handheld announce (D56) */
 } hh_refuse_t;
 
 typedef struct {
@@ -117,6 +118,7 @@ typedef struct {
     uint32_t       joins;                    /* registrations since boot */
     uint32_t       grid_time;                /* Unix seconds, 0 when not set */
     bool           time_restricted;          /* D6: only receiving and URGENT broadcasts */
+    bool           may_announce;             /* D56: the admin page lets this handheld announce */
     int            preferred_node;           /* -1 automatic */
     uint8_t        n_nodes;
     hh_node_seen_t nodes[HH_MAX_NODES];
@@ -167,6 +169,10 @@ bool hh_service_message(size_t newest_index, hh_message_t *out);
 
 /* Copies up to max messages, newest first; returns how many were copied. */
 size_t hh_service_messages(hh_message_t *out, size_t max);
+
+/* One short sentence for why this handheld may not announce, for the screens to show; empty
+ * when it may. Urgent broadcasts always go out (D6, D56). */
+const char *hh_announce_problem(const hh_status_t *st);
 
 /* One short sentence for a message's state, including why the grid rejected it or why this
  * handheld would not send it. Used by both the screens and the console, so the wording and

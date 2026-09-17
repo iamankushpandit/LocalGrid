@@ -1136,10 +1136,14 @@ static void drain_send_queue(void)
             }
         } else {
             m->state = HH_MSG_REFUSED;
-            m->reject = rc == LG_ERR_TIME ? HH_REFUSE_TIME : rc == LG_ERR_FULL ? HH_REFUSE_FULL : HH_REFUSE_INVALID;
-            const char *why = m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
-                              : m->reject == HH_REFUSE_FULL ? "outbox full"
-                                                            : "not allowed: unknown target, bad text, or no key yet";
+            m->reject = rc == LG_ERR_TIME     ? HH_REFUSE_TIME
+                        : rc == LG_ERR_FULL   ? HH_REFUSE_FULL
+                        : rc == LG_ERR_DENIED ? HH_REFUSE_ANNOUNCE
+                                              : HH_REFUSE_INVALID;
+            const char *why = m->reject == HH_REFUSE_TIME       ? "grid time is not set, so only urgent broadcasts go out"
+                              : m->reject == HH_REFUSE_FULL     ? "outbox full"
+                              : m->reject == HH_REFUSE_ANNOUNCE ? "the admin page does not let this handheld announce"
+                                                                : "not allowed: unknown target, bad text, or no key yet";
             if (req.scope == LG_SCOPE_DIRECT) {
                 ESP_LOGW("MSG", "[MSG] Not sent (%s): 1:1 to device %" PRIu32 ", %u bytes", why, m->target,
                          (unsigned)req.len);
@@ -1315,6 +1319,7 @@ static void publish(void)
         }
     }
     st->groups_version = roster->groups.seq;
+    st->may_announce = lg_roster_may_announce(roster, s.device);
     snprintf(st->group_problem, sizeof(st->group_problem), "%s", s.group_problem);
     st->messages_version = s.msg_version;
     st->free_heap = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -1625,6 +1630,11 @@ void hh_service_reconnect(void)
     }
 }
 
+const char *hh_announce_problem(const hh_status_t *st)
+{
+    return st->may_announce ? "" : "Only urgent messages: the admin page has not let you announce";
+}
+
 const char *hh_message_state_text(const hh_message_t *m)
 {
     switch (m->state) {
@@ -1641,12 +1651,14 @@ const char *hh_message_state_text(const hh_message_t *m)
         case LG_ACK_REJ_TIME:           return "not sent: the clocks disagree by more than two minutes";
         case LG_ACK_REJ_UNKNOWN_TARGET: return "not sent: the grid does not know that handheld";
         case LG_ACK_REJ_INVALID:        return "not sent: the node refused the message";
+        case LG_ACK_REJ_NOT_ALLOWED:    return "not sent: the admin page does not let you announce";
         default:                        return "not sent: the grid rejected it";
         }
     default:
         switch (m->reject) {
         case HH_REFUSE_TIME: return "not sent: grid time is not set, so only urgent broadcasts go out";
         case HH_REFUSE_FULL: return "not sent: too many messages waiting";
+        case HH_REFUSE_ANNOUNCE: return "not sent: the admin page does not let you announce";
         default:             return "not sent: unknown handheld, empty text, or no encryption key yet";
         }
     }

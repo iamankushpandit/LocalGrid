@@ -323,6 +323,10 @@ int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t
     if (lg_client_time_restricted(c) && !urgent_broadcast) {
         return LG_ERR_TIME;
     }
+    /* The AP refuses it anyway (D56); refusing here says so before the message leaves. */
+    if (scope == LG_SCOPE_BROADCAST && !urgent_broadcast && !lg_roster_may_announce(c->roster, c->device)) {
+        return LG_ERR_DENIED;
+    }
 
     int slot = pick_slot(c);
     if (slot < 0) {

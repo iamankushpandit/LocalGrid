@@ -1,13 +1,12 @@
 /*
- * lg_draw.h - a retained-box renderer with no UI library (spike, owner 2026-09-17).
+ * lg_draw.h - the handheld renderer: retained boxes with no UI library (D55).
  *
  * The screen is a set of boxes the caller owns. A box is drawn only when the caller asks,
  * and only its own rectangle is sent to the panel, in bands of the driver's draw buffer, so
  * a clock that ticks repaints a clock and nothing else. Nothing is allocated per draw: the
  * only buffer is lg_bsp's DMA band buffer.
  *
- * Fonts are LVGL's generated C font tables, read directly: bitmaps and glyph tables stay in
- * flash, and LVGL itself is never started. Only the uncompressed text format is supported.
+ * Fonts are generated C tables (lg_font.h): bitmaps and glyph tables stay in flash.
  *
  * Threading: one task draws. Call lg_draw_* from that task only.
  */
@@ -18,7 +17,7 @@
 
 #include "esp_err.h"
 #include "lg_board.h"
-#include "lvgl.h"   /* lv_font_t and the fmt_txt tables only; no LVGL function is called */
+#include "lg_font.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,8 +50,8 @@ typedef struct {
     lg_color_t        border;
     uint8_t           border_w;
     uint8_t           radius;
-    const lv_font_t  *font;
-    const lv_font_t  *fallback;   /* looked up when font has no glyph, e.g. emoji; may be NULL */
+    const lg_font_t  *font;
+    const lg_font_t  *fallback;   /* looked up when font has no glyph, e.g. emoji; may be NULL */
     lg_color_t        fg;
     uint8_t           align;      /* lg_align_t */
     int16_t           pad;
@@ -90,8 +89,8 @@ void lg_paint_panel(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t
                     lg_color_t outside, lg_color_t border, uint8_t border_w, uint8_t radius);
 
 /* len bytes of text from x, with line_top the top of the font's line. */
-void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lv_font_t *font,
-                   const lv_font_t *fallback, lg_color_t fg, const char *text, size_t len);
+void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lg_font_t *font,
+                   const lg_font_t *fallback, lg_color_t fg, const char *text, size_t len);
 
 /* One pixel blended over what is in the band (alpha 255 = opaque), clipped. For small shapes
  * such as the logo, drawn from distance tests. */
@@ -99,7 +98,7 @@ void lg_paint_pixel(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int1
 
 /* Word-wraps text to max_w: starts[i] is the byte offset of line i, and starts[lines] the end of
  * the text, so starts needs max_lines + 1 entries. Returns the number of lines. */
-uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,
+uint8_t lg_text_wrap(const lg_font_t *font, const lg_font_t *fallback, const char *text, int16_t max_w,
                      uint16_t *starts, uint8_t max_lines);
 
 /*
@@ -119,11 +118,29 @@ bool lg_draw_set_text(lg_box_t *box, const char *text);
 void lg_draw_fill(const lg_rect_t *r, lg_color_t color);
 
 /* Width in pixels of UTF-8 text in a font (with fallback). */
-int16_t lg_draw_text_width(const lv_font_t *font, const lv_font_t *fallback, const char *text);
+int16_t lg_draw_text_width(const lg_font_t *font, const lg_font_t *fallback, const char *text);
 
 const lg_draw_stats_t *lg_draw_stats(void);
 
-/* A touch that has been seen twice down, as the LVGL input path does. */
+/* The panel size given by lg_draw_start. */
+uint16_t lg_draw_width(void);
+uint16_t lg_draw_height(void);
+
+/* Colours and fonts for the few screens lg_draw draws itself. */
+typedef struct {
+    lg_color_t       bg;
+    lg_color_t       accent;
+    lg_color_t       muted;
+    lg_color_t       error;
+    const lg_font_t *title;
+    const lg_font_t *small;
+} lg_draw_palette_t;
+
+/* Touch calibration: three targets, tapped and held, saved by lg_bsp. Blocks the caller up to
+ * 30 s a target. True when the panel is calibrated afterwards. */
+bool lg_draw_calibrate(const lg_draw_palette_t *palette);
+
+/* A touch that has been seen twice down, so one noisy sample is not a press. */
 bool lg_draw_touch(int16_t *x, int16_t *y);
 
 static inline bool lg_rect_hit(const lg_rect_t *r, int16_t x, int16_t y)

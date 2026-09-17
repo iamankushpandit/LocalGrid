@@ -59,12 +59,22 @@ esp_err_t lg_draw_start(const lg_board_t *board, lg_color_t bg, uint16_t *width,
     return ESP_OK;
 }
 
+uint16_t lg_draw_width(void)
+{
+    return s.width;
+}
+
+uint16_t lg_draw_height(void)
+{
+    return s.height;
+}
+
 const lg_draw_stats_t *lg_draw_stats(void)
 {
     return &s.stats;
 }
 
-/* ---- fonts: LVGL's fmt_txt tables, read directly ---- */
+/* ---- fonts (lg_font.h) ---- */
 
 static uint32_t utf8_next(const char **p)
 {
@@ -92,10 +102,10 @@ static uint32_t utf8_next(const char **p)
     return cp;
 }
 
-static uint32_t glyph_id(const lv_font_fmt_txt_dsc_t *d, uint32_t cp)
+static uint32_t glyph_id(const lg_font_t *d, uint32_t cp)
 {
     for (uint16_t i = 0; i < d->cmap_num; i++) {
-        const lv_font_fmt_txt_cmap_t *c = &d->cmaps[i];
+        const lg_font_cmap_t *c = &d->cmaps[i];
         if (cp < c->range_start) {
             continue;
         }
@@ -104,15 +114,15 @@ static uint32_t glyph_id(const lv_font_fmt_txt_dsc_t *d, uint32_t cp)
             continue;
         }
         switch (c->type) {
-        case LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY:
+        case LG_FONT_CMAP_FORMAT0_TINY:
             return c->glyph_id_start + rcp;
-        case LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL:
+        case LG_FONT_CMAP_FORMAT0_FULL:
             return c->glyph_id_start + ((const uint8_t *)c->glyph_id_ofs_list)[rcp];
-        case LV_FONT_FMT_TXT_CMAP_SPARSE_TINY:
-        case LV_FONT_FMT_TXT_CMAP_SPARSE_FULL:
+        case LG_FONT_CMAP_SPARSE_TINY:
+        case LG_FONT_CMAP_SPARSE_FULL:
             for (uint16_t k = 0; k < c->list_length; k++) {   /* short lists: a scan beats a search */
                 if (c->unicode_list[k] == rcp) {
-                    if (c->type == LV_FONT_FMT_TXT_CMAP_SPARSE_TINY) {
+                    if (c->type == LG_FONT_CMAP_SPARSE_TINY) {
                         return c->glyph_id_start + k;
                     }
                     return c->glyph_id_start + ((const uint16_t *)c->glyph_id_ofs_list)[k];
@@ -126,39 +136,36 @@ static uint32_t glyph_id(const lv_font_fmt_txt_dsc_t *d, uint32_t cp)
     return 0;
 }
 
-/* The glyph for cp in font, then in fallback. Only uncompressed tables are read. */
-static const lv_font_t *find_glyph(const lv_font_t *font, const lv_font_t *fallback, uint32_t cp,
-                                   const lv_font_fmt_txt_glyph_dsc_t **out)
+/* The glyph for cp in font, then in fallback. */
+static const lg_font_t *find_glyph(const lg_font_t *font, const lg_font_t *fallback, uint32_t cp,
+                                   const lg_glyph_t **out)
 {
-    const lv_font_t *try[2] = { font, fallback };
+    const lg_font_t *try[2] = { font, fallback };
     for (int i = 0; i < 2; i++) {
         if (try[i] == NULL) {
             continue;
         }
-        const lv_font_fmt_txt_dsc_t *d = try[i]->dsc;
-        if (d->bitmap_format != LV_FONT_FMT_TXT_PLAIN) {
-            continue;
-        }
+        const lg_font_t *d = try[i];
         uint32_t id = glyph_id(d, cp);
         if (id != 0) {
-            *out = &d->glyph_dsc[id];
+            *out = &d->glyphs[id];
             return try[i];
         }
     }
     return NULL;
 }
 
-static int16_t advance(const lv_font_fmt_txt_glyph_dsc_t *g)
+static int16_t advance(const lg_glyph_t *g)
 {
     return (int16_t)((g->adv_w + 8u) >> 4);
 }
 
-int16_t lg_draw_text_width(const lv_font_t *font, const lv_font_t *fallback, const char *text)
+int16_t lg_draw_text_width(const lg_font_t *font, const lg_font_t *fallback, const char *text)
 {
     int16_t w = 0;
     const char *p = text;
     while (*p != '\0') {
-        const lv_font_fmt_txt_glyph_dsc_t *g = NULL;
+        const lg_glyph_t *g = NULL;
         if (find_glyph(font, fallback, utf8_next(&p), &g) != NULL) {
             w = (int16_t)(w + advance(g));
         }
@@ -318,8 +325,8 @@ void lg_paint_panel(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t
     }
 }
 
-void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lv_font_t *font,
-                   const lv_font_t *fallback, lg_color_t fg, const char *text, size_t len)
+void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lg_font_t *font,
+                   const lg_font_t *fallback, lg_color_t fg, const char *text, size_t len)
 {
     lg_rect_t visible;
     if (font == NULL || !intersect(&c->band, clip, &visible) || line_top >= visible.y + visible.h ||
@@ -329,25 +336,25 @@ void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16
     const char *p = text;
     const char *end = text + len;
     while (p < end && *p != '\0' && x < visible.x + visible.w) {
-        const lv_font_fmt_txt_glyph_dsc_t *g = NULL;
-        const lv_font_t *f = find_glyph(font, fallback, utf8_next(&p), &g);
+        const lg_glyph_t *g = NULL;
+        const lg_font_t *f = find_glyph(font, fallback, utf8_next(&p), &g);
         if (f == NULL) {
             continue;
         }
-        /* Same placement as LVGL: glyph top from the line top, via the font's base line. The
+        /* Glyph top from the line top, via the font's base line. The
          * fallback is centred on the main font's line, as the theme's fallback copies do. */
         int16_t top = (int16_t)(line_top + (font->line_height - font->base_line) - g->box_h - g->ofs_y);
         if (f != font) {
             top = (int16_t)(top + (font->line_height - f->line_height) / 2 + (f->base_line - font->base_line));
         }
         int16_t left = (int16_t)(x + g->ofs_x);
-        const lv_font_fmt_txt_dsc_t *d = f->dsc;
+        const lg_font_t *d = f;
         x = (int16_t)(x + advance(g));
         if (d->bpp != 4 || top >= visible.y + visible.h || top + g->box_h <= visible.y ||
             left >= visible.x + visible.w || left + g->box_w <= visible.x) {
             continue;
         }
-        const uint8_t *bits = &d->glyph_bitmap[g->bitmap_index];
+        const uint8_t *bits = &d->bitmap[g->bitmap_index];
         for (int16_t gy = 0; gy < g->box_h; gy++) {
             int16_t y = (int16_t)(top + gy);
             if (y < visible.y || y >= visible.y + visible.h) {
@@ -389,7 +396,7 @@ void lg_paint_pixel(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int1
     px[1] = (uint8_t)col;
 }
 
-uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,
+uint8_t lg_text_wrap(const lg_font_t *font, const lg_font_t *fallback, const char *text, int16_t max_w,
                      uint16_t *starts, uint8_t max_lines)
 {
     uint8_t lines = 0;
@@ -407,7 +414,7 @@ uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const cha
         const char *q = p;
         while (*q != '\0' && *q != '\n') {
             const char *before = q;
-            const lv_font_fmt_txt_glyph_dsc_t *g = NULL;
+            const lg_glyph_t *g = NULL;
             uint32_t cp = utf8_next(&q);
             int16_t adv = find_glyph(font, fallback, cp, &g) != NULL ? advance(g) : 0;
             if (w + adv > max_w && before != p) {

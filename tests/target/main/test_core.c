@@ -182,6 +182,27 @@ static void test_groups(void)
     CHECK_EQ(r.groups.count, 0);                        /* no built-in groups */
     CHECK(lg_roster_user(&r, 99) == NULL);
 
+    /* Who may announce (D56): everyone until the admin page says otherwise. */
+    CHECK_EQ(r.groups.announcers, LG_ANNOUNCE_EVERYONE);
+    CHECK(lg_roster_may_announce(&r, 1));
+    CHECK(lg_roster_may_announce(&r, 4));
+    CHECK(!lg_roster_may_announce(&r, 99));             /* not in the roster */
+    lg_group_edit_t who = { .op = LG_GROUP_ANNOUNCERS, .members = (1u << 0) | (1u << 3) };
+    CHECK_EQ(lg_groups_apply_edit(&r, 1, &who, 0), LG_ACK_REJ_NOT_ALLOWED);   /* a handheld may not */
+    CHECK_EQ(r.groups.seq, 0);
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &who, 3), 0);  /* the admin page may */
+    CHECK_EQ(r.groups.seq, 1);
+    CHECK_EQ(r.groups.author, 3);
+    CHECK(lg_roster_may_announce(&r, 1));
+    CHECK(!lg_roster_may_announce(&r, 2));
+    CHECK(lg_roster_may_announce(&r, 4));
+    lg_group_edit_t ghost = { .op = LG_GROUP_ANNOUNCERS, .members = 1u << 20 };
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &ghost, 0), LG_ACK_REJ_INVALID);     /* no such user */
+    who.members = LG_ANNOUNCE_EVERYONE;
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &who, 0), 0);  /* back to everyone */
+    CHECK(lg_roster_may_announce(&r, 2));
+    lg_roster_init_prototype(&r);
+
     lg_group_edit_t e = { .op = LG_GROUP_CREATE, .members = 1u << 1 };
     memcpy(e.name, "Cooks", 5);
     CHECK_EQ(lg_groups_apply_edit(&r, 1, &e, 2), 0);   /* device 1 (user 0) makes it */

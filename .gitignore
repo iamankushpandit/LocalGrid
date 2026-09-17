@@ -38,4 +38,3 @@ tools/.cache/
 
 # Chaos run output (tools/chaos.py)
 chaos-runs/
-firmware/handheld/sdkconfig.spike-*

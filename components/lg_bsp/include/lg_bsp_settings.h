@@ -1,9 +1,9 @@
 /*
  * lg_bsp_settings.h - small stored preferences, kept where the platform belongs.
  *
- * The screens own how a handheld looks and behaves; they do not own flash. lg_ui reaches
+ * The screens own how a handheld looks and behaves; they do not own flash. lg_draw reaches
  * hardware and platform services only through lg_bsp (D27), and `tools/check_layers.py`
- * enforces it: a `#include "nvs.h"` in lg_ui is rejected before the build starts, which is how
+ * enforces it: a `#include "nvs.h"` in lg_draw is rejected before the build starts, which is how
  * the screen saver's own setting first tried to store itself.
  *
  * One namespace, `lgui`, shared with the touch calibration and the audio volume, so every

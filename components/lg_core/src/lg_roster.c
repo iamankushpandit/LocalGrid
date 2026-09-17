@@ -18,6 +18,7 @@ void lg_roster_init_prototype(lg_roster_t *r)
     r->users   = proto_users;
     r->n_users = sizeof(proto_users) / sizeof(proto_users[0]);
     r->groups.next_id = 1;
+    r->groups.announcers = LG_ANNOUNCE_EVERYONE;   /* everyone announces until the admin narrows it (D56) */
     r->version = 2;
 }
 
@@ -58,6 +59,12 @@ bool lg_roster_is_member(const lg_roster_t *r, uint32_t device, uint16_t group_i
     int u = lg_roster_user_index(r, device);
     const lg_group_t *g = lg_roster_group(r, group_id);
     return u >= 0 && u < 32 && g != NULL && (g->members & (1u << (unsigned)u)) != 0;
+}
+
+bool lg_roster_may_announce(const lg_roster_t *r, uint32_t device)
+{
+    int ui = lg_roster_user_index(r, device);
+    return ui >= 0 && ui < 32 && (r->groups.announcers & (1u << (unsigned)ui)) != 0;
 }
 
 uint32_t lg_roster_user_mask(const lg_roster_t *r)
@@ -138,6 +145,15 @@ uint8_t lg_groups_apply_edit(lg_roster_t *r, uint32_t editor, const lg_group_edi
         memcpy(g->name, e->name, bounded_len(e->name, LG_GROUP_NAME_MAX));
         break;
     }
+    case LG_GROUP_ANNOUNCERS:
+        if (editor != 0) {
+            return LG_ACK_REJ_NOT_ALLOWED;   /* who may announce is the admin page's to set (D56) */
+        }
+        if ((e->members & ~known) != 0 && e->members != LG_ANNOUNCE_EVERYONE) {
+            return LG_ACK_REJ_INVALID;
+        }
+        t->announcers = e->members;
+        break;
     default:
         return LG_ACK_REJ_INVALID;
     }

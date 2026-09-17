@@ -23,7 +23,7 @@ description: Build LocalGrid firmware without flashing — every firmware type, 
    | See the matrix and each last result | `python tools/build.py --list` |
 
 3. **Read the RESULT table.** Done when every row shows `OK` with a size and free-space figure.
-4. **Before a change is done**, run the plain `python tools/build.py`. A shared component such as `lg_core`, `lg_crypto`, `lg_identity`, `lg_board`, or `lg_ui` compiles into several firmware types and both chips, so building one target leaves the others unproven.
+4. **Before a change is done**, run the plain `python tools/build.py`. A shared component such as `lg_core`, `lg_crypto`, `lg_identity`, `lg_board`, or `lg_draw` compiles into several firmware types and both chips, so building one target leaves the others unproven.
 
 ## Layout and rules
 
@@ -41,7 +41,7 @@ description: Build LocalGrid firmware without flashing — every firmware type, 
 |---|---|
 | `build has N warning(s)` | The first five are listed; the log has all of them. |
 | `set-target failed` | The IDF environment is not loaded, or the project's `CMakeLists.txt` is broken. |
-| Dependency download errors | A managed component (for example `lvgl/lvgl`) could not be fetched. The first build of a project needs Internet; later builds use `managed_components/`. |
+| Dependency download errors | A managed component could not be fetched. The first build of a project needs Internet; later builds use `managed_components/`. |
 | `file is being used by another process` | Something outside the lock is building the same folder, such as a manual `idf.py` run. Let it finish. |
 | A setting from a defaults file has no effect | The generated `sdkconfig.<target>` predates the edit. Rebuild with `--clean`. |
 | `LAYER ...` lines and `Layer check failed` | Code or a build crossed a layer boundary, and the line names the file and rule. Move the code to the right component; do not relax the check. A node build folder that still holds UI components clears with `--clean` once the project is fixed. |

@@ -161,6 +161,56 @@ static void test_group(void)
     sim_destroy(s);
 }
 
+
+/* Who may announce (D56): the admin page's list, enforced by the handheld and by the AP. */
+static void test_announce_permission(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* The admin page on AP A allows only Ranger; every AP and handheld hears it. */
+    lg_group_edit_t who = { .op = LG_GROUP_ANNOUNCERS, .members = 1u << RANGER };
+    CHECK_EQ(lg_node_edit_groups(&s->nodes[0].node, &who), 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].roster.groups.announcers, 1u << RANGER);
+    CHECK_EQ(s->nodes[2].roster.groups.announcers, 1u << RANGER);
+
+    /* Dad's handheld refuses an announcement before it leaves, and the urgent one still goes. */
+    CHECK_EQ(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, 0, TXT("Cake in the tent")), LG_ERR_DENIED);
+    int urgent = lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("URGENT: bear"));
+    CHECK(urgent >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "URGENT: bear"));
+
+    /* Ranger is on the list, so an ordinary announcement is delivered. */
+    s->now_ms += LG_BROADCAST_INTERVAL_MS + 1;
+    int ok = lg_client_send_text(cl(s, RANGER), LG_SCOPE_BROADCAST, 0, 0, TXT("Trail closed"));
+    CHECK(ok >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, ALEX, "Trail closed"));
+
+    /* A handheld holding an older table still tries: its AP refuses the message itself. */
+    s->clients[DAD].roster.groups.announcers = LG_ANNOUNCE_EVERYONE;
+    s->now_ms += LG_BROADCAST_INTERVAL_MS + 1;
+    int sneaky = lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, 0, TXT("Cake anyway"));
+    CHECK(sneaky >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[sneaky].state, LG_OUT_REJECTED);
+    CHECK_EQ(cl(s, DAD)->outbox[sneaky].reject_reason, LG_ACK_REJ_NOT_ALLOWED);
+    CHECK(!newest_is(s, EMMA, "Cake anyway"));
+
+    /* Back to everyone, and Dad's announcement is carried again. */
+    who.members = LG_ANNOUNCE_EVERYONE;
+    CHECK_EQ(lg_node_edit_groups(&s->nodes[1].node, &who), 0);
+    CHECK(sim_pump(s));
+    s->now_ms += LG_BROADCAST_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, 0, TXT("Cake now")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "Cake now"));
+    sim_destroy(s);
+}
+
 static void test_broadcast_and_rate_limit(void)
 {
     sim_t *s = make_chain();
@@ -914,6 +964,7 @@ void test_messaging(void)
     test_group();
     test_group_edits();
     test_broadcast_and_rate_limit();
+    test_announce_permission();
     test_duplicates_and_retransmit();
     test_offline_and_roam();
     test_time_rule();

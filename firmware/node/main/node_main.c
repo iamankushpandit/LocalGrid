@@ -724,6 +724,17 @@ static void handle_command(const node_cmd_t *cmd)
         if (r->groups.count == 0) {
             printf("  none; make them on the admin page or a handheld\n");
         }
+        printf("Announcements (D56): ");
+        if (r->groups.announcers == LG_ANNOUNCE_EVERYONE) {
+            printf("everyone\n");
+        } else {
+            for (size_t u = 0; u < r->n_users && u < 32u; u++) {
+                if (r->groups.announcers & (1u << u)) {
+                    printf("%s, ", r->users[u].name);
+                }
+            }
+            printf("%s\n", r->groups.announcers == 0 ? "nobody" : "and nobody else");
+        }
         break;
     }
     case NODE_CMD_STATUS:

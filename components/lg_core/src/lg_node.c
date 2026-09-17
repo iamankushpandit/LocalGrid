@@ -421,6 +421,9 @@ static uint8_t validate_text(lg_node_t *n, const lg_env_t *e, const uint8_t *bod
         if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
             return LG_ACK_REJ_INVALID;
         }
+        if (!urgent_broadcast && !lg_roster_may_announce(r, e->origin_id)) {
+            return LG_ACK_REJ_NOT_ALLOWED;   /* the admin page decides who may announce (D56) */
+        }
         uint32_t interval = urgent_broadcast ? LG_URGENT_INTERVAL_MS : LG_BROADCAST_INTERVAL_MS;
         if (n->has_broadcast[ui] && node_now_ms(n) - n->last_broadcast_ms[ui] < interval) {
             return LG_ACK_REJ_RATE;

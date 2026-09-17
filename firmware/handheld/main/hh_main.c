@@ -1,12 +1,9 @@
 /*
  * LocalGrid handheld firmware (prototype milestones P5, P6).
  *
- * Boot: identity, NVS, network service, the quick self test (decision D24), display, touch
- * calibration if needed, then the launcher. service/ and ui/ never include each other's
+ * Boot: identity, NVS, network service, the quick self test (decision D24), then the UI, which
+ * calibrates touch if needed and shows the launcher. service/ and ui/ never include each other's
  * layers (D27); they meet only through hh_service.h.
- *
- * This task stays alive afterwards to run the jobs the drawing task must not: touch
- * calibration waits for presses, and the self test runs for tens of milliseconds.
  */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -16,22 +13,13 @@
 #include "hh_service.h"
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
-#include "lg_bsp_touch.h"
-#include "lg_display.h"
 #include "lg_identity.h"
 #include "lg_power.h"
 #include "lg_selftest.h"
-#include "lg_theme.h"
-#include "lg_ui_input.h"
-#include "lg_ui_screensaver.h"
 #include "nvs_flash.h"
-#include "ui_launcher.h"
-#include "ui_settings.h"
-#include "spike_ui.h"
+#include "ui_main.h"
 
 static const char *TAG = "HH";
-
-#define SCREENSAVER_IDLE_MS 60000u   /* a minute untouched, then the rain (D35) */
 
 void app_main(void)
 {
@@ -100,47 +88,10 @@ void app_main(void)
     }
     hh_mem_mark("after self test");
 
-#if CONFIG_LG_HH_UI_SPIKE
-    /* The no-LVGL spike: LVGL is linked for its font tables but never started. */
-    if (board == NULL || spike_ui_start(board) != ESP_OK) {
-        ESP_LOGE(TAG, "[UI] Spike did not start");
-    }
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-#endif
-
-    static lg_display_t display;
-    if (!lg_board_has_display(board) || lg_display_start(board, &display) != ESP_OK) {
+    /* The UI (D55): lg_draw and its own task, which owns the panel, touch, and every screen. */
+    if (!lg_board_has_display(board) || ui_start(board) != ESP_OK) {
         ESP_LOGE(TAG, "[UI] No display on this board; decision D23 needs one on every handheld");
         return;
     }
-    hh_mem_mark("after display, LVGL, touch");
-    lg_theme_init(display.width, display.height, display.px_per_10mm);
-    while (lg_bsp_touch_needs_calibration()) {
-        lg_ui_calibrate();
-    }
-    ui_launcher_start(&identity);
-
-    /* This task is not the drawing task, so the saver's widgets are built under the
-     * lock. It lives on the top layer and leaves the launcher underneath untouched. */
-    lg_display_lock(1000);
-    lg_ui_screensaver_start(SCREENSAVER_IDLE_MS);
-    lg_display_unlock();
-    hh_mem_mark("after screen saver");
-
-    for (;;) {
-        switch (ui_settings_take_job()) {
-        case UI_JOB_CALIBRATE:
-            lg_ui_calibrate();
-            ui_settings_open();   /* Settings was freed when calibration replaced it; build it again */
-            break;
-        case UI_JOB_SELFTEST:
-            ESP_LOGI("TEST", "[TEST] Self test: %s", (lg_selftest_quick(), lg_selftest_summary()));
-            break;
-        default:
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    hh_mem_mark("after UI start");
 }

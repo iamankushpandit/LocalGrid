@@ -17,18 +17,13 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "lg_envelope.h"
-#include "ui_chat.h"
-#include "ui_group.h"
-#include "spike_ui.h"
+#include "ui_main.h"
+#include "ui_nav.h"
 #include "hh_service.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_touch.h"
-#include "lg_display.h"
+#include "lg_bsp_settings.h"
 #include "lg_identity.h"
-#include "lg_ui_screensaver.h"
-#include "ui_home.h"
-#include "ui_launcher.h"
-#include "ui_settings.h"
 
 
 /*
@@ -164,9 +159,9 @@ static int cmd_saver(int argc, char **argv)
             printf("saver <on|off>, or saver alone to show the setting\n");
             return 1;
         }
-        lg_ui_screensaver_set_enabled(on);   /* kept in NVS, so it survives a reboot */
+        lg_bsp_setting_set_bool("saver", on);   /* kept in NVS, so it survives a reboot */
     }
-    printf("Screen saver: %s\n", lg_ui_screensaver_enabled() ? "on" : "off");
+    printf("Screen saver: %s\n", lg_bsp_setting_get_bool("saver", true) ? "on" : "off");
     return 0;
 }
 
@@ -224,11 +219,9 @@ static int cmd_status(int argc, char **argv)
     } else {
         printf("  PSRAM: none on this board\n");
     }
-    /* Screens are built and refreshed on the drawing task, and LVGL's layout recurses, so a
-     * deeply nested screen can overflow that stack. The panic says a stack overflowed but
-     * never how close the boards that survive are, which is the figure worth watching. */
-    printf("  drawing task: %" PRIu32 " bytes of stack unused at its worst\n",
-           lg_display_stack_headroom());
+    /* Screens are built and drawn on the UI task. The panic says a stack overflowed but never
+     * how close the boards that survive are, which is the figure worth watching. */
+    printf("  UI task: %" PRIu32 " bytes of stack unused at its worst\n", ui_stack_headroom());
     /* Touch state, because it decides whether a press can happen at all: a resistive panel
      * maps no coordinates until it is calibrated, so an uncalibrated board cannot report a
      * press -- which is the difference between "a stray touch pressed something" and "a
@@ -524,18 +517,18 @@ static int cmd_chat(int argc, char **argv)
     char *end = NULL;
     long device = strtol(who, &end, 10);
     if (strcmp(who, "all") == 0) {
-        ui_chat_open_conversation(LG_SCOPE_BROADCAST, LG_TARGET_ALL, "Everyone");
+        ui_open_chat(LG_SCOPE_BROADCAST, LG_TARGET_ALL, "Everyone");
         printf("opened Everyone\n");
         return 0;
     }
     if (end != who && *end == '\0' && device > 0) {
-        ui_chat_open_conversation(LG_SCOPE_DIRECT, (uint32_t)device, person_name(st, (uint32_t)device));
+        ui_open_chat(LG_SCOPE_DIRECT, (uint32_t)device, person_name(st, (uint32_t)device));
         printf("opened the chat with device %ld\n", device);
         return 0;
     }
     for (uint8_t i = 0; i < st->n_groups; i++) {
         if (strcmp(st->groups[i].name, who) == 0) {
-            ui_chat_open_conversation(LG_SCOPE_GROUP, st->groups[i].id, st->groups[i].name);
+            ui_open_chat(LG_SCOPE_GROUP, st->groups[i].id, st->groups[i].name);
             printf("opened group %s\n", st->groups[i].name);
             return 0;
         }
@@ -544,93 +537,52 @@ static int cmd_chat(int argc, char **argv)
     return 1;
 }
 
-/*
- * screen <settings|status|groups|home>: opens that screen, so the screens can be driven from serial
- * while testing (D23, D25, D28), the way `chat` already opens a conversation.
- *
- * Added for a specific reason: Settings is the deepest tree this firmware builds -- screen,
- * tabview, content, page, list, row, label -- and it is what overflowed the drawing task's
- * stack. Without this there was no way to reach it except by tapping the glass, so the one
- * screen whose stack cost matters most was the one that could not be measured.
- */
-#if CONFIG_LG_HH_UI_SPIKE
-/* spike chat | spike scroll <px> | spike kb <on|off> | spike type <text> | spike log */
-static int cmd_spike(int argc, char **argv)
+/* ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <...> | log: drive the screens
+ * from serial while testing (D23, D25, D28). */
+static int cmd_ui(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "chat") == 0) {
-        spike_ui_request_cmd(SPIKE_CHAT, 0, NULL);
-    } else if (argc == 3 && strcmp(argv[1], "scroll") == 0) {
-        spike_ui_request_cmd(SPIKE_SCROLL, (int)strtol(argv[2], NULL, 10), NULL);
+    if (argc == 3 && strcmp(argv[1], "scroll") == 0) {
+        ui_request_cmd(UI_SCROLL, (int)strtol(argv[2], NULL, 10), NULL);
     } else if (argc == 3 && strcmp(argv[1], "kb") == 0) {
-        spike_ui_request_cmd(SPIKE_KEYBOARD, strcmp(argv[2], "on") == 0, NULL);
+        ui_request_cmd(UI_KEYBOARD, strcmp(argv[2], "on") == 0, NULL);
     } else if (argc >= 3 && strcmp(argv[1], "type") == 0) {
-        spike_ui_request_cmd(SPIKE_TYPE, 0, argv[2]);
+        ui_request_cmd(UI_TYPE, 0, argv[2]);
     } else if (argc >= 2 && strcmp(argv[1], "log") == 0) {
-        spike_ui_request_cmd(SPIKE_LOG, 0, NULL);
-    } else if (argc == 3 && strcmp(argv[1], "go") == 0) {
-        static const char *const names[] = { "home", "status", "messages", "chat", "groups", "edit", "settings" };
-        int to = -1;
-        for (int i = 0; i < 7; i++) {
-            if (strcmp(argv[2], names[i]) == 0) {
-                to = i;
-            }
-        }
-        if (to < 0 || to == 3 || to == 5) {
-            printf("go home|status|messages|groups|settings\n");
-            return 1;
-        }
-        spike_ui_request_cmd(SPIKE_GO, to, NULL);
+        ui_request_cmd(UI_LOG, 0, NULL);
     } else if (argc == 4 && strcmp(argv[1], "tap") == 0) {
         long x = strtol(argv[2], NULL, 10);
         long y = strtol(argv[3], NULL, 10);
-        spike_ui_request_cmd(SPIKE_TAP, (int)((x << 16) | (y & 0xFFFF)), NULL);
+        ui_request_cmd(UI_TAP, (int)((x << 16) | (y & 0xFFFF)), NULL);
     } else if (argc == 3 && strcmp(argv[1], "page") == 0) {
         int page = strcmp(argv[2], "numbers") == 0 ? 1 : strcmp(argv[2], "emoji") == 0 ? 2
                  : strcmp(argv[2], "shift") == 0 ? 3 : 0;
-        spike_ui_request_cmd(SPIKE_PAGE, page, NULL);
+        ui_request_cmd(UI_PAGE, page, NULL);
     } else {
-        printf("usage: spike chat | go <screen> | tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | log\n");
+        printf("usage: ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | log\n");
         return 1;
     }
     return 0;
 }
-#endif
 
+/* screen <home|status|messages|groups|settings>: opens that screen, the way `chat` opens a
+ * conversation, so every screen can be reached from serial (D23, D25, D28). */
 static int cmd_screen(int argc, char **argv)
 {
-    if (argc != 2) {
-        printf("usage: screen <settings|status|groups|home>\n");
-        return 1;
+    static const struct {
+        const char *name;
+        ui_nav_t    nav;
+    } SCREENS[] = {
+        { "home", NAV_HOME },     { "status", NAV_STATUS },     { "messages", NAV_CONVERSATIONS },
+        { "groups", NAV_GROUPS }, { "settings", NAV_SETTINGS },
+    };
+    for (size_t i = 0; argc == 2 && i < sizeof(SCREENS) / sizeof(SCREENS[0]); i++) {
+        if (strcmp(argv[1], SCREENS[i].name) == 0) {
+            ui_request_cmd(UI_GO, (int)SCREENS[i].nav, NULL);
+            printf("opened %s\n", SCREENS[i].name);
+            return 0;
+        }
     }
-    const char *which = argv[1];
-#if CONFIG_LG_HH_UI_SPIKE
-    if (strcmp(which, "status") == 0 || strcmp(which, "home") == 0) {
-        spike_ui_request(strcmp(which, "status") == 0);
-        printf("asked the spike for %s\n", which);
-        return 0;
-    }
-#endif
-    if (strcmp(which, "settings") == 0) {
-        ui_settings_open();
-        printf("opened Settings; run 'status' to read the drawing task's stack after it drew\n");
-        return 0;
-    }
-    if (strcmp(which, "status") == 0) {
-        ui_home_open();
-        printf("opened Status\n");
-        return 0;
-    }
-    if (strcmp(which, "groups") == 0) {
-        ui_group_open_list();
-        printf("opened Groups\n");
-        return 0;
-    }
-    if (strcmp(which, "home") == 0) {
-        ui_launcher_open();
-        printf("opened the launcher\n");
-        return 0;
-    }
-    printf("unknown screen '%s'; try settings, status, groups or home\n", which);
+    printf("usage: screen <home|status|messages|groups|settings>\n");
     return 1;
 }
 
@@ -700,10 +652,8 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "send",      .help = "send <device|group|all|urgent> <text>: send a message",   .func = cmd_send },
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
-        { .command = "screen",    .help = "screen <settings|status|groups|home>: open that screen",          .func = cmd_screen },
-#if CONFIG_LG_HH_UI_SPIKE
-        { .command = "spike",     .help = "spike chat | scroll <px> | kb <on|off> | type <word> | log (no-LVGL spike)", .func = cmd_spike },
-#endif
+        { .command = "screen",    .help = "screen <home|status|messages|groups|settings>: open that screen", .func = cmd_screen },
+        { .command = "ui",        .help = "ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <p> | log", .func = cmd_ui },
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },
         { .command = "tone",      .help = "tone [hz] [ms]: play one tone on the speaker",           .func = cmd_tone },
         { .command = "cue",       .help = "cue <sent|received|urgent>: play a notification sound",  .func = cmd_cue },

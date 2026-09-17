@@ -605,6 +605,16 @@ static esp_err_t h_status(httpd_req_t *req)
                       s.devices[i].device, un);
     }
     if (n > 0 && (size_t)n < sizeof(out)) {
+        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"announce_all\":%s,\"announcers\":[",
+                      r->groups.announcers == LG_ANNOUNCE_EVERYONE ? "true" : "false");
+    }
+    for (size_t u = 0, first = 1; u < r->n_users && u < 32u && n > 0 && (size_t)n < sizeof(out); u++) {
+        if (r->groups.announcers & (1u << u)) {
+            n += snprintf(out + n, sizeof(out) - (size_t)n, "%s%" PRIu32, first ? "" : ",", r->users[u].device);
+            first = 0;
+        }
+    }
+    if (n > 0 && (size_t)n < sizeof(out)) {
         n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"groups_version\":%" PRIu32 ",\"groups\":[", r->groups.seq);
     }
     for (size_t i = 0; i < r->groups.count && n > 0 && (size_t)n < sizeof(out); i++) {
@@ -787,11 +797,19 @@ static esp_err_t h_groups(httpd_req_t *req)
         e->op = LG_GROUP_UPDATE;
     } else if (strcmp(op, "delete") == 0) {
         e->op = LG_GROUP_DELETE;
+    } else if (strcmp(op, "announcers") == 0) {
+        /* Who may announce (D56). "all" keeps every handheld, including ones not seen yet. */
+        e->op = LG_GROUP_ANNOUNCERS;
+        if (strcmp(devices, "all") == 0) {
+            e->members = LG_ANNOUNCE_EVERYONE;
+        } else if (!parse_members(&snap.roster, devices, &e->members)) {
+            return send_error(req, "400 Bad Request", "Pick handhelds from the list.");
+        }
     } else {
         return send_error(req, "400 Bad Request", "Unknown group action.");
     }
     e->id = id <= 0xFFFFu ? (uint16_t)id : 0u;
-    if (e->op != LG_GROUP_DELETE) {
+    if (e->op != LG_GROUP_DELETE && e->op != LG_GROUP_ANNOUNCERS) {
         if (strlen(name) == 0 || strlen(name) > LG_GROUP_NAME_MAX) {
             return send_error(req, "400 Bad Request", "A group name is 1 to 15 bytes (fewer with accents or emoji).");
         }
@@ -814,7 +832,11 @@ static esp_err_t h_groups(httpd_req_t *req)
     if (xQueueSend(g_app.cmd_queue, &cmd, pdMS_TO_TICKS(500)) != pdTRUE) {
         return send_error(req, "503 Service Unavailable", "The AP is busy. Try again.");
     }
-    ESP_LOGI(TAG, "[WEB] Admin group %s: id %u \"%s\"", op, e->id, e->name);
+    if (e->op == LG_GROUP_ANNOUNCERS) {
+        ESP_LOGI(TAG, "[WEB] Admin announcers: 0x%08" PRIX32, e->members);
+    } else {
+        ESP_LOGI(TAG, "[WEB] Admin group %s: id %u \"%s\"", op, e->id, e->name);
+    }
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 

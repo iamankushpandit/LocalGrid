@@ -2,7 +2,7 @@
  * lg_bsp_display.h - display panel driver (board support layer, decision D27).
  *
  * Brings up a board's panel from its profile and moves pixels. It knows nothing
- * about LVGL or screens; lg_ui builds on it.
+ * about screens; lg_draw builds on it.
  */
 #pragma once
 

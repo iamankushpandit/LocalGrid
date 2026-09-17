@@ -640,7 +640,7 @@ static void audio_task(void *arg)
  *
  * Claiming them at boot cost the tighter board about 20 KB of heap. Audio starts as soon as
  * the board profile is known, well before Wi-Fi, so that the console can be asked for a cue
- * immediately; but a task and its stack standing there while lwIP and LVGL take their buffers
+ * immediately; but a task and its stack standing there while lwIP and the display take their buffers
  * changes what fits where, and the free heap at Online fell from 115 KB to 94 KB. Waiting
  * costs nothing: the first cue creates both in a few hundred microseconds.
  *

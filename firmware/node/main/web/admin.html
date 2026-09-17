@@ -171,6 +171,20 @@
     </form>
   </section>
 
+
+  <section id="announce-card" hidden>
+    <h2>Announcements</h2>
+    <p class="hint" style="margin:0 0 10px">An announcement goes to every handheld and takes over its screen, so choose who may send one. Urgent messages are never limited: anyone can always raise an emergency.</p>
+    <form id="announce-form">
+      <label><input type="checkbox" id="announce-all"> Everyone, including handhelds not seen yet</label>
+      <div class="members" id="announce-members"></div>
+      <div class="row">
+        <button type="submit" id="announce-save">Save</button>
+      </div>
+      <div class="msg" id="announce-msg"></div>
+    </form>
+  </section>
+
   <section id="avail-card" hidden>
     <h2>Availability, last 2 hours</h2>
     <div class="avail" id="avail"></div>
@@ -230,7 +244,7 @@
   const fmtGridTime = (t) => t ? new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "time not set then";
 
   function show(ids) {
-    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "groups-card", "devices-card"]) {
+    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "groups-card", "announce-card", "devices-card"]) {
       $(id).hidden = !ids.includes(id);
     }
     $("logout").hidden = !ids.includes("time-card");
@@ -418,6 +432,7 @@
     $("groups-empty").hidden = knownGroups.length > 0;
     $("groups-table").hidden = knownGroups.length === 0;
     if (firstLoad && editingId === 0) renderMemberChoices([]);   // never clobber a form in progress
+    renderAnnouncers(s);
   }
 
   async function groupAction(body, done) {
@@ -465,8 +480,51 @@
     if (await groupAction(body, editingId ? `${name} saved.` : `${name} added.`)) resetGroupForm();
   });
 
+
+  // ---- who may announce (D56) ----
+  let announceAll = true;
+  let announcers = [];
+  let announceEditing = false;   // never clobber the boxes while the admin is choosing
+
+  function renderAnnouncers(s) {
+    if (announceEditing) return;
+    announceAll = s.announce_all !== false;
+    announcers = s.announcers || [];
+    $("announce-all").checked = announceAll;
+    $("announce-members").innerHTML = knownUsers.map((u) =>
+      `<label class="member"><input type="checkbox" value="${u.device}" ${announceAll || announcers.includes(u.device) ? "checked" : ""} ${announceAll ? "disabled" : ""}>${escHtml(u.name)}</label>`
+    ).join("");
+  }
+
+  $("announce-all").addEventListener("change", () => {
+    announceEditing = true;
+    const all = $("announce-all").checked;
+    for (const box of $("announce-members").querySelectorAll("input")) {
+      box.disabled = all;
+      if (all) box.checked = true;
+    }
+  });
+
+  $("announce-members").addEventListener("change", () => { announceEditing = true; });
+
+  $("announce-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const all = $("announce-all").checked;
+    const devices = [...$("announce-members").querySelectorAll("input:checked")].map((i) => i.value);
+    if (!all && devices.length === 0) { say("announce-msg", "Pick at least one handheld, or choose everyone.", false); return; }
+    say("announce-msg", "Saving…", true);
+    try {
+      await api("/api/groups", { op: "announcers", devices: all ? "all" : devices.join(",") });
+      announceEditing = false;
+      say("announce-msg", all ? "Everyone can announce." : "Saved.", true);
+      setTimeout(refresh, 800);
+    } catch (e) {
+      say("announce-msg", e.message, false);
+    }
+  });
+
   function beginDashboard() {
-    show(["time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "groups-card", "devices-card"]);
+    show(["time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "groups-card", "announce-card", "devices-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);

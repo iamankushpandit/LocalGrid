@@ -40,6 +40,7 @@ typedef enum {
     LG_ERR_FULL       = -8,   /* bounded table or queue is full */
     LG_ERR_ID         = -9,   /* invalid message identity (sequence 0) */
     LG_ERR_TIME       = -10,  /* sending restricted until grid time is correct */
+    LG_ERR_DENIED     = -11,  /* the admin page does not allow this (D56) */
 } lg_err_t;
 
 const char *lg_err_str(int err);

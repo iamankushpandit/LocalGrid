@@ -55,6 +55,7 @@ typedef enum {
     LG_ACK_REJ_UNKNOWN_TARGET = 7,
     LG_ACK_REJ_INVALID        = 8,
     LG_ACK_READ               = 9,   /* the recipient's handheld showed it to them */
+    LG_ACK_REJ_NOT_ALLOWED    = 10,  /* the admin page does not let this handheld announce (D56) */
 } lg_ack_status_t;
 typedef struct {
     uint32_t author;
@@ -119,22 +120,25 @@ typedef struct {
 } lg_hello_t;
 
 /*
- * GROUPS: the whole group table (D52), little-endian:
+ * GROUPS: the whole group table (D52) and who may announce (D56), little-endian:
  *     0  u32  seq
  *     4  u16  author (AP index)
  *     6  u16  next_id
- *     8  u8   count, 0..LG_MAX_GROUPS
- *     9  count x LG_GROUP_ENTRY_LEN:
+ *     8  u32  announcers (roster user bits; all bits set = everyone, the default)
+ *    12  u8   count, 0..LG_MAX_GROUPS
+ *    13  count x LG_GROUP_ENTRY_LEN:
  *          0  u16   id (not 0, below next_id, unique)
  *          2  u32   members (roster user bits)
  *          6  16 B  name, 1..15 bytes of UTF-8, NUL-padded
- * The length is exactly 9 + count x 22: 185 bytes at most, inside even an ESP-NOW v1 frame.
+ * The length is exactly 13 + count x 22: 189 bytes at most, inside even an ESP-NOW v1 frame.
+ * One version covers both, because both are admin-owned policy carried by (seq, author).
  */
-#define LG_GROUPS_HEAD_LEN   9u
+#define LG_GROUPS_HEAD_LEN   13u
 #define LG_GROUP_ENTRY_LEN   22u
 #define LG_GROUPS_MAX_LEN    (LG_GROUPS_HEAD_LEN + LG_MAX_GROUPS * LG_GROUP_ENTRY_LEN)
 
-/* GROUP_EDIT: u8 op, u16 id, u32 members, 16 B name (NUL-padded). Exactly 23 bytes. */
+/* GROUP_EDIT: u8 op, u16 id, u32 members, 16 B name (NUL-padded). Exactly 23 bytes.
+ * LG_GROUP_ANNOUNCERS carries the announcer bits in `members`; id and name are unused. */
 #define LG_GROUP_EDIT_LEN    23u
 
 size_t lg_register_enc(const lg_register_t *v, uint8_t *out);

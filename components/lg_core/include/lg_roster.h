@@ -3,8 +3,9 @@
  *
  * Users are still the prototype's fixed list (docs/DESIGN_REVIEW.md answer 46). Groups are
  * not: they are made, renamed, given members, and removed on the admin page or on a handheld,
- * and every AP and handheld holds a copy (D52). A copy carries a version, (seq, author), and
- * the higher version wins everywhere, as the admin settings do (D45).
+ * and every AP and handheld holds a copy (D52). The same table carries who may announce, which
+ * only the admin page sets (D56). A copy carries a version, (seq, author), and the higher version
+ * wins everywhere, as the admin settings do (D45).
  *
  * The table lives inside the roster, so the owner of a roster (AP or handheld firmware) keeps
  * one mutable lg_roster_t and hands the core a pointer to it.
@@ -18,6 +19,9 @@ extern "C" {
 #endif
 
 #define LG_GROUP_NAME_MAX  15u   /* UTF-8 bytes in a group name */
+
+/* Announcers: every bit set means everyone may announce, which is how a grid starts (D56). */
+#define LG_ANNOUNCE_EVERYONE 0xFFFFFFFFu
 
 typedef struct {
     uint32_t    device;   /* device index = user address; one user per handheld */
@@ -34,6 +38,7 @@ typedef struct {
     uint32_t   seq;       /* 0 = never changed anywhere; each change adds one */
     uint16_t   author;    /* AP index that made this version */
     uint16_t   next_id;   /* the id the next new group gets; only ever grows */
+    uint32_t   announcers;/* bit i set: roster user i may send an ordinary broadcast (D56) */
     uint8_t    count;
     lg_group_t groups[LG_MAX_GROUPS];
 } lg_groups_t;
@@ -50,6 +55,7 @@ typedef enum {
     LG_GROUP_CREATE = 1,   /* name and members; the new id is assigned */
     LG_GROUP_UPDATE = 2,   /* id, and its new name and members */
     LG_GROUP_DELETE = 3,   /* id */
+    LG_GROUP_ANNOUNCERS = 4,   /* members = who may announce; admin page only (D56) */
 } lg_group_op_t;
 
 typedef struct {
@@ -65,6 +71,12 @@ int              lg_roster_group_index(const lg_roster_t *r, uint16_t group_id);
 const lg_group_t*lg_roster_group(const lg_roster_t *r, uint16_t group_id);
 bool             lg_roster_is_member(const lg_roster_t *r, uint32_t device, uint16_t group_id);
 
+/*
+ * May this handheld send an ordinary (not urgent) broadcast (D56)? An unknown device may not.
+ * Urgent broadcasts are never limited: D6 lets them out when nothing else gets through.
+ */
+bool lg_roster_may_announce(const lg_roster_t *r, uint32_t device);
+
 /* Bits for every user in the roster: the only member bits a group may carry. */
 uint32_t lg_roster_user_mask(const lg_roster_t *r);
 
@@ -76,8 +88,9 @@ bool lg_groups_newer(const lg_groups_t *a, const lg_groups_t *b);
  * handheld asking, or 0 for the admin page. A handheld that creates a group is always a member
  * of it, and only a member may rename, change, or remove a group; the admin may do anything.
  * Returns 0 on success, or the lg_ack_status_t that refuses it (REJ_INVALID for a bad name or
- * members, a full table, or an unknown op; REJ_UNKNOWN_TARGET for no such group;
- * REJ_NOT_MEMBER). On refusal nothing changes.
+ * members, a full table, or an unknown op; REJ_UNKNOWN_TARGET for no such group; REJ_NOT_MEMBER;
+ * REJ_NOT_ALLOWED when a handheld tries to set the announcers, which is the admin page's alone).
+ * On refusal nothing changes.
  */
 uint8_t lg_groups_apply_edit(lg_roster_t *r, uint32_t editor, const lg_group_edit_t *e, uint16_t author);
 

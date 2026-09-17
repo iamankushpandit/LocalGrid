@@ -1,5 +1,5 @@
 # lg_bsp: board support drivers (decision D27): SPI and I2C buses, display panel, touch controllers.
-# Knows board profiles; knows nothing about LVGL, screens, or the network.
+# Knows board profiles; knows nothing about screens or the network.
 idf_component_register(SRCS src/lg_bsp_display.c
                             src/lg_bsp_touch.c
                             src/lg_bsp_audio.c

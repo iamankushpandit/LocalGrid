@@ -15,12 +15,12 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `components/lg_crypto` | The only crypto interface (PSA Crypto backend). |
 | `components/lg_identity` | Device ID partition and the serial `id` responder. |
 | `components/lg_board` | Board profiles: pins and panel and touch facts, selected by the board code in the device ID. Data only. |
-| `components/lg_bsp` | Board support drivers: SPI and I2C buses, display panel, touch controllers. No LVGL. |
-| `components/lg_ui` | LVGL display glue, theme, pointer input, and the calibration screen. No drivers. |
+| `components/lg_bsp` | Board support drivers: SPI and I2C buses, display panel, touch controllers. No screens. |
+| `components/lg_draw` | The handheld renderer (D55): retained boxes and painted regions, hardware scroll, fonts, touch calibration. No UI library and no drivers. |
 | `components/lg_power` | Supply voltage from a board's sense divider and the `power` console command, shared by every firmware. |
 | `components/lg_selftest` | The quick boot check (D24): envelope, dedup, bodies, UTF-8, and the RFC crypto vectors. Reachable from Status. |
 | `firmware/node` | Infrastructure node firmware. |
-| `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui`, meeting only in `hh_service.h`. |
+| `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui` (drawn with `lg_draw`), meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
 | `tests/target` | On-board test app with a simulated three-node grid. |
 | `tools/` | Secrets generator and multi-port serial capture. |
@@ -45,7 +45,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 - **Nonces never repeat.** Nonces are built from (author, boot counter, sequence); the boot counter is committed to NVS before any radio transmit. A retransmission reuses the identical plaintext, AAD, and grid time.
 - **Prefix public symbols** with `lg_` (core, crypto) or a module prefix such as `lgbb_`. Short names collide with Espressif's closed libraries; `bb_init` already exists in the PHY library.
 - **Test on the ESP32 boards only** (D25). The PC builds, flashes, and reads serial logs; it never stands in for a handheld or a node.
-- **Layers stay separate** (D27). Infrastructure components never include UI or LVGL headers. `lg_bsp` is the only UI-side code that includes ESP-IDF drivers, and `lg_ui` reaches hardware only through it. Handheld screens and services exchange events and commands through a queue: screens never touch sockets, and services never touch LVGL. `tools/check_layers.py` checks this, and `tools/build.py` runs it on every build.
+- **Layers stay separate** (D27). Infrastructure components never include UI headers. `lg_bsp` is the only UI-side code that includes ESP-IDF drivers, and `lg_draw` reaches hardware only through it. Handheld screens and services exchange events and commands through a queue: screens never touch sockets, and services never draw. LVGL is retired (D55); nothing may bring it back. `tools/check_layers.py` checks this, and `tools/build.py` runs it on every build.
 - **Information is sticky** (D48). Anything a device learns that another could use must survive the holder restarting and be shared with neighbours, versioned so newer wins and duplicates merge, and announced on link up and periodically. A record kept on only one device is a design gap.
 - **Devices hold bytes, browsers make text** (D49). Store and send state as packed binary records; decode, format, and draw in the browser or PC tool. No long-lived text buffers on a device; new page APIs are binary with a documented layout.
 - **Handhelds show results on their screen** (D23). Any firmware flashed to a handheld, including test builds, drives the display with its status and results; serial output is an addition, never the only output.

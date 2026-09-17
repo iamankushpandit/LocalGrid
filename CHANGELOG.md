@@ -5,6 +5,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (D56: the admin page says who may announce)
+- Owner: the APs' web page defines who may make announcements. Urgent broadcasts stay open to everyone, and a new grid starts with everyone allowed.
+- Protocol: the GROUPS body carries `announcers`, a bit per roster user, in a 13-byte head (was 9). One version (seq, author) covers groups and announcers together, so the list is sticky the way groups are: saved in NVS, announced on link up and periodically, and sent to a handheld when it registers (D48). `LG_GROUP_ANNOUNCERS` is a new GROUP_EDIT op, refused with the new `LG_ACK_REJ_NOT_ALLOWED` when a handheld asks for it.
+- Enforced at both ends: `lg_client_send_text` returns the new `LG_ERR_DENIED` before the message leaves, and `lg_node` refuses a broadcast that arrives anyway with `LG_ACK_REJ_NOT_ALLOWED`. Urgent broadcasts skip both checks.
+- Admin page: a new Announcements card with "Everyone, including handhelds not seen yet" and a handheld list; `/api/status` reports `announce_all` and `announcers`, and `/api/groups` takes `{"op":"announcers","devices":"all"|"1,2"}`.
+- Handheld: the Everyone conversation shows "Urgent only: ask the admin" in the field with the send tick greyed out when this handheld may not announce, and a refused message reads "not sent: the admin page does not let you announce". The AP console's `groups` prints who may announce.
+- Fixed while testing: `lg_msg_ack_dec` rejected any status above the highest it knew, so the new refusal never reached the handheld and the message sat pending. The bound now includes it; the comment there already warned about this.
+- Verified on the boards: `tests/target` on the Hosyond, 710 checks, 0 failures, including a new scenario where only Ranger may announce (Dad's announcement refused by his own handheld, his urgent broadcast delivered, Ranger's announcement delivered, and a handheld with a forged older table refused by its AP). All five boards flashed; MAIN reports "Announcements (D56): everyone" and kept its grid time through the flash (`time CARRIED`); a broadcast from the Hosyond arrived on the Freenove. **Not verified on hardware**: setting a narrower list from the admin page, which needs a browser on the grid network.
+
+### Changed (D55: LVGL retired; the no-LVGL UI is the handheld UI)
+- Owner: make the no-LVGL UI the default and retire LVGL. A normal build and `flash.py` now put it on every handheld; there is no option to go back.
+- Deleted: `components/lg_ui` (LVGL glue, theme, widgets, calibration, screen saver), the LVGL screens in `firmware/handheld/main/ui`, `CONFIG_LG_HH_UI_SPIKE`, `sdkconfig.spike`, and the LVGL settings in both `sdkconfig.defaults`. No project downloads LVGL any more.
+- The spike code moved to `firmware/handheld/main/ui/` with `ui_` names (`ui_main.c`, `ui_chat.c`, `ui_kb.c`, `ui_list.c`, `ui_screens.c`, `ui_overlay.c`, `ui_theme.h`, `ui_nav.h`).
+- Fonts: `components/lg_draw/fonts` holds Montserrat 10 to 28 px (with the Font Awesome icons) and the emoji fonts as `lg_font_t` tables (`lg_font.h`, `LG_SYMBOL_*`). `tools/convert_font.py` rewrites lv_font_conv output into them; `tools/build_emoji_font.py` uses it and now writes into `lg_draw`.
+- Touch calibration moved into `lg_draw` (`lg_draw_calibrate`), shared by the handheld and the test app. The handheld calibrates at boot when the panel needs it, before the launcher.
+- Status screen: the "Boxes drawn" debug row is gone (owner); a "Self test" row shows the boot self test (D24), in the error colour if anything failed.
+- Console: `spike` is now `ui` (`ui tap|scroll|kb|type|page|log`); `screen` takes `home|status|messages|groups|settings`; `chat` opens a conversation on the new UI; `status` reports the UI task's stack headroom; `saver` reads and writes the NVS setting directly.
+- Test app: the results screen and touch check are drawn with `lg_draw` instead of LVGL.
+- `tools/check_layers.py`: `lg_draw` takes `lg_ui`'s place in the layer rules, and a new rule fails any `#include <lvgl...>` or a downloaded `lvgl` component.
+- Verified: handheld and tests build for esp32 and esp32s3 with zero warnings (handheld 937 KB and 926 KB). Both handhelds flashed with `flash.py --role H` and registered on different APs; every screen opened over serial on both with no fault (Hosyond 154 KB internal RAM free, UI task 4.2 KB stack unused; Freenove 187 KB, PSRAM 8122 KB free). `tests/target` on the Hosyond: 666 checks, 0 failures. **Not verified by eye**: the test app's redrawn results screen and the boot calibration path (both handhelds are already calibrated).
+
 ### Changed (D54: handhelds spread across the APs)
 - Owner: if all APs are in range, not every handheld should join the same one. Before, the choice was signal plus a 3 dB bonus for the last AP, and load only counted above 8 handhelds, so every handheld joined the strongest AP.
 - Joining (`pick_node`): APs heard at -70 dBm or better are all good enough; among them the one with the fewest other registered handhelds wins, and signal breaks ties. Backbone first and grid time second still outrank load. A handheld's own registration is not counted against the AP it is on.
