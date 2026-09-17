@@ -348,6 +348,7 @@ static void ring_update_from_outbox(uint32_t slot)
              * and LG_MAX_DEVICES is 32. */
             m->delivered_count = (uint8_t)o->delivered_count;
             m->read_count = (uint8_t)o->read_count;
+            m->read_mask = o->read_mask;   /* who, not just how many (D58) */
             s.msg_version++;
             s.dirty = true;
             return;
@@ -1558,6 +1559,27 @@ esp_err_t hh_service_edit_group(uint16_t id, const char *name, uint32_t members,
     return xQueueSend(s.queue, &ev, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+uint8_t hh_service_reader_names(uint32_t mask, char *out, size_t cap)
+{
+    out[0] = '\0';
+    size_t used = 0;
+    uint8_t named = 0;
+    for (size_t i = 0; i < s.roster.n_users && i < 32u; i++) {
+        if ((mask & (1u << i)) == 0) {
+            continue;
+        }
+        const char *name = roster_name(s.roster.users[i].device);
+        int n = snprintf(out + used, cap - used, "%s%s", named ? ", " : "", name);
+        if (n < 0 || (size_t)n >= cap - used) {
+            out[used] = '\0';   /* leave what fits whole: a half-written name names nobody */
+            break;
+        }
+        used += (size_t)n;
+        named++;
+    }
+    return named;
+}
+
 void hh_service_mark_read(uint32_t message_id)
 {
     if (s.queue == NULL || s.lock == NULL) {
@@ -1571,11 +1593,10 @@ void hh_service_mark_read(uint32_t message_id)
              * scans the wrong slots once the ring has wrapped, which would lose a read report
              * rather than fail loudly. */
             hh_message_t *m = &s.ring[(s.ring_head + i) % HH_MESSAGES];
-            /* Groups report reads as well as 1:1 (D42), so a group's read count can move.
-             * Broadcasts stay out: one report per handheld on the grid for every
-             * announcement is traffic nobody asked for. */
-            if (m->id == message_id && !m->mine && !m->read_sent &&
-                (m->scope == LG_SCOPE_DIRECT || m->scope == LG_SCOPE_GROUP)) {
+            /* Every scope reports reads (D42, D58). Broadcasts were left out to save one ack
+             * per handheld per announcement; the owner wants to see who has read an
+             * announcement or an emergency, which is worth 13 bytes a handheld. */
+            if (m->id == message_id && !m->mine && !m->read_sent) {
                 m->read_sent = true;   /* one report per message, however often it is on screen */
                 ev.id[0] = m->author;
                 ev.id[1] = m->origin_boot;

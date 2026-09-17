@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (D58: Read dismisses an alert, and a broadcast says who read it)
+- Alerts are closed with a Read button across the bottom; the corner X is gone (owner). Tapping Read also reports the message read, so dismissing an announcement and acknowledging it are one act.
+- Broadcasts now send read receipts, as 1:1 and group messages already did. They had been left out to save one ack per handheld per announcement; knowing who has seen an emergency is worth it.
+- Under our own group or broadcast message the chat shows who has read it: "Read by Pinky, Bluey", or "Read by N handhelds" when the names do not fit the bubble. 1:1 is unchanged -- the eye marker already says it.
+- `hh_message_t` carries the core's read mask, and `hh_service_reader_names()` turns it into current roster names in one place.
+- Verified on the boards: an urgent broadcast from the Hosyond raised the alert on the Freenove; tapping Read closed it, and the Hosyond's `msgs` then read `to everyone URGENT [sent, delivered 1, read 1]`. **Not verified by eye**: the Read button and the readers line on the panels.
+
+### Added (D57: sending an emergency, and a cheaper alert flash)
+- The Everyone conversation has an urgent toggle beside the send key: outlined when off, filled red when on, and the send tick turns red with it. Sending asks first ("Urgent broadcast -- this takes over every screen until it is read", Cancel or Send), and urgent never carries over to the next message.
+- When urgent is all this handheld may send -- not an announcer (D56), or grid time unset (D6) -- the toggle is locked on and the field reads "Urgent message only". Before this the field was simply dead, which would have blocked an emergency.
+- The no-LVGL UI had no way at all to send an urgent message from the screen; only the console's `send urgent <text>` did. That gap is closed.
+- Alerts paint once and flash only a 12 px border instead of repainting the panel (owner: "a lot of screen redraw is happening"). An emergency pulses every 500 ms, an announcement keeps 260 ms for its eight flashes. Measured on the Freenove with an emergency up: 5.9 screens of pixels per 10 s, where full repaints cost about 38.
+- The emergency tone is 2.3 s instead of 1.1 s (five pairs and a held last note), since it repeats every 4 s and a second of sound in four was easy to miss across a camp.
+- Fixed while testing: the confirm panel's buttons sat on top of its second line, because the painter and the layout each guessed the panel's height. One `place_confirm()` now owns the box, and it centres on the whole screen when the keyboard leaves the list too little room.
+- Verified on the boards: both handhelds built and flashed warning-free; on the Hosyond the toggle logs `[UI] Urgent on`, Cancel logs `Urgent broadcast cancelled`, and Send logs `[UI] Chat send (urgent): queued` with `[MSG] Sent URGENT to everyone`; the Freenove received it as `URGENT`, raised the alert (`cover 1`) and closed it on the X. **Not verified by eye**: the corrected confirm panel and the border flash (the owner's photo showed the overlapping version).
+
 ### Added (D56: the admin page says who may announce)
 - Owner: the APs' web page defines who may make announcements. Urgent broadcasts stay open to everyone, and a new grid starts with everyone allowed.
 - Protocol: the GROUPS body carries `announcers`, a bit per roster user, in a 13-byte head (was 9). One version (seq, author) covers groups and announcers together, so the list is sticky the way groups are: saved in NVS, announced on link up and periodically, and sent to a handheld when it registers (D48). `LG_GROUP_ANNOUNCERS` is a new GROUP_EDIT op, refused with the new `LG_ACK_REJ_NOT_ALLOWED` when a handheld asks for it.

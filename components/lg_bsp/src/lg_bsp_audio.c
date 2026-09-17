@@ -146,11 +146,17 @@ static const seg_t CUE_ANNOUNCE[] = {
  * The emergency: two tones alternating, which is what a phone's alert does and what ears are
  * already trained by. Three repeats of one note read as a doorbell; this reads as a warning.
  * Always at full amplitude -- an urgent broadcast ignores the volume setting entirely (D40).
+ *
+ * Lengthened from 1.1 s to 2.3 s (owner, 2026-09-17): the alert repeats every 4 s while an
+ * emergency is up, and a second of sound in every four was easy to miss from another tent or
+ * to mistake for a notification. Five pairs and a held last note carry across a camp.
  */
 static const seg_t CUE_URGENT[] = {
-    { 853, 170, ATTEN_FULL }, { 960, 170, ATTEN_FULL },
-    { 853, 170, ATTEN_FULL }, { 960, 170, ATTEN_FULL },
-    { 853, 170, ATTEN_FULL }, { 960, 230, ATTEN_FULL },
+    { 853, 190, ATTEN_FULL }, { 960, 190, ATTEN_FULL },
+    { 853, 190, ATTEN_FULL }, { 960, 190, ATTEN_FULL },
+    { 853, 190, ATTEN_FULL }, { 960, 190, ATTEN_FULL },
+    { 853, 190, ATTEN_FULL }, { 960, 190, ATTEN_FULL },
+    { 853, 190, ATTEN_FULL }, { 960, 400, ATTEN_FULL },
 };
 
 typedef struct {

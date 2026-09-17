@@ -9,8 +9,13 @@
  * - A message that arrives while the reader is scrolled up does not move the list. A down arrow
  *   flashes slowly in the middle of the list instead, and goes when the reader reaches the end.
  * - The keyboard is ui_kb: letters with shift, numbers and symbols, and emoji.
+ * - In Everyone, a toggle beside the send key marks the message urgent, and sending one asks
+ *   first: an urgent broadcast seizes every screen in the grid (D41). The toggle is locked on
+ *   when urgent is all this handheld may send -- the admin page has not let it announce (D56),
+ *   or grid time is not set (D6) -- so an emergency is never blocked.
  * - Any conversation: 1:1 (end-to-end encrypted by the service), a group, or everyone. A group
- *   message counts delivered and read handhelds instead of naming one state (D42).
+ *   message counts delivered and read handhelds instead of naming one state (D42), and under our
+ *   own group or broadcast message a line names who has read it (D58).
  *
  * RAM holds a layout per message (id, position, height, side), never its text: a bubble fetches
  * its message from the service when painted.
@@ -61,6 +66,10 @@ static struct {
     lg_rect_t  list;
     lg_rect_t  field;
     lg_rect_t  send;
+    lg_rect_t  urgent_key;
+    lg_rect_t  confirm;
+    lg_rect_t  confirm_yes;
+    lg_rect_t  confirm_no;
     lg_rect_t  back;
     lg_rect_t  arrow;
     bool       keyboard;
@@ -74,7 +83,9 @@ static struct {
     bool       arrow_on;         /* the flash phase */
     bool       arrow_drawn;      /* the arrow is on the panel now */
     uint32_t   flash_ms;
-    bool       blocked;          /* Everyone, and the admin page does not let us announce (D56) */
+    bool       urgent;           /* this message goes as an urgent broadcast */
+    bool       urgent_locked;    /* urgent is all this handheld may send here */
+    bool       confirming;       /* the "send to everyone as urgent?" panel is up */
     char       input[HH_TEXT_MAX + 1];
     size_t     input_len;
     bool       was_down;
@@ -139,6 +150,29 @@ static void count_text(const hh_message_t *m, char *out, size_t cap)
     }
 }
 
+/*
+ * "Read by Pinky, Bluey" under our own group or broadcast message (D58): who has opened it, not
+ * only how many. Empty for 1:1, where the eye marker already says it, and for received messages.
+ * Names are shortened to what the bubble can hold, on a name boundary, with a count instead.
+ */
+static void readers_text(const hh_message_t *m, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (!m->mine || m->scope == LG_SCOPE_DIRECT || m->read_mask == 0) {
+        return;
+    }
+    char names[72];   /* only what a line can hold: the count form covers the rest */
+    uint8_t n = hh_service_reader_names(m->read_mask, names, sizeof(names));
+    if (n == 0) {
+        return;
+    }
+    snprintf(out, cap, "Read by %s", names);
+    if (lg_draw_text_width(&lg_font_montserrat_10, NULL, out) <= bubble_text_w()) {
+        return;
+    }
+    snprintf(out, cap, "Read by %u handhelds", (unsigned)n);   /* too many to name in one line */
+}
+
 /* Who wrote a received message, for group and everyone chats. */
 static const char *author_name(uint32_t device)
 {
@@ -185,11 +219,14 @@ static void layout(void)
             hh_service_mark_read(m.id);
         }
         uint8_t lines = lg_text_wrap(body_font(), &lg_font_emoji_14, m.text, bubble_text_w(), starts, LINES_MAX);
+        char readers[96];
+        readers_text(&m, readers, sizeof(readers));
         bubble_t *b = &s.bubbles[s.n_bubbles++];
         b->id = m.id;
         b->mine = m.mine;
         b->y = y;
-        b->h = (int16_t)(PAD + (lines ? lines : 1) * line_h + lg_font_montserrat_12.line_height + PAD / 2);
+        b->h = (int16_t)(PAD + (lines ? lines : 1) * line_h + lg_font_montserrat_12.line_height + PAD / 2 +
+                         (readers[0] ? lg_font_montserrat_10.line_height : 0));
         y = (int16_t)(y + b->h + GAP);
     }
     s.content_h = y;
@@ -259,6 +296,8 @@ static void paint_list_content(const lg_canvas_t *c, bool with_arrow)
         uint32_t day = m.grid_time % 86400u;
         char counts[24];
         count_text(&m, counts, sizeof(counts));
+        char readers[96];
+        readers_text(&m, readers, sizeof(readers));
         if (!m.mine && s.scope != LG_SCOPE_DIRECT) {
             snprintf(clock, sizeof(clock), "%02u:%02u %s", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u),
                      author_name(m.author));
@@ -275,6 +314,8 @@ static void paint_list_content(const lg_canvas_t *c, bool with_arrow)
                                : NULL;
         int16_t note_w = (int16_t)(lg_draw_text_width(&lg_font_montserrat_10, F_EMOJI, clock) +
                                    (mark ? 4 + lg_draw_text_width(&lg_font_montserrat_12, &lg_font_emoji_14, mark) : 0));
+        int16_t readers_w = readers[0] ? lg_draw_text_width(&lg_font_montserrat_10, NULL, readers) : 0;
+        note_w = readers_w > note_w ? readers_w : note_w;
         int16_t bw = (int16_t)((widest > note_w ? widest : note_w) + 2 * PAD);
         bw = bw > bw_max ? bw_max : bw;
         lg_rect_t box = { m.mine ? (int16_t)(s.list.x + s.list.w - PAD - bw) : (int16_t)(s.list.x + PAD), top, bw,
@@ -288,6 +329,11 @@ static void paint_list_content(const lg_canvas_t *c, bool with_arrow)
         int16_t nx = (int16_t)(box.x + box.w - PAD - note_w);
         lg_paint_text(c, &s.list, nx, (int16_t)(note_top + 1), &lg_font_montserrat_10, F_EMOJI, C_MUTED, clock,
                       strlen(clock));
+        if (readers[0] != '\0') {
+            int16_t rx = (int16_t)(box.x + box.w - PAD - readers_w);
+            lg_paint_text(c, &s.list, rx, (int16_t)(note_top + 1 + lg_font_montserrat_10.line_height),
+                          &lg_font_montserrat_10, NULL, C_MARK_READ, readers, strlen(readers));
+        }
         if (mark != NULL) {
             lg_paint_text(c, &s.list, (int16_t)(nx + note_w - lg_draw_text_width(&lg_font_montserrat_12,
                                                                                 &lg_font_emoji_14, mark)),
@@ -382,24 +428,31 @@ static void paint_field(const lg_canvas_t *c, void *ctx)
         }
     }
     int16_t top = (int16_t)(s.field.y + (s.field.h - body_font()->line_height) / 2);
-    if (s.blocked) {
-        const char *why = "Urgent only: ask the admin";   /* the field says why, not just a dead key */
-        lg_paint_text(c, &s.field, (int16_t)(s.field.x + PAD), top, body_font(), NULL, C_WARNING, why, strlen(why));
-    } else if (s.input_len == 0) {
-        lg_paint_text(c, &s.field, (int16_t)(s.field.x + PAD), top, body_font(), NULL, C_MUTED, "Message", 7);
+    if (s.input_len == 0) {
+        const char *hint = s.urgent_locked ? "Urgent message only" : "Message";
+        lg_paint_text(c, &s.field, (int16_t)(s.field.x + PAD), top, body_font(), NULL,
+                      s.urgent_locked ? C_WARNING : C_MUTED, hint, strlen(hint));
     } else {
         lg_paint_text(c, &s.field, (int16_t)(s.field.x + PAD), top, body_font(), &lg_font_emoji_14, C_TEXT, shown,
                       strlen(shown));
     }
-    if (!s.blocked) {
-        int16_t cursor = (int16_t)(s.field.x + PAD +
-                                   (s.input_len ? lg_draw_text_width(body_font(), &lg_font_emoji_14, shown) : 0));
-        lg_rect_t bar = { cursor, (int16_t)(top + 1), 1, (int16_t)(body_font()->line_height - 2) };
-        lg_paint_panel(c, &s.field, &bar, C_ACCENT, C_ACCENT, C_ACCENT, 0, 0);
+    int16_t cursor = (int16_t)(s.field.x + PAD +
+                               (s.input_len ? lg_draw_text_width(body_font(), &lg_font_emoji_14, shown) : 0));
+    lg_rect_t bar = { cursor, (int16_t)(top + 1), 1, (int16_t)(body_font()->line_height - 2) };
+    lg_paint_panel(c, &s.field, &bar, C_ACCENT, C_ACCENT, C_ACCENT, 0, 0);
+    if (s.scope == LG_SCOPE_BROADCAST) {
+        /* The urgent key: outlined when off, filled when on, so the state reads at a glance. */
+        lg_color_t ink = s.urgent ? C_ACCENT_INK : C_MUTED;
+        lg_paint_panel(c, &s.urgent_key, &s.urgent_key, s.urgent ? C_ERROR : C_BG, C_BG,
+                       s.urgent ? C_ERROR : C_OUTLINE, 1, 4);
+        int16_t uw = lg_draw_text_width(&lg_font_montserrat_16, NULL, LG_SYMBOL_WARNING);
+        lg_paint_text(c, &s.urgent_key, (int16_t)(s.urgent_key.x + (s.urgent_key.w - uw) / 2),
+                      (int16_t)(s.urgent_key.y + (s.urgent_key.h - lg_font_montserrat_16.line_height) / 2),
+                      &lg_font_montserrat_16, NULL, ink, LG_SYMBOL_WARNING, strlen(LG_SYMBOL_WARNING));
     }
     int16_t sx = (int16_t)(s.send.x + (s.send.w - lg_draw_text_width(&lg_font_montserrat_16, NULL, LG_SYMBOL_OK)) / 2);
     lg_paint_text(c, &s.send, sx, (int16_t)(s.send.y + (s.send.h - lg_font_montserrat_16.line_height) / 2),
-                  &lg_font_montserrat_16, NULL, s.blocked ? C_MUTED : C_ACCENT, LG_SYMBOL_OK,
+                  &lg_font_montserrat_16, NULL, s.urgent ? C_ERROR : C_ACCENT, LG_SYMBOL_OK,
                   strlen(LG_SYMBOL_OK));
 }
 
@@ -407,6 +460,66 @@ static void draw_field(void)
 {
     lg_rect_t row = { 0, s.field.y, (int16_t)s.w, s.field.h };
     lg_draw_region(&row, paint_field, NULL);
+}
+
+/* ---- "send this to everyone as urgent?" ---- */
+
+#define CONFIRM_LINES 2
+#define CONFIRM_BTN_H 34
+
+static const char *const CONFIRM_TEXT[CONFIRM_LINES] = {
+    "This takes over every",
+    "screen until it is read.",
+};
+
+/*
+ * The panel's box and its two buttons, worked out from the text it holds and kept in `s`, so the
+ * painter and the touch test cannot disagree. They did once: both guessed the height separately
+ * and the buttons landed on top of the second line.
+ */
+static void place_confirm(void)
+{
+    int16_t cw = (int16_t)(s.w - 4 * PAD);
+    int16_t ch = (int16_t)(2 * PAD + F_TITLE->line_height + 4 + CONFIRM_LINES * F_SMALL->line_height + PAD +
+                           CONFIRM_BTN_H + PAD);
+    /* Centred in the list, or on the whole panel when the keyboard leaves too little room. */
+    int16_t cy = ch <= s.list.h ? (int16_t)(s.list.y + (s.list.h - ch) / 2) : (int16_t)((s.h - ch) / 2);
+    s.confirm = (lg_rect_t){ (int16_t)(2 * PAD), cy, cw, ch };
+    int16_t bw = (int16_t)((cw - 3 * PAD) / 2);
+    int16_t by = (int16_t)(s.confirm.y + ch - PAD - CONFIRM_BTN_H);
+    s.confirm_no = (lg_rect_t){ (int16_t)(s.confirm.x + PAD), by, bw, CONFIRM_BTN_H };
+    s.confirm_yes = (lg_rect_t){ (int16_t)(s.confirm.x + cw - PAD - bw), by, bw, CONFIRM_BTN_H };
+}
+
+static void centre_text(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t *in, int16_t y,
+                        const lg_font_t *font, lg_color_t fg, const char *text)
+{
+    lg_paint_text(c, clip, (int16_t)(in->x + (in->w - lg_draw_text_width(font, NULL, text)) / 2), y, font, NULL, fg,
+                  text, strlen(text));
+}
+
+static void paint_confirm(const lg_canvas_t *c, void *ctx)
+{
+    (void)ctx;
+    const lg_rect_t *r = &s.confirm;
+    lg_paint_panel(c, r, r, C_SURFACE, C_BG, C_ERROR, 2, 6);
+    int16_t y = (int16_t)(r->y + PAD);
+    centre_text(c, r, r, y, F_TITLE, C_ERROR, "Urgent broadcast");
+    y = (int16_t)(y + F_TITLE->line_height + 4);
+    for (int i = 0; i < CONFIRM_LINES; i++) {
+        centre_text(c, r, r, y, F_SMALL, C_TEXT, CONFIRM_TEXT[i]);
+        y = (int16_t)(y + F_SMALL->line_height);
+    }
+    lg_paint_panel(c, r, &s.confirm_no, C_SURFACE, C_SURFACE, C_OUTLINE, 1, 4);
+    lg_paint_panel(c, r, &s.confirm_yes, C_ERROR, C_SURFACE, C_ERROR, 1, 4);
+    int16_t btn_y = (int16_t)(s.confirm_no.y + (CONFIRM_BTN_H - F_BODY->line_height) / 2);
+    centre_text(c, &s.confirm_no, &s.confirm_no, btn_y, F_BODY, C_TEXT, "Cancel");
+    centre_text(c, &s.confirm_yes, &s.confirm_yes, btn_y, F_BODY, C_ACCENT_INK, "Send");
+}
+
+static void draw_confirm(void)
+{
+    lg_draw_region(&s.confirm, paint_confirm, NULL);
 }
 
 static void place(bool keyboard)
@@ -418,8 +531,12 @@ static void place(bool keyboard)
     s.list = (lg_rect_t){ 0, HEAD_H, (int16_t)s.w, (int16_t)(input_y - HEAD_H - GAP) };
     s.arrow = (lg_rect_t){ (int16_t)((s.w - ARROW_SIZE) / 2), (int16_t)(s.list.y + (s.list.h - ARROW_SIZE) / 2),
                            ARROW_SIZE, ARROW_SIZE };
-    s.field = (lg_rect_t){ PAD, input_y, (int16_t)(s.w - 2 * PAD - 36), INPUT_H };
+    bool has_urgent = s.scope == LG_SCOPE_BROADCAST;
+    int16_t keys_w = (int16_t)(has_urgent ? 72 : 36);
+    s.field = (lg_rect_t){ PAD, input_y, (int16_t)(s.w - 2 * PAD - keys_w), INPUT_H };
     s.send = (lg_rect_t){ (int16_t)(s.w - PAD - 32), input_y, 32, INPUT_H };
+    s.urgent_key = (lg_rect_t){ (int16_t)(s.w - PAD - 68), input_y, 32, INPUT_H };
+    place_confirm();
     if (keyboard) {
         ui_kb_open(s.w, s.h, s.input, sizeof(s.input));
     }
@@ -466,7 +583,8 @@ void ui_chat_open(uint16_t w, uint16_t h, uint8_t scope, uint32_t target, const 
     s.target = target;
     snprintf(s.title, sizeof(s.title), "%s", title != NULL ? title : "Chat");
     const hh_status_t *st = ui_status();
-    s.blocked = scope == LG_SCOPE_BROADCAST && !st->may_announce;   /* D56: only urgent goes out */
+    s.urgent_locked = scope == LG_SCOPE_BROADCAST && (!st->may_announce || st->time_restricted);
+    s.urgent = s.urgent_locked;   /* D56 and D6: urgent is all that gets out, so it starts on */
     place(false);
     layout();
     s.scroll = max_scroll();   /* newest at the bottom, in view */
@@ -484,9 +602,10 @@ void ui_chat_close(void)
 
 void ui_chat_refresh(const hh_status_t *st)
 {
-    bool blocked = s.scope == LG_SCOPE_BROADCAST && !st->may_announce;
-    if (blocked != s.blocked) {
-        s.blocked = blocked;   /* the admin page changed who may announce while this was open */
+    bool locked = s.scope == LG_SCOPE_BROADCAST && (!st->may_announce || st->time_restricted);
+    if (locked != s.urgent_locked) {
+        s.urgent_locked = locked;   /* the admin page or grid time changed while this was open */
+        s.urgent = s.urgent || locked;
         draw_field();
     }
     if (st->messages_version != s.shown_messages) {
@@ -522,6 +641,25 @@ void ui_chat_tick(uint32_t now_ms)
     draw_arrow(s.arrow_on);
 }
 
+
+
+/* Hands the text to the service, urgent or not, and clears the field when it was taken. */
+static void send_now(void)
+{
+    esp_err_t err = hh_service_send(s.scope, s.target, s.urgent, s.input);
+    ESP_LOGI(TAG, "[UI] Chat send%s: %s", s.urgent ? " (urgent)" : "",
+             err == ESP_OK ? "queued" : esp_err_to_name(err));
+    if (err != ESP_OK) {
+        return;
+    }
+    s.input_len = 0;
+    s.input[0] = '\0';
+    if (!s.urgent_locked) {
+        s.urgent = false;   /* urgent is per message, never a mode the next one inherits */
+    }
+    draw_field();
+}
+
 static void keyboard_event(kb_event_t ev)
 {
     s.input_len = strlen(s.input);
@@ -535,6 +673,26 @@ static void keyboard_event(kb_event_t ev)
 
 bool ui_chat_touch(int16_t x, int16_t y, bool down)
 {
+    if (s.confirming) {   /* the panel owns every touch until it is answered */
+        if (down || !s.was_down) {
+            s.was_down = down;
+            return false;
+        }
+        s.was_down = false;
+        bool yes = lg_rect_hit(&s.confirm_yes, x, y);
+        if (!yes && !lg_rect_hit(&s.confirm_no, x, y)) {
+            return false;
+        }
+        s.confirming = false;
+        if (yes) {
+            send_now();
+        } else {
+            ESP_LOGI(TAG, "[UI] Urgent broadcast cancelled");
+        }
+        draw_list();   /* the panel covered the list */
+        draw_field();
+        return false;
+    }
     if (s.keyboard) {
         kb_event_t kev;
         if (ui_kb_touch(x, y, down, &kev)) {
@@ -574,18 +732,21 @@ bool ui_chat_touch(int16_t x, int16_t y, bool down)
     }
     if (s.new_below && lg_rect_hit(&s.arrow, x, y)) {
         scroll_to(max_scroll());   /* tapping the arrow goes to the new message */
-    } else if (s.blocked) {
-        return false;   /* the field says why; nothing to type into and nothing to send */
+    } else if (s.scope == LG_SCOPE_BROADCAST && lg_rect_hit(&s.urgent_key, x, y)) {
+        if (!s.urgent_locked) {
+            s.urgent = !s.urgent;
+            draw_field();
+            ESP_LOGI(TAG, "[UI] Urgent %s", s.urgent ? "on" : "off");
+        }
     } else if (lg_rect_hit(&s.field, x, y) && !s.keyboard) {
         place(true);
         draw_all();
     } else if (lg_rect_hit(&s.send, x, y) && s.input_len > 0 && (s.scope != LG_SCOPE_DIRECT || s.target != 0)) {
-        esp_err_t err = hh_service_send(s.scope, s.target, false, s.input);
-        ESP_LOGI(TAG, "[UI] Chat send: %s", err == ESP_OK ? "queued" : esp_err_to_name(err));
-        if (err == ESP_OK) {
-            s.input_len = 0;
-            s.input[0] = '\0';
-            draw_field();
+        if (s.urgent) {
+            s.confirming = true;   /* an urgent broadcast is asked about before it goes (owner) */
+            draw_confirm();
+        } else {
+            send_now();
         }
     }
     return false;

@@ -5,9 +5,9 @@
  *   top for 15 s. Tapping the banner opens that conversation. Unread counts are kept per
  *   conversation until it is opened.
  * - A broadcast: the screen flashes the warning colour with the words on it and chimes, stops
- *   flashing after four cycles, and stays until its X is tapped (D41, revised).
+ *   flashing after four cycles, and stays until Read is tapped (D41, revised).
  * - An urgent broadcast: the error colour, flashing and sounding every 4 s (even at volume off)
- *   until its X is tapped.
+ *   until Read is tapped.
  * - After a minute untouched, if the setting is on, green characters fall down the panel. The
  *   first touch only dismisses it; the screen underneath is redrawn.
  *
@@ -33,7 +33,9 @@ static const char *TAG = "UI";
 #define WATCH_MS          400
 #define BANNER_MS         15000
 #define BANNER_H          58
-#define FLASH_MS          260
+#define FLASH_MS          260    /* an announcement flashes eight times and settles */
+#define EMERGENCY_FLASH_MS 500   /* an emergency flashes until it is read, so it pulses slower */
+#define ALERT_FRAME       12     /* the flashing border: the alert itself is painted once */
 #define ANNOUNCE_FLASHES  8
 #define EMERGENCY_REPEAT_MS 4000
 #define SAVER_IDLE_MS     60000
@@ -73,9 +75,10 @@ static struct {
     uint8_t   flashes_left;
     uint32_t  flash_ms;
     uint32_t  repeat_ms;
+    uint32_t  alert_id;   /* the message the alert is showing, reported read when Read is tapped */
     char      alert_who[HH_NAME_MAX];
     char      alert_text[HH_TEXT_MAX + 1];
-    lg_rect_t close;
+    lg_rect_t read_button;
     bool      swallow;         /* a dismissing touch: ignore it until the finger lifts */
     /* rain */
     uint8_t   cols;
@@ -176,13 +179,19 @@ void ui_overlay_screen_painted(void)
 
 /* ---- alert ---- */
 
+/*
+ * The alert is painted once and then only its border flashes. Repainting the whole panel every
+ * 260 ms cost a full screen of pixels a flash -- on the classic ESP32 that is most of the SPI
+ * bus, for as long as an emergency is up, and it made the rest of the UI crawl. The border is
+ * about a fifth of the pixels and reads the same from across a tent.
+ */
 static void paint_alert(const lg_canvas_t *c, void *ctx)
 {
     (void)ctx;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_color_t tone = s.emergency ? C_ERROR : C_WARNING;
-    lg_color_t ground = s.lit ? tone : C_BG;
-    lg_color_t ink = s.lit ? C_BG : tone;
+    lg_color_t ground = tone;
+    lg_color_t ink = C_BG;
     lg_paint_panel(c, &all, &all, ground, ground, ground, 0, 0);
     int16_t y = (int16_t)(s.h / 4);
     const char *kind = s.emergency ? "URGENT" : "ANNOUNCEMENT";
@@ -202,10 +211,14 @@ static void paint_alert(const lg_canvas_t *c, void *ctx)
         lg_paint_text(c, &all, (int16_t)((s.w - lg_draw_text_width(F_TITLE, F_EMOJI, line)) / 2),
                       (int16_t)(y + l * F_TITLE->line_height), F_TITLE, F_EMOJI, ink, line, n);
     }
-    int16_t xw = lg_draw_text_width(F_ICON, NULL, LG_SYMBOL_CLOSE);
-    lg_paint_text(c, &all, (int16_t)(s.close.x + (s.close.w - xw) / 2),
-                  (int16_t)(s.close.y + (s.close.h - F_ICON->line_height) / 2), F_ICON, NULL, ink, LG_SYMBOL_CLOSE,
-                  strlen(LG_SYMBOL_CLOSE));
+    /* "Read" dismisses it: a named button says what the tap means, where the X in the corner
+     * was both easy to miss and easy to hit by accident (owner, 2026-09-17). */
+    lg_paint_panel(c, &all, &s.read_button, ink, ground, ink, 2, 6);
+    const char *word = "Read";
+    lg_paint_text(c, &s.read_button, (int16_t)(s.read_button.x + (s.read_button.w -
+                  lg_draw_text_width(F_TITLE, NULL, word)) / 2),
+                  (int16_t)(s.read_button.y + (s.read_button.h - F_TITLE->line_height) / 2), F_TITLE, NULL, ground,
+                  word, strlen(word));
 }
 
 static void draw_alert(void)
@@ -215,7 +228,25 @@ static void draw_alert(void)
     lg_draw_region(&all, paint_alert, NULL);
 }
 
-static void show_alert(bool emergency, const char *who, const char *text, uint32_t now)
+/* One flash: four bars around the edge, and nothing else touched. */
+static void draw_alert_frame(void)
+{
+    lg_color_t tone = s.emergency ? C_ERROR : C_WARNING;
+    lg_color_t edge = s.lit ? C_BG : tone;
+    int16_t w = (int16_t)s.w;
+    int16_t h = (int16_t)s.h;
+    const lg_rect_t bars[4] = {
+        { 0, 0, w, ALERT_FRAME },
+        { 0, (int16_t)(h - ALERT_FRAME), w, ALERT_FRAME },
+        { 0, ALERT_FRAME, ALERT_FRAME, (int16_t)(h - 2 * ALERT_FRAME) },
+        { (int16_t)(w - ALERT_FRAME), ALERT_FRAME, ALERT_FRAME, (int16_t)(h - 2 * ALERT_FRAME) },
+    };
+    for (int i = 0; i < 4; i++) {
+        lg_draw_fill(&bars[i], edge);
+    }
+}
+
+static void show_alert(bool emergency, const char *who, const char *text, uint32_t id, uint32_t now)
 {
     if (s.cover == OV_ALERT && s.emergency && !emergency) {
         return;   /* an announcement never buries an emergency nobody has acknowledged */
@@ -223,13 +254,15 @@ static void show_alert(bool emergency, const char *who, const char *text, uint32
     s.banner = false;
     s.cover = OV_ALERT;
     s.emergency = emergency;
-    s.lit = true;
+    s.lit = false;   /* the frame starts dark against the coloured panel, then pulses */
     s.flashes_left = emergency ? 0 : ANNOUNCE_FLASHES;   /* 0: keep flashing */
     s.flash_ms = now;
     s.repeat_ms = now;
+    s.alert_id = id;
     snprintf(s.alert_who, sizeof(s.alert_who), "%s", who);
     snprintf(s.alert_text, sizeof(s.alert_text), "%s", text);
     draw_alert();
+    draw_alert_frame();
     (void)lg_bsp_audio_cue(emergency ? LG_CUE_URGENT : LG_CUE_ANNOUNCE);
     ESP_LOGI(TAG, "[UI] %s alert: %s", emergency ? "Emergency" : "Announcement", text);
 }
@@ -359,7 +392,7 @@ static void watch(uint32_t now)
         ui_redraw_current();
     }
     if (n_scope == LG_SCOPE_BROADCAST) {
-        show_alert(newest.urgent, who, newest.text, now);
+        show_alert(newest.urgent, who, newest.text, newest.id, now);
         return;
     }
     s.pending_scope = n_scope;
@@ -395,7 +428,9 @@ void ui_overlay_start(uint16_t w, uint16_t h)
     s.col_w = (int16_t)(lg_draw_text_width(F_SMALL, NULL, "W") > 0 ? lg_draw_text_width(F_SMALL, NULL, "W") : 8);
     s.cols = (uint8_t)(w / s.col_w > RAIN_COLS_MAX ? RAIN_COLS_MAX : w / s.col_w);
     s.col_w = (int16_t)(w / s.cols);
-    s.close = (lg_rect_t){ (int16_t)(w - 44), 0, 44, 44 };
+    int16_t bw = (int16_t)(w / 2);
+    int16_t bh = (int16_t)(F_TITLE->line_height + 20);
+    s.read_button = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - ALERT_FRAME - 10 - bh), bw, bh };
 }
 
 bool ui_overlay_covering(void)
@@ -411,13 +446,14 @@ void ui_overlay_tick(uint32_t now, uint32_t last_touch_ms)
     }
     switch (s.cover) {
     case OV_ALERT:
-        if ((s.emergency || s.flashes_left > 0) && now - s.flash_ms >= FLASH_MS) {
+        if ((s.emergency || s.flashes_left > 0) &&
+            now - s.flash_ms >= (s.emergency ? EMERGENCY_FLASH_MS : FLASH_MS)) {
             s.flash_ms = now;
             s.lit = !s.lit;
             if (!s.emergency && --s.flashes_left == 0) {
                 s.lit = true;   /* stop flashing and leave the words up to be read */
             }
-            draw_alert();
+            draw_alert_frame();   /* only the border moves; the words stay as painted */
         }
         if (s.emergency && now - s.repeat_ms >= EMERGENCY_REPEAT_MS) {
             s.repeat_ms = now;
@@ -459,8 +495,9 @@ bool ui_overlay_touch(int16_t x, int16_t y, bool down)
         }
         return true;
     case OV_ALERT:
-        if (!down && lg_rect_hit(&s.close, x, y)) {
-            s.cover = OV_NONE;   /* only the X closes an alert (D41) */
+        if (!down && lg_rect_hit(&s.read_button, x, y)) {
+            s.cover = OV_NONE;   /* only Read closes an alert (D41, revised) */
+            hh_service_mark_read(s.alert_id);   /* Read means read: the sender sees it (D58) */
             ESP_LOGI(TAG, "[UI] Alert closed");
             ui_redraw_current();
         }

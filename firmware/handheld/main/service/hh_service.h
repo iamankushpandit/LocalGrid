@@ -100,6 +100,7 @@ typedef struct {
      */
     uint8_t  delivered_count;   /* handhelds that confirmed delivery */
     uint8_t  read_count;        /* handhelds that reported showing it to their reader */
+    uint32_t read_mask;         /* our own messages: bit per roster user who reported reading it */
     uint16_t len;
     char     text[HH_TEXT_MAX + 1];
 } hh_message_t;
@@ -179,7 +180,11 @@ const char *hh_announce_problem(const hh_status_t *st);
  * the reason codes live in one place. */
 const char *hh_message_state_text(const hh_message_t *m);
 
-/* Tells the author that one received 1:1 message has been shown. Reports each message once. */
+/* Names the handhelds in a read mask ("Pinky, Bluey"), newest roster names, into out. Returns
+ * how many were named; writes an empty string for an empty mask. */
+uint8_t hh_service_reader_names(uint32_t mask, char *out, size_t cap);
+
+/* Tells the author that one received message has been shown. Reports each message once. */
 void hh_service_mark_read(uint32_t message_id);
 
 /*
