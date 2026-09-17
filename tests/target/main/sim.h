@@ -49,6 +49,7 @@ typedef struct {
     uint8_t   grid_state_last[LG_GRID_STATE_MAX];
     size_t    grid_state_len;
     uint32_t  groups_changed;      /* times on_groups_changed was called */
+    uint32_t  client_time_count;   /* times a handheld's clock was offered (on_client_time) */
     lg_roster_t roster;
     uint32_t  name_count;    /* names this node was asked to keep (io.on_name) */
     lg_node_t node;

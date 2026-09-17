@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (D53: an AP takes grid time back from a handheld)
+- Flashing and the brownout-prone hub restart APs, and grid time lived only in their RAM, so the owner kept having to set it again although both handhelds still had it. An AP with no time now takes it from a registering handheld whose clock the grid set: new optional node io `on_client_time`, called before `REGISTER_ACK` so the ack carries the time back. The AP logs `[TIME] Took grid time ... from handheld N`, marks its stratum unknown so any AP closer to the source corrects it, and floods it at once. No wire change: `REGISTER.client_time` was already sent, and is 0 on a handheld the grid never set.
+- Verified on the bench: `tests/target` on SOUTH, `LG_TESTS: 666 checks, 0 failures`. APs flashed one at a time, then all three restarted together through their serial ports (twice). All reported `Grid time 0 (UNSET)`; about 5 s after boot MAIN logged `[TIME] Took grid time 1789655713 from handheld 2 (this AP had none)`, and NORTH and SOUTH took it from MAIN within 30 ms (`from AP 0 (stratum 255)`). Nobody touched the admin page.
+- Tests: `test_time_from_handheld` (all APs lose time, a handheld restores one AP and is unrestricted at once; an AP with time is never offered one; a handheld with no grid-set clock offers nothing).
+
+
 ### Fixed (admin page stuck on "Connecting to this AP")
 - The merge left two `const esc` declarations in `admin.html` (main's strips characters, the Groups card's encodes them). A redeclared `const` is a syntax error, so no script ran and the page never left its loading card. The Groups helper is now `escHtml`. Checked with `node --check` on the page script and in the preview: setup, dashboard, availability, outages, and adding a group all render with no console errors. Flashed to MAIN, NORTH, and SOUTH.
 - The owner confirmed the page loads on a phone and set grid time. A group message then went end to end: the Freenove's `group new Cooks 1,2` reached both handhelds as groups version 4, and `send Cooks dinner at seven` arrived on the Hosyond with a notification, marked `delivered 1` on the sender.

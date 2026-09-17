@@ -281,6 +281,24 @@ static void io_on_time(void *ctx, uint16_t origin_node, const lg_time_sync_t *t)
     }
 }
 
+/*
+ * Grid time back from a handheld (D48, D53). This AP restarted with no clock, and a handheld
+ * whose clock the grid set is registering. Its distance from the source is unknown, so any AP
+ * that knows it is closer corrects this one at the next TIME_SYNC. Other APs with no time get it
+ * from here straight away.
+ */
+static void io_on_client_time(void *ctx, uint32_t device, uint32_t unix_s)
+{
+    (void)ctx;
+    if (g_app.time_quality != LG_TIME_UNSET || unix_s < 1700000000u) {
+        return;
+    }
+    set_grid_time_ms((uint64_t)unix_s * 1000u, LG_TIME_CARRIED, LG_STRATUM_UNKNOWN);
+    grid_state_note_sync(GRID_NO_AP, 0);
+    ESP_LOGI("TIME", "[TIME] Took grid time %" PRIu32 " from handheld %" PRIu32 " (this AP had none)", unix_s, device);
+    lg_node_announce_time(&g_app.core, LG_TIME_CARRIED);
+}
+
 /* ---- backbone callbacks ---- */
 
 static void on_backbone_frame(uint16_t from_node, const uint8_t *frame, size_t len)
@@ -831,6 +849,7 @@ void app_main(void)
         .time_now = io_time_now,
         .on_grid_state = io_on_grid_state,
         .on_groups_changed = io_on_groups_changed,
+        .on_client_time = io_on_client_time,
         .on_name = io_on_name,
     };
     lg_roster_init_prototype(&g_app.roster);

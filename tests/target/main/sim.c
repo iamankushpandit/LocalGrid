@@ -94,6 +94,16 @@ static void n_on_time(void *ctx, uint16_t origin_node, const lg_time_sync_t *t)
     }
 }
 
+static void n_on_client_time(void *ctx, uint32_t device, uint32_t unix_s)
+{
+    (void)device;
+    sim_node_t *sn = ctx;
+    sn->time = unix_s;
+    sn->time_millis = 0;
+    sn->time_stratum = LG_STRATUM_UNKNOWN;
+    sn->client_time_count++;
+}
+
 static void n_time_now(void *ctx, lg_time_sync_t *out)
 {
     sim_node_t *sn = ctx;
@@ -247,6 +257,7 @@ sim_t *sim_create(void)
             .time_now = n_time_now,
             .on_grid_state = n_on_grid_state,
             .on_groups_changed = n_on_groups_changed,
+            .on_client_time = n_on_client_time,
             .on_name = n_on_name,
         };
         lg_roster_init_prototype(&sn->roster);

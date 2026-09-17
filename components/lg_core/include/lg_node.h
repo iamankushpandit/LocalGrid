@@ -49,6 +49,13 @@ typedef struct {
     void     (*on_diag)(void *ctx, uint16_t origin_node, uint8_t hops, const uint8_t *text, size_t len);
     /* Optional. Another node announced grid time; glue decides whether to adopt it. */
     void     (*on_time)(void *ctx, uint16_t origin_node, const lg_time_sync_t *t);
+    /*
+     * Optional. A handheld registered, reporting a grid-set clock (unix_s, never 0), while this
+     * node has no grid time: glue may take it, so time survives an AP restart as long as any
+     * handheld stayed on (D48, D53). Called before REGISTER_ACK is built, so the ack carries
+     * whatever the glue decided. The sender's distance from the source is unknown.
+     */
+    void     (*on_client_time)(void *ctx, uint32_t device, uint32_t unix_s);
     /* Optional. Fills grid time with milliseconds and this node's stratum for TIME_SYNC; the core
      * sets quality. Without it the core sends whole seconds from grid_time and stratum unknown. */
     void     (*time_now)(void *ctx, lg_time_sync_t *out);

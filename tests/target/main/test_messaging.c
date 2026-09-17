@@ -301,6 +301,39 @@ static void test_time_rule(void)
     sim_destroy(s);
 }
 
+/* D53: an AP that restarted with no clock takes grid time back from a handheld that kept it. */
+static void test_time_from_handheld(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* Every AP lost its clock (all restarted); the handhelds kept theirs from the grid. */
+    s->grid_time = 0;
+    for (int i = 0; i < SIM_NODES; i++) {
+        s->nodes[i].time = 0;
+    }
+    sim_detach(s, EMMA);
+    sim_attach(s, EMMA, 2);
+    CHECK_EQ(s->nodes[2].client_time_count, 1u);
+    CHECK_EQ(s->nodes[2].time, T0);                       /* taken from Emma's clock */
+    CHECK_EQ(s->nodes[2].time_stratum, LG_STRATUM_UNKNOWN);
+    CHECK(!lg_client_time_restricted(cl(s, EMMA)));       /* the ack carried it straight back */
+
+    /* An AP that already has time is never offered a handheld's. */
+    sim_detach(s, ALEX);
+    sim_attach(s, ALEX, 2);
+    CHECK_EQ(s->nodes[2].client_time_count, 1u);
+
+    /* A handheld whose clock the grid never set offers nothing. */
+    sim_detach(s, DAD);
+    s->clients[DAD].clock = 0;
+    sim_attach(s, DAD, 0);
+    CHECK_EQ(s->nodes[0].client_time_count, 0u);
+    CHECK_EQ(s->nodes[0].time, 0u);
+    sim_destroy(s);
+}
+
 static void test_node_refuses_unsafe_frames(void)
 {
     sim_t *s = make_chain();
@@ -884,6 +917,7 @@ void test_messaging(void)
     test_duplicates_and_retransmit();
     test_offline_and_roam();
     test_time_rule();
+    test_time_from_handheld();
     test_node_refuses_unsafe_frames();
     test_key_pinning();
     test_ping_pong();

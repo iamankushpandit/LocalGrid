@@ -576,6 +576,12 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         p->state = LG_PRES_ONLINE;
         memcpy(p->pubkey, reg.pubkey, LG_PUBKEY_LEN);
 
+        /* Time is sticky (D48, D53): an AP that restarted with no clock takes it back from a
+         * handheld that kept running. A handheld reports 0 unless the grid set its clock. */
+        if (reg.client_time != 0 && node_grid_time(n) == 0 && n->io.on_client_time != NULL) {
+            n->io.on_client_time(n->io.ctx, reg.device, reg.client_time);
+        }
+
         lg_register_ack_t ack = {
             .node = n->self,
             .status = LG_REG_OK,
