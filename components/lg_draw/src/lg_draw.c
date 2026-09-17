@@ -8,15 +8,6 @@
 #include "lg_bsp_display.h"
 #include "lg_bsp_touch.h"
 
-#define GLYPHS_MAX 64u
-
-typedef struct {
-    int16_t                              x;        /* left of the glyph box */
-    int16_t                              y;        /* top of the glyph box */
-    const lv_font_fmt_txt_glyph_dsc_t   *dsc;
-    const lv_font_fmt_txt_dsc_t         *font;
-} placed_t;
-
 static struct {
     uint8_t          *buf;
     size_t            buf_bytes;
@@ -186,11 +177,6 @@ static inline void put(uint8_t *row, int16_t x, lg_color_t c)
     row[2 * x + 1] = (uint8_t)c;
 }
 
-static inline lg_color_t get(const uint8_t *row, int16_t x)
-{
-    return (lg_color_t)((row[2 * x] << 8) | row[2 * x + 1]);
-}
-
 static void send(int16_t x, int16_t y, int16_t w, int16_t h)
 {
     xSemaphoreTake(s.done, 0);   /* clear a stale completion */
@@ -225,95 +211,182 @@ static bool in_round(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r)
     return dx * dx + dy * dy <= (int32_t)r * r;
 }
 
-void lg_draw_box(const lg_box_t *b)
-{
-    int64_t t0 = esp_timer_get_time();
-    const lg_rect_t *r = &b->rect;
+/* ---- painting: a region is sent in bands, and painters draw each band, clipped ---- */
 
-    /* Lay the text out once: glyph positions relative to the box. */
-    static placed_t glyphs[GLYPHS_MAX];
-    size_t n = 0;
-    if (b->font != NULL && b->text[0] != '\0') {
-        int16_t tw = lg_draw_text_width(b->font, b->fallback, b->text);
-        int16_t x = b->align == LG_ALIGN_CENTER ? (int16_t)((r->w - tw) / 2)
-                  : b->align == LG_ALIGN_RIGHT  ? (int16_t)(r->w - b->pad - tw)
-                                                : b->pad;
-        int16_t line_top = (int16_t)((r->h - b->font->line_height) / 2 + b->text_dy);
-        const char *p = b->text;
-        while (*p != '\0' && n < GLYPHS_MAX) {
-            const lv_font_fmt_txt_glyph_dsc_t *g = NULL;
-            const lv_font_t *f = find_glyph(b->font, b->fallback, utf8_next(&p), &g);
-            if (f == NULL) {
-                continue;
+static inline uint8_t *pixel(const lg_canvas_t *c, int16_t x, int16_t y)
+{
+    return s.buf + 2u * ((size_t)(y - c->band.y) * (size_t)c->band.w + (size_t)(x - c->band.x));
+}
+
+/* The overlap of a and b in *out; false when they do not overlap. */
+static bool intersect(const lg_rect_t *a, const lg_rect_t *b, lg_rect_t *out)
+{
+    int16_t x1 = a->x > b->x ? a->x : b->x;
+    int16_t y1 = a->y > b->y ? a->y : b->y;
+    int16_t x2 = (int16_t)((a->x + a->w) < (b->x + b->w) ? (a->x + a->w) : (b->x + b->w));
+    int16_t y2 = (int16_t)((a->y + a->h) < (b->y + b->h) ? (a->y + a->h) : (b->y + b->h));
+    if (x2 <= x1 || y2 <= y1) {
+        return false;
+    }
+    *out = (lg_rect_t){ x1, y1, (int16_t)(x2 - x1), (int16_t)(y2 - y1) };
+    return true;
+}
+
+void lg_paint_panel(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t *box, lg_color_t bg,
+                    lg_color_t outside, lg_color_t border, uint8_t border_w, uint8_t radius)
+{
+    lg_rect_t area;
+    lg_rect_t visible;
+    if (!intersect(&c->band, box, &area) || !intersect(&area, clip, &visible)) {
+        return;
+    }
+    for (int16_t y = visible.y; y < visible.y + visible.h; y++) {
+        int16_t yy = (int16_t)(y - box->y);
+        for (int16_t x = visible.x; x < visible.x + visible.w; x++) {
+            int16_t xx = (int16_t)(x - box->x);
+            lg_color_t col = bg;
+            if (radius > 0 && !in_round(xx, yy, box->w, box->h, radius)) {
+                col = outside;
+            } else if (border_w > 0) {
+                bool edge = xx < border_w || yy < border_w || xx >= box->w - border_w || yy >= box->h - border_w ||
+                            (radius > 0 && !in_round((int16_t)(xx < box->w / 2 ? xx - border_w : xx + border_w),
+                                                     (int16_t)(yy < box->h / 2 ? yy - border_w : yy + border_w),
+                                                     box->w, box->h, radius));
+                if (edge) {
+                    col = border;
+                }
             }
-            /* Same placement as LVGL: glyph top from the line top, via the font's base line. The
-             * fallback is centred on the main font's line, as the theme's fallback copies do. */
-            int16_t top = (int16_t)(line_top + (b->font->line_height - b->font->base_line) - g->box_h - g->ofs_y);
-            if (f != b->font) {
-                top = (int16_t)(top + (b->font->line_height - f->line_height) / 2 +
-                                (f->base_line - b->font->base_line));
-            }
-            glyphs[n].x = (int16_t)(x + g->ofs_x);
-            glyphs[n].y = top;
-            glyphs[n].dsc = g;
-            glyphs[n].font = f->dsc;
-            n++;
-            x = (int16_t)(x + advance(g));
+            uint8_t *p = pixel(c, x, y);
+            p[0] = (uint8_t)(col >> 8);   /* the panel takes big-endian RGB565 */
+            p[1] = (uint8_t)col;
         }
     }
+}
 
-    for (int16_t by = 0; by < r->h; by = (int16_t)(by + s.band_lines)) {
-        int16_t bh = (int16_t)((r->h - by) < s.band_lines ? (r->h - by) : s.band_lines);
-        /* Panel: background, border, rounded corners. */
-        for (int16_t row = 0; row < bh; row++) {
-            int16_t yy = (int16_t)(by + row);
-            uint8_t *line = s.buf + (size_t)row * 2u * (size_t)r->w;
-            for (int16_t xx = 0; xx < r->w; xx++) {
-                lg_color_t c = b->bg;
-                if (b->radius > 0 && !in_round(xx, yy, r->w, r->h, b->radius)) {
-                    c = b->outside;
-                } else if (b->border_w > 0) {
-                    bool edge = xx < b->border_w || yy < b->border_w || xx >= r->w - b->border_w ||
-                                yy >= r->h - b->border_w ||
-                                (b->radius > 0 && !in_round((int16_t)(xx < r->w / 2 ? xx - b->border_w : xx + b->border_w),
-                                                            (int16_t)(yy < r->h / 2 ? yy - b->border_w : yy + b->border_w),
-                                                            r->w, r->h, b->radius));
-                    if (edge) {
-                        c = b->border;
-                    }
-                }
-                put(line, xx, c);
-            }
+void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lv_font_t *font,
+                   const lv_font_t *fallback, lg_color_t fg, const char *text, size_t len)
+{
+    lg_rect_t visible;
+    if (font == NULL || !intersect(&c->band, clip, &visible) || line_top >= visible.y + visible.h ||
+        line_top + font->line_height + 8 <= visible.y) {
+        return;
+    }
+    const char *p = text;
+    const char *end = text + len;
+    while (p < end && *p != '\0' && x < visible.x + visible.w) {
+        const lv_font_fmt_txt_glyph_dsc_t *g = NULL;
+        const lv_font_t *f = find_glyph(font, fallback, utf8_next(&p), &g);
+        if (f == NULL) {
+            continue;
         }
-        /* Glyphs: 4 bits per pixel, packed without row padding, blended over what is there. */
-        for (size_t i = 0; i < n; i++) {
-            const placed_t *gp = &glyphs[i];
-            const lv_font_fmt_txt_glyph_dsc_t *g = gp->dsc;
-            if (gp->y >= by + bh || gp->y + g->box_h <= by || gp->font->bpp != 4) {
+        /* Same placement as LVGL: glyph top from the line top, via the font's base line. The
+         * fallback is centred on the main font's line, as the theme's fallback copies do. */
+        int16_t top = (int16_t)(line_top + (font->line_height - font->base_line) - g->box_h - g->ofs_y);
+        if (f != font) {
+            top = (int16_t)(top + (font->line_height - f->line_height) / 2 + (f->base_line - font->base_line));
+        }
+        int16_t left = (int16_t)(x + g->ofs_x);
+        const lv_font_fmt_txt_dsc_t *d = f->dsc;
+        x = (int16_t)(x + advance(g));
+        if (d->bpp != 4 || top >= visible.y + visible.h || top + g->box_h <= visible.y ||
+            left >= visible.x + visible.w || left + g->box_w <= visible.x) {
+            continue;
+        }
+        const uint8_t *bits = &d->glyph_bitmap[g->bitmap_index];
+        for (int16_t gy = 0; gy < g->box_h; gy++) {
+            int16_t y = (int16_t)(top + gy);
+            if (y < visible.y || y >= visible.y + visible.h) {
                 continue;
             }
-            const uint8_t *bits = &gp->font->glyph_bitmap[g->bitmap_index];
-            for (int16_t gy = 0; gy < g->box_h; gy++) {
-                int16_t yy = (int16_t)(gp->y + gy);
-                if (yy < by || yy >= by + bh) {
+            for (int16_t gx = 0; gx < g->box_w; gx++) {
+                int16_t xx = (int16_t)(left + gx);
+                if (xx < visible.x || xx >= visible.x + visible.w) {
                     continue;
                 }
-                uint8_t *line = s.buf + (size_t)(yy - by) * 2u * (size_t)r->w;
-                for (int16_t gx = 0; gx < g->box_w; gx++) {
-                    int16_t xx = (int16_t)(gp->x + gx);
-                    uint32_t bit = (uint32_t)gy * g->box_w * 4u + (uint32_t)gx * 4u;
-                    uint8_t a4 = (uint8_t)((bits[bit >> 3] >> (4u - (bit & 7u))) & 0x0Fu);
-                    if (a4 == 0 || xx < 0 || xx >= r->w) {
-                        continue;
-                    }
-                    put(line, xx, blend(b->fg, get(line, xx), (uint8_t)(a4 * 17u)));
+                /* 4 bits per pixel, packed without row padding, blended over what is there. */
+                uint32_t bit = (uint32_t)gy * g->box_w * 4u + (uint32_t)gx * 4u;
+                uint8_t a4 = (uint8_t)((bits[bit >> 3] >> (4u - (bit & 7u))) & 0x0Fu);
+                if (a4 == 0) {
+                    continue;
                 }
+                uint8_t *px = pixel(c, xx, y);
+                lg_color_t under = (lg_color_t)((px[0] << 8) | px[1]);
+                lg_color_t col = blend(fg, under, (uint8_t)(a4 * 17u));
+                px[0] = (uint8_t)(col >> 8);
+                px[1] = (uint8_t)col;
             }
         }
-        send(r->x, (int16_t)(r->y + by), r->w, bh);
     }
-    s.stats.boxes++;
+}
+
+uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,
+                     uint16_t *starts, uint8_t max_lines)
+{
+    uint8_t lines = 0;
+    const char *p = text;
+    while (*p != '\0' && lines < max_lines) {
+        while (*p == ' ') {
+            p++;   /* a wrapped line does not start with the space it broke at */
+        }
+        if (*p == '\0') {
+            break;
+        }
+        starts[lines++] = (uint16_t)(p - text);
+        int16_t w = 0;
+        const char *last_space = NULL;
+        const char *q = p;
+        while (*q != '\0' && *q != '\n') {
+            const char *before = q;
+            const lv_font_fmt_txt_glyph_dsc_t *g = NULL;
+            uint32_t cp = utf8_next(&q);
+            int16_t adv = find_glyph(font, fallback, cp, &g) != NULL ? advance(g) : 0;
+            if (w + adv > max_w && before != p) {
+                q = last_space != NULL ? last_space : before;   /* break at the last space, or mid-word */
+                break;
+            }
+            if (cp == ' ') {
+                last_space = before;
+            }
+            w = (int16_t)(w + adv);
+        }
+        p = *q == '\n' ? q + 1 : q;
+    }
+    starts[lines] = (uint16_t)strlen(text);   /* one past the last line: its end */
+    return lines;
+}
+
+void lg_draw_region(const lg_rect_t *r, lg_painter_t paint, void *ctx)
+{
+    int64_t t0 = esp_timer_get_time();
+    for (int16_t y = r->y; y < r->y + r->h; y = (int16_t)(y + s.band_lines)) {
+        int16_t h = (int16_t)((r->y + r->h - y) < s.band_lines ? (r->y + r->h - y) : s.band_lines);
+        lg_canvas_t c = { .band = { r->x, y, r->w, h } };
+        paint(&c, ctx);
+        send(r->x, y, r->w, h);
+    }
     s.stats.draw_us += (uint64_t)(esp_timer_get_time() - t0);
+}
+
+static void paint_box(const lg_canvas_t *c, void *ctx)
+{
+    const lg_box_t *b = ctx;
+    lg_paint_panel(c, &b->rect, &b->rect, b->bg, b->outside, b->border, b->border_w, b->radius);
+    if (b->font == NULL || b->text[0] == '\0') {
+        return;
+    }
+    const lg_rect_t *r = &b->rect;
+    int16_t tw = lg_draw_text_width(b->font, b->fallback, b->text);
+    int16_t x = b->align == LG_ALIGN_CENTER ? (int16_t)(r->x + (r->w - tw) / 2)
+              : b->align == LG_ALIGN_RIGHT  ? (int16_t)(r->x + r->w - b->pad - tw)
+                                            : (int16_t)(r->x + b->pad);
+    int16_t line_top = (int16_t)(r->y + (r->h - b->font->line_height) / 2 + b->text_dy);
+    lg_paint_text(c, r, x, line_top, b->font, b->fallback, b->fg, b->text, strlen(b->text));
+}
+
+void lg_draw_box(const lg_box_t *b)
+{
+    lg_draw_region(&b->rect, paint_box, (void *)b);
+    s.stats.boxes++;
 }
 
 bool lg_draw_set_text(lg_box_t *box, const char *text)

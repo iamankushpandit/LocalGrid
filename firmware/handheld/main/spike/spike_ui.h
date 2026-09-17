@@ -13,3 +13,14 @@ esp_err_t spike_ui_start(const lg_board_t *board);
 
 /* From any task: open the Status screen (true) or the launcher (false) on the spike's task. */
 void spike_ui_request(bool status);
+
+typedef enum { SPIKE_HOME, SPIKE_STATUS, SPIKE_CHAT, SPIKE_SCROLL, SPIKE_KEYBOARD, SPIKE_TYPE, SPIKE_LOG } spike_cmd_t;
+
+typedef struct {
+    spike_cmd_t cmd;
+    int         arg;
+    char        text[48];
+} spike_req_t;
+
+/* From any task: a console-driven step for measurement, done on the spike's task. */
+void spike_ui_request_cmd(spike_cmd_t cmd, int arg, const char *text);

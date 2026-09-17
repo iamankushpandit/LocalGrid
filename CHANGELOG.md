@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (spike, part two: a 1:1 chat without LVGL on the Hosyond)
+- `lg_draw` gains painted regions: `lg_draw_region()` sends a rectangle in bands and calls a painter per band; `lg_paint_panel()` and `lg_paint_text()` draw clipped to the band and a clip rectangle; `lg_text_wrap()` word-wraps UTF-8 with emoji. `lg_draw_box()` is now a painter too.
+- `spike/spike_chat.c`: the Messages tile opens a chat with the first known handheld. Bubbles with wrapped text, time and state; a list that scrolls under a dragged finger; an input field that shows the tail of what is typed; a lowercase keyboard (letters, space, comma, full stop, question mark, backspace, hide) where a press repaints only its key. RAM holds a layout per message (id, position, height, side), never its text: a bubble fetches its message when painted. Console: `spike chat | scroll <px> | kb <on|off> | type <word> | log`.
+- Measured on the Hosyond after the Freenove sent eight messages (seven shown): chat open with 7 bubbles, keyboard shown and hidden, typing through the keys: free 141 KB, lowest 137 KB, largest block 108 KB. The LVGL chat with its keyboard costs about 12 KB more than its launcher (128 KB idle after the RAM cuts), so about 116 KB.
+- Paint cost: a key press 1 ms; a full repaint of the message list 83 ms on average (6 repaints: open, three scroll steps, keyboard shown and hidden). That is about 12 frames a second while dragging: usable, not smooth. It fetches and wraps each visible message once per 24-line band; caching the wrap and fetching once per paint is the obvious next step, and the ST7789's hardware vertical scroll could move the list without repainting it.
+- **Not verified by touch**: drag scrolling and typing were driven from the console; the owner has to try them.
+
+
 ### Changed (handheld RAM: 24 KB back, and PSRAM on the FNK0104B)
 - From the static RAM audit, the low-risk cuts plus the inbox:
   - Removing a group compacts the message ring in place instead of through a 6.7 KB scratch copy.

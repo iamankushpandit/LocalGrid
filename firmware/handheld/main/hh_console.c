@@ -553,6 +553,28 @@ static int cmd_chat(int argc, char **argv)
  * stack. Without this there was no way to reach it except by tapping the glass, so the one
  * screen whose stack cost matters most was the one that could not be measured.
  */
+#if CONFIG_LG_HH_UI_SPIKE
+/* spike chat | spike scroll <px> | spike kb <on|off> | spike type <text> | spike log */
+static int cmd_spike(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "chat") == 0) {
+        spike_ui_request_cmd(SPIKE_CHAT, 0, NULL);
+    } else if (argc == 3 && strcmp(argv[1], "scroll") == 0) {
+        spike_ui_request_cmd(SPIKE_SCROLL, (int)strtol(argv[2], NULL, 10), NULL);
+    } else if (argc == 3 && strcmp(argv[1], "kb") == 0) {
+        spike_ui_request_cmd(SPIKE_KEYBOARD, strcmp(argv[2], "on") == 0, NULL);
+    } else if (argc >= 3 && strcmp(argv[1], "type") == 0) {
+        spike_ui_request_cmd(SPIKE_TYPE, 0, argv[2]);
+    } else if (argc >= 2 && strcmp(argv[1], "log") == 0) {
+        spike_ui_request_cmd(SPIKE_LOG, 0, NULL);
+    } else {
+        printf("usage: spike chat | scroll <px> | kb <on|off> | type <word> | log\n");
+        return 1;
+    }
+    return 0;
+}
+#endif
+
 static int cmd_screen(int argc, char **argv)
 {
     if (argc != 2) {
@@ -658,6 +680,9 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
         { .command = "screen",    .help = "screen <settings|status|groups|home>: open that screen",          .func = cmd_screen },
+#if CONFIG_LG_HH_UI_SPIKE
+        { .command = "spike",     .help = "spike chat | scroll <px> | kb <on|off> | type <word> | log (no-LVGL spike)", .func = cmd_spike },
+#endif
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },
         { .command = "tone",      .help = "tone [hz] [ms]: play one tone on the speaker",           .func = cmd_tone },
         { .command = "cue",       .help = "cue <sent|received|urgent>: play a notification sound",  .func = cmd_cue },

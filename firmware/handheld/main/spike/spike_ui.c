@@ -18,11 +18,13 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "hh_mem.h"
 #include "hh_service.h"
 #include "lg_draw.h"
 #include "lg_emoji.h"
+#include "spike_chat.h"
 
 static const char *TAG = "UI";
 
@@ -42,7 +44,7 @@ static const char *TAG = "UI";
 #define PAD          8
 #define GAP          5
 
-typedef enum { SCREEN_LAUNCHER, SCREEN_STATUS } screen_t;
+typedef enum { SCREEN_LAUNCHER, SCREEN_STATUS, SCREEN_CHAT } screen_t;
 
 enum { TILE_MESSAGES, TILE_GROUPS, TILE_STATUS, TILE_SETTINGS, TILE_COUNT };
 
@@ -187,6 +189,10 @@ static void refresh(void)
 {
     hh_service_status(&s.st);
     const hh_status_t *st = &s.st;
+    if (s.screen == SCREEN_CHAT) {
+        spike_chat_refresh(st);
+        return;
+    }
     char text[128];   /* lg_draw_set_text keeps what fits in a box */
     uint32_t day = st->grid_time % 86400u;
     if (s.screen == SCREEN_LAUNCHER) {
@@ -254,9 +260,18 @@ static void on_tap(int16_t x, int16_t y, bool down)
             if (was == TILE_STATUS && hit == TILE_STATUS) {
                 show_status();
                 refresh();
+            } else if (was == TILE_MESSAGES && hit == TILE_MESSAGES) {
+                hh_service_status(&s.st);
+                s.screen = SCREEN_CHAT;
+                spike_chat_open(s.w, s.h, &s.st);
             } else {
                 draw_tile(&s.tiles[was], false);
             }
+        }
+    } else if (s.screen == SCREEN_CHAT) {
+        if (spike_chat_touch(x, y, down)) {
+            show_launcher();
+            refresh();
         }
     } else {
         bool on_back = lg_rect_hit(&s.back.rect, x, y);
@@ -272,7 +287,44 @@ static void on_tap(int16_t x, int16_t y, bool down)
     }
 }
 
-static volatile int s_request = -1;
+static QueueHandle_t s_requests;
+
+static void handle_request(const spike_req_t *r)
+{
+    switch (r->cmd) {
+    case SPIKE_HOME:
+        show_launcher();
+        refresh();
+        break;
+    case SPIKE_STATUS:
+        show_status();
+        refresh();
+        break;
+    case SPIKE_CHAT:
+        hh_service_status(&s.st);
+        s.screen = SCREEN_CHAT;
+        spike_chat_open(s.w, s.h, &s.st);
+        break;
+    case SPIKE_SCROLL:
+        if (s.screen == SCREEN_CHAT) {
+            spike_chat_scroll_by((int16_t)r->arg);
+        }
+        break;
+    case SPIKE_KEYBOARD:
+        if (s.screen == SCREEN_CHAT) {
+            spike_chat_keyboard(r->arg != 0);
+        }
+        break;
+    case SPIKE_TYPE:
+        if (s.screen == SCREEN_CHAT) {
+            spike_chat_type(r->text);
+        }
+        break;
+    case SPIKE_LOG:
+        spike_chat_log();
+        break;
+    }
+}
 
 static void spike_task(void *arg)
 {
@@ -290,15 +342,9 @@ static void spike_task(void *arg)
             on_tap(x, y, down);
         }
         was_down = down;
-        int request = s_request;
-        if (request >= 0) {
-            s_request = -1;
-            if (request == SCREEN_STATUS) {
-                show_status();
-            } else {
-                show_launcher();
-            }
-            refresh();
+        spike_req_t req;
+        while (xQueueReceive(s_requests, &req, 0) == pdTRUE) {
+            handle_request(&req);
         }
         if (now - last_refresh >= REFRESH_MS) {
             last_refresh = now;
@@ -327,6 +373,7 @@ esp_err_t spike_ui_start(const lg_board_t *board)
     }
     hh_mem_mark("after lg_draw, panel, touch (no LVGL)");
     s.pressed = -1;
+    s_requests = xQueueCreate(8, sizeof(spike_req_t));
     build_launcher();
     build_status();
     show_launcher();
@@ -338,9 +385,22 @@ esp_err_t spike_ui_start(const lg_board_t *board)
     return ESP_OK;
 }
 
-/* Console hook: asks the spike task to open a screen, so it can be driven without a finger.
- * Only a flag crosses tasks; lg_draw is used by the spike task alone. */
+/* Console hooks: requests cross tasks through a queue, and the spike task does the drawing, so
+ * lg_draw is used by one task alone. */
+
+void spike_ui_request_cmd(spike_cmd_t cmd, int arg, const char *text)
+{
+    if (s_requests == NULL) {
+        return;
+    }
+    spike_req_t req = { .cmd = cmd, .arg = arg };
+    if (text != NULL) {
+        snprintf(req.text, sizeof(req.text), "%s", text);
+    }
+    (void)xQueueSend(s_requests, &req, 0);
+}
+
 void spike_ui_request(bool status)
 {
-    s_request = status ? SCREEN_STATUS : SCREEN_LAUNCHER;
+    spike_ui_request_cmd(status ? SPIKE_STATUS : SPIKE_HOME, 0, NULL);
 }

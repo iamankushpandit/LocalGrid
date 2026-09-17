@@ -72,6 +72,32 @@ esp_err_t lg_draw_start(const lg_board_t *board, lg_color_t bg, uint16_t *width,
 /* Draws a box now. */
 void lg_draw_box(const lg_box_t *box);
 
+/*
+ * Regions painted by the caller, for anything that is not one box: a scrolling list, a keyboard.
+ * lg_draw_region sends r in bands of the driver's buffer and calls paint once per band; the
+ * painter draws with lg_paint_*, each clipped to the band and to its own clip rectangle, in
+ * screen coordinates. Paint the background first: nothing clears the band for you.
+ */
+typedef struct {
+    lg_rect_t band;   /* the part of the screen this call paints */
+} lg_canvas_t;
+
+typedef void (*lg_painter_t)(const lg_canvas_t *canvas, void *ctx);
+
+void lg_draw_region(const lg_rect_t *r, lg_painter_t paint, void *ctx);
+
+void lg_paint_panel(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t *box, lg_color_t bg,
+                    lg_color_t outside, lg_color_t border, uint8_t border_w, uint8_t radius);
+
+/* len bytes of text from x, with line_top the top of the font's line. */
+void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lv_font_t *font,
+                   const lv_font_t *fallback, lg_color_t fg, const char *text, size_t len);
+
+/* Word-wraps text to max_w: starts[i] is the byte offset of line i, and starts[lines] the end of
+ * the text, so starts needs max_lines + 1 entries. Returns the number of lines. */
+uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,
+                     uint16_t *starts, uint8_t max_lines);
+
 /* Sets a box's text and draws it only if the text changed. Returns true if it drew. */
 bool lg_draw_set_text(lg_box_t *box, const char *text);
 
