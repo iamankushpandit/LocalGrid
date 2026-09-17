@@ -35,6 +35,7 @@ typedef struct {
     int8_t   rssi;
     uint8_t  clients;
     bool     backbone;      /* node has at least one backbone link */
+    bool     has_time;      /* the AP holds grid time (its beacon says so) */
 } hh_node_seen_t;
 
 typedef struct {
@@ -154,3 +155,11 @@ const char *hh_message_state_text(const hh_message_t *m);
 
 /* Tells the author that one received 1:1 message has been shown. Reports each message once. */
 void hh_service_mark_read(uint32_t message_id);
+
+/*
+ * Renames this handheld (D50): 1..HH_NAME_MAX - 1 bytes of UTF-8. The name is kept in flash and
+ * carried to every AP and handheld, now if online or at the next registration. The new name shows
+ * in the snapshot once the service task has taken it. ESP_ERR_INVALID_ARG for an empty, too long,
+ * or malformed name; ESP_ERR_NO_MEM when the queue is full.
+ */
+esp_err_t hh_service_set_name(const char *name);

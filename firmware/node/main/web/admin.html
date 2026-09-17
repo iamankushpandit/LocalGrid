@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>LocalGrid</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
@@ -49,6 +50,19 @@
   td { padding: 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: 0; }
   [hidden] { display: none !important; }
+  main > *, header > div { min-width: 0; }
+  .avail { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: center; }
+  /* Colours through CSS, not the SVG fill attribute: some phone browsers ignore var() there. */
+  .av0 { fill: var(--unknown); } .av1 { fill: var(--up); } .av2 { fill: var(--partial); } .av3 { fill: var(--down); }
+  .avail .sum { font: 13px var(--mono); color: var(--muted); text-align: right; white-space: nowrap; }
+  .avail .axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .avail svg { width: 100%; height: 18px; display: block; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+  .chips button { padding: 5px 12px; font-size: 13px; font-weight: 500; background: transparent; color: var(--muted); border-color: var(--line); border-radius: 999px; }
+  .chips button[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  :root { --up: var(--accent); --partial: var(--warn); --down: var(--danger); --unknown: var(--line); }
 </style>
 </head>
 <body>
@@ -99,6 +113,7 @@
     <div class="clock" id="grid-clock">--:--:--</div>
     <div class="row"><span class="pill" id="time-pill">--</span><span class="dim" id="grid-date"></span></div>
     <p class="hint" id="time-hint"></p>
+    <p class="hint" id="time-source"></p>
     <div class="row">
       <button id="use-device-time">Use this device's time</button>
     </div>
@@ -123,8 +138,30 @@
   <section id="nodes-card" hidden>
     <h2>APs</h2>
     <div class="table"><table>
-      <thead><tr><th>AP</th><th>Status</th><th>Signal</th><th>Last heard</th></tr></thead>
+      <thead><tr><th>AP</th><th>Status</th><th>Up for</th><th>Grid time</th><th>Last time sync</th><th>Last restart</th><th>Signal</th></tr></thead>
       <tbody id="nodes-body"></tbody>
+    </table></div>
+  </section>
+
+  <section id="avail-card" hidden>
+    <h2>Availability, last 2 hours</h2>
+    <div class="avail" id="avail"></div>
+    <div class="legend">
+      <span><i style="background:var(--up)"></i>reachable</span>
+      <span><i style="background:var(--partial)"></i>part of the minute</span>
+      <span><i style="background:var(--down)"></i>unreachable</span>
+      <span><i style="background:var(--unknown)"></i>no record (before this AP started)</span>
+    </div>
+    <p class="hint" id="avail-hint"></p>
+  </section>
+
+  <section id="incidents-card" hidden>
+    <h2>What happened to the APs</h2>
+    <div class="chips" id="incidents-filter" role="group" aria-label="Show outages for"></div>
+    <p class="dim" id="incidents-empty">No AP outage on record. The log survives restarts and is shared between APs.</p>
+    <div class="table" id="incidents-table"><table>
+      <thead><tr><th>When</th><th>AP</th><th>Down for</th><th>What happened</th><th>Seen by</th></tr></thead>
+      <tbody id="incidents-body"></tbody>
     </table></div>
   </section>
 
@@ -150,10 +187,22 @@
   const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; } };
   const pad = (n) => String(n).padStart(2, "0");
   const fmtClock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const nodeName = (n) => n < 0 ? "--" : (NODE_NAMES[n] || `AP ${n}`);
+  let apNames = {};
+  const nodeName = (n) => n < 0 ? "--" : (apNames[n] || NODE_NAMES[n] || `AP ${n}`);
+  const esc = (t) => String(t).replace(/[<&"]/g, "");
+  const fmtDur = (sec) => {
+    if (sec < 0) return "--";
+    const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${pad(m)}m`;
+    if (m) return `${m}m ${pad(sec % 60)}s`;
+    return `${sec}s`;
+  };
+  const quality = (q) => q === 2 ? '<span class="pill good">SET HERE</span>' : q === 1 ? '<span class="pill good">CARRIED</span>' : '<span class="pill bad">NOT SET</span>';
+  const fmtGridTime = (t) => t ? new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "time not set then";
 
   function show(ids) {
-    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "devices-card"]) {
+    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "devices-card"]) {
       $(id).hidden = !ids.includes(id);
     }
     $("logout").hidden = !ids.includes("time-card");
@@ -178,6 +227,51 @@
     try { data = await res.json(); } catch (e) { /* empty body */ }
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status}).`);
     return data;
+  }
+
+  // /api/history is bytes (D49); the layout is documented at h_history in web_admin.c.
+  const RESET_TEXT = { 1: "power-on or reset", 2: "external reset", 3: "software restart", 4: "crash (panic)",
+    5: "crash (interrupt watchdog)", 6: "hang (task watchdog)", 7: "crash (other watchdog)", 9: "low supply voltage (brownout)" };
+  const resetText = (code) => RESET_TEXT[code] || "unknown reset";
+  const KIND = ["down", "restarted", "link", "unexplained"];
+
+  async function history() {
+    if (window.LG_MOCK_API) return null;
+    const res = await fetch("/api/history", { credentials: "same-origin" });
+    if (!res.ok) return null;
+    const v = new DataView(await res.arrayBuffer());
+    if (v.byteLength < 16 || v.getUint8(0) !== 1) return null;
+    const nAps = v.getUint8(2), nInc = v.getUint8(3);
+    const out = {
+      self: v.getUint8(1),
+      time_set: { unix: v.getUint32(4, true), on: v.getUint8(8) === 255 ? -1 : v.getUint8(8), from: v.getUint8(9) === 255 ? -1 : v.getUint8(9) },
+      newest_min: v.getUint32(12, true),
+      aps: [], incidents: [],
+    };
+    let o = 16;
+    for (let i = 0; i < nAps && o + 76 <= v.byteLength; i++, o += 76) {
+      let name = "";
+      for (let c = 0; c < 16; c++) { const b = v.getUint8(o + 28 + c); if (!b) break; name += String.fromCharCode(b); }
+      const avail = [];
+      for (let m = 0; m < 120; m++) avail.push((v.getUint8(o + 44 + (m >> 2)) >> ((m % 4) * 2)) & 3);
+      const syncAge = v.getUint32(o + 16, true), prev = v.getUint32(o + 24, true);
+      out.aps.push({
+        ap: v.getUint8(o), self: (v.getUint8(o + 1) & 1) === 1, time_quality: v.getUint8(o + 2), stratum: v.getUint8(o + 3),
+        sync_from: v.getUint8(o + 4) === 255 ? -1 : v.getUint8(o + 4), reset: resetText(v.getUint8(o + 5)),
+        sync_drift_ms: v.getInt16(o + 6, true), uptime_s: v.getUint32(o + 8, true), heard_s: v.getUint32(o + 12, true),
+        sync_age_s: syncAge === 0xFFFFFFFF ? -1 : syncAge, boot: v.getUint32(o + 20, true),
+        prev_run_s: prev === 0xFFFFFFFF ? -1 : prev, name, avail,
+      });
+    }
+    for (let i = 0; i < nInc && o + 16 <= v.byteLength; i++, o += 16) {
+      const kr = v.getUint8(o + 11), prevMin = v.getUint16(o + 6, true);
+      out.incidents.push({
+        down_grid_time: v.getUint32(o, true), duration_s: v.getUint16(o + 4, true),
+        prev_run_s: prevMin === 0xFFFF ? -1 : prevMin * 60, ap: v.getUint8(o + 10),
+        kind: KIND[kr & 3], reset: resetText(kr >> 2), seen_by: v.getUint8(o + 12),
+      });
+    }
+    return out;
   }
 
   async function start() {
@@ -263,7 +357,7 @@
   });
 
   function beginDashboard() {
-    show(["time-card", "grid-card", "nodes-card", "devices-card"]);
+    show(["time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "devices-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);
@@ -281,6 +375,47 @@
   }
   setInterval(renderClock, 1000);
 
+  // Outage log with a per-AP filter. The choice is a per-viewer convenience, remembered when storage allows.
+  let lastIncidents = [];
+  let incidentAp = -1;   // -1: every AP
+  let lastChips = "";
+  try { const v = localStorage.getItem("lg_incident_ap"); if (v !== null) incidentAp = +v; } catch (e) { /* no storage */ }
+
+  function renderIncidents() {
+    const all = lastIncidents.slice().sort((a, b) => (b.down_grid_time || 0) - (a.down_grid_time || 0));
+    const aps = [...new Set([...Object.keys(apNames).map(Number), ...all.map((i) => i.ap)])].sort((a, b) => a - b);
+    if (incidentAp >= 0 && !aps.includes(incidentAp)) incidentAp = -1;
+    const chip = (ap, label, n) => `<button type="button" data-ap="${ap}" aria-pressed="${ap === incidentAp}">${esc(label)} (${n})</button>`;
+    const chips = [chip(-1, "All APs", all.length),
+      ...aps.map((ap) => chip(ap, nodeName(ap), all.filter((i) => i.ap === ap).length))].join("");
+    if (chips !== lastChips) { $("incidents-filter").innerHTML = chips; lastChips = chips; }   // keep buttons steady between polls
+    $("incidents-filter").hidden = all.length === 0;
+
+    const shown = incidentAp < 0 ? all : all.filter((i) => i.ap === incidentAp);
+    const inc = shown.map((i) => {
+      const what = i.kind === "restarted" ? `Restarted: ${esc(i.reset)}` + (i.prev_run_s >= 0 ? ` after running ${fmtDur(i.prev_run_s)}` : "")
+        : i.kind === "link" ? "Kept running; the AP-to-AP link dropped (radio or distance)"
+        : i.kind === "unexplained" ? "Came back but did not say why within a minute"
+        : '<span class="bad">Unreachable now</span>';
+      const when = i.down_grid_time ? fmtGridTime(i.down_grid_time) : "grid time was not set";
+      return `<tr><td>${when}</td><td>${esc(nodeName(i.ap))}</td><td>${fmtDur(i.duration_s)}</td><td>${what}</td><td class="dim">${esc(nodeName(i.seen_by))}</td></tr>`;
+    });
+    $("incidents-body").innerHTML = inc.join("");
+    $("incidents-empty").textContent = all.length === 0
+      ? "No AP outage on record. The log survives restarts and is shared between APs."
+      : `No outage on record for ${nodeName(incidentAp)}.`;
+    $("incidents-empty").hidden = inc.length > 0;
+    $("incidents-table").hidden = inc.length === 0;
+  }
+
+  $("incidents-filter").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-ap]");
+    if (!b) return;
+    incidentAp = +b.dataset.ap;
+    try { localStorage.setItem("lg_incident_ap", String(incidentAp)); } catch (e) { /* no storage */ }
+    renderIncidents();
+  });
+
   async function refresh() {
     let s;
     try { s = await api("/api/status"); }
@@ -288,6 +423,8 @@
       if (/Log in/.test(e.message)) { clearInterval(poll); show(["login"]); }
       return;
     }
+    const hist = await history().catch(() => null);
+    if (hist) { s.aps = hist.aps; s.incidents = hist.incidents; s.time_set = hist.time_set; }
     gridTime = s.grid_time; lastStatusAt = performance.now(); renderClock();
     const pill = $("time-pill");
     if (!s.grid_time) {
@@ -296,7 +433,7 @@
       $("time-card").classList.add("banner");
     } else {
       const drift = Math.round(s.grid_time - Date.now() / 1000);
-      pill.textContent = s.time_quality === 2 ? "SET BY ADMIN" : "CARRIED FROM AN AP";
+      pill.textContent = s.time_quality === 2 ? "SET ON THIS AP" : "CARRIED";
       pill.className = "pill good";
       $("time-hint").textContent = Math.abs(drift) > 120
         ? `This device's clock differs from the grid by ${drift} s.` : "";
@@ -304,18 +441,77 @@
     }
     $("subtitle").textContent = `LocalMesh Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
     $("s-node").textContent = s.node_name;
-    const h = Math.floor(s.uptime_s / 3600), m = Math.floor(s.uptime_s % 3600 / 60);
-    $("s-uptime").textContent = `${h}h ${pad(m)}m`;
+    $("s-uptime").textContent = fmtDur(s.uptime_s);
     $("s-handhelds").textContent = s.handhelds;
     $("s-heap").textContent = `${Math.round(s.heap_free / 1024)} KB`;
 
-    const nodes = [`<tr><td>${nodeName(s.node)}</td><td><span class="pill good">YOU ARE HERE</span></td><td class="dim">this AP</td><td class="dim">now</td></tr>`];
-    for (const l of s.links) {
-      const status = l.up ? '<span class="pill good">ONLINE</span>' : '<span class="pill warn">CONNECTING</span>';
-      const q = l.rssi >= -60 ? "good" : l.rssi >= -75 ? "warn" : "bad";
-      nodes.push(`<tr><td>${nodeName(l.node)}</td><td>${status}</td><td class="${q}">${l.rssi} dBm</td><td>${(l.age_ms / 1000).toFixed(1)} s ago</td></tr>`);
+    apNames = {};
+    for (const a of (s.aps || [])) apNames[a.ap] = a.name;
+
+    // Where the time on this page came from: carried from which AP, and where and when an admin set it.
+    const ts = s.time_set || {};
+    const me = (s.aps || []).find((x) => x.self) || {};
+    const src = $("time-source");
+    if (!s.grid_time) {
+      src.textContent = "";
+    } else {
+      const parts = [];
+      if (me.sync_from === s.node && me.stratum === 0) {
+        parts.push(`Set by the admin on this AP (${esc(s.node_name)})`);
+      } else if (me.sync_from >= 0) {
+        parts.push(`Carried here from ${esc(nodeName(me.sync_from))}, last synced ${fmtDur(me.sync_age_s)} ago` +
+          (me.sync_drift_ms ? ` (${me.sync_drift_ms > 0 ? "+" : ""}${me.sync_drift_ms} ms)` : "") +
+          (me.stratum < 255 ? `, ${me.stratum} hop${me.stratum === 1 ? "" : "s"} from where it was set` : ""));
+      }
+      if (ts.on >= 0 && !(me.sync_from === s.node && me.stratum === 0)) {
+        parts.push(`originally set by the admin on ${esc(nodeName(ts.on))}` + (ts.unix ? ` at ${fmtGridTime(ts.unix)}` : ""));
+      } else if (ts.on < 0) {
+        parts.push("where and when it was originally set is not known: every AP that saw it being set has restarted since");
+      }
+      src.textContent = parts.join("; ") + ".";
+    }
+
+    const links = {};
+    for (const l of s.links) links[l.node] = l;
+    const nodes = [];
+    for (const a of (s.aps || [])) {
+      const l = links[a.ap];
+      let status, signal = '<span class="dim">this AP</span>';
+      if (a.self) {
+        status = '<span class="pill good">YOU ARE HERE</span>';
+      } else if (l && l.up) {
+        status = '<span class="pill good">ONLINE</span>';
+        const q = l.rssi >= -60 ? "good" : l.rssi >= -75 ? "warn" : "bad";
+        signal = `<span class="${q}">${l.rssi} dBm</span>`;
+      } else {
+        status = `<span class="pill bad">UNREACHABLE</span>`;
+        signal = `<span class="dim">last heard ${fmtDur(a.heard_s)} ago</span>`;
+      }
+      const sync = a.sync_age_s < 0 ? '<span class="dim">never</span>'
+        : a.sync_from === a.ap ? `set here ${fmtDur(a.sync_age_s)} ago`
+        : `from ${esc(nodeName(a.sync_from))}, ${fmtDur(a.sync_age_s)} ago` + (a.sync_drift_ms ? ` (${a.sync_drift_ms > 0 ? "+" : ""}${a.sync_drift_ms} ms)` : "") + (a.stratum < 255 ? `, ${a.stratum} hop${a.stratum === 1 ? "" : "s"} from source` : "");
+      const restart = esc(a.reset) + (a.prev_run_s >= 0 ? `, after ${fmtDur(a.prev_run_s)}` : "");
+      const reachable = a.self || (l && l.up);
+      nodes.push(`<tr><td>${esc(a.name)}</td><td>${status}</td><td>${reachable ? fmtDur(a.uptime_s) : "--"}</td><td>${quality(a.time_quality)}</td><td>${sync}</td><td class="dim">${restart}</td><td>${signal}</td></tr>`);
     }
     $("nodes-body").innerHTML = nodes.join("");
+
+    // Availability strips: one rect per minute, oldest on the left.
+    const strips = [];
+    for (const a of (s.aps || [])) {
+      const cells = (a.avail || []).map((c, i) => `<rect x="${i}" y="0" width="0.92" height="10" class="av${c & 3}"><title>${120 - i} min ago</title></rect>`).join("");
+      // How much of the recorded time it was reachable: this changes every minute, the 2-hour strip barely does.
+      const rec = (a.avail || []).filter((c) => c !== 0).length;
+      const upMin = (a.avail || []).reduce((t, c) => t + (c === 1 ? 1 : c === 2 ? 0.5 : 0), 0);
+      const sum = rec ? `${Math.round(100 * upMin / rec)}% of ${rec} min` : "no record";
+      strips.push(`<div>${esc(a.name)}</div><svg viewBox="0 0 120 10" preserveAspectRatio="none" role="img" aria-label="${esc(a.name)} availability">${cells}</svg><div class="sum">${sum}</div>`);
+    }
+    if (strips.length) strips.push('<div></div><div class="axis"><span>2 h ago</span><span>1 h</span><span>now</span></div><div></div>');
+    $("avail").innerHTML = strips.join("");
+    $("avail-hint").textContent = `As seen from ${s.node_name}: whether each AP was reachable over the AP-to-AP link, minute by minute. Each strip fills in from the right, one sliver a minute. The history survives restarts and unplugging; minutes ${s.node_name} was down are filled in from the other APs' records.`;
+
+    lastIncidents = s.incidents || [];
+    renderIncidents();
 
     const rows = s.devices.map((d) => {
       const cls = d.state === "ONLINE" ? "good" : "dim";

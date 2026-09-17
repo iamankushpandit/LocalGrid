@@ -34,6 +34,7 @@ void    lgbb_send_unicast(uint16_t node, const uint8_t *frame, size_t len);
 void    lgbb_flood(uint16_t except_node, const uint8_t *frame, size_t len);
 bool    lgbb_is_neighbor(uint16_t node);
 uint8_t lgbb_link_count(void);
+uint32_t lgbb_tx_frame_count(void);   /* frames handed to the radio since boot */
 void    lgbb_print(void);
 
 typedef struct {

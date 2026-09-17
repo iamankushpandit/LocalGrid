@@ -5,12 +5,16 @@
  * broadcast do not wait to be noticed:
  *
  *   ANNOUNCEMENT  something everyone wants to know now -- the food is ready. The screen
- *                 flashes with the words on it and chimes, then clears itself. Meant to be
- *                 caught out of the corner of an eye, from the other side of a tent.
+ *                 flashes with the words on it and chimes once, then settles and stays until
+ *                 somebody taps its X. Meant to be caught out of the corner of an eye, from
+ *                 the other side of a tent, or read later by whoever picks the handheld up.
  *
  *   EMERGENCY     an urgent broadcast (D6 lets these through when nothing else gets out).
- *                 The screen is taken over until somebody taps Dismiss, the siren repeats,
- *                 and it sounds at full volume even on a handheld that has been silenced.
+ *                 The screen is taken over until somebody taps its X, it keeps flashing, the
+ *                 siren repeats, and it sounds at full volume even on a silenced handheld.
+ *
+ * Only the X closes either one (D41): a touch anywhere else is swallowed, so a pocket or a
+ * stray finger cannot clear an alert nobody has read.
  *
  * Keeping the takeover for emergencies is deliberate. If every broadcast seized the screen,
  * people would learn to dismiss them unread, which is exactly how a real alert loses its

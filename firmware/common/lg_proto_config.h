@@ -30,6 +30,7 @@
 #define LG_DISC_NAME_MAX        15
 #define LG_DISC_WIFI_MAX        (LG_DISC_LEN + 1 + LG_DISC_NAME_MAX)
 #define LG_DISC_FLAG_BACKBONE   0x01    /* node has at least one working backbone link */
+#define LG_DISC_FLAG_TIME       0x02    /* the AP holds grid time; handhelds prefer such an AP (D6) */
 #define LG_VENDOR_OUI           { 0x4C, 0x47, 0x00 }   /* prototype placeholder, not a registered OUI */
 #define LG_VENDOR_OUI_TYPE      0x01
 #define LG_BLE_COMPANY_ID       0xFFFF  /* Bluetooth SIG "testing" company ID */

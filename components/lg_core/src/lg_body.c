@@ -92,21 +92,62 @@ bool lg_presence_dec(const uint8_t *in, size_t len, lg_presence_t *v)
     return v->state <= LG_PRES_ONLINE;
 }
 
+bool lg_name_valid(const uint8_t *text, size_t len)
+{
+    return text != NULL && len >= 1u && len <= LG_NAME_MAX - 1u && lg_utf8_valid(text, len);
+}
+
+size_t lg_name_enc(const lg_name_t *v, uint8_t *out)
+{
+    lg_wr32(out, v->device);
+    lg_wr32(out + 4, v->version);
+    out[8] = v->len;
+    memcpy(out + 9, v->text, v->len);
+    return 9u + v->len;
+}
+
+bool lg_name_dec(const uint8_t *in, size_t len, lg_name_t *v)
+{
+    if (len < LG_NAME_LEN_MIN || len > LG_NAME_LEN_MAX || in[8] != len - 9u) {
+        return false;
+    }
+    v->device  = lg_rd32(in);
+    v->version = lg_rd32(in + 4);
+    v->len     = in[8];
+    if (v->device == 0 || v->version == 0 || !lg_name_valid(in + 9, v->len)) {
+        return false;
+    }
+    memcpy(v->text, in + 9, v->len);
+    v->text[v->len] = '\0';
+    return true;
+}
+
 size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out)
 {
     lg_wr32(out, v->grid_time);
-    out[4] = v->quality;
+    lg_wr16(out + 4, v->millis);
+    out[6] = v->quality;
+    out[7] = v->stratum;
     return LG_TIME_SYNC_LEN;
 }
 
 bool lg_time_sync_dec(const uint8_t *in, size_t len, lg_time_sync_t *v)
 {
+    if (len == LG_TIME_SYNC_LEN_V1) {
+        v->grid_time = lg_rd32(in);
+        v->millis    = 0;
+        v->quality   = in[4];
+        v->stratum   = LG_STRATUM_UNKNOWN;
+        return v->quality <= LG_TIME_AUTHORITATIVE;
+    }
     if (len != LG_TIME_SYNC_LEN) {
         return false;
     }
     v->grid_time = lg_rd32(in);
-    v->quality   = in[4];
-    return v->quality <= LG_TIME_AUTHORITATIVE;
+    v->millis    = lg_rd16(in + 4);
+    v->quality   = in[6];
+    v->stratum   = in[7];
+    return v->quality <= LG_TIME_AUTHORITATIVE && v->millis < 1000u;
 }
 
 size_t lg_hello_enc(const lg_hello_t *v, uint8_t *out)

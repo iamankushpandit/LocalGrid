@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "lg_bsp_settings.h"
+#include "lg_display.h"
 #include "lg_theme.h"
 
 #define COLUMNS_MAX   30
@@ -209,9 +210,13 @@ bool lg_ui_screensaver_enabled(void)
 void lg_ui_screensaver_set_enabled(bool enabled)
 {
     s.enabled = enabled;
+    /* Also called from the console task (D28), and hide() deletes widgets the drawing task may be walking.
+     * The lock is recursive, so Settings calling this from the drawing task is unaffected. */
+    lg_display_lock(1000);
     if (!enabled && s.showing) {
         hide();
     }
+    lg_display_unlock();
     lg_bsp_setting_set_bool(SETTING_SAVER, enabled);
 }
 
@@ -222,9 +227,11 @@ bool lg_ui_screensaver_showing(void)
 
 void lg_ui_screensaver_dismiss(void)
 {
+    lg_display_lock(1000);   /* recursive: safe from the drawing task and from any other */
     if (s.showing) {
         hide();
     }
+    lg_display_unlock();
 }
 
 void lg_ui_screensaver_start(uint32_t idle_ms)

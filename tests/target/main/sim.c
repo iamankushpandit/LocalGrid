@@ -83,13 +83,23 @@ static void n_on_diag(void *ctx, uint16_t origin_node, uint8_t hops, const uint8
     sn->diag_hops = hops;
 }
 
-static void n_on_time(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality)
+static void n_on_time(void *ctx, uint16_t origin_node, const lg_time_sync_t *t)
 {
     (void)origin_node;
     sim_node_t *sn = ctx;
-    if (grid_time != 0 && quality > LG_TIME_UNSET) {
-        sn->time = grid_time;
+    if (t->grid_time != 0 && t->quality > LG_TIME_UNSET) {
+        sn->time = t->grid_time;
+        sn->time_millis = t->millis;
+        sn->time_stratum = t->stratum;
     }
+}
+
+static void n_time_now(void *ctx, lg_time_sync_t *out)
+{
+    sim_node_t *sn = ctx;
+    out->grid_time = sn->time != 0 ? sn->time : sn->sim->grid_time;
+    out->millis = 250;   /* a fixed, recognisable fraction for the tests */
+    out->stratum = (uint8_t)sn->index;
 }
 
 static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
@@ -99,6 +109,12 @@ static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body
     sn->grid_state_origin = origin_node;
     sn->grid_state_len = len <= sizeof(sn->grid_state_last) ? len : sizeof(sn->grid_state_last);
     memcpy(sn->grid_state_last, body, sn->grid_state_len);
+}
+
+static void n_on_name(void *ctx, const lg_name_t *name)
+{
+    (void)name;
+    ((sim_node_t *)ctx)->name_count++;
 }
 
 /* ---- client io ---- */
@@ -120,6 +136,8 @@ static void c_event(void *ctx, const lg_client_event_t *ev)
         c->messages++;
     } else if (ev->type == LG_CEV_KEY_CHANGED) {
         c->key_changes++;
+    } else if (ev->type == LG_CEV_NAME) {
+        c->name_events++;
     }
 }
 
@@ -192,7 +210,9 @@ sim_t *sim_create(void)
             .grid_time = n_grid_time,
             .on_diag = n_on_diag,
             .on_time = n_on_time,
+            .time_now = n_time_now,
             .on_grid_state = n_on_grid_state,
+            .on_name = n_on_name,
         };
         lg_node_init(&sn->node, (uint16_t)i, 1, roster, &io);
     }

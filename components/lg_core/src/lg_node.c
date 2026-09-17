@@ -19,6 +19,18 @@ static uint32_t node_grid_time(const lg_node_t *n)
     return n->io.grid_time ? n->io.grid_time(n->io.ctx) : 0;
 }
 
+static void time_sync_now(const lg_node_t *n, uint8_t quality, lg_time_sync_t *t)
+{
+    memset(t, 0, sizeof(*t));
+    if (n->io.time_now != NULL) {
+        n->io.time_now(n->io.ctx, t);
+    } else {
+        t->grid_time = node_grid_time(n);
+        t->stratum = LG_STRATUM_UNKNOWN;
+    }
+    t->quality = quality;
+}
+
 static lg_presence_entry_t *presence_find(lg_node_t *n, uint32_t device)
 {
     for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
@@ -143,7 +155,8 @@ static void flood_presence(lg_node_t *n, const lg_presence_entry_t *p)
 
 static void send_time_to_client(lg_node_t *n, uint32_t device, uint8_t quality)
 {
-    lg_time_sync_t t = { .grid_time = node_grid_time(n), .quality = quality };
+    lg_time_sync_t t;
+    time_sync_now(n, quality, &t);
     uint8_t body[LG_TIME_SYNC_LEN];
     size_t blen = lg_time_sync_enc(&t, body);
     lg_env_t e;
@@ -218,6 +231,86 @@ static bool direct_body_ok(const lg_env_t *e)
 static bool plain_body_ok(const lg_env_t *e, const uint8_t *body)
 {
     return (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 && lg_text_valid(body, e->body_len);
+}
+
+/* ---- names (D50) --------------------------------------------------------- */
+
+static lg_name_t *name_slot(lg_node_t *n, uint32_t device)
+{
+    int ui = lg_roster_user_index(n->roster, device);
+    return ui >= 0 && ui < (int)LG_MAX_DEVICES ? &n->names[ui] : NULL;
+}
+
+/* Keeps name if it is newer than the one held. Returns true when it was taken. */
+static bool name_take(lg_node_t *n, const lg_name_t *name)
+{
+    lg_name_t *slot = name_slot(n, name->device);
+    if (slot == NULL || name->version <= slot->version) {
+        return false;
+    }
+    *slot = *name;
+    return true;
+}
+
+static void send_name_to_client(lg_node_t *n, uint32_t device, const lg_name_t *name)
+{
+    uint8_t body[LG_NAME_LEN_MAX];
+    size_t blen = lg_name_enc(name, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_NAME, LG_SCOPE_SYSTEM, name->device);
+    send_client(n, device, &e, body, blen);
+}
+
+static void push_name_to_local_clients(lg_node_t *n, const lg_name_t *name)
+{
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *q = &n->presence[i];
+        if (q->in_use && is_local_online(n, q)) {
+            send_name_to_client(n, q->device, name);
+        }
+    }
+}
+
+static void flood_name(lg_node_t *n, const lg_name_t *name)
+{
+    uint8_t body[LG_NAME_LEN_MAX];
+    size_t blen = lg_name_enc(name, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_NAME, LG_SCOPE_SYSTEM, name->device);
+    e.ttl = LG_TTL_DEFAULT;
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, buf, sizeof(buf));
+    if (flen < 0) {
+        return;
+    }
+    (void)lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq);
+    flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+}
+
+static void handle_client_name(lg_node_t *n, uint32_t session_device, const lg_env_t *e, const uint8_t *body)
+{
+    lg_name_t name;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_name_dec(body, e->body_len, &name)) {
+        n->stats.malformed++;
+        return;
+    }
+    if (name.device != session_device || lg_roster_user(n->roster, name.device) == NULL) {
+        n->stats.rejected++;   /* a handheld names only itself */
+        return;
+    }
+    if (name_take(n, &name)) {
+        if (n->io.on_name != NULL) {
+            n->io.on_name(n->io.ctx, &name);
+        }
+        flood_name(n, &name);
+        push_name_to_local_clients(n, &name);
+        return;
+    }
+    /* Not newer. If the grid holds a newer one (the handheld lost its flash), hand it back. */
+    const lg_name_t *held = name_slot(n, name.device);
+    if (held != NULL && held->version > name.version) {
+        send_name_to_client(n, session_device, held);
+    }
 }
 
 /* ---- delivery ----------------------------------------------------------- */
@@ -448,6 +541,11 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
                 send_presence_to_client(n, reg.device, &n->presence[i]);
             }
         }
+        for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+            if (n->names[i].version != 0) {
+                send_name_to_client(n, reg.device, &n->names[i]);
+            }
+        }
         flood_presence(n, p);
         notify_local_clients(n, p, reg.device);
         return;
@@ -471,6 +569,9 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         break;
     case LG_T_MSG_ACK:
         handle_client_ack(n, &e, body);
+        break;
+    case LG_T_NAME:
+        handle_client_name(n, *session_device, &e, body);
         break;
     default:
         break;  /* unknown or not client-originated: ignored */
@@ -548,6 +649,22 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
     case LG_T_MSG_ACK:
         deliver_direct(n, &e, body, frame, len, from_node);
         break;
+    case LG_T_NAME: {
+        lg_name_t name;
+        if (e.scope != LG_SCOPE_SYSTEM || !lg_name_dec(body, e.body_len, &name)) {
+            n->stats.malformed++;
+            break;
+        }
+        /* Only a newer name goes further: an AP that already holds it announced it itself. */
+        if (name_take(n, &name)) {
+            if (n->io.on_name != NULL) {
+                n->io.on_name(n->io.ctx, &name);
+            }
+            push_name_to_local_clients(n, &name);
+            forward(n, &e, body, from_node);
+        }
+        break;
+    }
     case LG_T_TIME_SYNC: {
         lg_time_sync_t t;
         if (!lg_time_sync_dec(body, e.body_len, &t)) {
@@ -555,7 +672,7 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
             break;
         }
         if (n->io.on_time != NULL) {
-            n->io.on_time(n->io.ctx, e.origin_node, t.grid_time, t.quality);
+            n->io.on_time(n->io.ctx, e.origin_node, &t);
         }
         push_time_to_local_clients(n, t.quality);
         forward(n, &e, body, from_node);
@@ -595,6 +712,7 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor)
             flood_presence(n, &n->presence[i]);
         }
     }
+    lg_node_announce_names(n);
 }
 
 void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality)
@@ -604,7 +722,8 @@ void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality)
 
 void lg_node_announce_time(lg_node_t *n, uint8_t quality)
 {
-    lg_time_sync_t t = { .grid_time = node_grid_time(n), .quality = quality };
+    lg_time_sync_t t;
+    time_sync_now(n, quality, &t);
     uint8_t body[LG_TIME_SYNC_LEN];
     size_t blen = lg_time_sync_enc(&t, body);
     (void)flood_new(n, LG_T_TIME_SYNC, body, blen);
@@ -625,4 +744,32 @@ int lg_node_announce_grid_state(lg_node_t *n, const uint8_t *body, size_t len)
         return LG_ERR_ARG;
     }
     return flood_new(n, LG_T_GRID_STATE, body, len);
+}
+
+bool lg_node_restore_name(lg_node_t *n, const lg_name_t *name)
+{
+    if (name == NULL || name->version == 0 || !lg_name_valid((const uint8_t *)name->text, name->len)) {
+        return false;
+    }
+    lg_name_t copy = *name;
+    copy.text[copy.len] = 0;
+    return name_take(n, &copy);
+}
+
+void lg_node_announce_names(lg_node_t *n)
+{
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (n->names[i].version != 0) {
+            flood_name(n, &n->names[i]);
+        }
+    }
+}
+
+const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device)
+{
+    int ui = lg_roster_user_index(n->roster, device);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES || n->names[ui].version == 0) {
+        return NULL;
+    }
+    return &n->names[ui];
 }

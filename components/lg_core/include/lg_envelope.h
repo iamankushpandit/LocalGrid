@@ -40,6 +40,7 @@ typedef enum {
     LG_T_PING            = 0x12,
     LG_T_PONG            = 0x13,
     LG_T_PRESENCE_UPDATE = 0x20,
+    LG_T_NAME            = 0x23,   /* a handheld's chosen name, versioned; newest wins everywhere */
     LG_T_TEXT            = 0x30,
     LG_T_MSG_ACK         = 0x31,
     LG_T_TIME_SYNC       = 0x50,

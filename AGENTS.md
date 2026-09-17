@@ -17,6 +17,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `components/lg_board` | Board profiles: pins and panel and touch facts, selected by the board code in the device ID. Data only. |
 | `components/lg_bsp` | Board support drivers: SPI and I2C buses, display panel, touch controllers. No LVGL. |
 | `components/lg_ui` | LVGL display glue, theme, pointer input, and the calibration screen. No drivers. |
+| `components/lg_power` | Supply voltage from a board's sense divider and the `power` console command, shared by every firmware. |
 | `components/lg_selftest` | The quick boot check (D24): envelope, dedup, bodies, UTF-8, and the RFC crypto vectors. Reachable from Status. |
 | `firmware/node` | Infrastructure node firmware. |
 | `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui`, meeting only in `hh_service.h`. |
@@ -27,8 +28,11 @@ User-facing text calls the product "an offline network", never a camp or campsit
 ## Skills
 
 - `.claude/skills/bench/SKILL.md` — build, run on-board tests, and read serial logs on the bench boards.
+- `.claude/skills/chaos/SKILL.md` — take APs and handhelds out at random for hours and report how the grid recovers. Boards are found by their own device IDs; run it only when the owner asks.
 - `.claude/skills/build/SKILL.md` — build every firmware type, chosen types or targets, or what named boards run, without flashing.
 - `.claude/skills/flash/SKILL.md` — flash one, several, or all boards with their assigned firmware from `tools/bench_devices.json`.
+- `.claude/skills/power/SKILL.md` — supply voltage on one or all boards, now or monitored with min, average, and max.
+- `.claude/skills/wifi/SKILL.md` — count the APs broadcasting the grid SSID from this laptop's radio.
 - `.claude/skills/protocol-change/SKILL.md` — add or change a message type or `lg_core` behavior.
 
 ## Rules
@@ -42,6 +46,8 @@ User-facing text calls the product "an offline network", never a camp or campsit
 - **Prefix public symbols** with `lg_` (core, crypto) or a module prefix such as `lgbb_`. Short names collide with Espressif's closed libraries; `bb_init` already exists in the PHY library.
 - **Test on the ESP32 boards only** (D25). The PC builds, flashes, and reads serial logs; it never stands in for a handheld or a node.
 - **Layers stay separate** (D27). Infrastructure components never include UI or LVGL headers. `lg_bsp` is the only UI-side code that includes ESP-IDF drivers, and `lg_ui` reaches hardware only through it. Handheld screens and services exchange events and commands through a queue: screens never touch sockets, and services never touch LVGL. `tools/check_layers.py` checks this, and `tools/build.py` runs it on every build.
+- **Information is sticky** (D48). Anything a device learns that another could use must survive the holder restarting and be shared with neighbours, versioned so newer wins and duplicates merge, and announced on link up and periodically. A record kept on only one device is a design gap.
+- **Devices hold bytes, browsers make text** (D49). Store and send state as packed binary records; decode, format, and draw in the browser or PC tool. No long-lived text buffers on a device; new page APIs are binary with a documented layout.
 - **Handhelds show results on their screen** (D23). Any firmware flashed to a handheld, including test builds, drives the display with its status and results; serial output is an addition, never the only output.
 - **UI code** reads screen size at runtime and styles through the theme (D9, D10). Pixel values and colors appear only in board profiles and theme tables.
 - **Secrets** come from `python tools/gen_secrets.py` into gitignored `firmware/common/lg_secrets.h`. Commit only `lg_secrets.example.h`.

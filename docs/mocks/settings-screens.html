@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handheld Settings Mock</title>
+<style>
+  :root {
+    --page-bg: #f2f5f2; --page-panel: #ffffff; --page-ink: #14201a; --page-muted: #55665e;
+    --page-rule: #d3ded7; --page-accent: #1f7a4d; --page-warn: #8a5a00; --page-bad: #a32b2b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page-bg: #0b0f0d; --page-panel: #121815; --page-ink: #e2ece6; --page-muted: #94a69c;
+      --page-rule: #24312b; --page-accent: #5fd38d; --page-warn: #f0b64a; --page-bad: #ff8b8b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #0b0f0d; --page-panel: #121815; --page-ink: #e2ece6; --page-muted: #94a69c;
+    --page-rule: #24312b; --page-accent: #5fd38d; --page-warn: #f0b64a; --page-bad: #ff8b8b;
+  }
+  /* Terminal theme, copied from components/lg_ui/src/lg_theme.c. Sizes are the Hosyond 240x320. */
+  .screen {
+    --bg: #000000; --bar: #0b1a12; --bar-text: #5fd38d; --surface: #0a140f; --outline: #1f3a2a;
+    --text: #d2f5de; --muted: #7fa78f; --accent: #5fd38d; --error: #ff6b6b; --warning: #f0b64a;
+    --radius: 6px; --pad: 8px; --gap: 5px; --touch: 39px; --hairline: 1px; --stroke: 2px;
+    --f-small: 12px; --f-body: 14px;
+  }
+
+  body { margin: 0; background: var(--page-bg); color: var(--page-ink); font-family: system-ui, sans-serif; line-height: 1.5; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: clamp(26px, 4vw, 38px); line-height: 1.1; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .lede { max-width: 66ch; color: var(--page-muted); margin: 0 0 16px; }
+  h2 { font-size: 20px; margin: 44px 0 4px; }
+  h2 + p { margin: 0 0 20px; color: var(--page-muted); max-width: 70ch; }
+  .frames { display: grid; gap: 24px; grid-template-columns: repeat(auto-fill, minmax(min(394px, 100%), 1fr)); }
+  figure { margin: 0; background: var(--page-panel); border: 1px solid var(--page-rule); border-radius: 10px; padding: 16px; }
+  figcaption { margin-top: 12px; }
+  .cap-title { font-weight: 600; font-size: 15px; }
+  .cap-note { color: var(--page-muted); font-size: 13px; margin-top: 2px; }
+  .bad { color: var(--page-bad); }
+
+  .stage { width: 360px; aspect-ratio: 240 / 320; overflow: hidden; border-radius: 10px; border: 1px solid var(--page-rule); }
+  .screen {
+    width: 240px; height: 320px; transform: scale(1.5); transform-origin: top left;
+    background: var(--bg); color: var(--text); font-family: Montserrat, system-ui, sans-serif; font-size: var(--f-body);
+    display: flex; flex-direction: column; gap: var(--gap); padding: var(--pad); box-sizing: border-box; overflow: hidden; position: relative;
+  }
+  @media (max-width: 440px) { .stage { width: 240px; } .screen { transform: none; } }
+
+  .bar { background: var(--bar); border-radius: var(--radius); padding: 2px; display: flex; align-items: center; gap: var(--gap); color: var(--bar-text); }
+  .bar .home { width: 30px; height: 30px; display: grid; place-items: center; font-size: 16px; }
+  .bar .title { flex: 1; }
+  .bar .st { font-size: var(--f-small); padding-right: 4px; }
+
+  /* Today: LVGL's default light theme styles the tab strip, not lg_theme. */
+  .tabs-now { display: flex; background: #ffffff; height: var(--touch); flex: none; }
+  .tabs-now div { flex: 1; display: grid; place-items: center; font-size: var(--f-small); color: var(--text); }
+  .tabs-now .on { background: rgba(33,150,243,.2); color: #2196f3; border-bottom: 2px solid #2196f3; }
+  .page-now { padding: 11px; display: flex; flex-direction: column; gap: var(--gap); overflow: hidden; flex: 1; }
+  .page-now .scroll { position: absolute; right: 3px; top: 90px; width: 4px; height: 90px; background: #9e9e9e; border-radius: 2px; opacity: .6; }
+
+  /* Proposed: Gume's raised tabs in Terminal colours. */
+  .tabs { display: flex; gap: 2px; height: calc(var(--touch) - 8px); flex: none; align-items: end; border-bottom: var(--hairline) solid var(--outline); }
+  .tabs div { flex: 1; height: 26px; display: grid; place-items: center; font-size: var(--f-small); color: var(--muted);
+    background: var(--bar); border: var(--hairline) solid var(--outline); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; }
+  .tabs .on { height: 31px; color: var(--bar-text); background: var(--surface); border-color: var(--accent); margin-bottom: -1px; font-weight: 600; }
+  .page { display: flex; flex-direction: column; gap: var(--gap); flex: 1; overflow: hidden; padding-top: 2px; }
+
+  .listrow, .act { min-height: var(--touch); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between; gap: var(--gap); padding: 0 var(--gap); box-sizing: border-box; }
+  .listrow { background: var(--surface); border: var(--hairline) solid var(--outline); }
+  .listrow .v { font-size: var(--f-small); color: var(--muted); }
+  .act { background: var(--surface); border: var(--hairline) solid var(--accent); }
+  .act .v { font-size: var(--f-small); color: var(--accent); }
+  .act.center { justify-content: center; }
+  .act.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  .act.danger { background: var(--error); color: #000; border-color: var(--error); font-weight: 600; }
+  .info { display: flex; justify-content: space-between; font-size: var(--f-small); padding: 3px var(--gap); border-bottom: var(--hairline) solid var(--outline); }
+  .info span:first-child { color: var(--muted); }
+  .note { font-size: var(--f-small); color: var(--muted); line-height: 1.3; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+  .seg { display: grid; grid-template-columns: repeat(4, 1fr); border: var(--hairline) solid var(--outline); border-radius: var(--radius); overflow: hidden; min-height: var(--touch); }
+  .seg div { display: grid; place-items: center; font-size: var(--f-small); color: var(--muted); border-right: var(--hairline) solid var(--outline); }
+  .seg div:last-child { border-right: 0; }
+  .seg .on { background: var(--accent); color: #000; font-weight: 600; }
+  .label { font-size: var(--f-small); color: var(--muted); display: flex; justify-content: space-between; }
+  .field { min-height: var(--touch); border: var(--stroke) solid var(--accent); background: var(--surface); border-radius: var(--radius); display: flex; align-items: center; padding: 0 var(--gap); }
+  .field i { width: 1px; height: 16px; background: var(--accent); margin-left: 1px; }
+  .kb { display: grid; gap: 2px; margin-top: auto; }
+  .kb .r { display: grid; gap: 2px; }
+  .kb .k { background: var(--surface); border: var(--hairline) solid var(--outline); border-radius: 3px; height: 30px; display: grid; place-items: center; font-size: var(--f-small); }
+  .kb .k.ok { background: var(--accent); color: #000; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Handheld Settings, in the theme's colours</h1>
+  <p class="lede">Settings is the one screen built on <code>lv_tabview</code>, and nothing restyles its tab strip, so it gets LVGL's default light theme: a white strip, light green tab names on white, and a blue selected tab. Below is how it renders now, then Settings with Gume's raised tabs and button rows in the Terminal theme's colours. The screen size is the Hosyond 240 × 320, drawn 1.5 times larger.</p>
+
+  <h2>Now</h2>
+  <p>These colours come from <code>lv_theme_default.c</code>: <code>bg_color_white</code> on the tab strip, and <code>bg_color_primary_muted</code> with a primary bottom border on the selected tab. The tab names use <code>t-&gt;text</code> (#D2F5DE), which almost disappears on white.</p>
+  <div class="frames">
+    <figure>
+      <div class="stage"><div class="screen">
+        <div class="bar"><span class="home">⌂</span><span class="title">Settings</span><span class="st">-52 dBm 14:07</span></div>
+        <div class="tabs-now"><div>Grid</div><div>Sound</div><div>Screen</div><div class="on">Device</div></div>
+        <div class="page-now">
+          <div class="listrow"><span>Name</span><span class="v">Handheld 1</span></div>
+          <div class="listrow"><span>Device number</span><span class="v">1</span></div>
+          <div class="listrow"><span>Board</span><span class="v">HY3</span></div>
+          <div class="listrow"><span>Identity</span><span class="v">LG-H-HY3-…</span></div>
+          <div class="listrow"><span>Memory</span><span class="v">88 KB free, 61…</span></div>
+          <div class="scroll"></div>
+        </div>
+      </div></div>
+      <figcaption><div class="cap-title">Device tab, as it renders now</div>
+        <div class="cap-note"><span class="bad">White strip, unreadable tab names, blue selection, grey scrollbar.</span> Tappable and read-only rows also look alike: Restart is below the fold and looks the same as Memory.</div></figcaption>
+    </figure>
+  </div>
+
+  <h2>Proposed, Gume's layout</h2>
+  <p>As in Gume, the selected tab is raised and joins the page, and the others are dimmed. Actions are outlined buttons with the value in accent, a main action is filled with the accent colour, and Restart is filled red. Facts that cannot be changed are plain text rows, so nothing looks tappable unless it is. Every colour is an existing <code>lg_theme</code> role, so no new colour is needed.</p>
+  <div class="frames">
+    <figure>
+      <div class="stage"><div class="screen">
+        <div class="bar"><span class="home">⌂</span><span class="title">Settings</span><span class="st">-52 dBm 14:07</span></div>
+        <div class="tabs"><div class="on">Grid</div><div>Sound</div><div>Screen</div><div>Device</div></div>
+        <div class="page">
+          <div class="act"><span>Which AP</span><span class="v">automatic ›</span></div>
+          <div class="two">
+            <div class="act center primary">Reconnect</div>
+            <div class="act center">Look for APs</div>
+          </div>
+          <div class="info"><span>Connected to</span><span>AP 2, -52 dBm</span></div>
+          <div class="info"><span>Grid time</span><span>14:07</span></div>
+          <div class="note">Grid time is set on any AP's admin page; a handheld never sets it.</div>
+        </div>
+      </div></div>
+      <figcaption><div class="cap-title">Grid</div><div class="cap-note">The two actions share a row, as in Gume's two-column grid. The note says "any AP" now that there is no master AP (D45).</div></figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen">
+        <div class="bar"><span class="home">⌂</span><span class="title">Settings</span><span class="st">-52 dBm 14:07</span></div>
+        <div class="tabs"><div>Grid</div><div class="on">Sound</div><div>Screen</div><div>Device</div></div>
+        <div class="page">
+          <div class="label"><span>Volume</span><span>medium</span></div>
+          <div class="seg"><div>Off</div><div>Low</div><div class="on">Med</div><div>High</div></div>
+          <div class="two">
+            <div class="act center primary">Test sound</div>
+            <div class="act center">Test urgent</div>
+          </div>
+          <div class="note">A bell when a message arrives, and three notes for an urgent one.</div>
+          <div class="note">Off silences the handheld except for urgent broadcasts, which always sound.</div>
+        </div>
+      </div></div>
+      <figcaption><div class="cap-title">Sound</div><div class="cap-note">Gume uses a slider, but the hardware has only four levels, so this shows four buttons and one tap picks a level instead of stepping through them. The test buttons play the existing <code>received</code> and <code>urgent</code> sounds.</div></figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen">
+        <div class="bar"><span class="home">⌂</span><span class="title">Settings</span><span class="st">-52 dBm 14:07</span></div>
+        <div class="tabs"><div>Grid</div><div>Sound</div><div class="on">Screen</div><div>Device</div></div>
+        <div class="page">
+          <div class="act"><span>Screen saver</span><span class="v">on</span></div>
+          <div class="act"><span>Calibrate touch</span><span class="v" style="color:var(--warning)">needed</span></div>
+          <div class="note">Green rain covers the panel after a minute untouched; a touch clears it.</div>
+        </div>
+      </div></div>
+      <figcaption><div class="cap-title">Screen</div><div class="cap-note">"needed" uses the warning colour, so it stands out from an ordinary value.</div></figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen">
+        <div class="bar"><span class="home">⌂</span><span class="title">Settings</span><span class="st">-52 dBm 14:07</span></div>
+        <div class="tabs"><div>Grid</div><div>Sound</div><div>Screen</div><div class="on">Device</div></div>
+        <div class="page">
+          <div class="act"><span>Name</span><span class="v">Handheld 1 ›</span></div>
+          <div class="info"><span>Device number</span><span>1</span></div>
+          <div class="info"><span>Board</span><span>HY3</span></div>
+          <div class="info"><span>Identity</span><span>LG-H-HY3-MPT7…</span></div>
+          <div class="info"><span>Memory</span><span>88 KB, lowest 61</span></div>
+          <div class="act center danger" style="margin-top:auto">Restart</div>
+        </div>
+      </div></div>
+      <figcaption><div class="cap-title">Device</div><div class="cap-note">The facts fit as compact rows, so Restart shows without scrolling. Name becomes a button, which <b>needs your decision</b> (next frame).</div></figcaption>
+    </figure>
+
+    <figure>
+      <div class="stage"><div class="screen">
+        <div class="bar"><span class="home">‹</span><span class="title">Name</span><span class="st">-52 dBm 14:07</span></div>
+        <div class="field">Handheld 1<i></i></div>
+        <div class="note">Every handheld in the grid sees the new name. Up to 23 letters.</div>
+        <div class="kb">
+          <div class="r" style="grid-template-columns:repeat(10,1fr)"><div class="k">q</div><div class="k">w</div><div class="k">e</div><div class="k">r</div><div class="k">t</div><div class="k">y</div><div class="k">u</div><div class="k">i</div><div class="k">o</div><div class="k">p</div></div>
+          <div class="r" style="grid-template-columns:repeat(9,1fr);padding:0 11px"><div class="k">a</div><div class="k">s</div><div class="k">d</div><div class="k">f</div><div class="k">g</div><div class="k">h</div><div class="k">j</div><div class="k">k</div><div class="k">l</div></div>
+          <div class="r" style="grid-template-columns:1.5fr repeat(7,1fr) 1.5fr"><div class="k">⇧</div><div class="k">z</div><div class="k">x</div><div class="k">c</div><div class="k">v</div><div class="k">b</div><div class="k">n</div><div class="k">m</div><div class="k">⌫</div></div>
+          <div class="r" style="grid-template-columns:1.5fr 5fr 2fr"><div class="k">123</div><div class="k">space</div><div class="k ok">Save</div></div>
+        </div>
+      </div></div>
+      <figcaption><div class="cap-title">Renaming, if you approve it</div><div class="cap-note">This reuses the chat keyboard. Today a name is fixed in <code>lg_roster.c</code> when the firmware is built, so this screen needs a stored, shared name record first.</div></figcaption>
+    </figure>
+  </div>
+</div>
+</body>
+</html>

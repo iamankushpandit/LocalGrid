@@ -488,6 +488,8 @@ static void test_time_announce(void)
     CHECK(sim_pump(s));
     CHECK_EQ(s->nodes[1].time, T0 + 5);
     CHECK_EQ(s->nodes[2].time, T0 + 5);
+    CHECK_EQ(s->nodes[2].time_millis, 250);   /* milliseconds travel with the time */
+    CHECK_EQ(s->nodes[2].time_stratum, 0);    /* the stratum of the node that announced it, forwarded unchanged */
     CHECK_EQ(s->clients[EMMA].clock, T0 + 5);      /* pushed by node C after adopting */
     CHECK(!lg_client_time_restricted(cl(s, EMMA)));
     CHECK_EQ(s->clients[DAD].clock, T0 + 5);       /* pushed by node A directly */
@@ -551,6 +553,155 @@ static void test_read_receipt(void)
     sim_destroy(s);
 }
 
+static bool name_is(const lg_name_t *n, const char *text)
+{
+    return n != NULL && n->len == strlen(text) && memcmp(n->text, text, n->len) == 0 && n->text[n->len] == 0;
+}
+
+/* Sends a NAME frame on Dad's session at node A, as a handheld would, with any contents. */
+static void dad_sends_name_frame(sim_t *s, const lg_name_t *name, size_t body_len, uint32_t seq)
+{
+    uint8_t body[LG_NAME_LEN_MAX + 4];
+    memset(body, 0, sizeof(body));
+    (void)lg_name_enc(name, body);
+    lg_env_t e = {
+        .type = LG_T_NAME, .scope = LG_SCOPE_SYSTEM, .target = name->device,
+        .origin_id = LG_PROTO_DAD, .origin_boot = 1, .origin_seq = seq,
+    };
+    uint8_t frame[LG_FRAME_MAX];
+    int len = lg_frame_build(&e, body, body_len, frame, sizeof(frame));
+    CHECK(len > 0);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+}
+
+/* D50: a handheld names itself; the newest name reaches every AP and handheld and stays there. */
+static void test_names(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+
+    /* Wire format: exact lengths, a real device and version, and UTF-8 only. */
+    lg_name_t w = { .device = LG_PROTO_DAD, .version = 7, .len = 4 };
+    memcpy(w.text, "Papa", 4);
+    uint8_t wire[LG_NAME_LEN_MAX + 1];
+    lg_name_t back;
+    size_t wl = lg_name_enc(&w, wire);
+    CHECK_EQ(wl, 13u);
+    CHECK(lg_name_dec(wire, wl, &back) && back.version == 7 && name_is(&back, "Papa"));
+    CHECK(!lg_name_dec(wire, wl - 1, &back));
+    CHECK(!lg_name_dec(wire, wl + 1, &back));
+    wire[9] = 0xFF;
+    CHECK(!lg_name_dec(wire, wl, &back));                               /* not UTF-8 */
+    CHECK_EQ(lg_client_set_name(cl(s, DAD), (const uint8_t *)"", 0), LG_ERR_ARG);
+    CHECK_EQ(lg_client_set_name(cl(s, DAD), TXT("123456789012345678901234")), LG_ERR_ARG);   /* 24 bytes */
+
+    /* Nobody has chosen a name: the roster name applies everywhere. */
+    CHECK(lg_client_name(cl(s, EMMA), LG_PROTO_DAD) == NULL);
+    CHECK(lg_node_name(&s->nodes[2].node, LG_PROTO_DAD) == NULL);
+
+    /* Dad renames himself on node A; Emma on node C, two hops away, and every AP get it. */
+    CHECK_EQ(lg_client_set_name(cl(s, DAD), TXT("Papa")), LG_OK);
+    CHECK(sim_pump(s));
+    const lg_name_t *own = lg_client_name(cl(s, DAD), LG_PROTO_DAD);
+    CHECK(name_is(own, "Papa"));
+    CHECK(own != NULL && own->version >= (1u << 12));
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(name_is(lg_node_name(&s->nodes[i].node, LG_PROTO_DAD), "Papa"));
+        CHECK_EQ(s->nodes[i].name_count, 1u);
+    }
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        CHECK(name_is(lg_client_name(cl(s, i), LG_PROTO_DAD), "Papa"));
+        CHECK_EQ(s->clients[i].name_events, 1u);
+    }
+
+    /* A second rename gets a higher version and replaces the first everywhere. */
+    uint32_t v1 = own != NULL ? own->version : 0;
+    CHECK_EQ(lg_client_set_name(cl(s, DAD), TXT("Dad 🔥")), LG_OK);
+    CHECK(sim_pump(s));
+    own = lg_client_name(cl(s, DAD), LG_PROTO_DAD);
+    CHECK(own != NULL && own->version > v1);
+    CHECK(name_is(lg_client_name(cl(s, EMMA), LG_PROTO_DAD), "Dad 🔥"));
+    CHECK_EQ(s->nodes[2].name_count, 2u);
+
+    /* Re-registering resends the same version: nothing is kept again, nobody is told again. */
+    sim_detach(s, DAD);
+    sim_attach(s, DAD, 0);
+    CHECK(cl(s, DAD)->registered);
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK_EQ(s->nodes[i].name_count, 2u);
+    }
+    CHECK_EQ(s->clients[EMMA].name_events, 2u);
+
+    /* A duplicated backbone frame is taken once. */
+    s->duplicate_backbone = true;
+    CHECK_EQ(lg_client_set_name(cl(s, DAD), TXT("Dad")), LG_OK);
+    CHECK(sim_pump(s));
+    s->duplicate_backbone = false;
+    CHECK_EQ(s->nodes[1].name_count, 3u);
+    CHECK_EQ(s->nodes[2].name_count, 3u);
+
+    /* A handheld that was away learns every name held when it registers. */
+    sim_detach(s, EMMA);
+    CHECK_EQ(lg_client_set_name(cl(s, ALEX), TXT("Alex")), LG_OK);
+    CHECK(sim_pump(s));
+    memset(cl(s, EMMA)->names, 0, sizeof(cl(s, EMMA)->names));   /* as if Emma had restarted */
+    sim_attach(s, EMMA, 2);
+    CHECK(name_is(lg_client_name(cl(s, EMMA), LG_PROTO_ALEX), "Alex"));
+    CHECK(name_is(lg_client_name(cl(s, EMMA), LG_PROTO_DAD), "Dad"));
+
+    /* A handheld that lost its own name (reflashed) is handed back the grid's newer copy. */
+    memset(cl(s, ALEX)->names, 0, sizeof(cl(s, ALEX)->names));
+    lg_name_t old = { .device = LG_PROTO_ALEX, .version = 1, .len = 3 };
+    memcpy(old.text, "Old", 3);
+    CHECK(lg_client_restore_name(cl(s, ALEX), &old));
+    sim_detach(s, ALEX);
+    sim_attach(s, ALEX, 1);
+    CHECK(name_is(lg_client_name(cl(s, ALEX), LG_PROTO_ALEX), "Alex"));
+    CHECK(name_is(lg_node_name(&s->nodes[0].node, LG_PROTO_ALEX), "Alex"));   /* the old one went nowhere */
+
+    /* A split grid: a rename on one side reaches the other when the link comes back. */
+    sim_link(s, 1, 2, false);
+    CHECK_EQ(lg_client_set_name(cl(s, RANGER), TXT("Ranger Rick")), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(name_is(lg_node_name(&s->nodes[1].node, LG_PROTO_RANGER), "Ranger Rick"));
+    CHECK(lg_client_name(cl(s, EMMA), LG_PROTO_RANGER) == NULL);
+    sim_link(s, 1, 2, true);
+    CHECK(name_is(lg_node_name(&s->nodes[2].node, LG_PROTO_RANGER), "Ranger Rick"));
+    CHECK(name_is(lg_client_name(cl(s, EMMA), LG_PROTO_RANGER), "Ranger Rick"));
+
+    /* Restoring from flash takes only a newer name and sends nothing. */
+    lg_node_t *c_node = &s->nodes[2].node;
+    uint32_t forwarded = c_node->stats.forwarded;
+    CHECK(!lg_node_restore_name(c_node, &old));   /* older than the "Alex" it holds */
+    lg_name_t newer = *lg_node_name(c_node, LG_PROTO_ALEX);
+    newer.version++;
+    memcpy(newer.text, "Alexa", 5);
+    newer.len = 5;
+    CHECK(lg_node_restore_name(c_node, &newer));
+    CHECK(name_is(lg_node_name(c_node, LG_PROTO_ALEX), "Alexa"));
+    CHECK_EQ(c_node->stats.forwarded, forwarded);
+
+    /* Refusals: naming another handheld, a body of the wrong length, a scope other than system. */
+    uint32_t rejected = s->nodes[0].node.stats.rejected;
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    lg_name_t spoof = { .device = LG_PROTO_EMMA, .version = 0x7FFFFFFF, .len = 4 };
+    memcpy(spoof.text, "Evil", 4);
+    dad_sends_name_frame(s, &spoof, 13, 9001);
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected + 1);
+    CHECK(lg_node_name(&s->nodes[0].node, LG_PROTO_EMMA) == NULL);
+    CHECK(lg_client_name(cl(s, ALEX), LG_PROTO_EMMA) == NULL);
+
+    lg_name_t mine = { .device = LG_PROTO_DAD, .version = 0x7FFFFFFF, .len = 4 };
+    memcpy(mine.text, "Long", 4);
+    dad_sends_name_frame(s, &mine, 14, 9002);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 1);
+    CHECK(name_is(lg_node_name(&s->nodes[0].node, LG_PROTO_DAD), "Dad"));
+    sim_destroy(s);
+}
+
 static void test_ping_pong(void)
 {
     sim_t *s = make_chain();
@@ -592,4 +743,5 @@ void test_messaging(void)
     test_key_pinning();
     test_ping_pong();
     test_read_receipt();
+    test_names();
 }

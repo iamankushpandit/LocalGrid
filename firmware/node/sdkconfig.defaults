@@ -43,3 +43,6 @@ CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 CONFIG_LG_NODE_BLE_ADV=y
 # PMF capable on the SoftAP. For the reason-2 disassociation A/B, set CONFIG_LG_NODE_PMF_CAPABLE=n.
 CONFIG_LG_NODE_PMF_CAPABLE=y
+
+# ---- Watchdog: a stuck core task panics with a backtrace instead of only a warning ----
+CONFIG_ESP_TASK_WDT_PANIC=y

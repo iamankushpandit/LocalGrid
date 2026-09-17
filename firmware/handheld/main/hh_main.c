@@ -19,6 +19,7 @@
 #include "lg_bsp_touch.h"
 #include "lg_display.h"
 #include "lg_identity.h"
+#include "lg_power.h"
 #include "lg_selftest.h"
 #include "lg_theme.h"
 #include "lg_ui_input.h"
@@ -71,6 +72,7 @@ void app_main(void)
      * so it cannot settle a 20 KB question; a settled `status` reading can.
      */
     lg_bsp_audio_start(board);
+    (void)lg_power_init(board != NULL ? board->supply_sense : -1, board != NULL ? board->supply_divider_milli : 0);
     hh_mem_mark("after NVS and audio");
 
     if (hh_console_start(&identity) != ESP_OK) {   /* answers id, status, nodes, send, ... (D28) */

@@ -31,3 +31,32 @@ lv_obj_t *ui_list_action(lv_obj_t *list, const char *label, const char *value, l
 
 /* A line of explanation, wrapped, in the muted colour. */
 void ui_list_note(lv_obj_t *list, const char *text);
+
+/*
+ * A fact that cannot be changed: small label and value on one line with a hairline under it,
+ * no box. Kept visibly different from actions so nothing looks tappable unless it is.
+ */
+void ui_list_fact(lv_obj_t *list, const char *label, const char *value);
+
+/* Colours an action row's value as a warning ("needed"), rather than the usual accent. */
+void ui_list_value_warn(lv_obj_t *row);
+
+typedef enum {
+    UI_BUTTON_PLAIN = 0,   /* outlined, like an action row */
+    UI_BUTTON_MAIN,        /* filled with the accent: the one thing a page is for */
+    UI_BUTTON_DANGER,      /* filled with the error colour: restarts and resets */
+} ui_button_kind_t;
+
+/* A row of buttons sharing the width equally; add them with ui_list_button. */
+lv_obj_t *ui_list_buttons(lv_obj_t *list);
+
+/* A centred button, one touch target tall. Its parent is a list or a ui_list_buttons row. */
+lv_obj_t *ui_list_button(lv_obj_t *parent, const char *text, ui_button_kind_t kind, lv_event_cb_t on_click,
+                         void *user_data);
+
+/*
+ * A label and the current choice's name, over one button per choice with the current one
+ * filled. Each button's user data is its index, read with lv_event_get_user_data.
+ */
+void ui_list_choice(lv_obj_t *list, const char *label, const char *const *names, uint8_t count, uint8_t current,
+                    lv_event_cb_t on_pick);

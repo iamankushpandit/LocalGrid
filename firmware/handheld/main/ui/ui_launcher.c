@@ -196,10 +196,15 @@ void ui_launcher_start(const lg_identity_t *identity)
     hh_mem_mark("after Status screen");
     ui_settings_build(identity);
     hh_mem_mark("after Settings screen");
+    /* This is the main task, not the drawing task, so both are built under the lock. Built without it,
+     * the alert layer's widgets went onto LVGL's top layer while the drawing task walked that tree, and
+     * a debug build with object checks crashed on every Hosyond boot reading freed child arrays. */
+    lg_display_lock(1000);
     ui_alert_start();   /* the announcement flash and the emergency takeover */
     hh_mem_mark("after alert layer");
     ui_notify_start();
     hh_mem_mark("after notifications");
+    lg_display_unlock();
     ESP_LOGI(TAG, "[UI] Launcher ready: %dx%d panel, tiles %dx%d and %dx%d", (int)w, (int)h, full_w, tile_h,
              half_w, tile_h);
 }

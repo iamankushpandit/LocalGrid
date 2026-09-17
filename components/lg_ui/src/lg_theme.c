@@ -142,3 +142,51 @@ void lg_theme_style_button(lv_obj_t *button)
     lv_obj_set_style_text_color(button, s_theme.text, 0);
     lv_obj_set_style_text_font(button, s_theme.font_body, 0);
 }
+
+void lg_theme_style_button_filled(lv_obj_t *button, lv_color_t fill)
+{
+    lg_theme_style_button(button);
+    lv_obj_set_style_bg_color(button, fill, 0);
+    lv_obj_set_style_bg_color(button, lv_color_mix(fill, s_theme.bg, LV_OPA_70), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(button, fill, 0);
+    lv_obj_set_style_text_color(button, s_theme.bg, 0);
+}
+
+#if LV_USE_TABVIEW
+void lg_theme_style_tabview(lv_obj_t *tabview)
+{
+    lv_obj_t *bar = lv_tabview_get_tab_bar(tabview);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_column(bar, s_theme.hairline * 2, 0);
+    lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(bar, s_theme.outline, 0);
+    lv_obj_set_style_border_width(bar, s_theme.hairline, 0);
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(bar); i++) {
+        lv_obj_t *tab = lv_obj_get_child(bar, (int32_t)i);
+        lv_obj_set_style_bg_color(tab, s_theme.bar, 0);
+        lv_obj_set_style_bg_opa(tab, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(tab, s_theme.muted, 0);
+        lv_obj_set_style_border_color(tab, s_theme.outline, 0);
+        lv_obj_set_style_border_width(tab, s_theme.hairline, 0);
+        lv_obj_set_style_border_side(tab, LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT, 0);
+        lv_obj_set_style_radius(tab, s_theme.radius, 0);
+        lv_obj_set_style_bg_color(tab, s_theme.outline, LV_STATE_PRESSED);
+
+        lv_obj_set_style_bg_color(tab, s_theme.surface, LV_STATE_CHECKED);
+        lv_obj_set_style_text_color(tab, s_theme.bar_text, LV_STATE_CHECKED);
+        lv_obj_set_style_border_color(tab, s_theme.accent, LV_STATE_CHECKED);
+        lv_obj_set_style_border_side(tab, LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT,
+                                     LV_STATE_CHECKED);
+        lv_obj_set_style_border_width(tab, s_theme.hairline, LV_STATE_CHECKED);
+    }
+
+    lv_obj_t *content = lv_tabview_get_content(tabview);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(content); i++) {
+        lv_obj_t *page = lv_obj_get_child(content, (int32_t)i);
+        lv_obj_set_style_pad_all(page, 0, 0);
+        lv_obj_set_style_pad_top(page, s_theme.gap, 0);
+        lv_obj_set_style_bg_color(page, s_theme.outline, LV_PART_SCROLLBAR);
+    }
+}
+#endif

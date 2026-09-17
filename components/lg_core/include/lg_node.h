@@ -48,10 +48,16 @@ typedef struct {
     /* Optional. A diagnostic echo arrived; hops = backbone hops travelled. */
     void     (*on_diag)(void *ctx, uint16_t origin_node, uint8_t hops, const uint8_t *text, size_t len);
     /* Optional. Another node announced grid time; glue decides whether to adopt it. */
-    void     (*on_time)(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality);
+    void     (*on_time)(void *ctx, uint16_t origin_node, const lg_time_sync_t *t);
+    /* Optional. Fills grid time with milliseconds and this node's stratum for TIME_SYNC; the core
+     * sets quality. Without it the core sends whole seconds from grid_time and stratum unknown. */
+    void     (*time_now)(void *ctx, lg_time_sync_t *out);
     /* Optional. Another node flooded its grid state (D45). The body is opaque to the core:
      * 1..LG_GRID_STATE_MAX bytes whose layout the AP firmware defines and checks. */
     void     (*on_grid_state)(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len);
+    /* Optional. A newer handheld name was taken (from a handheld or the backbone): glue keeps it
+     * in flash so it survives this AP restarting (D48). Not called for lg_node_restore_name. */
+    void     (*on_name)(void *ctx, const lg_name_t *name);
 } lg_node_io_t;
 
 typedef struct {
@@ -80,6 +86,7 @@ typedef struct {
     const lg_roster_t  *roster;
     lg_node_io_t        io;
     lg_presence_entry_t presence[LG_MAX_DEVICES];
+    lg_name_t           names[LG_MAX_DEVICES];              /* indexed by roster user index; version 0 = none */
     uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
     bool                has_broadcast[LG_MAX_DEVICES];
     lg_dedup_entry_t    dedup_slots[LG_NODE_DEDUP_SLOTS];
@@ -125,6 +132,21 @@ int lg_node_send_diag(lg_node_t *n, const uint8_t *text, size_t len);
 int lg_node_announce_grid_state(lg_node_t *n, const uint8_t *body, size_t len);
 
 const lg_presence_entry_t *lg_node_presence(const lg_node_t *n, uint32_t device);
+
+/*
+ * Handheld names (D50). A handheld sends its own NAME; the AP keeps the newest version per
+ * device, floods a newer one to every AP, and pushes it to its handhelds. Every name held is
+ * sent to a handheld when it registers and flooded when a neighbour link comes up.
+ */
+
+/* Loads a name kept in flash at boot. Takes it only if newer; sends nothing. */
+bool lg_node_restore_name(lg_node_t *n, const lg_name_t *name);
+
+/* Floods every name held, for the periodic announcement D48 asks for. */
+void lg_node_announce_names(lg_node_t *n);
+
+/* The newest name held for device, or NULL when it has none. */
+const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device);
 
 #ifdef __cplusplus
 }

@@ -20,6 +20,7 @@
 #include "esp_netif.h"
 #include "lwip/ip4_addr.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "grid_state.h"
@@ -28,6 +29,7 @@
 #include "lg_secrets.h"
 #include "node_app.h"
 #include "nvs_flash.h"
+#include "power_trace.h"
 #include "sessions.h"
 #include "settings.h"
 #include "web_admin.h"
@@ -45,6 +47,7 @@ _Static_assert(LG_PROTO_DHCP_INDICES == LG_MAX_NODES, "one phone DHCP block per 
 
 #define STATUS_LOG_MS        30000u
 #define TIME_ANNOUNCE_MS     60000u
+#define NAMES_ANNOUNCE_MS    300000u   /* handheld names again, so a missed flood heals (D48, D50) */
 
 /* ---- time ---- */
 
@@ -53,27 +56,78 @@ uint32_t app_now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-static int64_t mono_s(void)
+/*
+ * Grid time is kept in milliseconds (monotonic time plus an offset) and handed between APs with
+ * its milliseconds and a stratum, the distance from the AP where an admin set it.
+ *
+ * Whole seconds used to travel alone, so every hand-off could be up to a second out and two
+ * hand-offs two; and any AP carrying time accepted a correction from any other that differed by
+ * more than a second, so carrying APs pushed each other back and forth. Now:
+ *   - an AP takes time only from a lower stratum than its own (or when it has none), so time
+ *     flows outward from where it was set and never loops between siblings;
+ *   - differences under TIME_DEADBAND_MS are left alone (radio and queue delay, not error);
+ *   - a correction under TIME_STEP_MS is slewed in at TIME_SLEW_MS_PER_S, so the clock never
+ *     jumps; anything larger, or an AP with no time at all, steps at once.
+ */
+#define TIME_DEADBAND_MS       100
+#define TIME_STEP_MS           1000
+#define TIME_SLEW_MS_PER_S     100
+
+static int64_t mono_ms(void)
 {
-    return esp_timer_get_time() / 1000000;
+    return esp_timer_get_time() / 1000;
 }
 
-uint32_t app_grid_time(void)
+uint64_t app_grid_time_ms(void)
 {
     if (g_app.time_quality == LG_TIME_UNSET) {
         return 0;
     }
-    return (uint32_t)(mono_s() + g_app.time_offset_s);
+    return (uint64_t)(mono_ms() + g_app.time_offset_ms);
 }
 
-static void set_grid_time(uint32_t unix_s, uint8_t quality)
+uint32_t app_grid_time(void)
 {
-    int64_t new_offset = (int64_t)unix_s - mono_s();
-    if (g_app.time_quality != LG_TIME_UNSET) {
-        ESP_LOGI("TIME", "[TIME] Offset corrected %+" PRId64 " s", new_offset - g_app.time_offset_s);
-    }
-    g_app.time_offset_s = new_offset;
+    return (uint32_t)(app_grid_time_ms() / 1000u);
+}
+
+static void set_grid_time_ms(uint64_t unix_ms, uint8_t quality, uint8_t stratum)
+{
+    g_app.time_offset_ms = (int64_t)unix_ms - mono_ms();
+    g_app.time_slew_ms = 0;
     g_app.time_quality = quality;
+    g_app.time_stratum = stratum;
+    ptrace_event(PTRACE_TIME);
+}
+
+void app_time_follow_new_generation(void)
+{
+    g_app.time_stratum = LG_STRATUM_UNKNOWN;
+}
+
+void app_time_slew(uint32_t elapsed_ms)
+{
+    if (g_app.time_slew_ms == 0) {
+        return;
+    }
+    int32_t step = (int32_t)((int64_t)TIME_SLEW_MS_PER_S * elapsed_ms / 1000);
+    step = step < 1 ? 1 : step;
+    if (g_app.time_slew_ms > 0) {
+        step = step > g_app.time_slew_ms ? g_app.time_slew_ms : step;
+    } else {
+        step = -step < g_app.time_slew_ms ? g_app.time_slew_ms : -step;
+    }
+    g_app.time_offset_ms += step;
+    g_app.time_slew_ms -= step;
+}
+
+static void io_time_now(void *ctx, lg_time_sync_t *out)
+{
+    (void)ctx;
+    uint64_t ms = app_grid_time_ms();
+    out->grid_time = (uint32_t)(ms / 1000u);
+    out->millis = (uint16_t)(ms % 1000u);
+    out->stratum = g_app.time_quality == LG_TIME_UNSET ? LG_STRATUM_UNKNOWN : g_app.time_stratum;
 }
 
 /* ---- lg_core io ---- */
@@ -126,16 +180,95 @@ static void io_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *bod
     grid_state_on_frame(origin_node, body, len);
 }
 
-static void io_on_time(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality)
+/*
+ * Handheld names (D50) live in flash as one blob of packed NAME records (D49), rewritten only
+ * when a newer name arrives, so an AP that restarts still knows every name and hands them to
+ * handhelds and APs that missed them.
+ */
+static void io_on_name(void *ctx, const lg_name_t *name)
 {
     (void)ctx;
-    if (grid_time == 0 || quality == LG_TIME_UNSET || g_app.time_quality == LG_TIME_AUTHORITATIVE) {
+    static uint8_t blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];   /* about 1 KB: kept off the stack */
+    size_t used = 0;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (g_app.core.names[i].version != 0) {
+            used += lg_name_enc(&g_app.core.names[i], blob + used);
+        }
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("lg", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, "names", blob, used);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "[GRID] Device %" PRIu32 " is now called \"%s\" (version %" PRIu32 ")%s", name->device, name->text,
+             name->version, err == ESP_OK ? "" : ", not saved");
+}
+
+static void load_names(void)
+{
+    static uint8_t blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];
+    size_t len = sizeof(blob);
+    nvs_handle_t h;
+    if (nvs_open("lg", NVS_READONLY, &h) != ESP_OK) {
         return;
     }
-    uint32_t mine = app_grid_time();
-    if (g_app.time_quality == LG_TIME_UNSET || mine > grid_time + 1 || grid_time > mine + 1) {
-        set_grid_time(grid_time, LG_TIME_CARRIED);
-        ESP_LOGI("TIME", "[TIME] Adopted grid time %" PRIu32 " from node %u", grid_time, origin_node);
+    esp_err_t err = nvs_get_blob(h, "names", blob, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return;
+    }
+    unsigned loaded = 0;
+    for (size_t at = 0; at + LG_NAME_LEN_MIN <= len;) {
+        size_t rec = 9u + blob[at + 8];
+        lg_name_t name;
+        if (at + rec > len || !lg_name_dec(blob + at, rec, &name)) {
+            break;   /* a damaged tail loses only what follows it */
+        }
+        loaded += lg_node_restore_name(&g_app.core, &name) ? 1u : 0u;
+        at += rec;
+    }
+    ESP_LOGI(TAG, "[GRID] Loaded %u handheld name(s) from flash", loaded);
+}
+
+static void io_on_time(void *ctx, uint16_t origin_node, const lg_time_sync_t *t)
+{
+    (void)ctx;
+    if (t->grid_time == 0 || t->quality == LG_TIME_UNSET || g_app.time_quality == LG_TIME_AUTHORITATIVE) {
+        return;   /* nothing to take, or this AP is where the time was set */
+    }
+    uint8_t theirs = t->stratum;
+    uint8_t mine_stratum = g_app.time_quality == LG_TIME_UNSET ? LG_STRATUM_UNKNOWN : g_app.time_stratum;
+    bool have_none = g_app.time_quality == LG_TIME_UNSET;
+    /* Only from closer to the source. An unknown stratum is as far as can be, so two APs that
+     * both lost track can still agree, but never override an AP that knows it is closer. */
+    if (!have_none && !(theirs < mine_stratum || (theirs == LG_STRATUM_UNKNOWN && mine_stratum == LG_STRATUM_UNKNOWN))) {
+        return;
+    }
+    uint8_t next_stratum = theirs >= LG_STRATUM_UNKNOWN - 1u ? LG_STRATUM_UNKNOWN : (uint8_t)(theirs + 1u);
+    uint64_t sent_ms = (uint64_t)t->grid_time * 1000u + t->millis;
+    if (have_none) {
+        set_grid_time_ms(sent_ms, LG_TIME_CARRIED, next_stratum);
+        grid_state_note_sync(origin_node, 0);
+        ESP_LOGI("TIME", "[TIME] Took grid time %" PRIu32 ".%03u from AP %u (stratum %u)", t->grid_time, t->millis,
+                 origin_node, next_stratum);
+        return;
+    }
+    int64_t diff = (int64_t)sent_ms - (int64_t)app_grid_time_ms();
+    g_app.time_stratum = next_stratum;
+    grid_state_note_sync(origin_node, (int32_t)(diff > INT32_MAX ? INT32_MAX : diff < INT32_MIN ? INT32_MIN : diff));
+    if (diff > -TIME_DEADBAND_MS && diff < TIME_DEADBAND_MS) {
+        return;   /* agrees: the difference is delay on the way, not error */
+    }
+    if (diff >= TIME_STEP_MS || diff <= -TIME_STEP_MS) {
+        set_grid_time_ms(sent_ms, LG_TIME_CARRIED, next_stratum);
+        ESP_LOGW("TIME", "[TIME] Stepped grid time by %+" PRId64 " ms from AP %u", diff, origin_node);
+    } else {
+        g_app.time_slew_ms = (int32_t)diff;
+        ESP_LOGI("TIME", "[TIME] Slewing grid time by %+" PRId64 " ms from AP %u", diff, origin_node);
     }
 }
 
@@ -148,11 +281,13 @@ static void on_backbone_frame(uint16_t from_node, const uint8_t *frame, size_t l
 
 static void on_link(uint16_t node, bool up)
 {
+    ptrace_event(up ? PTRACE_LINK_UP : PTRACE_LINK_DOWN);
     if (up) {
         lg_node_on_neighbor_up(&g_app.core, node);
         /* A returning or new AP learns everything it missed: settings first, so a time
          * generation it has not seen demotes it before the time itself arrives (D45). */
         grid_state_announce();
+        grid_state_avail_announce();   /* a returning AP fills the minutes it missed from this */
         if (g_app.time_quality != LG_TIME_UNSET) {
             lg_node_announce_time(&g_app.core, g_app.time_quality);
         }
@@ -177,7 +312,8 @@ static size_t build_discovery(uint8_t out[LG_DISC_LEN])
     out[7] = (uint8_t)g_app.index;
     out[8] = 0;   /* was the master flag; there is no master AP (D45) */
     out[9] = (uint8_t)(LG_PROTO_MAX_STATIONS - clients);
-    out[10] = lgbb_link_count() > 0 ? LG_DISC_FLAG_BACKBONE : 0;
+    out[10] = (uint8_t)((lgbb_link_count() > 0 ? LG_DISC_FLAG_BACKBONE : 0) |
+                        (g_app.time_quality != LG_TIME_UNSET ? LG_DISC_FLAG_TIME : 0));
     out[11] = clients;
     return LG_DISC_LEN;
 }
@@ -298,6 +434,27 @@ static void record_restart(void)
     }
     s_run_mark = RUN_MARK;
     s_run_uptime_s = 0;
+    ptrace_event(PTRACE_NVS_WRITE);
+    ptrace_boot(kind->text);
+}
+
+static const char *quality_name(uint8_t q);
+
+/* Once a second: which APs this AP can reach over the backbone, for the availability graph. */
+static void record_availability(uint32_t now)
+{
+    bool up[LG_MAX_NODES] = { false };
+    if (g_app.index < LG_MAX_NODES) {
+        up[g_app.index] = true;
+    }
+    lgbb_link_info_t links[LG_MAX_NODES];
+    size_t n = lgbb_links(links, LG_MAX_NODES, now);
+    for (size_t i = 0; i < n; i++) {
+        if (links[i].up && links[i].node < LG_MAX_NODES) {
+            up[links[i].node] = true;
+        }
+    }
+    grid_state_avail_second(up);
 }
 
 /* Called once a second so a crash can say how long the board had been up. */
@@ -306,7 +463,7 @@ static void note_uptime(void)
     s_run_uptime_s = app_now_ms() / 1000u;
 }
 
-static void print_restarts(void)
+void node_print_restarts(void)
 {
     nvs_handle_t h;
     if (nvs_open("lg", NVS_READONLY, &h) != ESP_OK) {
@@ -350,9 +507,11 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const wifi_event_ap_staconnected_t *e = data;
         /* Decision D21: no hardware addresses in output; the association id is enough to follow a station. */
         ESP_LOGI("NET", "[NET] Station joined (aid %u)", e->aid);
+        ptrace_event(PTRACE_STA_JOIN);
     } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
         const wifi_event_ap_stadisconnected_t *e = data;
         ESP_LOGI("NET", "[NET] Station left (aid %u, reason %u)", e->aid, e->reason);
+        ptrace_event(PTRACE_STA_LEAVE);
     }
 }
 
@@ -405,6 +564,16 @@ static void wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
+#if CONFIG_LG_NODE_WIFI_TX_POWER_QDBM > 0
+    /* A/B test for brownouts: transmit bursts are the largest current spikes on this board. */
+    if (esp_wifi_set_max_tx_power((int8_t)CONFIG_LG_NODE_WIFI_TX_POWER_QDBM) != ESP_OK) {
+        ESP_LOGW("NET", "[NET] Transmit power ceiling not applied");
+    }
+#endif
+    int8_t tx_qdbm = 0;
+    if (esp_wifi_get_max_tx_power(&tx_qdbm) == ESP_OK) {
+        ESP_LOGI("NET", "[NET] Transmit power ceiling %d.%02d dBm", tx_qdbm / 4, (tx_qdbm % 4) * 25);
+    }
     ESP_ERROR_CHECK(esp_wifi_set_inactive_time(WIFI_IF_AP, 30));
     ESP_LOGI("NET", "[NET] SoftAP \"%s\" (AP %u %s) on channel %d at %u.%u.%u.%u, phone DHCP .%u to .%u, PMF %s",
              LG_PROTO_SSID, g_app.index, g_app.name, LG_PROTO_CHANNEL, ip[0], ip[1], ip[2], ip[3], first, last,
@@ -441,7 +610,7 @@ static void print_status(void)
            st->rx_client, st->rx_backbone, st->delivered_local, st->forwarded, st->duplicates, st->rejected,
            st->malformed);
     grid_state_print();
-    print_restarts();
+    node_print_restarts();
 }
 
 /* Decision D28: every device answers configuration questions over its serial port.
@@ -520,8 +689,8 @@ static void handle_command(const node_cmd_t *cmd)
         printf("Grid time %" PRIu32 " (%s)\n", app_grid_time(), quality_name(g_app.time_quality));
         break;
     case NODE_CMD_TIME_SET:
-        set_grid_time(cmd->value, LG_TIME_AUTHORITATIVE);
-        grid_state_time_set_here();
+        set_grid_time_ms((uint64_t)cmd->value * 1000u + cmd->millis, LG_TIME_AUTHORITATIVE, 0);
+        grid_state_time_set_here(cmd->value);
         grid_state_announce();   /* the new generation goes first, so other APs stop defending theirs */
         lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
         printf("Grid time set to %" PRIu32 " and announced\n", cmd->value);
@@ -539,9 +708,21 @@ static void core_task(void *arg)
     uint32_t last_grid_state = 0;
     uint32_t last_disc = 0;
     node_cmd_t cmd;
+    /*
+     * The task watchdog watches this loop, not only the idle tasks: a core task stuck for 5 s
+     * now panics with a backtrace of where it was, restarts, and is counted as a task-watchdog
+     * restart, with the power trace showing the seconds before it (CONFIG_ESP_TASK_WDT_PANIC).
+     */
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "[GRID] Task watchdog not watching the core task");
+    }
     for (;;) {
+        esp_task_wdt_reset();
         sess_poll(20);
         uint32_t now = app_now_ms();
+        static uint32_t last_slew;
+        app_time_slew(now - last_slew);
+        last_slew = now;
         lgbb_poll(now);
         while (xQueueReceive(g_app.cmd_queue, &cmd, 0) == pdTRUE) {
             handle_command(&cmd);
@@ -549,6 +730,8 @@ static void core_task(void *arg)
         if (now - last_disc >= 1000) {
             last_disc = now;
             note_uptime();
+            ptrace_second(now / 1000u, lgbb_tx_frame_count(), lgbb_link_count(), quality_name(g_app.time_quality));
+            record_availability(now);
             refresh_discovery();
             web_admin_publish_snapshot();
         }
@@ -556,9 +739,16 @@ static void core_task(void *arg)
             last_grid_state = now;
             grid_state_announce();
         }
-        if (g_app.time_quality == LG_TIME_AUTHORITATIVE && now - last_announce >= TIME_ANNOUNCE_MS) {
+        static uint32_t last_names;
+        if (now - last_names >= NAMES_ANNOUNCE_MS) {
+            last_names = now;
+            lg_node_announce_names(&g_app.core);
+        }
+        if (g_app.time_quality != LG_TIME_UNSET && now - last_announce >= TIME_ANNOUNCE_MS) {
+            /* Every AP with time repeats it, not only the one it was set on: with strata a copy
+             * can never pull a closer AP back, and it keeps each AP's last sync recent. */
             last_announce = now;
-            lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
+            lg_node_announce_time(&g_app.core, g_app.time_quality);
         }
         if (now - last_status >= STATUS_LOG_MS) {
             last_status = now;
@@ -600,9 +790,12 @@ void app_main(void)
         .grid_time = io_grid_time,
         .on_diag = io_on_diag,
         .on_time = io_on_time,
+        .time_now = io_time_now,
         .on_grid_state = io_on_grid_state,
+        .on_name = io_on_name,
     };
     lg_node_init(&g_app.core, g_app.index, g_app.boot, lg_roster_prototype(), &io);
+    load_names();
 
     grid_state_init(g_app.index);
     ESP_ERROR_CHECK(lgbb_init(g_app.index, g_app.boot, s_backbone_key, on_backbone_frame, on_link, clients_count));

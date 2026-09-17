@@ -572,6 +572,11 @@ size_t lgbb_links(lgbb_link_info_t *out, size_t max, uint32_t now_ms)
     return n;
 }
 
+uint32_t lgbb_tx_frame_count(void)
+{
+    return s.tx_frames;
+}
+
 void lgbb_print(void)
 {
     printf("Backbone links (AP %u):\n", s.self);
