@@ -33,6 +33,7 @@ LOG_RE = re.compile(r"^[IWED] \(\d+\) ")   # ESP-IDF log lines: shown only with 
 PROMPT = "grid>"
 ID_WAIT_S = 9.0
 PROMPT_WAIT_S = 12.0   # opening the port resets the board; its console starts after boot
+SETTLED_WAIT_S = 30.0  # --settled: how long to wait for the board to join a node
 QUIET_S = 1.0
 REPLY_MAX_S = 15.0
 
@@ -88,7 +89,7 @@ def send_and_read(ser, command, raw):
     return lines
 
 
-def ask(device, command, trust_port, raw=False):
+def ask(device, command, trust_port, raw=False, settled=False):
     import serial
 
     try:
@@ -124,6 +125,25 @@ def ask(device, command, trust_port, raw=False):
         while PROMPT not in text and time.time() < prompt_deadline:
             text += ser.read(512).decode("utf-8", "replace")
 
+        # Opening the port resets the board, so a command lands a few seconds into the boot,
+        # before Wi-Fi is up. That is fine for most questions and useless for one: free heap
+        # read while the link is still STOPPED is about 40 KB higher than once the node session
+        # exists, which is how an imaginary 20 KB regression got chased for several builds.
+        #
+        # --settled asks the board rather than watching for a boot line. Watching was wrong:
+        # "[NET] Online" is printed once, so a board that is already up and quiet never says it
+        # again and the wait could only time out. Asking works either way.
+        if settled:
+            online_deadline = time.time() + SETTLED_WAIT_S
+            online = False
+            while not online and time.time() < online_deadline:
+                reply = "\n".join(send_and_read(ser, "status", raw))
+                online = "ONLINE" in reply
+                if not online:
+                    time.sleep(2.0)
+            if not online:
+                return False, f"board was not online within {SETTLED_WAIT_S:.0f} s"
+
         lines = send_and_read(ser, command, raw)
         if not lines:
             lines = send_and_read(ser, command, raw)   # one retry: the prompt may have just appeared
@@ -140,6 +160,8 @@ def main():
     ap.add_argument("command", nargs="+", help="console command, for example: status")
     ap.add_argument("--trust-port", action="store_true", help="send even if the board does not answer 'id'")
     ap.add_argument("--raw", action="store_true", help="keep the board's log lines in the reply")
+    ap.add_argument("--settled", action="store_true",
+                    help="wait until the board reports online before asking, so heap readings compare")
     args = ap.parse_args()
 
     data = load_map()
@@ -155,7 +177,7 @@ def main():
             # comes back with time UNSET and re-adopts it from a neighbour within a minute.
             print("  note: this resets the node, so it loses grid time until a neighbour announces it",
                   flush=True)
-        ok, reply = ask(device, command, args.trust_port, args.raw)
+        ok, reply = ask(device, command, args.trust_port, args.raw, settled=args.settled)
         print(reply if ok else f"  FAILED: {reply}", flush=True)
         failures += 0 if ok else 1
     return 1 if failures else 0

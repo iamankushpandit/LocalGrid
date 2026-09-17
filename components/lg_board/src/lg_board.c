@@ -25,6 +25,15 @@ static const lg_board_t BOARDS[] = {
          * inversion on, and Braino adds none on top, so the panel runs inverted. */
         .code = "HY3",
         .name = "Hosyond 3.2in (E32R32P)",
+        /* GPIO26 is DAC channel 1 on a classic ESP32, and the amplifier behind it is enabled
+         * by GPIO4 held LOW. Both come from the vendor's own E32R32P pin table rather than
+         * from a sibling board, and nothing else in this profile claims either pin. The 75
+         * volume ceiling is inherited from the rest of that board family and has not been set
+         * by listening on this one, so treat it as a starting point. */
+        .audio = { .kind = LG_AUDIO_DAC, .speaker = 26, .codec_addr = 0,
+                   .i2s_mclk = LG_PIN_NONE, .i2s_bclk = LG_PIN_NONE, .i2s_ws = LG_PIN_NONE,
+                   .i2s_dout = LG_PIN_NONE, .i2s_din = LG_PIN_NONE,
+                   .amp_enable = 4, .amp_active_low = true, .max_volume = 75 },
         .panel = {
             .kind = LG_PANEL_ST7789,
             .native_width = 240, .native_height = 320,
@@ -48,6 +57,20 @@ static const lg_board_t BOARDS[] = {
          * rotation for ILI9341 sets the horizontal mirror. */
         .code = "F4B",
         .name = "Freenove FNK0104B 2.8in",
+        /* This board has an ES8311 codec, a microphone and a speaker, and the ESP32-S3 has no
+         * DAC, so every sound goes through the codec over I2S. There is no bare speaker pin
+         * and there must not be one: the transducer hangs off the codec's amplifier.
+         *
+         * The wiring below was established on this board rather than inferred, and three
+         * parts of it are easy to get wrong: the amplifier enable is active LOW, MCLK is 384
+         * times the sample rate (6.144 MHz at 16 kHz), and the codec's DAC volume register
+         * resets to silence. The S3 has no audio PLL, so MCLK comes from the PLL through the
+         * I2S fractional divider. None of these pins touch GPIO33 to 37,
+         * which are the octal PSRAM lines here and must never be assigned.
+         * lg_bsp_audio.c drives it. */
+        .audio = { .kind = LG_AUDIO_ES8311_I2S, .speaker = LG_PIN_NONE, .codec_addr = 0x18,
+                   .i2s_mclk = 4, .i2s_bclk = 5, .i2s_ws = 7, .i2s_dout = 8, .i2s_din = 6,
+                   .amp_enable = 1, .amp_active_low = true, .max_volume = 85 },
         .panel = {
             .kind = LG_PANEL_ILI9341,
             .native_width = 240, .native_height = 320,

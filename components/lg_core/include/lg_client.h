@@ -34,6 +34,7 @@ typedef enum {
     LG_OUT_ACCEPTED  = 2,   /* a node took it; group/broadcast count deliveries here */
     LG_OUT_DELIVERED = 3,   /* 1:1 recipient's device confirmed */
     LG_OUT_REJECTED  = 4,   /* see reject_reason (lg_ack_status_t) */
+    LG_OUT_READ      = 5,   /* 1:1 recipient's device showed it to them */
 } lg_out_state_t;
 
 typedef struct {
@@ -48,6 +49,8 @@ typedef struct {
     uint32_t last_tx_ms;
     uint32_t delivered_mask;   /* bit i: roster user i confirmed delivery */
     uint16_t delivered_count;
+    uint32_t read_mask;        /* bit i: roster user i reported reading it */
+    uint16_t read_count;
     uint16_t len;
     uint8_t  text[LG_TEXT_MAX];
 } lg_out_msg_t;
@@ -56,6 +59,8 @@ typedef struct {
     uint32_t author;
     uint32_t target;
     uint32_t grid_time;
+    uint32_t boot;             /* with author and seq, the message identity a read report names */
+    uint32_t seq;
     uint8_t  scope;
     uint16_t flags;
     uint16_t len;
@@ -156,6 +161,13 @@ void lg_client_tick(lg_client_t *c);
 bool lg_client_time_restricted(const lg_client_t *c);
 
 const lg_in_msg_t *lg_client_inbox(const lg_client_t *c, size_t newest_index);
+
+/*
+ * Reports that a received 1:1 message has been shown to its reader, so the author can mark it
+ * read. Names the message by its identity, as every ack does. Refuses our own messages and a
+ * session that is not open; the caller decides when a message counts as read, and reports once.
+ */
+bool lg_client_mark_read(lg_client_t *c, uint32_t author, uint32_t boot, uint32_t seq);
 const lg_peer_t   *lg_client_peer(const lg_client_t *c, uint32_t device);
 
 #ifdef __cplusplus

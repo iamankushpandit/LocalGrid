@@ -57,14 +57,14 @@
         "H"
       ],
       "description": "Handheld: joins the grid over Wi-Fi, registers with a node, and shows link, grid time, people, and nodes on screen.",
-      "verify_ok": "\\[UI\\] Home screen ready",
+      "verify_ok": "\\[UI\\] Launcher ready",
       "verify_timeout_s": 30
     }
   },
   "devices": [
     {
       "name": "node-main",
-      "port": "COM19",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -72,11 +72,11 @@
       "node_name": "MAIN",
       "id": "LG-N-ELG-1ME3HN5EDP",
       "id_created": 1789492913,
-      "notes": "Master; admin page at http://192.168.4.1/"
+      "notes": "AP 0; every AP serves the admin page at http://192.168.4.1/ (D45, D46)"
     },
     {
       "name": "node-north",
-      "port": "COM16",
+      "port": "COM17",
       "role": "N",
       "board": "ELG",
       "firmware": "node",

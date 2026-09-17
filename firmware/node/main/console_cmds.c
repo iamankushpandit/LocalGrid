@@ -51,7 +51,7 @@ static int cmd_devices(int argc, char **argv)
     return post(NODE_CMD_DEVICES, 0, NULL);
 }
 
-/* Read-only: a node's settings are changed on the master's admin page, never over serial. */
+/* Read-only: settings are changed on the admin page of any AP, never over serial (D45). */
 static int cmd_config(int argc, char **argv)
 {
     (void)argc;
@@ -103,11 +103,11 @@ void console_start(void)
 
     const esp_console_cmd_t cmds[] = {
         { .command = "id",      .help = "Print this board's LocalGrid device ID",        .func = cmd_id },
-        { .command = "status",  .help = "Node identity, time, memory, links, sessions", .func = cmd_status },
-        { .command = "nodes",   .help = "Backbone links and counters",                   .func = cmd_nodes },
+        { .command = "status",  .help = "AP identity, time, memory, links, sessions", .func = cmd_status },
+        { .command = "nodes",   .help = "Backbone links to other APs, loss counters",  .func = cmd_nodes },
         { .command = "devices", .help = "Grid presence table and local sessions",       .func = cmd_devices },
-        { .command = "config",  .help = "Grid name, time zone, network, admin state (read-only)", .func = cmd_config },
-        { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every node", .func = cmd_ping },
+        { .command = "config",  .help = "Grid name, time zone, LocalMesh Access Point network, admin state (read-only)", .func = cmd_config },
+        { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {

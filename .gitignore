@@ -35,3 +35,6 @@ __pycache__/
 
 # Font build cache (downloaded fonts)
 tools/.cache/
+
+# Chaos run output (tools/chaos.py)
+chaos-runs/

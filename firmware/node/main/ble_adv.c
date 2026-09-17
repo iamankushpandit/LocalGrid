@@ -29,7 +29,7 @@ static void set_payload(const uint8_t *payload, size_t len)
     s_mfg_len = 2 + len;
 }
 
-static void start_advertising(void)
+static int set_fields(void)
 {
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
@@ -39,6 +39,13 @@ static void start_advertising(void)
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "[BLE] set adv fields rc=%d", rc);
+    }
+    return rc;
+}
+
+static void start_advertising(void)
+{
+    if (set_fields() != 0) {
         return;
     }
     struct ble_gap_adv_params params;
@@ -47,7 +54,7 @@ static void start_advertising(void)
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
     params.itvl_min = ADV_INTERVAL_UNITS;
     params.itvl_max = ADV_INTERVAL_UNITS;
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, NULL, NULL);
+    int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, NULL, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "[BLE] adv start rc=%d", rc);
     }
@@ -97,10 +104,18 @@ esp_err_t ble_adv_init(const uint8_t *payload, size_t len)
 
 void ble_adv_update(const uint8_t *payload, size_t len)
 {
+    size_t n = len > sizeof(s_mfg) - 2 ? sizeof(s_mfg) - 2 : len;
+    if (s_mfg_len == 2 + n && memcmp(s_mfg + 2, payload, n) == 0) {
+        return;   /* unchanged: leave the running advertisement alone */
+    }
     set_payload(payload, len);
     if (!s_synced) {
-        return;
+        return;   /* on_sync starts advertising with the new payload */
     }
-    (void)ble_gap_adv_stop();
-    start_advertising();
+    /* LE Set Advertising Data is allowed while advertising, so the radio schedule is not
+     * interrupted. Stop and start only if the controller refuses the update. */
+    if (set_fields() != 0) {
+        (void)ble_gap_adv_stop();
+        start_advertising();
+    }
 }

@@ -69,6 +69,9 @@ def reader(port, ser, stop, out_lock, until, hit):
 
 
 def main():
+    # Board output includes UTF-8 (emoji in messages, box drawing). Redirected to a file on Windows,
+    # stdout is cp1252 and one such line killed that port's reader thread mid-capture.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ports", nargs="+", required=True)
     ap.add_argument("--seconds", type=float, default=30)

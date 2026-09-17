@@ -35,6 +35,10 @@ typedef struct {
     uint32_t  time;          /* this node's grid time; 0 falls back to sim->grid_time */
     uint32_t  diag_count;    /* diagnostic echoes reported to this node */
     uint8_t   diag_hops;     /* hops of the last echo */
+    uint32_t  grid_state_count;    /* grid state bodies reported to this node */
+    uint16_t  grid_state_origin;   /* origin node of the last one */
+    uint8_t   grid_state_last[LG_GRID_STATE_MAX];
+    size_t    grid_state_len;
     lg_node_t node;
 } sim_node_t;
 

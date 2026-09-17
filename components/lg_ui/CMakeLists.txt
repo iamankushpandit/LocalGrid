@@ -6,6 +6,7 @@ idf_component_register(SRCS src/lg_display.c
                             src/lg_ui_input.c
                             src/lg_ui_calibrate.c
                             src/lg_ui_widgets.c
+                            src/lg_ui_screensaver.c
                             fonts/lg_font_emoji_20.c
                        INCLUDE_DIRS include
                        REQUIRES lvgl__lvgl lg_board lg_bsp

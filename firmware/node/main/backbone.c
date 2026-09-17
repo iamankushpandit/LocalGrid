@@ -21,7 +21,21 @@ static const char *TAG = "BB";
 #define BB_HELLO_MS          2000u
 #define BB_HELLO_FAST_MS     200u
 #define BB_HELLO_FAST_COUNT  5u
-#define BB_LINK_TIMEOUT_MS   6000u
+/*
+ * Link loss. HELLOs are ESP-NOW broadcasts: no MAC-level ACK and no retries, and on the classic
+ * ESP32 the radio is shared with BLE advertising, so a run of lost HELLOs does not mean the
+ * neighbour is gone. Once a usable link has not been heard for BB_PROBE_AFTER_MS, this AP sends
+ * its HELLO to that neighbour as a unicast every BB_PROBE_MS. A unicast is retried and ACKed by
+ * the neighbour's radio, and the neighbour processes it as a HELLO, which also repairs the other
+ * direction. The link is lost only when it has had neither a HELLO nor an ACK for
+ * BB_LINK_TIMEOUT_MS, or no HELLO at all for BB_LINK_HARD_TIMEOUT_MS (an ACK proves the radio,
+ * not the firmware). Links that are not yet confirmed keep the plain timeout.
+ */
+#define BB_LINK_TIMEOUT_MS       6000u
+#define BB_LINK_HARD_TIMEOUT_MS  20000u
+#define BB_PROBE_AFTER_MS        (BB_HELLO_MS + BB_HELLO_MS / 2u)
+#define BB_PROBE_MS              1000u
+#define BB_GAP_MS                (2u * BB_HELLO_MS)   /* a HELLO later than this counts as a gap */
 #define BB_TX_QUEUE          16u
 #define BB_TX_DEADMAN_MS     1000u
 #define BB_RX_QUEUE          12u
@@ -47,10 +61,25 @@ typedef struct {
     uint16_t node;
     uint8_t  mac[6];
     uint32_t boot;
-    uint32_t last_ms;
+    uint32_t last_ms;        /* last HELLO */
+    uint32_t last_ack_ms;    /* last MAC-level ACK of a unicast to this neighbour */
+    uint32_t last_probe_ms;
+    bool     hello_timeout_noted;
     int      rssi;
     uint32_t hellos;
 } lgbb_link_t;
+
+/* Per-neighbour counters, kept across link loss so `nodes` shows the history. */
+typedef struct {
+    uint32_t hellos;       /* HELLOs received (broadcast or unicast) */
+    uint32_t gaps;         /* HELLOs that arrived more than BB_GAP_MS after the previous one */
+    uint32_t max_gap_ms;
+    uint32_t probes;       /* unicast keepalives sent */
+    uint32_t acks;         /* unicasts to this neighbour ACKed at MAC level */
+    uint32_t saves;        /* times an ACK kept a link up that the HELLO timeout alone would have dropped */
+    uint32_t ups;
+    uint32_t losses;
+} lgbb_link_stats_t;
 
 static const uint8_t BROADCAST_MAC[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
@@ -69,6 +98,8 @@ static struct {
     volatile bool     tx_done;
     volatile bool     tx_ok;
     lgbb_link_t         links[LG_MAX_NODES];
+    lgbb_link_stats_t   stats[LG_MAX_NODES];   /* indexed by node */
+    uint8_t             in_flight_mac[6];
     lg_dedup_entry_t  replay_slots[LG_MAX_NODES];
     lg_dedup_t        replay;
     uint32_t          last_hello_ms;
@@ -132,6 +163,8 @@ static void enqueue_sealed(const uint8_t *mac, const uint8_t *inner, size_t len)
     s.tx_count++;
 }
 
+static void note_ack(const uint8_t *mac, uint32_t now);
+
 static void service_tx(uint32_t now)
 {
     if (s.in_flight) {
@@ -139,6 +172,8 @@ static void service_tx(uint32_t now)
             s.in_flight = false;
             if (!s.tx_ok) {
                 s.tx_fail++;
+            } else if (memcmp(s.in_flight_mac, BROADCAST_MAC, 6) != 0) {
+                note_ack(s.in_flight_mac, now);
             }
         } else if (now - s.in_flight_ms > BB_TX_DEADMAN_MS) {
             ESP_LOGW(TAG, "send callback missing for %u ms; releasing", (unsigned)BB_TX_DEADMAN_MS);
@@ -161,6 +196,7 @@ static void service_tx(uint32_t now)
     s.tx_head = (s.tx_head + 1) % BB_TX_QUEUE;
     s.tx_count--;
     if (err == ESP_OK) {
+        memcpy(s.in_flight_mac, t->mac, 6);
         s.in_flight = true;
         s.in_flight_ms = now;
         s.tx_frames++;
@@ -218,6 +254,18 @@ static void ensure_peer(lgbb_link_t *l)
     }
 }
 
+static void note_ack(const uint8_t *mac, uint32_t now)
+{
+    for (size_t i = 0; i < LG_MAX_NODES; i++) {
+        lgbb_link_t *l = &s.links[i];
+        if (l->in_use && memcmp(l->mac, mac, 6) == 0) {
+            l->last_ack_ms = now;
+            s.stats[l->node].acks++;
+            return;
+        }
+    }
+}
+
 bool lgbb_is_neighbor(uint16_t node)
 {
     const lgbb_link_t *l = link_find(node);
@@ -253,7 +301,8 @@ void lgbb_flood(uint16_t except_node, const uint8_t *frame, size_t len)
     }
 }
 
-static void send_hello(void)
+/* Builds and queues a HELLO to dest: the broadcast address, or one neighbour as a keepalive probe. */
+static bool send_hello_to(const uint8_t *dest)
 {
     uint8_t body[LG_HELLO_LEN + 1 + LG_MAX_NODES * 6];
     lg_hello_t h = {
@@ -284,8 +333,16 @@ static void send_hello(void)
     e.origin_node = s.self;
     uint8_t frame[LG_FRAME_MAX];
     int flen = lg_frame_build(&e, body, n, frame, sizeof(frame));
-    if (flen > 0) {
-        enqueue_sealed(BROADCAST_MAC, frame, (size_t)flen);
+    if (flen <= 0) {
+        return false;
+    }
+    enqueue_sealed(dest, frame, (size_t)flen);
+    return true;
+}
+
+static void send_hello(void)
+{
+    if (send_hello_to(BROADCAST_MAC)) {
         s.hellos_sent++;
     }
 }
@@ -315,6 +372,17 @@ static void handle_hello(uint16_t src, const lgbb_rx_t *r, uint32_t boot, const 
         }
         l->boot = boot;
     }
+    lgbb_link_stats_t *st = &s.stats[src];
+    if (l->hellos > 0) {
+        uint32_t gap = now - l->last_ms;
+        if (gap > BB_GAP_MS) {
+            st->gaps++;
+        }
+        if (gap > st->max_gap_ms) {
+            st->max_gap_ms = gap;
+        }
+    }
+    st->hellos++;
     memcpy(l->mac, r->mac, 6);
     l->last_ms = now;
     l->hellos++;
@@ -330,6 +398,7 @@ static void handle_hello(uint16_t src, const lgbb_rx_t *r, uint32_t boot, const 
     }
     if (lists_me && !l->usable) {
         l->usable = true;
+        st->ups++;
         ESP_LOGI(TAG, "[BB] Link up to node %u, RSSI %d, %u clients there", src, l->rssi, h.clients);
         if (s.on_link != NULL) {
             s.on_link(src, true);
@@ -381,11 +450,37 @@ static void handle_rx(const lgbb_rx_t *r, uint32_t now)
     }
 }
 
-static void expire_links(uint32_t now)
+static void probe_and_expire_links(uint32_t now)
 {
     for (size_t i = 0; i < LG_MAX_NODES; i++) {
         lgbb_link_t *l = &s.links[i];
-        if (!l->in_use || now - l->last_ms <= BB_LINK_TIMEOUT_MS) {
+        if (!l->in_use) {
+            continue;
+        }
+        uint32_t hello_age = now - l->last_ms;
+        bool acked = l->last_ack_ms != 0 && now - l->last_ack_ms <= BB_LINK_TIMEOUT_MS;
+        if (l->usable && l->peer_added && hello_age > BB_PROBE_AFTER_MS && now - l->last_probe_ms >= BB_PROBE_MS) {
+            l->last_probe_ms = now;
+            if (send_hello_to(l->mac)) {
+                s.stats[l->node].probes++;
+            }
+        }
+        bool lost;
+        if (l->usable) {
+            lost = hello_age > BB_LINK_HARD_TIMEOUT_MS || (hello_age > BB_LINK_TIMEOUT_MS && !acked);
+            if (!lost && hello_age > BB_LINK_TIMEOUT_MS && !l->hello_timeout_noted) {
+                l->hello_timeout_noted = true;
+                s.stats[l->node].saves++;
+                ESP_LOGW(TAG, "[BB] No HELLO from node %u for %" PRIu32 " ms, but it ACKs keepalives; link kept",
+                         l->node, hello_age);
+            }
+        } else {
+            lost = hello_age > BB_LINK_TIMEOUT_MS;
+        }
+        if (hello_age <= BB_LINK_TIMEOUT_MS) {
+            l->hello_timeout_noted = false;
+        }
+        if (!lost) {
             continue;
         }
         bool was_usable = l->usable;
@@ -394,7 +489,13 @@ static void expire_links(uint32_t now)
             (void)esp_now_del_peer(l->mac);
         }
         memset(l, 0, sizeof(*l));
-        ESP_LOGW(TAG, "[BB] Link lost to node %u (no HELLO for %u ms)", node, (unsigned)BB_LINK_TIMEOUT_MS);
+        if (was_usable) {
+            s.stats[node].losses++;
+            ESP_LOGW(TAG, "[BB] Link lost to node %u (no HELLO for %" PRIu32 " ms, %s)", node, hello_age,
+                     acked ? "keepalives still ACKed" : "no keepalive ACK either");
+        } else {
+            ESP_LOGW(TAG, "[BB] One-way link to node %u expired (no HELLO for %" PRIu32 " ms)", node, hello_age);
+        }
         if (was_usable && s.on_link != NULL) {
             s.on_link(node, false);
         }
@@ -412,7 +513,7 @@ void lgbb_poll(uint32_t now)
         s.last_hello_ms = now;
         send_hello();
     }
-    expire_links(now);
+    probe_and_expire_links(now);
     service_tx(now);
 }
 
@@ -473,19 +574,29 @@ size_t lgbb_links(lgbb_link_info_t *out, size_t max, uint32_t now_ms)
 
 void lgbb_print(void)
 {
-    printf("Backbone links (node %u):\n", s.self);
-    printf("  NODE  STATE     RSSI  HELLOS  AGE_MS\n");   /* no hardware addresses in output (decision D21) */
+    printf("Backbone links (AP %u):\n", s.self);
+    printf("  AP    STATE     RSSI  AGE_MS  HELLOS  GAPS  MAX_GAP  PROBES  ACKS  SAVES  UPS  LOSSES\n");
+    /* no hardware addresses in output (decision D21); counters survive link loss */
     uint32_t now = (uint32_t)(esp_log_timestamp());
-    for (size_t i = 0; i < LG_MAX_NODES; i++) {
-        const lgbb_link_t *l = &s.links[i];
-        if (!l->in_use) {
+    for (uint16_t node = 0; node < LG_MAX_NODES; node++) {
+        const lgbb_link_t *l = link_find(node);
+        const lgbb_link_stats_t *st = &s.stats[node];
+        if (l == NULL && st->hellos == 0) {
             continue;
         }
-        printf("  %-4u  %-8s  %4d  %6" PRIu32 "  %6" PRIu32 "\n",
-               l->node, l->usable ? "UP" : "ONE-WAY", l->rssi, l->hellos, now - l->last_ms);
+        if (l != NULL) {
+            printf("  %-4u  %-8s  %4d  %6" PRIu32, node, l->usable ? "UP" : "ONE-WAY", l->rssi, now - l->last_ms);
+        } else {
+            printf("  %-4u  %-8s  %4s  %6s", node, "DOWN", "--", "--");
+        }
+        printf("  %6" PRIu32 "  %4" PRIu32 "  %7" PRIu32 "  %6" PRIu32 "  %4" PRIu32 "  %5" PRIu32 "  %3" PRIu32
+               "  %6" PRIu32 "\n", st->hellos, st->gaps, st->max_gap_ms, st->probes, st->acks, st->saves, st->ups,
+               st->losses);
     }
-    printf("  tx %" PRIu32 " fail %" PRIu32 " dropped %" PRIu32 " nomem %" PRIu32
-           " | rx %" PRIu32 " auth_fail %" PRIu32 " replay %" PRIu32 " queue_full %" PRIu32 " | queued %u\n",
+    printf("  gap = HELLO more than %u ms after the previous; probe = unicast keepalive; save = link kept by ACKs\n",
+           (unsigned)BB_GAP_MS);
+    printf("  tx %" PRIu32 " tx_fail %" PRIu32 " dropped %" PRIu32 " nomem %" PRIu32
+           " | rx %" PRIu32 " auth_fail %" PRIu32 " replay %" PRIu32 " rx_queue_full %" PRIu32 " | queued %u\n",
            s.tx_frames, s.tx_fail, s.tx_dropped, s.tx_nomem,
            s.rx_frames, s.rx_auth_fail, s.rx_replay, s.rx_queue_full, (unsigned)s.tx_count);
 }

@@ -371,7 +371,8 @@ static void handle_client_text(lg_node_t *n, const lg_env_t *e, const uint8_t *b
 static void handle_client_ack(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
 {
     lg_msg_ack_t a;
-    if (!lg_msg_ack_dec(body, e->body_len, &a) || a.status != LG_ACK_DELIVERED || a.author != e->target ||
+    if (!lg_msg_ack_dec(body, e->body_len, &a) || a.author != e->target ||
+        (a.status != LG_ACK_DELIVERED && a.status != LG_ACK_READ) ||
         lg_roster_user(n->roster, e->target) == NULL) {
         n->stats.malformed++;
         return;
@@ -560,6 +561,16 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         forward(n, &e, body, from_node);
         break;
     }
+    case LG_T_GRID_STATE:
+        if (e.scope != LG_SCOPE_SYSTEM || e.body_len == 0 || e.body_len > LG_GRID_STATE_MAX) {
+            n->stats.malformed++;
+            break;
+        }
+        if (n->io.on_grid_state != NULL) {
+            n->io.on_grid_state(n->io.ctx, e.origin_node, body, e.body_len);
+        }
+        forward(n, &e, body, from_node);
+        break;
     case LG_T_DIAG_ECHO:
         if (!lg_text_valid(body, e.body_len)) {
             n->stats.malformed++;
@@ -606,4 +617,12 @@ int lg_node_send_diag(lg_node_t *n, const uint8_t *text, size_t len)
         return LG_ERR_ARG;
     }
     return flood_new(n, LG_T_DIAG_ECHO, text, len);
+}
+
+int lg_node_announce_grid_state(lg_node_t *n, const uint8_t *body, size_t len)
+{
+    if (body == NULL || len == 0 || len > LG_GRID_STATE_MAX) {
+        return LG_ERR_ARG;
+    }
+    return flood_new(n, LG_T_GRID_STATE, body, len);
 }

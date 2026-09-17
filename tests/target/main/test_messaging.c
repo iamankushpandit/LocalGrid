@@ -410,6 +410,65 @@ static void test_diag_echo(void)
     sim_destroy(s);
 }
 
+/* D45: grid state floods from one AP to every other exactly once, opaque and intact. */
+static void test_grid_state(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    uint8_t body[LG_GRID_STATE_MAX];
+    for (size_t i = 0; i < sizeof(body); i++) {
+        body[i] = (uint8_t)(i * 7u + 1u);
+    }
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[0].node, body, 147), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].grid_state_count, 0);   /* the author does not hear its own */
+    CHECK_EQ(s->nodes[1].grid_state_count, 1);
+    CHECK_EQ(s->nodes[2].grid_state_count, 1);   /* two hops, once */
+    CHECK_EQ(s->nodes[2].grid_state_origin, 0);
+    CHECK_EQ(s->nodes[2].grid_state_len, 147u);
+    CHECK(memcmp(s->nodes[2].grid_state_last, body, 147) == 0);
+
+    /* A second path and duplicated backbone frames still report it once per node. */
+    sim_link(s, 0, 2, true);
+    s->duplicate_backbone = true;
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[2].node, body, sizeof(body)), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].grid_state_count, 1);
+    CHECK_EQ(s->nodes[1].grid_state_count, 2);
+    CHECK_EQ(s->nodes[2].grid_state_count, 1);
+    CHECK_EQ(s->nodes[0].grid_state_len, (size_t)LG_GRID_STATE_MAX);
+
+    /* Empty and oversize bodies are refused at the author. */
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[0].node, body, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_node_announce_grid_state(&s->nodes[0].node, body, LG_GRID_STATE_MAX + 1u), LG_ERR_ARG);
+
+    /* An oversize body forged onto the backbone is counted malformed and goes no further. */
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.major = LG_PROTO_MAJOR;
+    e.minor = LG_PROTO_MINOR;
+    e.type = LG_T_GRID_STATE;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.ttl = LG_TTL_DEFAULT;
+    e.origin_id = LG_NODE_ID_BASE | 1u;
+    e.origin_node = 1;
+    e.origin_boot = 1;
+    e.origin_seq = 900;
+    static uint8_t big[LG_GRID_STATE_MAX + 1u];
+    static uint8_t frame[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, big, sizeof(big), frame, sizeof(frame));
+    CHECK(flen > 0);
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    uint32_t forwarded = s->nodes[0].node.stats.forwarded;
+    lg_node_on_backbone_frame(&s->nodes[0].node, 1, frame, (size_t)flen);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 1u);
+    CHECK_EQ(s->nodes[0].node.stats.forwarded, forwarded);
+    CHECK_EQ(s->nodes[0].grid_state_count, 1);
+    sim_destroy(s);
+}
+
 static void test_time_announce(void)
 {
     sim_t *s = make_chain();
@@ -441,6 +500,57 @@ static void test_time_announce(void)
 }
 
 /* Keepalive: a handheld's PING is answered by its own node, and only to that session. */
+/*
+ * A read report travels the same path as a delivery report: recipient -> node -> author, with
+ * the message named by (author, boot, seq). It only moves a 1:1 message, it is counted once
+ * per reader however many times it arrives, and it never moves backwards to delivered.
+ */
+static void test_read_receipt(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Are you there?"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_DELIVERED);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].read_count, 0);
+
+    /* Emma's handheld keeps the identity of what it received, which is what it reports. */
+    const lg_in_msg_t *in = lg_client_inbox(cl(s, EMMA), 0);
+    CHECK(in != NULL);
+    CHECK_EQ(in->author, LG_PROTO_DAD);
+    CHECK(in->seq == cl(s, DAD)->outbox[slot].seq);
+    CHECK(in->boot == cl(s, DAD)->outbox[slot].boot);
+
+    CHECK(lg_client_mark_read(cl(s, EMMA), in->author, in->boot, in->seq));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_READ);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].read_count, 1);
+
+    /* Reported twice, counted once, and still read. */
+    CHECK(lg_client_mark_read(cl(s, EMMA), in->author, in->boot, in->seq));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].read_count, 1);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_READ);
+
+    /* A handheld does not report its own message read. */
+    CHECK(!lg_client_mark_read(cl(s, EMMA), LG_PROTO_EMMA, 1, 1));
+
+    /* A group message carries no read state: one report per member would say little. */
+    int g = lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("Dinner is ready."));
+    CHECK(g >= 0);
+    CHECK(sim_pump(s));
+    const lg_in_msg_t *gin = lg_client_inbox(cl(s, EMMA), 0);
+    CHECK(gin != NULL && gin->scope == LG_SCOPE_GROUP);
+    CHECK(lg_client_mark_read(cl(s, EMMA), gin->author, gin->boot, gin->seq));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[g].read_count, 1);
+    CHECK(cl(s, DAD)->outbox[g].state != LG_OUT_READ);
+    sim_destroy(s);
+}
+
 static void test_ping_pong(void)
 {
     sim_t *s = make_chain();
@@ -468,6 +578,7 @@ static void test_ping_pong(void)
 void test_messaging(void)
 {
     test_diag_echo();
+    test_grid_state();
     test_time_announce();
     test_registration_and_presence();
     test_direct_two_hops_encrypted();
@@ -480,4 +591,5 @@ void test_messaging(void)
     test_node_refuses_unsafe_frames();
     test_key_pinning();
     test_ping_pong();
+    test_read_receipt();
 }

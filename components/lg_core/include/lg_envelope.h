@@ -43,6 +43,7 @@ typedef enum {
     LG_T_TEXT            = 0x30,
     LG_T_MSG_ACK         = 0x31,
     LG_T_TIME_SYNC       = 0x50,
+    LG_T_GRID_STATE      = 0x51,   /* AP to AP only: replicated admin settings and time generation (D45) */
     LG_T_DIAG_ECHO       = 0x70,   /* node console test: flooded once, reported by every node */
     LG_T_ERROR           = 0x7F,
 } lg_msg_type_t;

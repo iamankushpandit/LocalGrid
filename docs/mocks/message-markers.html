@@ -1,0 +1,460 @@
+<title>Message Marker Icons</title>
+<meta name="description" content="Icon proposals for LocalGrid delivery and read markers, for owner review before implementation (D31).">
+<style>
+  :root {
+    --page-bg: #f6f7f5;
+    --page-surface: #ffffff;
+    --page-line: #d9ded8;
+    --page-ink: #14190f;
+    --page-ink-soft: #55604e;
+    --page-accent: #1f6b3f;
+    --page-warn: #8a5a12;
+
+    /* The device palette. These are not page chrome: they are the handheld's own
+       theme values from components/lg_ui/src/lg_theme.c, so they are fixed here on
+       purpose - the mock has to show the real panel, not this page's colours. */
+    --d-bg: #000000;
+    --d-surface: #0a140f;
+    --d-outline: #1f3a2a;
+    --d-text: #d2f5de;
+    --d-muted: #7fa78f;
+    --d-accent: #5fd38d;   /* accent and success are the SAME value today */
+    --d-error: #ff6b6b;
+    --d-warning: #f0b64a;
+
+    /* Proposed new marker roles, the subject of this review. */
+    --m-wait: #7fa78f;
+    --m-node: #4a8fd4;
+    --m-delivered: #5fd38d;
+    --m-read: #b98cff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page-bg: #101310;
+      --page-surface: #181c18;
+      --page-line: #2b312b;
+      --page-ink: #e8eee6;
+      --page-ink-soft: #a3ada0;
+      --page-accent: #7fd39c;
+      --page-warn: #e0b256;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #101310;
+    --page-surface: #181c18;
+    --page-line: #2b312b;
+    --page-ink: #e8eee6;
+    --page-ink-soft: #a3ada0;
+    --page-accent: #7fd39c;
+    --page-warn: #e0b256;
+  }
+
+  body {
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding-block: 28px;
+    padding-left: 20px;
+    padding-right: 20px;
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 6px; text-wrap: balance; }
+  h2 {
+    font-size: 13px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--page-ink-soft); margin: 38px 0 14px;
+    border-bottom: 1px solid var(--page-line); padding-bottom: 7px;
+  }
+  h3 { font-size: 15px; margin: 22px 0 8px; }
+  p { margin: 0 0 12px; max-width: 68ch; }
+  .lede { color: var(--page-ink-soft); }
+  .note {
+    border-left: 3px solid var(--page-warn); padding: 10px 14px; margin: 16px 0;
+    background: var(--page-surface); border-radius: 0 6px 6px 0;
+  }
+  .note strong { color: var(--page-warn); }
+  code {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: .88em; background: var(--page-surface);
+    border: 1px solid var(--page-line); border-radius: 4px; padding: 1px 5px;
+  }
+  .ic { width: 1em; height: 1em; fill: none; stroke: currentColor;
+        stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+  .ic.filled { fill: currentColor; stroke: none; }
+
+  /* --- candidate sets --- */
+  .sets { display: grid; gap: 16px; }
+  .set {
+    background: var(--page-surface); border: 1px solid var(--page-line);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  .set.pick { border-color: var(--page-accent); border-width: 2px; }
+  .set-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+  .set-head b { font-size: 16px; }
+  .tag {
+    font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--page-accent); border: 1px solid currentColor;
+    border-radius: 99px; padding: 1px 8px;
+  }
+  .states { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .state {
+    background: var(--d-bg); border: 1px solid var(--d-outline); border-radius: 8px;
+    padding: 11px 12px; min-width: 132px; flex: 1 1 132px;
+  }
+  .state .big { font-size: 30px; line-height: 1; display: block; margin-bottom: 8px; }
+  .state .nm {
+    font-family: ui-monospace, Consolas, monospace; font-size: 10.5px;
+    color: var(--d-text); display: block; word-break: break-all;
+  }
+  .state .what { font-size: 11.5px; color: var(--d-muted); display: block; margin-top: 3px; }
+  .w-wait { color: var(--m-wait); }
+  .w-node { color: var(--m-node); }
+  .w-del  { color: var(--m-delivered); }
+  .w-read { color: var(--m-read); }
+
+  /* --- true-size panel --- */
+  .panels { display: flex; flex-wrap: wrap; gap: 22px; }
+  .panel-wrap { flex: 0 0 auto; }
+  .panel {
+    width: 240px; height: 320px; background: var(--d-bg);
+    border: 1px solid var(--d-outline); border-radius: 6px;
+    padding: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden;
+    font-size: 12px; color: var(--d-text);
+  }
+  .p-head { display: flex; align-items: center; gap: 6px; color: var(--d-accent); font-size: 13px; }
+  .p-head .sp { flex: 1; }
+  .bubbles { display: flex; flex-direction: column; gap: 5px; overflow: hidden; }
+  .bub { display: flex; }
+  .bub.me { justify-content: flex-end; }
+  .card {
+    max-width: 85%; background: var(--d-surface); border: 1px solid var(--d-outline);
+    border-radius: 6px; padding: 5px 6px;
+  }
+  .card .msg { font-size: 12px; }
+  .mark {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 10px; color: var(--d-muted); margin-top: 2px;
+  }
+  .mark .ic { width: 13px; height: 13px; }
+  .cap { font-size: 12px; color: var(--page-ink-soft); margin-top: 8px; max-width: 240px; }
+
+  /* --- tables --- */
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--page-line); vertical-align: top; }
+  th { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--page-ink-soft); }
+  td.sw { white-space: nowrap; }
+  .chip {
+    display: inline-block; width: 13px; height: 13px; border-radius: 3px;
+    vertical-align: -2px; margin-right: 6px; border: 1px solid rgba(128,128,128,.4);
+  }
+  .scroll { overflow-x: auto; }
+  ul { margin: 0 0 12px; padding-left: 20px; max-width: 68ch; }
+  li { margin-bottom: 5px; }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-refresh" viewBox="0 0 24 24">
+    <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M19.6 3.3v4.8h-4.8"/>
+  </symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24">
+    <path d="M12 16.5V4.2"/><path d="M7 9.2l5-5 5 5"/><path d="M3.6 20h16.8"/>
+  </symbol>
+  <symbol id="i-download" viewBox="0 0 24 24">
+    <path d="M12 4v12.3"/><path d="M7 11.3l5 5 5-5"/><path d="M3.6 20h16.8"/>
+  </symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24">
+    <path d="M4.2 13.2l5.2 5.2L20 6.4"/>
+  </symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24">
+    <path d="M1.9 12S5.6 5.6 12 5.6 22.1 12 22.1 12 18.4 18.4 12 18.4 1.9 12 1.9 12z"/>
+    <circle cx="12" cy="12" r="3.1"/>
+  </symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24">
+    <path d="M2.6 8.6a14 14 0 0 1 18.8 0"/><path d="M6.2 12.2a9 9 0 0 1 11.6 0"/>
+    <path d="M9.6 15.7a4.6 4.6 0 0 1 4.8 0"/><circle cx="12" cy="19.2" r="1.5" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-envelope" viewBox="0 0 24 24">
+    <rect x="2.6" y="5.2" width="18.8" height="13.6" rx="2"/><path d="M3.2 6.6l8.8 6.4 8.8-6.4"/>
+  </symbol>
+  <symbol id="i-gps" viewBox="0 0 24 24">
+    <path d="M12 21.5s7-6.2 7-11.3A7 7 0 0 0 5 10.2c0 5.1 7 11.3 7 11.3z"/><circle cx="12" cy="10" r="2.6"/>
+  </symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24">
+    <path d="M6 16.4v-5.2a6 6 0 1 1 12 0v5.2l2 2.1H4z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>
+  </symbol>
+  <symbol id="i-warning" viewBox="0 0 24 24">
+    <path d="M12 3.6L21.6 20H2.4z"/><path d="M12 9.6v4.6"/><path d="M12 17.1v.1"/>
+  </symbol>
+  <symbol id="i-home" viewBox="0 0 24 24">
+    <path d="M3.5 10.6L12 3.8l8.5 6.8V20H3.5z"/>
+  </symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M14.5 5L8 12l6.5 7"/></symbol>
+  <symbol id="i-dot" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="3.6" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24">
+    <path d="M9 5.2v13.6" stroke-width="2.6"/><path d="M15 5.2v13.6" stroke-width="2.6"/>
+  </symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+</defs></svg>
+
+<h1>Message marker icons</h1>
+<p class="lede">
+  Four states, four distinct shapes instead of one tick repeated. For owner review before any code
+  is written (D31). Every glyph below is one this build can already draw &mdash; each is labelled with
+  the exact <code>LV_SYMBOL_*</code> constant, so nothing here needs a new font.
+</p>
+
+<div class="note">
+  <p><strong>Why the old markers could never work.</strong> In the theme today
+  <code>accent</code> and <code>success</code> are the <em>same</em> value, <code>0x5FD38D</code>.
+  So "delivered grey, read green" and "delivered green, read green" were asking two identical
+  colours to carry different meanings. The pair of ticks was not hard to read &mdash; it was
+  impossible. Distinct shapes fix that; distinct colours alone could not.</p>
+</div>
+
+<h2>The four states, and what each one honestly means</h2>
+<div class="scroll"><table>
+  <tr><th>State</th><th>What the grid actually knows</th><th>Exists today?</th></tr>
+  <tr><td><b>Waiting</b></td><td>This handheld is holding it; no node has taken it yet.</td><td>Yes</td></tr>
+  <tr><td><b>On the grid</b></td><td>A node accepted it. If the recipient is offline the node is storing it for them.</td><td>Yes</td></tr>
+  <tr><td><b>On their handheld</b></td><td>The recipient's device confirmed it arrived. Nobody has necessarily looked at it.</td><td>Yes</td></tr>
+  <tr><td><b>Read</b></td><td>They opened that conversation while the message was in it. Not a camera &mdash; an assumption, and the fairest one available.</td><td>Yes, 1:1</td></tr>
+</table></div>
+
+<h2>Three candidate icon sets &mdash; pick one</h2>
+<div class="sets">
+
+  <div class="set pick">
+    <div class="set-head"><b>Set A &mdash; the journey</b><span class="tag">chosen</span></div>
+    <p style="margin:0;color:var(--page-ink-soft);font-size:13.5px">
+      Reads as a path: it leaves here, it lands there, it was looked at. The up and down arrows are
+      unmistakable from each other at 13&nbsp;px, which is the whole problem with ticks.
+    </p>
+    <div class="states">
+      <div class="state"><span class="big w-wait" style="font-size:26px">&#x1F553;</span>
+        <span class="nm">U+1F553 (emoji font)</span><span class="what">Waiting</span></div>
+      <div class="state"><span class="big w-node"><svg class="ic" style="width:30px;height:30px"><use href="#i-upload"/></svg></span>
+        <span class="nm">LV_SYMBOL_UPLOAD</span><span class="what">On the grid</span></div>
+      <div class="state"><span class="big w-del"><svg class="ic" style="width:30px;height:30px"><use href="#i-download"/></svg></span>
+        <span class="nm">LV_SYMBOL_DOWNLOAD</span><span class="what">On their handheld</span></div>
+      <div class="state"><span class="big w-read"><svg class="ic" style="width:30px;height:30px"><use href="#i-eye"/></svg></span>
+        <span class="nm">LV_SYMBOL_EYE_OPEN</span><span class="what">Read</span></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="set-head"><b>Set B &mdash; grid, then person</b></div>
+    <p style="margin:0;color:var(--page-ink-soft);font-size:13.5px">
+      Names the infrastructure explicitly: the aerial means the grid has it, the tick means their
+      device has it. Keeps one familiar tick for people who expect one.
+    </p>
+    <div class="states">
+      <div class="state"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-refresh"/></svg></span>
+        <span class="nm">LV_SYMBOL_REFRESH</span><span class="what">Waiting</span></div>
+      <div class="state"><span class="big w-node"><svg class="ic" style="width:30px;height:30px"><use href="#i-wifi"/></svg></span>
+        <span class="nm">LV_SYMBOL_WIFI</span><span class="what">On the grid</span></div>
+      <div class="state"><span class="big w-del"><svg class="ic" style="width:30px;height:30px"><use href="#i-ok"/></svg></span>
+        <span class="nm">LV_SYMBOL_OK</span><span class="what">On their handheld</span></div>
+      <div class="state"><span class="big w-read"><svg class="ic" style="width:30px;height:30px"><use href="#i-eye"/></svg></span>
+        <span class="nm">LV_SYMBOL_EYE_OPEN</span><span class="what">Read</span></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="set-head"><b>Set C &mdash; the letter</b></div>
+    <p style="margin:0;color:var(--page-ink-soft);font-size:13.5px">
+      Postal metaphor: posted, delivered to the door, opened. The envelope is the most literal
+      "the grid is carrying it", but it is also the busiest shape at marker size.
+    </p>
+    <div class="states">
+      <div class="state"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-refresh"/></svg></span>
+        <span class="nm">LV_SYMBOL_REFRESH</span><span class="what">Waiting</span></div>
+      <div class="state"><span class="big w-node"><svg class="ic" style="width:30px;height:30px"><use href="#i-envelope"/></svg></span>
+        <span class="nm">LV_SYMBOL_ENVELOPE</span><span class="what">On the grid</span></div>
+      <div class="state"><span class="big w-del"><svg class="ic" style="width:30px;height:30px"><use href="#i-download"/></svg></span>
+        <span class="nm">LV_SYMBOL_DOWNLOAD</span><span class="what">On their handheld</span></div>
+      <div class="state"><span class="big w-read"><svg class="ic" style="width:30px;height:30px"><use href="#i-eye"/></svg></span>
+        <span class="nm">LV_SYMBOL_EYE_OPEN</span><span class="what">Read</span></div>
+    </div>
+  </div>
+</div>
+
+<h2>The waiting glyph &mdash; settled: the clock</h2>
+<p>
+  <b>Decided and shipped: a clock face, <code>U+1F553</code> from the emoji font.</b> The turning
+  arrow was rejected for a good reason &mdash; <code>LV_SYMBOL_REFRESH</code> already means
+  <em>retry</em> on this handheld, being the Reconnect action's shape, so using it for "not sent yet"
+  asked one glyph to carry two unrelated meanings. A clock says "time passing", which is what this
+  state is.
+</p>
+<p>
+  It costs nothing extra: <code>U+1F553</code> was already in the committed Noto Emoji subset, so no
+  font was regenerated and no glyph embedded. A true hourglass (<code>U+231B</code>) was the first
+  choice and was dropped once its price was clear &mdash; the font generator emits one size only, so
+  an hourglass would have meant a second font target, a second generated <code>.c</code>, and a
+  second <code>LV_FONT_DECLARE</code>. The clock also forced one real design consequence: the emoji
+  font has exactly one size, 20&nbsp;px, so the marker glyph is drawn at <code>font_icon</code> while
+  the timestamp beside it stays at <code>font_tiny</code>. Asked for inside a 10&nbsp;px line, it
+  would not have drawn at all.
+</p>
+<p class="lede" style="max-width:68ch">
+  The candidates below are kept as the record of what was considered. None of them is in the
+  firmware.
+</p>
+<div class="states">
+  <div class="state"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-dot"/></svg></span>
+    <span class="nm">LV_SYMBOL_BULLET</span><span class="what">A dot: queued here, nothing has happened to it yet</span></div>
+  <div class="state"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-pause"/></svg></span>
+    <span class="nm">LV_SYMBOL_PAUSE</span><span class="what">Held: waiting on the grid, not on you</span></div>
+  <div class="state"><span class="big w-wait"><svg class="ic" style="width:30px;height:30px"><use href="#i-minus"/></svg></span>
+    <span class="nm">LV_SYMBOL_MINUS</span><span class="what">A dash: no state reached</span></div>
+  <div class="state"><span class="big w-wait" style="font-size:13px;color:var(--d-muted)">14:02</span>
+    <span class="nm">no icon</span><span class="what">Timestamp alone; the first icon appears when the grid takes it</span></div>
+</div>
+<div class="panels" style="margin-top:16px">
+  <div class="panel-wrap">
+    <div class="panel" style="height:auto;padding-bottom:10px">
+      <div class="p-head"><span>Emma</span><span class="sp"></span><svg class="ic" style="width:14px;height:14px"><use href="#i-left"/></svg></div>
+      <div class="bubbles">
+        <div class="bub me"><div class="card"><div class="msg">Heading back now</div>
+          <div class="mark"><span>14:02</span><svg class="ic w-wait"><use href="#i-dot"/></svg></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Heading back now</div>
+          <div class="mark"><span>14:02</span><svg class="ic w-wait"><use href="#i-pause"/></svg></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Heading back now</div>
+          <div class="mark"><span>14:02</span><svg class="ic w-wait"><use href="#i-minus"/></svg></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Heading back now</div>
+          <div class="mark"><span>14:02</span></div></div></div>
+      </div>
+    </div>
+    <p class="cap">The same message four ways, at true size. Top to bottom: dot, held, dash, nothing.</p>
+  </div>
+</div>
+<p class="lede" style="max-width:68ch">
+  Worth knowing how briefly this state exists: on the bench a message went from sent to accepted by a
+  node in under half a second. Waiting is only visible for any length of time when the handheld is off
+  the grid &mdash; which is precisely when it matters, because it is the difference between "gone" and
+  "still in my pocket". That argues for a mark rather than nothing: an absent icon cannot tell you
+  which of those you are looking at.
+</p>
+
+<h2>Set A at true size, on the real panel</h2>
+<p>
+  Both panels are 240&nbsp;&times;&nbsp;320 at 1:1, the Hosyond and FNK0104B resolution. The marker
+  icon is drawn one size larger than the timestamp beside it, so the shape survives at arm's length.
+</p>
+<div class="panels">
+
+  <div class="panel-wrap">
+    <div class="panel">
+      <div class="p-head"><span>Emma</span><span class="sp"></span><svg class="ic" style="width:14px;height:14px"><use href="#i-left"/></svg></div>
+      <div class="bubbles">
+        <div class="bub me"><div class="card"><div class="msg">Heading back now</div>
+          <div class="mark"><span>14:02</span><svg class="ic w-wait"><use href="#i-refresh"/></svg></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Kettle on?</div>
+          <div class="mark"><span>14:03</span><svg class="ic w-node"><use href="#i-upload"/></svg></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Ten minutes out</div>
+          <div class="mark"><span>14:05</span><svg class="ic w-del"><use href="#i-download"/></svg></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">At the gate</div>
+          <div class="mark"><span>14:11</span><svg class="ic w-read"><use href="#i-eye"/></svg></div></div></div>
+        <div class="bub"><div class="card"><div class="msg">Kettle is on</div>
+          <div class="mark"><span>14:12, Emma</span></div></div></div>
+      </div>
+    </div>
+    <p class="cap">One conversation showing all four states at once. In use you would see one marker
+      change under one bubble, not four different ones.</p>
+  </div>
+
+  <div class="panel-wrap">
+    <div class="panel">
+      <div class="p-head"><span>FAMILY</span><span class="sp"></span><svg class="ic" style="width:14px;height:14px"><use href="#i-left"/></svg></div>
+      <div class="bubbles">
+        <div class="bub me"><div class="card"><div class="msg">Food is ready</div>
+          <div class="mark"><span>18:30</span><svg class="ic w-del"><use href="#i-download"/></svg><span class="w-del">3/4</span>
+            <svg class="ic w-read"><use href="#i-eye"/></svg><span class="w-read">1</span></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Tents down by nine</div>
+          <div class="mark"><span>08:15</span><svg class="ic w-read"><use href="#i-eye"/></svg><span class="w-read">all read</span></div></div></div>
+        <div class="bub me"><div class="card"><div class="msg">Anyone seen the mallet</div>
+          <div class="mark"><span>08:40</span><svg class="ic w-node"><use href="#i-upload"/></svg></div></div></div>
+      </div>
+    </div>
+    <p class="cap">Group markers carry counts, and collapse to "all read" once everyone has opened it
+      &mdash; so a number never sits there implying someone is missing when nobody is.</p>
+  </div>
+</div>
+
+<h2>Groups and broadcasts</h2>
+<p>
+  You asked for delivered and read counts on groups, and for broadcasts to show only as far as the
+  grid carrying them. Both fit what the core already does &mdash; with one honest exception, below.
+</p>
+<div class="scroll"><table>
+  <tr><th>Conversation</th><th>Marker</th><th>Reads as</th></tr>
+  <tr><td>1:1</td><td class="sw"><svg class="ic w-del" style="width:15px;height:15px"><use href="#i-download"/></svg></td>
+      <td>One icon, the furthest state reached.</td></tr>
+  <tr><td>Group, partly read</td>
+      <td class="sw"><svg class="ic w-del" style="width:15px;height:15px"><use href="#i-download"/></svg> <span class="w-del">3/4</span>
+          &nbsp;<svg class="ic w-read" style="width:15px;height:15px"><use href="#i-eye"/></svg> <span class="w-read">1</span></td>
+      <td>Three of four handhelds have it, one person has opened it.</td></tr>
+  <tr><td>Group, all read</td>
+      <td class="sw"><svg class="ic w-read" style="width:15px;height:15px"><use href="#i-eye"/></svg> <span class="w-read">all read</span></td>
+      <td>Counts collapse once everybody has opened it.</td></tr>
+  <tr><td>Broadcast</td>
+      <td class="sw"><svg class="ic w-node" style="width:15px;height:15px"><use href="#i-upload"/></svg>
+          &nbsp;&rarr;&nbsp;<svg class="ic w-del" style="width:15px;height:15px"><use href="#i-download"/></svg> <span class="w-del">4</span></td>
+      <td>On the grid, then how many handhelds confirmed it. No read state.</td></tr>
+</table></div>
+
+<div class="note">
+  <p><strong>One thing I cannot honestly show.</strong> You described a broadcast as "sending it,
+  receiving it in AP, then AP delivering it". The first two are real states. The third is not: no node
+  ever reports back "I have finished handing this out" &mdash; there is no such message in the protocol.
+  What <em>is</em> real is that every receiving handheld confirms delivery individually, so a broadcast
+  can show a count of handhelds that have it. That is strictly better information than an AP claim
+  would be, but it is a count rather than a completion, because the grid does not know how many
+  handhelds are switched on.</p>
+</div>
+
+<h2>Colours come from the theme, not from the screen</h2>
+<p>
+  Your point stands and it needs a theme change, not just discipline. There is no role today meaning
+  <em>delivered</em> or <em>read</em>; borrowing <code>success</code> and <code>accent</code> would bake
+  marker meaning into unrelated roles &mdash; and they are the same colour anyway. So four new roles go
+  into <code>lg_theme_t</code>, screens ask for them by name, and a future theme changes all of it in
+  one file.
+</p>
+<div class="scroll"><table>
+  <tr><th>Proposed role</th><th>Default</th><th>Carries</th><th>Chosen because</th></tr>
+  <tr><td><code>mark_wait</code></td><td class="sw"><span class="chip" style="background:var(--m-wait)"></span>#7FA78F</td>
+      <td>Waiting</td><td>The existing muted green: recedes, because nothing has happened yet.</td></tr>
+  <tr><td><code>mark_node</code></td><td class="sw"><span class="chip" style="background:var(--m-node)"></span>#4A8FD4</td>
+      <td>On the grid</td><td>A blue, deliberately not green: the grid has it, the person does not.</td></tr>
+  <tr><td><code>mark_delivered</code></td><td class="sw"><span class="chip" style="background:var(--m-delivered)"></span>#5FD38D</td>
+      <td>On their handheld</td><td>The theme's green, which already means "good" everywhere else.</td></tr>
+  <tr><td><code>mark_read</code></td><td class="sw"><span class="chip" style="background:var(--m-read)"></span>#B98CFF</td>
+      <td>Read</td><td><b>Decided.</b> A violet, so read cannot be mistaken for delivered at
+      13&nbsp;px. The only value outside the green palette, and deliberately so: stepping out of the
+      greens is what guarantees the two states can never collapse into each other again.</td></tr>
+</table></div>
+
+<h2>What I would build once you pick</h2>
+<ul>
+  <li><b>One icon per bubble, not a row of them.</b> The marker shows the furthest state reached, so
+    the bubble stays quiet and one glyph changes in place.</li>
+  <li><b>Group read needs one line widened</b> in the chat screen, which currently reports reads only
+    for 1:1. Group delivery counts already arrive today &mdash; every member's handheld reports, and
+    the core counts per member.</li>
+  <li><b>No wire change and no reflashing nodes</b> for any of this. It is screens, the theme, and one
+    scope widening.</li>
+  <li><b>Rejections keep their words.</b> "That handheld is offline" cannot be said by any icon, so
+    refusals stay as text in the error colour.</li>
+</ul>
+<p class="lede">
+  <b>All settled and built:</b> Set A, violet for read, and a clock for waiting. Recorded as D42 and
+  on both handhelds. It needed no wire change and no reflashing of APs &mdash; screens, four new theme
+  roles, and one line widened so group reads are reported as well as 1:1.
+  <br><br>
+  <b>Still unproven on hardware:</b> the group counts and the group read reports, and whether the
+  clock glyph draws at all. Serial output reports states and counts, never pixels, so that last one
+  needs somebody to look at a panel.
+</p>

@@ -1,7 +1,8 @@
 /*
- * settings.h - master node settings persisted in NVS (namespace "lgcfg").
+ * settings.h - admin settings persisted in NVS (namespace "lgcfg") on every AP (D45).
  *
  * The admin password is stored only as PBKDF2-HMAC-SHA256(password, salt, iterations).
+ * seq and author version the record across APs; grid_state.c decides which copy wins.
  */
 #pragma once
 
@@ -23,6 +24,8 @@ typedef struct {
     uint8_t  salt[SETTINGS_SALT_LEN];
     uint32_t iterations;
     uint8_t  hash[SETTINGS_HASH_LEN];
+    uint32_t seq;       /* 0 = never set anywhere; each change anywhere on the grid adds one */
+    uint16_t author;    /* AP index that made this version */
 } node_settings_t;
 
 /* Loads settings; an absent or incompatible record yields configured == false. */

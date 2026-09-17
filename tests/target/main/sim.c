@@ -92,6 +92,15 @@ static void n_on_time(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8
     }
 }
 
+static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
+{
+    sim_node_t *sn = ctx;
+    sn->grid_state_count++;
+    sn->grid_state_origin = origin_node;
+    sn->grid_state_len = len <= sizeof(sn->grid_state_last) ? len : sizeof(sn->grid_state_last);
+    memcpy(sn->grid_state_last, body, sn->grid_state_len);
+}
+
 /* ---- client io ---- */
 
 static bool c_send(void *ctx, const uint8_t *frame, size_t len)
@@ -183,6 +192,7 @@ sim_t *sim_create(void)
             .grid_time = n_grid_time,
             .on_diag = n_on_diag,
             .on_time = n_on_time,
+            .on_grid_state = n_on_grid_state,
         };
         lg_node_init(&sn->node, (uint16_t)i, 1, roster, &io);
     }

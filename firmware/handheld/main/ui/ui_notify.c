@@ -8,6 +8,7 @@
  *
  * Counts live in RAM with the messages themselves, so a reboot clears both.
  */
+#include "ui_snapshot.h"
 #include "ui_notify.h"
 
 #include <stdio.h>
@@ -15,9 +16,11 @@
 
 #include "esp_log.h"
 #include "hh_service.h"
+#include "lg_bsp_audio.h"
 #include "lg_envelope.h"
 #include "lg_theme.h"
 #include "lg_ui_widgets.h"
+#include "ui_alert.h"
 #include "ui_chat.h"
 
 static const char *TAG = "UI";
@@ -99,6 +102,8 @@ void ui_notify_mark_seen(uint8_t scope, uint32_t target)
 static void on_banner_tapped(lv_event_t *e)
 {
     (void)e;
+    ESP_LOGI(TAG, "[UI] Banner tapped: opening %s", s_notify.pending_title);
+    lg_ui_toast_hide();
     ui_chat_open_conversation(s_notify.pending_scope, s_notify.pending_target, s_notify.pending_title);
 }
 
@@ -135,13 +140,12 @@ static void conversation_title(const hh_status_t *st, uint8_t scope, uint32_t ta
 static void watch(lv_timer_t *timer)
 {
     (void)timer;
-    static hh_message_t msgs[HH_MESSAGES];
-    static hh_status_t st;
-    size_t n = hh_service_messages(msgs, HH_MESSAGES);
+    size_t n = 0;
+    const hh_message_t *msgs = ui_messages(&n);
     if (n == 0) {
         return;
     }
-    hh_service_status(&st);
+    const hh_status_t *st = ui_status();
 
     /* The list arrives newest first; walk it oldest first so counts follow arrival order. */
     const hh_message_t *newest_unseen = NULL;
@@ -173,17 +177,29 @@ static void watch(lv_timer_t *timer)
 
     s_notify.pending_scope = newest_scope;
     s_notify.pending_target = newest_target;
-    conversation_title(&st, newest_scope, newest_target, newest_unseen, s_notify.pending_title,
+    conversation_title(st, newest_scope, newest_target, newest_unseen, s_notify.pending_title,
                        sizeof(s_notify.pending_title));
     char text[HH_TEXT_MAX + 64];
-    const char *who = sender_name(&st, newest_unseen->author);
+    const char *who = sender_name(st, newest_unseen->author);
     if (newest_scope == LG_SCOPE_DIRECT) {
         snprintf(text, sizeof(text), "%s%s: %s", who, newest_unseen->urgent ? " (urgent)" : "", newest_unseen->text);
     } else {
         snprintf(text, sizeof(text), "%s in %s%s: %s", who, s_notify.pending_title,
                  newest_unseen->urgent ? " (urgent)" : "", newest_unseen->text);
     }
-    lg_ui_toast(text, on_banner_tapped);
+    /*
+     * Three levels of insistence. A message for you gets a banner and a bell: look when you
+     * look. A broadcast is for everybody, so it flashes the screen and chimes -- meant to be
+     * caught across a tent. An urgent broadcast takes the screen until somebody acknowledges
+     * it, and sounds even on a handheld that has been silenced.
+     */
+    if (newest_scope == LG_SCOPE_BROADCAST) {
+        ui_alert_show(newest_unseen->urgent ? UI_ALERT_EMERGENCY : UI_ALERT_ANNOUNCEMENT,
+                      who, newest_unseen->text);   /* the alert plays its own cue */
+    } else {
+        lg_bsp_audio_cue(LG_CUE_RECEIVED);
+        lg_ui_toast(text, on_banner_tapped);
+    }
     ESP_LOGI(TAG, "[UI] Notified: %s", text);
 }
 

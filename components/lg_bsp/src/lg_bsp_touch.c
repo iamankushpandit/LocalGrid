@@ -12,6 +12,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "lg_bsp_i2c.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -45,6 +46,7 @@ typedef struct {
 static const lg_board_t       *s_board;
 static SemaphoreHandle_t       s_lock;
 static i2c_master_dev_handle_t s_ft;
+static i2c_master_bus_handle_t s_i2c_bus;
 static spi_device_handle_t     s_xpt;
 static touch_cal_t             s_cal;
 static bool                    s_calibrated;
@@ -67,11 +69,11 @@ static esp_err_t ft_start(const lg_touch_profile_t *t)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    i2c_master_bus_handle_t bus;
-    esp_err_t err = i2c_new_master_bus(&bus_cfg, &bus);
+    esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_i2c_bus);
     if (err != ESP_OK) {
         return err;
     }
+    i2c_master_bus_handle_t bus = s_i2c_bus;   /* kept so the audio driver can look for a codec */
     err = i2c_master_probe(bus, t->i2c_addr, 50);
     if (err != ESP_OK) {
         return err;
@@ -82,6 +84,11 @@ static esp_err_t ft_start(const lg_touch_profile_t *t)
         .scl_speed_hz = FT_I2C_HZ,
     };
     return i2c_master_bus_add_device(bus, &dev_cfg, &s_ft);
+}
+
+i2c_master_bus_handle_t lg_bsp_touch_i2c_bus(void)
+{
+    return s_i2c_bus;
 }
 
 static esp_err_t xpt_start(const lg_touch_profile_t *t, int spi_host)

@@ -25,6 +25,7 @@ extern "C" {
 #define LG_AEAD_TAG_LEN         16u          /* ChaCha20-Poly1305 tag */
 #define LG_PUBKEY_LEN           32u          /* X25519 public key */
 #define LG_DIRECT_BODY_MAX      (LG_TEXT_MAX + LG_AEAD_TAG_LEN)
+#define LG_GRID_STATE_MAX       256u         /* bytes in one GRID_STATE body; its layout belongs to AP firmware */
 
 typedef enum {
     LG_OK             = 0,

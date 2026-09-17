@@ -17,6 +17,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `components/lg_board` | Board profiles: pins and panel and touch facts, selected by the board code in the device ID. Data only. |
 | `components/lg_bsp` | Board support drivers: SPI and I2C buses, display panel, touch controllers. No LVGL. |
 | `components/lg_ui` | LVGL display glue, theme, pointer input, and the calibration screen. No drivers. |
+| `components/lg_selftest` | The quick boot check (D24): envelope, dedup, bodies, UTF-8, and the RFC crypto vectors. Reachable from Status. |
 | `firmware/node` | Infrastructure node firmware. |
 | `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui`, meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
@@ -26,6 +27,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 ## Skills
 
 - `.claude/skills/bench/SKILL.md` — build, run on-board tests, and read serial logs on the bench boards.
+- `.claude/skills/chaos/SKILL.md` — take APs and handhelds out at random for hours and report how the grid recovers. Boards are found by their own device IDs; run it only when the owner asks.
 - `.claude/skills/build/SKILL.md` — build every firmware type, chosen types or targets, or what named boards run, without flashing.
 - `.claude/skills/flash/SKILL.md` — flash one, several, or all boards with their assigned firmware from `tools/bench_devices.json`.
 - `.claude/skills/protocol-change/SKILL.md` — add or change a message type or `lg_core` behavior.

@@ -57,13 +57,13 @@
     <img src="/favicon.svg" alt="">
     <div>
       <h1 id="title">LocalGrid</h1>
-      <div class="sub" id="subtitle">Offline network</div>
+      <div class="sub" id="subtitle">LocalMesh Access Point</div>
     </div>
     <div class="spacer"></div>
     <button class="ghost" id="logout" hidden>Log out</button>
   </header>
 
-  <section id="loading"><p class="dim">Connecting to the master node…</p></section>
+  <section id="loading"><p class="dim">Connecting to this AP…</p></section>
 
   <!-- First-time setup -->
   <section id="setup" hidden>
@@ -111,9 +111,9 @@
   </section>
 
   <section id="grid-card" hidden>
-    <h2>Master node</h2>
+    <h2>This AP</h2>
     <div class="stats">
-      <div class="stat"><div class="k">Node</div><div class="v" id="s-node">--</div></div>
+      <div class="stat"><div class="k">AP</div><div class="v" id="s-node">--</div></div>
       <div class="stat"><div class="k">Uptime</div><div class="v" id="s-uptime">--</div></div>
       <div class="stat"><div class="k">Handhelds here</div><div class="v" id="s-handhelds">--</div></div>
       <div class="stat"><div class="k">Free memory</div><div class="v" id="s-heap">--</div></div>
@@ -121,9 +121,9 @@
   </section>
 
   <section id="nodes-card" hidden>
-    <h2>Infrastructure</h2>
+    <h2>APs</h2>
     <div class="table"><table>
-      <thead><tr><th>Node</th><th>Status</th><th>Signal</th><th>Last heard</th></tr></thead>
+      <thead><tr><th>AP</th><th>Status</th><th>Signal</th><th>Last heard</th></tr></thead>
       <tbody id="nodes-body"></tbody>
     </table></div>
   </section>
@@ -150,7 +150,7 @@
   const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; } };
   const pad = (n) => String(n).padStart(2, "0");
   const fmtClock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const nodeName = (n) => n < 0 ? "--" : (NODE_NAMES[n] || `NODE ${n}`);
+  const nodeName = (n) => n < 0 ? "--" : (NODE_NAMES[n] || `AP ${n}`);
 
   function show(ids) {
     for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "devices-card"]) {
@@ -184,12 +184,13 @@
     try {
       const st = await api("/api/state");
       csrf = st.csrf || "";
+      if (st.ap_name) { $("subtitle").textContent = `LocalMesh Access Point, served by AP ${st.ap_name}`; }
       if (st.grid_name) { $("title").textContent = st.grid_name; document.title = st.grid_name + " · LocalGrid"; }
       if (!st.configured) { beginSetup(); }
       else if (!st.logged_in) { show(["login"]); $("login-password").focus(); }
       else { beginDashboard(); }
     } catch (e) {
-      $("loading").innerHTML = '<p class="bad">Cannot reach the master node. Make sure this device is on the LG-MAIN network, then reload.</p>';
+      $("loading").innerHTML = '<p class="bad">Cannot reach this AP. Make sure this device is connected to the LocalMesh Access Point network, then reload. Every AP answers at http://192.168.4.1/.</p>';
     }
   }
 
@@ -295,20 +296,20 @@
       $("time-card").classList.add("banner");
     } else {
       const drift = Math.round(s.grid_time - Date.now() / 1000);
-      pill.textContent = s.time_quality === 2 ? "SET BY ADMIN" : "CARRIED FROM NODE";
+      pill.textContent = s.time_quality === 2 ? "SET BY ADMIN" : "CARRIED FROM AN AP";
       pill.className = "pill good";
       $("time-hint").textContent = Math.abs(drift) > 120
         ? `This device's clock differs from the grid by ${drift} s.` : "";
       $("time-card").classList.remove("banner");
     }
-    $("subtitle").textContent = s.timezone ? `Time zone ${s.timezone}` : "Offline network";
+    $("subtitle").textContent = `LocalMesh Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
     $("s-node").textContent = s.node_name;
     const h = Math.floor(s.uptime_s / 3600), m = Math.floor(s.uptime_s % 3600 / 60);
     $("s-uptime").textContent = `${h}h ${pad(m)}m`;
     $("s-handhelds").textContent = s.handhelds;
     $("s-heap").textContent = `${Math.round(s.heap_free / 1024)} KB`;
 
-    const nodes = [`<tr><td>${nodeName(s.node)}</td><td><span class="pill good">MASTER</span></td><td class="dim">this node</td><td class="dim">now</td></tr>`];
+    const nodes = [`<tr><td>${nodeName(s.node)}</td><td><span class="pill good">YOU ARE HERE</span></td><td class="dim">this AP</td><td class="dim">now</td></tr>`];
     for (const l of s.links) {
       const status = l.up ? '<span class="pill good">ONLINE</span>' : '<span class="pill warn">CONNECTING</span>';
       const q = l.rssi >= -60 ? "good" : l.rssi >= -75 ? "warn" : "bad";

@@ -33,6 +33,8 @@ static lg_theme_t s_theme;
  */
 static lv_font_t s_body_emoji;
 static lv_font_t s_small_emoji;
+static lv_font_t s_huge_emoji;
+static lv_font_t s_icon_emoji;
 
 static const lv_font_t *with_emoji(lv_font_t *copy, const lv_font_t *base)
 {
@@ -40,6 +42,17 @@ static const lv_font_t *with_emoji(lv_font_t *copy, const lv_font_t *base)
     copy->fallback = &lg_font_emoji_20;
     return copy;
 }
+
+/*
+ * The smallest size the theme offers, for a delivery marker beside a timestamp: at body size
+ * two ticks and a clock crowd a bubble. It falls back to 12 px where Montserrat 10 was not
+ * compiled in, so a build that has not enabled it still works, only less tidily.
+ */
+#if defined(LV_FONT_MONTSERRAT_10) && LV_FONT_MONTSERRAT_10
+#define FONT_10 (&lv_font_montserrat_10)
+#else
+#define FONT_10 FONT_12
+#endif
 
 void lg_theme_init(uint16_t width, uint16_t height, uint16_t px_per_10mm)
 {
@@ -57,20 +70,39 @@ void lg_theme_init(uint16_t width, uint16_t height, uint16_t px_per_10mm)
         .success  = lv_color_hex(0x5FD38D),
         .error    = lv_color_hex(0xFF6B6B),
         .warning  = lv_color_hex(0xF0B64A),
+        /*
+         * Marker colours (D42). Read is a violet, deliberately outside this palette's greens:
+         * accent and success are the same value here, so two states drawn in "different"
+         * greens were being drawn identically. Stepping out of the family is what keeps
+         * delivered and read from collapsing into each other at marker size again.
+         */
+        .mark_wait      = lv_color_hex(0x7FA78F),
+        .mark_node      = lv_color_hex(0x4A8FD4),
+        .mark_delivered = lv_color_hex(0x5FD38D),
+        .mark_read      = lv_color_hex(0xB98CFF),
         .radius   = 6,
     };
 
     uint16_t short_side = width < height ? width : height;
     bool compact = short_side <= 240;
+    s_theme.font_tiny  = compact ? FONT_10 : FONT_12;
     s_theme.font_small = compact ? FONT_12 : &lv_font_montserrat_14;
     s_theme.font_body  = compact ? &lv_font_montserrat_14 : FONT_16;
     s_theme.font_title = FONT_20;
     s_theme.font_huge  = FONT_28;
+    /* One icon size everywhere, so a control never looks bigger than its neighbour.
+     * 20 px is also the emoji font's only size, so a drawn face matches a drawn glyph. */
+    s_theme.font_icon  = FONT_20;
     s_theme.pad = (int16_t)(short_side / 30);    /* 8 px on a 240 px side */
     s_theme.gap = (int16_t)(short_side / 48);    /* 5 px on a 240 px side */
     s_theme.touch_min = (int16_t)((px_per_10mm * 8u) / 10u);
     s_theme.font_body = with_emoji(&s_body_emoji, s_theme.font_body);
     s_theme.font_small = with_emoji(&s_small_emoji, s_theme.font_small);
+    /* The magnified keycap uses the largest font, and emoji keys have to show in it.
+     * The emoji font is one 20 px size, so an emoji there is drawn at 20 px inside a
+     * 28 px line: still larger than the key it magnifies. */
+    s_theme.font_huge = with_emoji(&s_huge_emoji, s_theme.font_huge);
+    s_theme.font_icon = with_emoji(&s_icon_emoji, s_theme.font_icon);
     s_theme.stroke = (int16_t)(short_side / 120 > 2 ? short_side / 120 : 2);
     s_theme.hairline = (int16_t)(s_theme.stroke / 2);
 }

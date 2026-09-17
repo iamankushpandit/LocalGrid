@@ -1,0 +1,19 @@
+menu "LocalGrid AP"
+
+    config LG_NODE_BLE_ADV
+        bool "Advertise LocalGrid discovery over BLE"
+        default y
+        help
+            APs advertise the discovery payload over BLE (D4). The classic ESP32 shares one
+            radio between Wi-Fi, ESP-NOW, and BLE, so turning this off is an A/B test of
+            coexistence: build with it off, flash every AP, and compare the backbone counters
+            that `nodes` prints. Keep it on in normal builds.
+
+    config LG_NODE_PMF_CAPABLE
+        bool "SoftAP advertises Protected Management Frames (PMF capable)"
+        default y
+        help
+            Normal builds offer PMF (capable, not required). Turning it off is an A/B test
+            for handhelds that disassociate with reason 2. Keep it on in normal builds.
+
+endmenu

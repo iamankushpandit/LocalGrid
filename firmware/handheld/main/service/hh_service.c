@@ -12,6 +12,7 @@
  * Not yet: BLE observer (D4), proactive roaming (answer 11), messaging screens (P6).
  * BSSIDs stay in memory and are never logged (D21).
  */
+#include "hh_mem.h"
 #include "hh_service.h"
 
 #include <errno.h>
@@ -50,7 +51,6 @@ static const char *TAG = "NET";
 #define TASK_PRIORITY         5
 #define QUEUE_LEN             24
 #define SEND_QUEUE_LEN        4
-#define SCAN_RECORDS_MAX      16
 #define SCAN_DWELL_MIN_MS     40
 #define SCAN_DWELL_MAX_MS     120   /* beacons come every 102 ms */
 #define NODE_FRESH_MS         15000
@@ -87,6 +87,7 @@ typedef enum {
     EV_PREFER,
     EV_SCAN_NOW,
     EV_RECONNECT,
+    EV_MARK_READ,
 } ev_type_t;
 
 typedef struct {
@@ -94,7 +95,9 @@ typedef struct {
     int8_t  rssi;
     uint8_t bssid[6];
     uint8_t payload[LG_DISC_LEN];
+    char    name[LG_DISC_NAME_MAX + 1];   /* EV_BEACON: AP name from the vendor IE tail, or empty */
     int32_t value;                 /* disconnect reason, or preferred node */
+    uint32_t id[3];                /* EV_MARK_READ: author, boot, seq of the message read */
 } ev_t;
 
 typedef struct {
@@ -104,7 +107,7 @@ typedef struct {
     uint8_t  clients;
     uint8_t  free_slots;
     uint8_t  flags;
-    char     ssid[HH_SSID_MAX];
+    char     ssid[HH_SSID_MAX];   /* the AP's name as shown on screens, from its vendor IE (D46) */
     uint32_t heard_ms;
 } node_cand_t;
 
@@ -226,6 +229,7 @@ static uint8_t state_from_outbox(const lg_out_msg_t *o)
     switch (o->state) {
     case LG_OUT_ACCEPTED:  return HH_MSG_ACCEPTED;
     case LG_OUT_DELIVERED: return HH_MSG_DELIVERED;
+    case LG_OUT_READ:      return HH_MSG_READ;
     case LG_OUT_REJECTED:  return HH_MSG_REJECTED;
     default:               return HH_MSG_PENDING;
     }
@@ -242,6 +246,12 @@ static void ring_update_from_outbox(uint32_t slot)
         if (m->mine && m->seq == o->seq && o->seq != 0) {
             m->state = state_from_outbox(o);
             m->reject = o->reject_reason;
+            /* Counts, for a marker that says how many rather than which state (D42). The
+             * core keeps these per roster member for every scope; only 1:1 promotes state.
+             * Both fit a byte: the masks they are counted from are one bit per roster user,
+             * and LG_MAX_DEVICES is 32. */
+            m->delivered_count = (uint8_t)o->delivered_count;
+            m->read_count = (uint8_t)o->read_count;
             s.msg_version++;
             s.dirty = true;
             return;
@@ -301,6 +311,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
     (void)ctx;
     switch (ev->type) {
     case LG_CEV_REGISTERED:
+        if (s.joins == 0) {
+            hh_mem_mark("first registration (Wi-Fi joined, TCP session up)");
+        }
         s.link = HH_LINK_ONLINE;
         s.joins++;
         s.online_since_ms = now_ms();
@@ -336,17 +349,36 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             m->target = in->target;
             m->scope = in->scope;
             m->state = HH_MSG_IN;
+            m->seq = in->seq;
+            m->origin_boot = in->boot;
+            m->read_sent = false;
             m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
             m->grid_time = in->grid_time;
             ring_set_text(m, (const char *)in->text, in->len);
-            ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
-                     m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+            if (in->scope == LG_SCOPE_DIRECT) {
+                /* Never the text of a 1:1 message (AGENTS.md): author, boot, and seq identify it. */
+                ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: 1:1 boot %" PRIu32 " seq %" PRIu32 ", %u bytes",
+                         in->author, roster_name(in->author), m->urgent ? " URGENT" : "", in->boot, in->seq,
+                         (unsigned)in->len);
+            } else {
+                ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
+                         m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+            }
         }
         break;
     }
-    case LG_CEV_OUTBOX:
+    case LG_CEV_OUTBOX: {
+        /* Logged for the same reason as the read report: the only way to tell delivered from
+         * read on the bench was to ask the console, and by then the reason was gone. */
+        uint8_t was = ev->value < LG_OUTBOX_SIZE ? state_from_outbox(&s.client.outbox[ev->value]) : 0;
         ring_update_from_outbox(ev->value);
+        if (was == HH_MSG_READ) {
+            ESP_LOGI("MSG", "[MSG] Read by the other handheld: outbox slot %" PRIu32, ev->value);
+        } else if (was == HH_MSG_DELIVERED) {
+            ESP_LOGI("MSG", "[MSG] Delivered to the other handheld: outbox slot %" PRIu32, ev->value);
+        }
         break;
+    }
     case LG_CEV_DECRYPT_FAILED:
         ESP_LOGW("MSG", "[MSG] Could not decrypt a 1:1 message from device %" PRIu32, ev->value);
         break;
@@ -388,6 +420,14 @@ static void on_vendor_ie(void *ctx, wifi_vendor_ie_type_t type, const uint8_t sa
     ev_t ev = { .type = EV_BEACON, .rssi = (int8_t)rssi };
     memcpy(ev.bssid, sa, 6);
     memcpy(ev.payload, ie->payload, LG_DISC_LEN);
+    /* Optional tail (D46): u8 length and the AP name. Every AP shares one SSID, so this is the label. */
+    size_t tail = (size_t)ie->length - 4u - LG_DISC_LEN;
+    if (tail >= 1u) {
+        size_t n = ie->payload[LG_DISC_LEN];
+        if (n <= LG_DISC_NAME_MAX && n <= tail - 1u) {
+            memcpy(ev.name, ie->payload + LG_DISC_LEN + 1u, n);
+        }
+    }
     xQueueSend(s.queue, &ev, 0);
 }
 
@@ -517,8 +557,10 @@ static void begin_join(int node, uint32_t now)
         return;
     }
 
+    /* One network (D46): every AP has the same SSID, and the BSSID picks this one. */
     wifi_config_t wc = { 0 };
-    memcpy(wc.sta.ssid, c->ssid, strnlen(c->ssid, sizeof(wc.sta.ssid)));
+    _Static_assert(sizeof(LG_PROTO_SSID) <= sizeof(wc.sta.ssid), "SSID too long");
+    memcpy(wc.sta.ssid, LG_PROTO_SSID, sizeof(LG_PROTO_SSID) - 1);
     _Static_assert(sizeof(LG_SECRET_WIFI_PASSPHRASE) <= sizeof(wc.sta.password), "Wi-Fi passphrase too long");
     memcpy(wc.sta.password, LG_SECRET_WIFI_PASSPHRASE, sizeof(LG_SECRET_WIFI_PASSPHRASE) - 1);
     wc.sta.scan_method = WIFI_FAST_SCAN;
@@ -533,7 +575,7 @@ static void begin_join(int node, uint32_t now)
     wc.sta.mbo_enabled = 0;
     wc.sta.ft_enabled = 0;
     if (esp_wifi_set_config(WIFI_IF_STA, &wc) != ESP_OK || esp_wifi_connect() != ESP_OK) {
-        drop_link("Could not start joining a node", false);
+        drop_link("Could not start joining an AP", false);
         return;
     }
     s.wifi_associating = true;
@@ -598,6 +640,11 @@ static void on_beacon(const ev_t *ev, uint32_t now)
         memcpy(c->bssid, ev->bssid, 6);
         c->valid = true;
     }
+    if (ev->name[0] != '\0') {
+        snprintf(c->ssid, sizeof(c->ssid), "%s", ev->name);
+    } else if (c->ssid[0] == '\0') {
+        snprintf(c->ssid, sizeof(c->ssid), "AP %u", (unsigned)p[7]);   /* AP firmware older than the name tail */
+    }
     c->rssi = ev->rssi;
     c->free_slots = p[9];
     c->flags = p[10];
@@ -608,12 +655,13 @@ static void on_beacon(const ev_t *ev, uint32_t now)
 static void on_scan_done(uint32_t now)
 {
     s_scanning = false;
-    static wifi_ap_record_t records[SCAN_RECORDS_MAX];
-    uint16_t n = SCAN_RECORDS_MAX;
-    if (esp_wifi_scan_get_ap_records(&n, records) != ESP_OK) {
+    /* Candidates come from the vendor IE alone (name included, D46), so the driver's scan
+     * records are only counted and freed. */
+    uint16_t n = 0;
+    if (esp_wifi_scan_get_ap_num(&n) != ESP_OK) {
         n = 0;
-        esp_wifi_clear_ap_list();
     }
+    esp_wifi_clear_ap_list();
     int found = 0;
     for (int i = 0; i < HH_MAX_NODES; i++) {
         node_cand_t *c = &s.cand[i];
@@ -623,11 +671,6 @@ static void on_scan_done(uint32_t now)
         if (now - c->heard_ms > NODE_EXPIRE_MS) {
             memset(c, 0, sizeof(*c));
             continue;
-        }
-        for (uint16_t r = 0; r < n; r++) {
-            if (memcmp(records[r].bssid, c->bssid, 6) == 0) {
-                snprintf(c->ssid, sizeof(c->ssid), "%s", (const char *)records[r].ssid);
-            }
         }
         found += node_usable(c, now) ? 1 : 0;
         ESP_LOGI(TAG, "[NET] Heard node %d \"%s\" %d dBm, %u attached, %u free, backbone %s, %" PRIu32 " ms ago", i,
@@ -646,7 +689,7 @@ static void on_scan_done(uint32_t now)
     }
     s.backoff_ms = s.backoff_ms == 0 ? BACKOFF_FIRST_MS : MIN_U32(s.backoff_ms * 2, BACKOFF_MAX_MS);
     s.next_attempt_ms = now + s.backoff_ms;
-    set_problem(found > 0 && s.preferred >= 0 ? "The chosen node is not in range" : "No LocalGrid node in range");
+    set_problem(found > 0 && s.preferred >= 0 ? "The chosen AP is not in range" : "No LocalGrid AP in range");
     ESP_LOGI(TAG, "[NET] Scan found %d usable node(s); scanning again in %" PRIu32 " s", found, s.backoff_ms / 1000);
 }
 
@@ -693,6 +736,15 @@ static void handle_event(const ev_t *ev, uint32_t now)
     case EV_RECONNECT:
         drop_link("Reconnecting on request", true);
         break;
+    case EV_MARK_READ: {
+        /* The reader has seen it, so tell the author. Logged because this path had no
+         * evidence at all: on the bench the receiver opened the conversation and the sender
+         * still showed delivered, with nothing to say whether the report was ever sent. */
+        bool told = lg_client_mark_read(&s.client, ev->id[0], ev->id[1], ev->id[2]);
+        ESP_LOGI("MSG", "[MSG] Read report to device %" PRIu32 " (boot %" PRIu32 " seq %" PRIu32 "): %s",
+                 ev->id[0], ev->id[1], ev->id[2], told ? "sent" : "refused");
+        break;
+    }
     default:
         break;
     }
@@ -754,17 +806,25 @@ static void drain_send_queue(void)
             m->seq = o->seq;
             m->grid_time = o->grid_time;
             m->state = state_from_outbox(o);
-            ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
-                     req.scope == LG_SCOPE_DIRECT ? "device" : req.scope == LG_SCOPE_GROUP ? "group" : "everyone",
-                     m->target, m->text);
+            if (req.scope == LG_SCOPE_DIRECT) {
+                ESP_LOGI("MSG", "[MSG] Sent%s to device %" PRIu32 ": 1:1 boot %" PRIu32 " seq %" PRIu32 ", %u bytes",
+                         req.urgent ? " URGENT" : "", m->target, o->boot, o->seq, (unsigned)req.len);
+            } else {
+                ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
+                         req.scope == LG_SCOPE_GROUP ? "group" : "everyone", m->target, m->text);
+            }
         } else {
             m->state = HH_MSG_REFUSED;
             m->reject = rc == LG_ERR_TIME ? HH_REFUSE_TIME : rc == LG_ERR_FULL ? HH_REFUSE_FULL : HH_REFUSE_INVALID;
-            ESP_LOGW("MSG", "[MSG] Not sent (%s): %s",
-                     m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
-                     : m->reject == HH_REFUSE_FULL ? "outbox full"
-                                                   : "not allowed: unknown target, bad text, or no key yet",
-                     m->text);
+            const char *why = m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
+                              : m->reject == HH_REFUSE_FULL ? "outbox full"
+                                                            : "not allowed: unknown target, bad text, or no key yet";
+            if (req.scope == LG_SCOPE_DIRECT) {
+                ESP_LOGW("MSG", "[MSG] Not sent (%s): 1:1 to device %" PRIu32 ", %u bytes", why, m->target,
+                         (unsigned)req.len);
+            } else {
+                ESP_LOGW("MSG", "[MSG] Not sent (%s): %s", why, m->text);
+            }
         }
     }
 }
@@ -897,6 +957,14 @@ static void publish(void)
         g->id = roster->groups[i].id;
         snprintf(g->name, sizeof(g->name), "%s", roster->groups[i].name);
         g->member = lg_roster_is_member(roster, s.device, g->id);
+        /* The denominator for a group delivery count (D42), counted here because the screens
+         * cannot see the roster. Every handheld in the group, this one included. */
+        g->members = 0;
+        for (size_t u = 0; u < roster->n_users; u++) {
+            if (lg_roster_is_member(roster, roster->users[u].device, g->id)) {
+                g->members++;
+            }
+        }
     }
     st->messages_version = s.msg_version;
     st->free_heap = esp_get_free_heap_size();
@@ -1095,6 +1163,43 @@ void hh_service_status(hh_status_t *out)
     xSemaphoreGive(s.lock);
 }
 
+/*
+ * The screen says a received 1:1 message has been shown; the service task owns the client, so
+ * the identity of that message goes to it through the queue (D27). Reported once per message.
+ */
+void hh_service_mark_read(uint32_t message_id)
+{
+    if (s.queue == NULL || s.lock == NULL) {
+        return;
+    }
+    ev_t ev = { .type = EV_MARK_READ };
+    bool found = false;
+    if (xSemaphoreTake(s.lock, portMAX_DELAY) == pdTRUE) {
+        for (uint8_t i = 0; i < s.ring_count; i++) {
+            /* Through the ring head, as every other reader does: indexing the array directly
+             * scans the wrong slots once the ring has wrapped, which would lose a read report
+             * rather than fail loudly. */
+            hh_message_t *m = &s.ring[(s.ring_head + i) % HH_MESSAGES];
+            /* Groups report reads as well as 1:1 (D42), so a group's read count can move.
+             * Broadcasts stay out: one report per handheld on the grid for every
+             * announcement is traffic nobody asked for. */
+            if (m->id == message_id && !m->mine && !m->read_sent &&
+                (m->scope == LG_SCOPE_DIRECT || m->scope == LG_SCOPE_GROUP)) {
+                m->read_sent = true;   /* one report per message, however often it is on screen */
+                ev.id[0] = m->author;
+                ev.id[1] = m->origin_boot;
+                ev.id[2] = m->seq;
+                found = true;
+                break;
+            }
+        }
+        xSemaphoreGive(s.lock);
+    }
+    if (found) {
+        xQueueSend(s.queue, &ev, 0);
+    }
+}
+
 void hh_service_prefer_node(int node)
 {
     if (s.queue == NULL) {
@@ -1127,6 +1232,7 @@ const char *hh_message_state_text(const hh_message_t *m)
     case HH_MSG_PENDING:   return "sending";
     case HH_MSG_ACCEPTED:  return m->scope == LG_SCOPE_DIRECT ? "sent, waiting for the other handheld" : "sent";
     case HH_MSG_DELIVERED: return "delivered";
+    case HH_MSG_READ:      return "read";
     case HH_MSG_REJECTED:
         switch (m->reject) {
         case LG_ACK_REJ_OFFLINE:        return "not delivered: that handheld is offline";

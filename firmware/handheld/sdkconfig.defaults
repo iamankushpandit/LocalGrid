@@ -12,13 +12,25 @@ CONFIG_MBEDTLS_CHACHAPOLY_C=y
 CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
 
 # ---- Wi-Fi station: memory-saving buffer rank for the no-PSRAM Hosyond (answer 40) ----
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+# Measured 2026-09-16: starting Wi-Fi took 49 KB of the Hosyond's heap. A handheld carries a
+# few small frames a second, so it keeps the fewest static receive buffers the driver allows
+# headroom for, and no A-MPDU aggregation, which exists for throughput it never needs and
+# holds reorder state and buffers per session. It is a station only: no SoftAP, no WPA3 or
+# enterprise (the APs run WPA2-PSK), which removes that code and its state.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
-CONFIG_ESP_WIFI_RX_BA_WIN=6
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=12
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 
 # ---- lwIP: one node session ----
-CONFIG_LWIP_MAX_SOCKETS=8
+CONFIG_LWIP_MAX_SOCKETS=4
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
 CONFIG_LWIP_TCP_WND_DEFAULT=2880
 CONFIG_LWIP_IPV6=n
@@ -27,6 +39,7 @@ CONFIG_LWIP_IPV6=n
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_USE_CLIB_MALLOC=y
 # CONFIG_LV_BUILD_EXAMPLES is not set
+CONFIG_LV_FONT_MONTSERRAT_10=y
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y

@@ -212,7 +212,7 @@ static int pick_slot(const lg_client_t *c)
     }
     for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
         const lg_out_msg_t *m = &c->outbox[i];
-        bool reusable = m->state == LG_OUT_DELIVERED || m->state == LG_OUT_REJECTED ||
+        bool reusable = m->state == LG_OUT_DELIVERED || m->state == LG_OUT_READ || m->state == LG_OUT_REJECTED ||
                         (m->state == LG_OUT_ACCEPTED && m->scope != LG_SCOPE_DIRECT);
         if (reusable && (best < 0 || m->seq < c->outbox[best].seq)) {
             best = (int)i;
@@ -304,6 +304,25 @@ static void send_delivered(lg_client_t *c, const lg_env_t *orig)
     (void)send_frame(c, &e, body, blen);
 }
 
+/* The same ack the recipient sends for delivery, with the status that says it was read. */
+bool lg_client_mark_read(lg_client_t *c, uint32_t author, uint32_t boot, uint32_t seq)
+{
+    if (c == NULL || author == c->device || !c->registered) {
+        return false;
+    }
+    lg_msg_ack_t a = {
+        .author = author,
+        .boot   = boot,
+        .seq    = seq,
+        .status = LG_ACK_READ,
+    };
+    uint8_t body[LG_MSG_ACK_LEN];
+    size_t blen = lg_msg_ack_enc(&a, body);
+    lg_env_t e;
+    base_env(c, &e, LG_T_MSG_ACK, LG_SCOPE_DIRECT, author);
+    return send_frame(c, &e, body, blen);
+}
+
 static void inbox_store(lg_client_t *c, const lg_env_t *e, const uint8_t *plain, size_t plen)
 {
     size_t pos;
@@ -318,6 +337,8 @@ static void inbox_store(lg_client_t *c, const lg_env_t *e, const uint8_t *plain,
     m->author    = e->origin_id;
     m->target    = e->target;
     m->grid_time = e->grid_time;
+    m->boot      = e->origin_boot;
+    m->seq       = e->origin_seq;
     m->scope     = e->scope;
     m->flags     = e->flags;
     m->len       = (uint16_t)plen;
@@ -412,9 +433,23 @@ static void handle_ack(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
                 m->delivered_count++;
             }
             if (m->scope == LG_SCOPE_DIRECT) {
-                m->state = LG_OUT_DELIVERED;
+                if (m->state != LG_OUT_READ) {   /* a read message stays read */
+                    m->state = LG_OUT_DELIVERED;
+                }
             } else if (m->state == LG_OUT_PENDING) {
                 m->state = LG_OUT_ACCEPTED;
+            }
+            break;
+        }
+        case LG_ACK_READ: {
+            int ui = lg_roster_user_index(c->roster, e->origin_id);
+            if (ui >= 0 && ui < 32 && (m->read_mask & (1u << (unsigned)ui)) == 0) {
+                m->read_mask |= 1u << (unsigned)ui;
+                m->read_count++;
+            }
+            /* Only 1:1 carries a read state: a group would report one per member. */
+            if (m->scope == LG_SCOPE_DIRECT && (m->state == LG_OUT_DELIVERED || m->state == LG_OUT_ACCEPTED)) {
+                m->state = LG_OUT_READ;
             }
             break;
         }
