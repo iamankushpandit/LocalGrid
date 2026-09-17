@@ -567,8 +567,12 @@ static int cmd_spike(int argc, char **argv)
         spike_ui_request_cmd(SPIKE_TYPE, 0, argv[2]);
     } else if (argc >= 2 && strcmp(argv[1], "log") == 0) {
         spike_ui_request_cmd(SPIKE_LOG, 0, NULL);
+    } else if (argc == 3 && strcmp(argv[1], "page") == 0) {
+        int page = strcmp(argv[2], "numbers") == 0 ? 1 : strcmp(argv[2], "emoji") == 0 ? 2
+                 : strcmp(argv[2], "shift") == 0 ? 3 : 0;
+        spike_ui_request_cmd(SPIKE_PAGE, page, NULL);
     } else {
-        printf("usage: spike chat | scroll <px> | kb <on|off> | type <word> | log\n");
+        printf("usage: spike chat | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | log\n");
         return 1;
     }
     return 0;

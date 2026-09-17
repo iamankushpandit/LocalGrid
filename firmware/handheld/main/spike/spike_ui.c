@@ -133,6 +133,9 @@ static void build_launcher(void)
 
 static void show_launcher(void)
 {
+    if (s.screen == SCREEN_CHAT) {
+        spike_chat_close();
+    }
     s.screen = SCREEN_LAUNCHER;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
@@ -161,6 +164,9 @@ static void build_status(void)
 
 static void show_status(void)
 {
+    if (s.screen == SCREEN_CHAT) {
+        spike_chat_close();
+    }
     s.screen = SCREEN_STATUS;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
@@ -323,6 +329,11 @@ static void handle_request(const spike_req_t *r)
     case SPIKE_LOG:
         spike_chat_log();
         break;
+    case SPIKE_PAGE:
+        if (s.screen == SCREEN_CHAT) {
+            spike_chat_page(r->arg);
+        }
+        break;
     }
 }
 
@@ -345,6 +356,9 @@ static void spike_task(void *arg)
         spike_req_t req;
         while (xQueueReceive(s_requests, &req, 0) == pdTRUE) {
             handle_request(&req);
+        }
+        if (s.screen == SCREEN_CHAT) {
+            spike_chat_tick(now);
         }
         if (now - last_refresh >= REFRESH_MS) {
             last_refresh = now;

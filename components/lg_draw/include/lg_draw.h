@@ -98,6 +98,16 @@ void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16
 uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,
                      uint16_t *starts, uint8_t max_lines);
 
+/*
+ * Hardware vertical scroll (ST7789, ILI9341). Screen rows top..top+height-1 become a scrolling
+ * window over the panel's own memory; everything else stays fixed. lg_draw_scroll(dy) moves the
+ * content up by dy rows (down when negative) with one command and no repaint: the caller then
+ * paints only the dy rows that scrolled into view. Drawing stays in screen rows; lg_draw maps them
+ * to memory. The area must span the full panel width. height 0 turns scrolling off.
+ */
+void lg_draw_scroll_area(int16_t top, int16_t height);
+void lg_draw_scroll(int16_t dy);
+
 /* Sets a box's text and draws it only if the text changed. Returns true if it drew. */
 bool lg_draw_set_text(lg_box_t *box, const char *text);
 

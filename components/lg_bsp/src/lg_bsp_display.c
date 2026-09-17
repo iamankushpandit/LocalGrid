@@ -69,6 +69,7 @@ static const panel_cmd_t ST7789_INIT[] = {
 
 static const lg_panel_profile_t *s_panel_profile;
 static esp_lcd_panel_handle_t    s_panel;
+static esp_lcd_panel_io_handle_t s_io;
 static uint8_t                  *s_buffer;
 static size_t                    s_buffer_bytes;
 static lg_bsp_flush_done_t       s_flush_done;
@@ -109,6 +110,31 @@ uint8_t *lg_bsp_display_buffer(size_t *out_bytes)
 esp_err_t lg_bsp_display_draw(int32_t x1, int32_t y1, int32_t x2, int32_t y2, const uint8_t *pixels)
 {
     return esp_lcd_panel_draw_bitmap(s_panel, (int)x1, (int)y1, (int)x2 + 1, (int)y2 + 1, pixels);
+}
+
+/*
+ * Hardware vertical scrolling, the same two commands on the ST7789 and the ILI9341: VSCRDEF
+ * splits the panel's rows into a fixed top, a scrolling middle, and a fixed bottom, and VSCRSADD
+ * says which memory row is shown at the top of the middle. Neither board profile mirrors rows,
+ * so memory rows and screen rows run the same way.
+ */
+esp_err_t lg_bsp_display_scroll_area(uint16_t top_fixed, uint16_t scroll_rows, uint16_t bottom_fixed)
+{
+    if (s_io == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint8_t def[6] = { (uint8_t)(top_fixed >> 8), (uint8_t)top_fixed, (uint8_t)(scroll_rows >> 8),
+                             (uint8_t)scroll_rows, (uint8_t)(bottom_fixed >> 8), (uint8_t)bottom_fixed };
+    return esp_lcd_panel_io_tx_param(s_io, 0x33, def, sizeof(def));
+}
+
+esp_err_t lg_bsp_display_scroll_to(uint16_t first_row)
+{
+    if (s_io == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint8_t start[2] = { (uint8_t)(first_row >> 8), (uint8_t)first_row };
+    return esp_lcd_panel_io_tx_param(s_io, 0x37, start, sizeof(start));
 }
 
 esp_err_t lg_bsp_display_start(const lg_board_t *board, lg_bsp_flush_done_t flush_done, void *ctx)
@@ -158,6 +184,7 @@ esp_err_t lg_bsp_display_start(const lg_board_t *board, lg_bsp_flush_done_t flus
     if (err != ESP_OK) {
         return err;
     }
+    s_io = io;
 
     esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = (gpio_num_t)p->rst,

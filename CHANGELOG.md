@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (spike chat: hardware scroll, a full keyboard, delivery icons, a new-message arrow, and the Freenove)
+- Owner, after trying the spike: scrolling should be smooth with hardware scroll, the new keyboard is much better and should be on the Freenove too, and it needs capitals, numbers and emoji; delivery icons were missing; a message arriving while scrolled up needs a slowly flashing down arrow that goes when the reader reaches the end.
+- `lg_bsp_display_scroll_area()` and `lg_bsp_display_scroll_to()` send VSCRDEF (0x33) and VSCRSADD (0x37), the same on the ST7789 and the ILI9341; neither board mirrors rows. `lg_draw_scroll_area()` and `lg_draw_scroll()` make the chat list the scrolling window, and every send maps screen rows onto the panel's circular memory rows, split where they wrap, so painters stay in screen coordinates.
+- Scrolling moves the list with one command and paints only the rows that came into view. The flashing arrow is taken off before a scroll and put back after, so it never scrolls with the content. Measured on the Hosyond: 31 scroll steps of 10 px averaged 12 ms each, including one 250 px jump that costs a full 105 ms list repaint; a full repaint of an 18-message list is 107 ms.
+- Keyboard: letters with shift (once for one capital, again for caps lock, again for off), a numbers and symbols page (`123`), and two emoji pages of the 48 emoji (the smiley key; previous and next arrows). A press repaints one key, about 1 ms.
+- Bubbles show D42's markers for our own messages in the theme's marker colours: clock (waiting), up arrow (an AP took it), down arrow (delivered), eye (read).
+- A message from the other handheld that arrives while the list is scrolled up leaves the list where it is and flashes a down arrow (on and off every 700 ms) in the middle of the list; reaching the end, or tapping the arrow, removes it. Verified over serial: `new message below; arrow flashing`, then after scrolling down, `reached the newest message; arrow gone`.
+- The spike now builds for the ESP32-S3 (`build-spike-s3`, defaults `sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.spike`) and runs on the Freenove, with PSRAM: internal 173 KB free with the chat open (the LVGL build idled at 161 KB), PSRAM 8,122 KB free. Hosyond: 140 KB with the chat open.
+- Both handhelds run the spike, which has no Groups or Settings screens. **Not verified by eye**: that the hardware scroll draws correctly on both panels.
+
+
 ### Added (spike, part two: a 1:1 chat without LVGL on the Hosyond)
 - `lg_draw` gains painted regions: `lg_draw_region()` sends a rectangle in bands and calls a painter per band; `lg_paint_panel()` and `lg_paint_text()` draw clipped to the band and a clip rectangle; `lg_text_wrap()` word-wraps UTF-8 with emoji. `lg_draw_box()` is now a painter too.
 - `spike/spike_chat.c`: the Messages tile opens a chat with the first known handheld. Bubbles with wrapped text, time and state; a list that scrolls under a dragged finger; an input field that shows the tail of what is typed; a lowercase keyboard (letters, space, comma, full stop, question mark, backspace, hide) where a press repaints only its key. RAM holds a layout per message (id, position, height, side), never its text: a bubble fetches its message when painted. Console: `spike chat | scroll <px> | kb <on|off> | type <word> | log`.

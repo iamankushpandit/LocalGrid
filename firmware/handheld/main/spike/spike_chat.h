@@ -12,8 +12,17 @@
 /* Opens a chat with the first handheld in the status snapshot and draws the whole screen. */
 void spike_chat_open(uint16_t w, uint16_t h, const hh_status_t *st);
 
-/* Repaints the list if the messages changed. */
+/* Leaves the chat: turns the hardware scroll area off before another screen draws. */
+void spike_chat_close(void);
+
+/* Repaints the list if the messages changed; flashes the new-message arrow when scrolled up. */
 void spike_chat_refresh(const hh_status_t *st);
+
+/* Call every loop: runs the arrow's slow flash. */
+void spike_chat_tick(uint32_t now_ms);
+
+/* Console: 0 letters, 1 numbers, 2 emoji, 3 press shift. */
+void spike_chat_page(int page);
 
 /* A touch sample: true when the back arrow was tapped. */
 bool spike_chat_touch(int16_t x, int16_t y, bool down);

@@ -21,6 +21,11 @@ static struct {
     bool              down;
     int16_t           last_x;
     int16_t           last_y;
+    /* Hardware scroll: screen rows [scroll_top, scroll_top + scroll_h) show memory rows shifted
+     * by scroll_vs, wrapping inside the area. scroll_h 0: no scroll area. */
+    int16_t           scroll_top;
+    int16_t           scroll_h;
+    int16_t           scroll_vs;
 } s;
 
 static void flush_done(void *ctx)
@@ -177,12 +182,62 @@ static inline void put(uint8_t *row, int16_t x, lg_color_t c)
     row[2 * x + 1] = (uint8_t)c;
 }
 
-static void send(int16_t x, int16_t y, int16_t w, int16_t h)
+/* The panel memory row behind screen row y. */
+static int16_t memory_row(int16_t y)
+{
+    if (s.scroll_h <= 0 || y < s.scroll_top || y >= s.scroll_top + s.scroll_h) {
+        return y;
+    }
+    return (int16_t)(s.scroll_top + (y - s.scroll_top + s.scroll_vs) % s.scroll_h);
+}
+
+static void send_rows(int16_t x, int16_t mem_y, int16_t w, int16_t h, const uint8_t *px)
 {
     xSemaphoreTake(s.done, 0);   /* clear a stale completion */
-    (void)lg_bsp_display_draw(x, y, x + w - 1, y + h - 1, s.buf);   /* the driver takes inclusive corners */
+    (void)lg_bsp_display_draw(x, mem_y, x + w - 1, mem_y + h - 1, px);   /* the driver takes inclusive corners */
     xSemaphoreTake(s.done, pdMS_TO_TICKS(200));
+}
+
+/* Sends the band buffer for screen rows y..y+h-1, split wherever the scroll area wraps, so a
+ * painter works in screen rows and never sees where the panel keeps them. */
+static void send(int16_t x, int16_t y, int16_t w, int16_t h)
+{
+    int16_t row = 0;
+    while (row < h) {
+        int16_t start = memory_row((int16_t)(y + row));
+        int16_t run = 1;
+        while (row + run < h && memory_row((int16_t)(y + row + run)) == start + run) {
+            run++;
+        }
+        send_rows(x, start, w, run, s.buf + (size_t)row * 2u * (size_t)w);
+        row = (int16_t)(row + run);
+    }
     s.stats.pixels += (uint64_t)w * (uint64_t)h;
+}
+
+void lg_draw_scroll_area(int16_t top, int16_t height)
+{
+    s.scroll_vs = 0;
+    if (height <= 0) {
+        s.scroll_h = 0;
+        (void)lg_bsp_display_scroll_area(0, s.height, 0);
+        (void)lg_bsp_display_scroll_to(0);
+        return;
+    }
+    s.scroll_top = top;
+    s.scroll_h = height;
+    (void)lg_bsp_display_scroll_area((uint16_t)top, (uint16_t)height, (uint16_t)(s.height - top - height));
+    (void)lg_bsp_display_scroll_to((uint16_t)top);
+}
+
+void lg_draw_scroll(int16_t dy)
+{
+    if (s.scroll_h <= 0 || dy == 0) {
+        return;
+    }
+    int32_t vs = (s.scroll_vs + dy) % s.scroll_h;
+    s.scroll_vs = (int16_t)(vs < 0 ? vs + s.scroll_h : vs);
+    (void)lg_bsp_display_scroll_to((uint16_t)(s.scroll_top + s.scroll_vs));
 }
 
 void lg_draw_fill(const lg_rect_t *r, lg_color_t color)

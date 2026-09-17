@@ -32,6 +32,13 @@ esp_err_t lg_bsp_display_draw(int32_t x1, int32_t y1, int32_t x2, int32_t y2, co
 
 void lg_bsp_backlight(bool on);
 
+/* Hardware vertical scroll: rows top_fixed and bottom_fixed stay put, the scroll_rows between
+ * them scroll. The three must add up to the panel height. Wait for any pending draw first. */
+esp_err_t lg_bsp_display_scroll_area(uint16_t top_fixed, uint16_t scroll_rows, uint16_t bottom_fixed);
+
+/* The panel memory row shown at the top of the scrolling area (top_fixed .. top_fixed+scroll_rows-1). */
+esp_err_t lg_bsp_display_scroll_to(uint16_t first_row);
+
 #ifdef __cplusplus
 }
 #endif
