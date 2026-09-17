@@ -48,6 +48,13 @@
   th { text-align: left; color: var(--muted); font-weight: 500; font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
   td { padding: 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px;
+          border: 1px solid var(--line); font-size: 14px; cursor: pointer; user-select: none; }
+  .chip input { width: auto; margin: 0; accent-color: var(--accent); }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .actions button { padding: 6px 10px; font-size: 14px; }
+  button.danger { border-color: var(--danger); color: var(--danger); background: transparent; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -128,6 +135,27 @@
     </table></div>
   </section>
 
+  <section id="groups-card" hidden>
+    <h2>Groups</h2>
+    <p class="hint" style="margin:0 0 10px">Groups are shared by every AP and handheld. Removing a group deletes its messages on every handheld. People can also make and change groups they belong to on their handhelds.</p>
+    <p class="dim" id="groups-empty" hidden>No groups yet.</p>
+    <div class="table" id="groups-table"><table>
+      <thead><tr><th>Name</th><th>Members</th><th></th></tr></thead>
+      <tbody id="groups-body"></tbody>
+    </table></div>
+    <form id="group-form">
+      <label for="group-name" id="group-form-title">New group</label>
+      <input id="group-name" maxlength="15" required placeholder="Cooks" autocomplete="off">
+      <label>Members</label>
+      <div class="chips" id="group-members"></div>
+      <div class="row">
+        <button type="submit" id="group-save">Add group</button>
+        <button type="button" class="ghost" id="group-cancel" hidden>Cancel</button>
+      </div>
+      <div class="msg" id="group-msg"></div>
+    </form>
+  </section>
+
   <section id="devices-card" hidden>
     <h2>Handhelds</h2>
     <p class="dim" id="devices-empty" hidden>No handhelds have connected yet.</p>
@@ -153,7 +181,7 @@
   const nodeName = (n) => n < 0 ? "--" : (NODE_NAMES[n] || `AP ${n}`);
 
   function show(ids) {
-    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "devices-card"]) {
+    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "groups-card", "devices-card"]) {
       $(id).hidden = !ids.includes(id);
     }
     $("logout").hidden = !ids.includes("time-card");
@@ -262,8 +290,89 @@
     setTime(t, "manual entry");
   });
 
+  // ---- groups (D52) ----
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  let editingId = 0;          // 0: the form makes a new group
+  let knownUsers = [];
+  let knownGroups = [];
+
+  function renderMemberChoices(checked) {
+    $("group-members").innerHTML = knownUsers.map((u) =>
+      `<label class="chip"><input type="checkbox" value="${u.device}" ${checked.includes(u.device) ? "checked" : ""}>${esc(u.name)}</label>`
+    ).join("");
+  }
+
+  function resetGroupForm() {
+    editingId = 0;
+    $("group-name").value = "";
+    $("group-form-title").textContent = "New group";
+    $("group-save").textContent = "Add group";
+    $("group-cancel").hidden = true;
+    renderMemberChoices([]);
+  }
+
+  function renderGroups(s) {
+    const firstLoad = knownUsers.length === 0;
+    knownUsers = s.users || [];
+    knownGroups = s.groups || [];
+    const name = (d) => (knownUsers.find((u) => u.device === d) || { name: `Handheld ${d}` }).name;
+    $("groups-body").innerHTML = knownGroups.map((g) =>
+      `<tr><td>${esc(g.name)}</td><td>${g.members.map((d) => esc(name(d))).join(", ")}</td>` +
+      `<td class="actions"><button class="ghost" data-edit="${g.id}">Edit</button>` +
+      `<button class="danger" data-remove="${g.id}">Remove</button></td></tr>`
+    ).join("");
+    $("groups-empty").hidden = knownGroups.length > 0;
+    $("groups-table").hidden = knownGroups.length === 0;
+    if (firstLoad && editingId === 0) renderMemberChoices([]);   // never clobber a form in progress
+  }
+
+  async function groupAction(body, done) {
+    say("group-msg", "Saving…", true);
+    try {
+      await api("/api/groups", body);
+      say("group-msg", done, true);
+      setTimeout(refresh, 800);
+      return true;
+    } catch (e) {
+      say("group-msg", e.message, false);
+      return false;
+    }
+  }
+
+  $("groups-body").addEventListener("click", async (ev) => {
+    const edit = ev.target.closest("[data-edit]");
+    const remove = ev.target.closest("[data-remove]");
+    if (edit) {
+      const g = knownGroups.find((x) => x.id === Number(edit.dataset.edit));
+      if (!g) return;
+      editingId = g.id;
+      $("group-name").value = g.name;
+      $("group-form-title").textContent = `Edit ${g.name}`;
+      $("group-save").textContent = "Save changes";
+      $("group-cancel").hidden = false;
+      renderMemberChoices(g.members);
+      $("group-name").focus();
+    } else if (remove) {
+      const g = knownGroups.find((x) => x.id === Number(remove.dataset.remove));
+      if (!g || !confirm(`Remove ${g.name}? Its messages are deleted on every handheld.`)) return;
+      if (await groupAction({ op: "delete", id: g.id }, `${g.name} removed.`) && editingId === g.id) resetGroupForm();
+    }
+  });
+
+  $("group-cancel").addEventListener("click", () => { resetGroupForm(); say("group-msg", ""); });
+
+  $("group-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const name = $("group-name").value.trim();
+    const devices = [...$("group-members").querySelectorAll("input:checked")].map((i) => i.value);
+    if (new TextEncoder().encode(name).length > 15) { say("group-msg", "That name is too long: 15 bytes at most.", false); return; }
+    if (devices.length === 0) { say("group-msg", "Pick at least one handheld.", false); return; }
+    const body = { op: editingId ? "update" : "create", id: editingId, name, devices: devices.join(",") };
+    if (await groupAction(body, editingId ? `${name} saved.` : `${name} added.`)) resetGroupForm();
+  });
+
   function beginDashboard() {
-    show(["time-card", "grid-card", "nodes-card", "devices-card"]);
+    show(["time-card", "grid-card", "nodes-card", "groups-card", "devices-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);
@@ -323,6 +432,7 @@
       return `<tr><td>${d.name.replace(/[<&]/g, "")}</td><td><span class="pill ${cls}">${d.state}</span></td><td>${where}</td></tr>`;
     });
     $("devices-body").innerHTML = rows.join("");
+    renderGroups(s);
     $("devices-empty").hidden = rows.length > 0;
     $("devices-table").hidden = rows.length === 0;
   }

@@ -166,7 +166,11 @@ void ui_launcher_start(const lg_identity_t *identity)
     lv_obj_set_style_pad_row(s_ui.screen, t->gap, 0);
 
     lv_obj_t *header = lg_ui_column(s_ui.screen, 0);
-    lg_ui_text(header, t->font_title, t->accent, "LocalGrid");
+    /* The same mark as the admin page, a little taller than the name beside it. */
+    lv_obj_t *brand = lg_ui_row(header);
+    lv_obj_set_flex_align(brand, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lg_ui_logo(brand, lv_font_get_line_height(t->font_title) * 3 / 2);
+    lg_ui_text(brand, t->font_title, t->accent, "LocalGrid");
     s_ui.status = lg_ui_label(header, t->font_small, t->muted, "Starting");
 
     /* Divide what is there: one more gap than tiles, and the header taken off first. */
@@ -189,8 +193,11 @@ void ui_launcher_start(const lg_identity_t *identity)
     lv_screen_load(s_ui.screen);
     lv_timer_create(refresh, REFRESH_MS, NULL);
     refresh(NULL);
-    lg_display_unlock();
 
+    /* Still under the lock: these create timers and top-layer widgets, and this is the main
+     * task, not the drawing task, which is already running the launcher. Building them after
+     * the unlock raced LVGL's event and timer lists, and a later screen deletion spun forever
+     * in lv_event_mark_deleted on both handhelds. */
     hh_mem_mark("after theme and launcher screen");
     ui_home_build(identity);   /* the Status screen, reached from its tile */
     hh_mem_mark("after Status screen");
@@ -200,6 +207,7 @@ void ui_launcher_start(const lg_identity_t *identity)
     hh_mem_mark("after alert layer");
     ui_notify_start();
     hh_mem_mark("after notifications");
+    lg_display_unlock();
     ESP_LOGI(TAG, "[UI] Launcher ready: %dx%d panel, tiles %dx%d and %dx%d", (int)w, (int)h, full_w, tile_h,
              half_w, tile_h);
 }
@@ -209,7 +217,12 @@ void ui_launcher_open(void)
     if (s_ui.screen == NULL) {
         return;
     }
-    lg_display_lock(1000);
+    if (!lg_display_lock(3000)) {
+        /* Never draw without the lock: two tasks in LVGL at once corrupt its event list, and
+         * before the display starts there is no lock at all. */
+        ESP_LOGW(TAG, "[UI] Display busy or not started; launcher not opened");
+        return;
+    }
     lv_screen_load(s_ui.screen);
     s_ui.shown_version = 0;   /* repaint on the next tick */
     lg_display_unlock();

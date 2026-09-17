@@ -45,7 +45,8 @@ typedef struct {
     const lv_font_t *font_body;
     const lv_font_t *font_title;
     const lv_font_t *font_huge;
-    const lv_font_t *font_icon;   /* every icon is drawn at this one size */
+    const lv_font_t *font_icon;   /* emoji glyphs: the emoji font has one size, 20 px */
+    const lv_font_t *font_symbol; /* plain symbols (arrows, house, tick): smaller on small screens */
     int16_t          pad;          /* outer padding */
     int16_t          gap;          /* space between stacked items */
     int16_t          touch_min;    /* smallest touch target, from 8 mm */

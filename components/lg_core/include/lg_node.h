@@ -52,6 +52,9 @@ typedef struct {
     /* Optional. Another node flooded its grid state (D45). The body is opaque to the core:
      * 1..LG_GRID_STATE_MAX bytes whose layout the AP firmware defines and checks. */
     void     (*on_grid_state)(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len);
+    /* Optional. The roster's group table changed, by an edit here or a newer copy from another
+     * AP (D52). The glue saves it; the core has already sent it on. */
+    void     (*on_groups_changed)(void *ctx);
 } lg_node_io_t;
 
 typedef struct {
@@ -77,7 +80,7 @@ typedef struct {
     uint16_t            self;
     uint32_t            boot;
     uint32_t            seq;
-    const lg_roster_t  *roster;
+    lg_roster_t        *roster;    /* owned by the glue; the core edits its group table */
     lg_node_io_t        io;
     lg_presence_entry_t presence[LG_MAX_DEVICES];
     uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
@@ -87,7 +90,7 @@ typedef struct {
     lg_node_stats_t     stats;
 } lg_node_t;
 
-void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, const lg_roster_t *roster, const lg_node_io_t *io);
+void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roster, const lg_node_io_t *io);
 
 /*
  * A frame arrived on a client session. *session_device is 0 until the session
@@ -123,6 +126,18 @@ int lg_node_send_diag(lg_node_t *n, const uint8_t *text, size_t len);
  * which reports it once through io.on_grid_state. Never sent to a handheld session.
  */
 int lg_node_announce_grid_state(lg_node_t *n, const uint8_t *body, size_t len);
+
+/*
+ * Groups (D52). A handheld's GROUP_EDIT and the admin page's edits both end here, become a new
+ * version of the table, and go to every AP and every attached handheld. A newer table from the
+ * backbone replaces this node's and is passed on the same way; an older one is only forwarded.
+ * Every handheld gets the table when it registers.
+ */
+/* Applies an admin edit (no membership rule). Returns 0 or the lg_ack_status_t refusing it. */
+uint8_t lg_node_edit_groups(lg_node_t *n, const lg_group_edit_t *edit);
+
+/* Floods this node's group table, so APs that missed a change catch up. */
+int lg_node_announce_groups(lg_node_t *n);
 
 const lg_presence_entry_t *lg_node_presence(const lg_node_t *n, uint32_t device);
 

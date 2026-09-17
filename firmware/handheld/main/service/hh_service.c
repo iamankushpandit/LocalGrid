@@ -88,6 +88,7 @@ typedef enum {
     EV_SCAN_NOW,
     EV_RECONNECT,
     EV_MARK_READ,
+    EV_GROUP_EDIT,
 } ev_type_t;
 
 typedef struct {
@@ -98,6 +99,7 @@ typedef struct {
     char    name[LG_DISC_NAME_MAX + 1];   /* EV_BEACON: AP name from the vendor IE tail, or empty */
     int32_t value;                 /* disconnect reason, or preferred node */
     uint32_t id[3];                /* EV_MARK_READ: author, boot, seq of the message read */
+    lg_group_edit_t group;         /* EV_GROUP_EDIT, members as roster user bits */
 } ev_t;
 
 typedef struct {
@@ -122,6 +124,8 @@ typedef struct {
 static struct {
     uint32_t          device;
     const lg_user_t  *user;
+    lg_roster_t       roster;       /* users fixed; groups replaced by newer tables and saved (D52) */
+    char              group_problem[HH_PROBLEM_MAX];
     uint32_t          boot;
     lg_e2e_t          e2e;
     lg_client_t       client;
@@ -189,7 +193,7 @@ static void set_problem(const char *text)
 
 static const char *roster_name(uint32_t device)
 {
-    const lg_user_t *u = lg_roster_user(lg_roster_prototype(), device);
+    const lg_user_t *u = lg_roster_user(&s.roster, device);
     return u != NULL ? u->name : "Unknown handheld";
 }
 
@@ -256,6 +260,75 @@ static void ring_update_from_outbox(uint32_t slot)
             s.dirty = true;
             return;
         }
+    }
+}
+
+/*
+ * A removed group's messages go (D52). The ring is compacted in place under the lock, because
+ * the screens read it from their own task.
+ */
+static void ring_forget_group(uint16_t id)
+{
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    static hh_message_t kept[HH_MESSAGES];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < s.ring_count; i++) {
+        const hh_message_t *m = &s.ring[(s.ring_head + i) % HH_MESSAGES];
+        if (!(m->scope == LG_SCOPE_GROUP && m->target == id)) {
+            kept[n++] = *m;
+        }
+    }
+    uint8_t dropped = (uint8_t)(s.ring_count - n);
+    memset(s.ring, 0, sizeof(s.ring));
+    memcpy(s.ring, kept, n * sizeof(kept[0]));
+    s.ring_head = 0;
+    s.ring_count = n;
+    s.msg_version++;
+    s.dirty = true;
+    xSemaphoreGive(s.lock);
+    ESP_LOGI("MSG", "[MSG] Group %u was removed; deleted its %u message(s)", id, dropped);
+}
+
+/* ---- groups in NVS (D48, D52): kept as their GROUPS body ---- */
+
+static void groups_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t len = sizeof(body);
+    lg_groups_t in;
+    if (nvs_get_blob(h, "groups", body, &len) == ESP_OK && lg_groups_dec(body, len, &in)) {
+        s.roster.groups = in;
+    }
+    nvs_close(h);
+}
+
+static void groups_save(void)
+{
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t len = lg_groups_enc(&s.roster.groups, body);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, "groups", body, len);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("GRID", "[GRID] Groups not saved to flash: %s", esp_err_to_name(err));
+    }
+}
+
+static void io_groups_removed(void *ctx, const uint16_t *removed, size_t n)
+{
+    (void)ctx;
+    for (size_t i = 0; i < n; i++) {
+        ring_forget_group(removed[i]);
     }
 }
 
@@ -377,6 +450,20 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         break;
     case LG_CEV_KEY_CHANGED:
         ESP_LOGW("GRID", "[GRID] Device %" PRIu32 " advertised a different key; the pinned key is kept", ev->value);
+        break;
+    case LG_CEV_GROUPS:
+        groups_save();
+        s.group_problem[0] = '\0';
+        ESP_LOGI("GRID", "[GRID] Groups version %" PRIu32 " (made on AP %u): %u group(s), %" PRIu32 " removed",
+                 s.roster.groups.seq, s.roster.groups.author, s.roster.groups.count, ev->value);
+        break;
+    case LG_CEV_GROUP_REFUSED:
+        snprintf(s.group_problem, sizeof(s.group_problem), "%s",
+                 ev->value == LG_ACK_REJ_NOT_MEMBER       ? "Only members can change this group" :
+                 ev->value == LG_ACK_REJ_UNKNOWN_TARGET   ? "That group was already removed" :
+                 s.roster.groups.count >= LG_MAX_GROUPS   ? "There are already 8 groups" :
+                                                            "The AP refused that group");
+        ESP_LOGW("GRID", "[GRID] Group edit refused: status %" PRIu32, ev->value);
         break;
     default:
         break;
@@ -729,6 +816,18 @@ static void handle_event(const ev_t *ev, uint32_t now)
     case EV_RECONNECT:
         drop_link("Reconnecting on request", true);
         break;
+    case EV_GROUP_EDIT: {
+        int rc = lg_client_edit_group(&s.client, &ev->group);
+        if (rc == LG_OK) {
+            s.group_problem[0] = '\0';   /* a refusal of an earlier edit is not this edit's answer */
+        } else {
+            snprintf(s.group_problem, sizeof(s.group_problem), "Not connected to an AP; try again");
+            s.dirty = true;
+        }
+        ESP_LOGI("GRID", "[GRID] Group edit (op %u, group %u) %s", ev->group.op, ev->group.id,
+                 rc == LG_OK ? "sent" : "not sent: offline");
+        break;
+    }
     case EV_MARK_READ: {
         /* The reader has seen it, so tell the author. Logged because this path had no
          * evidence at all: on the bench the receiver opened the conversation and the sender
@@ -923,7 +1022,7 @@ static void publish(void)
 
     /* Only handhelds this one has actually heard about; no placeholder people. */
     st->n_people = 0;
-    const lg_roster_t *roster = lg_roster_prototype();
+    const lg_roster_t *roster = &s.roster;
     for (size_t i = 0; i < roster->n_users && st->n_people < LG_MAX_DEVICES; i++) {
         uint32_t dev = roster->users[i].device;
         const lg_peer_t *p = lg_client_peer(&s.client, dev);
@@ -936,21 +1035,35 @@ static void publish(void)
         o->node = p->node;
         o->online = s.link == HH_LINK_ONLINE && p->state == LG_PRES_ONLINE;
     }
+    st->n_users = 0;
+    for (size_t i = 0; i < roster->n_users && st->n_users < LG_MAX_DEVICES; i++) {
+        hh_user_t *o = &st->users[st->n_users++];
+        o->device = roster->users[i].device;
+        snprintf(o->name, sizeof(o->name), "%s", roster->users[i].name);
+    }
     st->n_groups = 0;
-    for (size_t i = 0; i < roster->n_groups && st->n_groups < LG_MAX_GROUPS; i++) {
+    for (size_t i = 0; i < roster->groups.count && st->n_groups < LG_MAX_GROUPS; i++) {
+        const lg_group_t *rg = &roster->groups.groups[i];
         hh_group_t *g = &st->groups[st->n_groups++];
-        g->id = roster->groups[i].id;
-        snprintf(g->name, sizeof(g->name), "%s", roster->groups[i].name);
+        g->id = rg->id;
+        snprintf(g->name, sizeof(g->name), "%s", rg->name);
         g->member = lg_roster_is_member(roster, s.device, g->id);
         /* The denominator for a group delivery count (D42), counted here because the screens
          * cannot see the roster. Every handheld in the group, this one included. */
         g->members = 0;
+        g->member_devices = 0;
         for (size_t u = 0; u < roster->n_users; u++) {
-            if (lg_roster_is_member(roster, roster->users[u].device, g->id)) {
+            uint32_t dev = roster->users[u].device;
+            if (lg_roster_is_member(roster, dev, g->id)) {
                 g->members++;
+                if (dev >= 1u && dev <= 32u) {
+                    g->member_devices |= 1u << (dev - 1u);
+                }
             }
         }
     }
+    st->groups_version = roster->groups.seq;
+    snprintf(st->group_problem, sizeof(st->group_problem), "%s", s.group_problem);
     st->messages_version = s.msg_version;
     st->free_heap = esp_get_free_heap_size();
     st->min_free_heap = esp_get_minimum_free_heap_size();
@@ -1094,7 +1207,8 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
         return fail_start(ESP_ERR_INVALID_STATE, "No device index. Provision with tools/flash.py --update-identity");
     }
     s.device = identity->device_index;
-    s.user = lg_roster_user(lg_roster_prototype(), s.device);
+    lg_roster_init_prototype(&s.roster);
+    s.user = lg_roster_user(&s.roster, s.device);
     if (s.user == NULL) {
         return fail_start(ESP_ERR_NOT_FOUND, "This handheld's device index is not in the grid roster");
     }
@@ -1116,6 +1230,9 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     if ((err = load_or_create_key()) != ESP_OK) {
         return fail_start(err, "Could not load this handheld's encryption key");
     }
+    groups_load();   /* the last table this handheld heard, until an AP sends a newer one */
+    ESP_LOGI("GRID", "[GRID] Groups version %" PRIu32 " from flash: %u group(s)", s.roster.groups.seq,
+             s.roster.groups.count);
     const lg_client_io_t io = {
         .ctx = NULL,
         .send = io_send,
@@ -1125,8 +1242,9 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
         .set_time = io_set_time,
         .seal = io_seal,
         .open = io_open,
+        .on_groups_removed = io_groups_removed,
     };
-    lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, lg_roster_prototype(), &io);
+    lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, &s.roster, &io);
     if (xTaskCreate(service_task, "hh_net", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, "Network task did not start");
     }
@@ -1152,6 +1270,32 @@ void hh_service_status(hh_status_t *out)
  * The screen says a received 1:1 message has been shown; the service task owns the client, so
  * the identity of that message goes to it through the queue (D27). Reported once per message.
  */
+esp_err_t hh_service_edit_group(uint16_t id, const char *name, uint32_t members, bool remove)
+{
+    if (s.queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ev_t ev = { .type = EV_GROUP_EDIT };
+    ev.group.op = remove ? LG_GROUP_DELETE : id == 0 ? LG_GROUP_CREATE : LG_GROUP_UPDATE;
+    ev.group.id = id;
+    if (!remove) {
+        size_t len = name != NULL ? strlen(name) : 0;
+        if (len == 0 || len > HH_GROUP_NAME_MAX) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        memcpy(ev.group.name, name, len);
+        /* Devices to roster user bits. The roster's users are const, so reading them here,
+         * outside the service task, is safe. */
+        for (size_t u = 0; u < s.roster.n_users && u < 32u; u++) {
+            uint32_t dev = s.roster.users[u].device;
+            if (dev >= 1u && dev <= 32u && (members & (1u << (dev - 1u))) != 0) {
+                ev.group.members |= 1u << u;
+            }
+        }
+    }
+    return xQueueSend(s.queue, &ev, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 void hh_service_mark_read(uint32_t message_id)
 {
     if (s.queue == NULL || s.lock == NULL) {

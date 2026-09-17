@@ -2,11 +2,13 @@
 
 #include <string.h>
 
+#include "lg_body.h"
 #include "nvs.h"
 
 #define SETTINGS_NAMESPACE  "lgcfg"
 #define SETTINGS_KEY        "admin"
 #define SETTINGS_VERSION    2
+#define GROUPS_KEY          "groups"
 
 /* Version 1, written by master-only firmware before D45. Read once and carried forward. */
 typedef struct {
@@ -83,6 +85,40 @@ esp_err_t settings_save(const node_settings_t *in)
         return err;
     }
     err = nvs_set_blob(h, SETTINGS_KEY, &tmp, sizeof(tmp));
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t settings_groups_load(lg_groups_t *out)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t len = sizeof(body);
+    err = nvs_get_blob(h, GROUPS_KEY, body, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return lg_groups_dec(body, len, out) ? ESP_OK : ESP_ERR_INVALID_SIZE;
+}
+
+esp_err_t settings_groups_save(const lg_groups_t *in)
+{
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t len = lg_groups_enc(in, body);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_blob(h, GROUPS_KEY, body, len);
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }

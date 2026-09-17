@@ -35,11 +35,18 @@ lv_obj_t *lg_ui_button(lv_obj_t *parent, const char *text, lv_event_cb_t on_clic
 lv_obj_t *lg_ui_button_small(lv_obj_t *parent, const char *text, lv_event_cb_t on_click, void *user_data);
 
 /*
- * An icon-only control: the glyph at the theme's one icon size, on a square target no
- * smaller than the touch minimum. Every icon in the firmware goes through here, so they
- * are all the same size whatever row they sit in.
+ * An icon-only control: a bare accent glyph with no outline, on a target no narrower than
+ * the touch minimum that is only shaded while pressed. Emoji are drawn at font_icon, other
+ * symbols at font_symbol. Every icon in the firmware goes through here, so they are all the
+ * same size whatever row they sit in.
  */
 lv_obj_t *lg_ui_icon_button(lv_obj_t *parent, const char *icon, lv_event_cb_t on_click, void *user_data);
+
+/*
+ * The LocalGrid mark, as on the admin page (assets/brand/localgrid-icon.svg), drawn from
+ * LVGL parts at size x size pixels in the theme's accent. One per screen.
+ */
+lv_obj_t *lg_ui_logo(lv_obj_t *parent, int32_t size);
 
 /*
  * Shows one shared banner on LVGL's top layer, above whatever screen is displayed, and

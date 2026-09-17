@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Conversation list and chat screens (P6).
  *
  * Conversations are Everyone (broadcast), each group this handheld belongs to, and each
@@ -24,6 +24,7 @@
 #include "lg_theme.h"
 #include "lg_ui_screensaver.h"
 #include "lg_ui_widgets.h"
+#include "ui_group.h"
 #include "ui_launcher.h"
 #include "ui_notify.h"
 
@@ -67,6 +68,7 @@ static struct {
     lv_obj_t   *keyboard;
     lv_obj_t   *keyboard_label;
     lv_obj_t   *controls;
+    lv_obj_t   *edit_group;      /* the pencil in a group chat's header; hidden elsewhere */
     conv_t      convs[CONVS_MAX];
     uint8_t     n_convs;
     conv_t      open;
@@ -118,9 +120,9 @@ static const char *person_name(const hh_status_t *st, uint32_t device)
 
 /*
  * One icon per state, not one tick repeated (D42). The clock is the emoji font's U+1F553,
- * already in the committed subset, so nothing new is embedded to draw it. It is drawn at
- * font_icon rather than font_tiny: the emoji font has exactly one size, 20 px, so a clock
- * asked for inside a 10 px line would either overflow the row or not draw at all.
+ * already in the committed subset, so nothing new is embedded to draw it. It is drawn through
+ * font_body rather than font_tiny: the emoji faces are 14 and 20 px only, so a clock asked for
+ * inside a 10 px line would either overflow the row or not draw at all.
  */
 #define MARK_WAIT      "\xF0\x9F\x95\x93"   /* U+1F553, a clock face: this handheld still has it */
 #define MARK_NODE      LV_SYMBOL_UPLOAD     /* a node took it, perhaps to store for someone offline */
@@ -207,6 +209,13 @@ static void count_text(const hh_status_t *st, const hh_message_t *m, char *out, 
 
 /* ---- chat screen ---- */
 
+/* The clock is an emoji, drawn through body text's 14 px emoji face; the arrows and eye are
+ * symbols. Both stay near 16 px, so a bubble is no taller than its text needs. */
+static const lv_font_t *mark_font(const char *glyph)
+{
+    return (unsigned char)glyph[0] >= 0xF0 ? lg_theme()->font_body : lg_theme()->font_symbol;
+}
+
 static lv_obj_t *add_message_row(lv_obj_t *parent, const hh_message_t *m, const hh_status_t *st,
                                  lv_obj_t **note_out, lv_obj_t **mark_out)
 {
@@ -227,15 +236,17 @@ static lv_obj_t *add_message_row(lv_obj_t *parent, const hh_message_t *m, const 
     lv_obj_set_style_border_color(card, m->urgent ? t->warning : t->outline, 0);
     lv_obj_set_style_border_width(card, m->urgent ? t->stroke : t->hairline, 0);
     lv_obj_set_style_radius(card, t->radius, 0);
-    lv_obj_set_style_pad_all(card, t->gap, 0);
+    /* Tight bubbles and small text: on a 2.8 in panel every line saved is another message. */
+    lv_obj_set_style_pad_hor(card, t->gap, 0);
+    lv_obj_set_style_pad_ver(card, t->gap / 2, 0);
 
-    lg_ui_label(card, t->font_body, t->text, m->text);
+    lg_ui_label(card, t->font_small, t->text, m->text);
 
     /*
      * The note is a row rather than one label, because the state glyph and the words beside
-     * it are drawn at different sizes: the emoji font has exactly one size, 20 px, so a clock
-     * asked for inside a 10 px line would not draw. Timestamp and counts stay at font_tiny;
-     * only the glyph is font_icon (D42).
+     * it are drawn at different sizes: the emoji faces are 14 and 20 px only, so a clock asked
+     * for inside a 10 px line would not draw. Timestamp and counts stay at font_tiny; only the
+     * glyph is larger (mark_font, D42).
      */
     char clock[8];
     clock_text(m->grid_time, clock, sizeof(clock));
@@ -269,7 +280,7 @@ static lv_obj_t *add_message_row(lv_obj_t *parent, const hh_message_t *m, const 
     if (m->mine && !refused) {
         lv_color_t mark_colour;
         const char *glyph = state_marker(m, &mark_colour);
-        mark_label = lg_ui_text(foot, t->font_icon, mark_colour, glyph);
+        mark_label = lg_ui_text(foot, mark_font(glyph), mark_colour, glyph);
     }
     if (note_out != NULL) {
         *note_out = note_label;
@@ -321,6 +332,7 @@ static void update_message_note(shown_msg_t *shown, const hh_message_t *m, const
         lv_color_t mark_colour;
         const char *glyph = state_marker(m, &mark_colour);
         if (shown->mark != NULL) {
+            lv_obj_set_style_text_font(shown->mark, mark_font(glyph), 0);
             lg_ui_set_text(shown->mark, glyph);
             lv_obj_set_style_text_color(shown->mark, mark_colour, 0);
         }
@@ -669,7 +681,9 @@ static int keyboard_height_pct(void)
 
 static void t9_forget(lv_timer_t *timer)
 {
-    (void)timer;
+    /* Pause, never a repeat count of 1: LVGL frees a timer whose count runs out, and this one's
+     * pointer is kept, reset, and deleted later. That was heap corruption. */
+    lv_timer_pause(timer);
     s_ui.t9_key = T9_NONE;   /* the pause ended the run, so the next tap starts a new letter */
 }
 
@@ -707,7 +721,6 @@ static bool t9_type(lv_obj_t *ta, const char *txt)
     if (s_ui.t9_timer == NULL) {
         s_ui.t9_timer = lv_timer_create(t9_forget, T9_PAUSE_MS, NULL);
     }
-    lv_timer_set_repeat_count(s_ui.t9_timer, 1);
     lv_timer_reset(s_ui.t9_timer);
     lv_timer_resume(s_ui.t9_timer);
     return true;
@@ -847,6 +860,20 @@ static void on_back_to_list(lv_event_t *e)
     ui_chat_open_list();   /* the list was freed when the chat replaced it; this builds it again */
 }
 
+static void on_new_group(lv_event_t *e)
+{
+    (void)e;
+    ui_group_open(0);
+}
+
+static void on_edit_group(lv_event_t *e)
+{
+    (void)e;
+    if (s_ui.open.scope == LG_SCOPE_GROUP) {
+        ui_group_open((uint16_t)s_ui.open.target);
+    }
+}
+
 static void on_back_home(lv_event_t *e)
 {
     (void)e;
@@ -874,6 +901,7 @@ static void forget_chat(void)
     s_ui.keyboard = NULL;
     s_ui.keyboard_label = NULL;
     s_ui.controls = NULL;
+    s_ui.edit_group = NULL;
     s_ui.empty_note = NULL;
     s_ui.shown_count = 0;
     s_ui.in_chat = false;
@@ -907,8 +935,8 @@ static void build_chat_screen(void)
     lg_theme_apply_screen(s_ui.chat_screen);
     lv_obj_remove_flag(s_ui.chat_screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(s_ui.chat_screen, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(s_ui.chat_screen, t->pad, 0);
-    lv_obj_set_style_pad_row(s_ui.chat_screen, t->gap, 0);
+    lv_obj_set_style_pad_all(s_ui.chat_screen, t->gap, 0);   /* the panel's edge is margin enough */
+    lv_obj_set_style_pad_row(s_ui.chat_screen, t->gap / 2, 0);
 
     lv_obj_t *head = lg_ui_row(s_ui.chat_screen);
     /* The name of whoever you are talking to is a label, not a headline: body size, so it
@@ -916,6 +944,7 @@ static void build_chat_screen(void)
     s_ui.chat_title = lg_ui_text(head, t->font_body, t->accent, "Chat");
     lv_obj_set_flex_grow(s_ui.chat_title, 1);
     lv_label_set_long_mode(s_ui.chat_title, LV_LABEL_LONG_DOT);
+    s_ui.edit_group = lg_ui_icon_button(head, LV_SYMBOL_EDIT, on_edit_group, NULL);   /* groups only (D52) */
     lg_ui_icon_button(head, LV_SYMBOL_LEFT, on_back_to_list, NULL);
 
     s_ui.chat_hint = lg_ui_label(s_ui.chat_screen, t->font_small, t->warning, "");
@@ -923,7 +952,7 @@ static void build_chat_screen(void)
     /* The message list takes whatever the header, controls, entry, and keyboard leave.
      * A flex child cannot both grow and be content-sized: content-sizing wins and the list
      * collapses to nothing, which looks like messages never arriving. */
-    s_ui.chat_rows = lg_ui_column(s_ui.chat_screen, t->gap);
+    s_ui.chat_rows = lg_ui_column(s_ui.chat_screen, t->gap / 2);
     lv_obj_set_flex_grow(s_ui.chat_rows, 1);
     lv_obj_set_height(s_ui.chat_rows, LV_PCT(100));
     lv_obj_set_style_min_height(s_ui.chat_rows, t->touch_min, 0);   /* one bubble, so the column never overflows */
@@ -950,12 +979,13 @@ static void build_chat_screen(void)
     lv_textarea_set_max_length(s_ui.input, HH_TEXT_MAX);
     lv_textarea_set_placeholder_text(s_ui.input, "Message");
     lv_obj_set_flex_grow(s_ui.input, 1);
-    lv_obj_set_style_min_height(s_ui.input, t->touch_min, 0);
+    lv_obj_set_style_min_height(s_ui.input, t->touch_min * 3 / 4, 0);
+    lv_obj_set_style_pad_ver(s_ui.input, t->gap, 0);
     lv_obj_set_style_bg_color(s_ui.input, t->surface, 0);
     lv_obj_set_style_border_color(s_ui.input, t->outline, 0);
     lv_obj_set_style_border_width(s_ui.input, t->hairline, 0);
     lv_obj_set_style_text_color(s_ui.input, t->text, 0);
-    lv_obj_set_style_text_font(s_ui.input, t->font_body, 0);
+    lv_obj_set_style_text_font(s_ui.input, t->font_small, 0);
     lv_obj_add_event_cb(s_ui.input, on_input_tapped, LV_EVENT_CLICKED, NULL);
     lg_ui_icon_button(entry, LV_SYMBOL_OK, on_send, NULL);   /* an icon, so the field keeps the width */
 
@@ -986,6 +1016,11 @@ static void open_chat(const conv_t *conv)
     }
     const hh_status_t *st = ui_status();
     lg_ui_set_text(s_ui.chat_title, conv->title);
+    if (conv->scope == LG_SCOPE_GROUP) {
+        lv_obj_remove_flag(s_ui.edit_group, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_ui.edit_group, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_textarea_set_text(s_ui.input, "");
     update_hint(st);
     refresh_messages(st, true);   /* a different conversation: start the list again */
@@ -1000,7 +1035,12 @@ void ui_chat_open_conversation(uint8_t scope, uint32_t target, const char *title
 {
     conv_t conv = { .scope = scope, .target = target };
     snprintf(conv.title, sizeof(conv.title), "%s", title != NULL ? title : "Chat");
-    lg_display_lock(1000);
+    if (!lg_display_lock(3000)) {
+        /* Never draw without the lock: two tasks in LVGL at once corrupt its event list, and
+         * before the display starts there is no lock at all. */
+        ESP_LOGW(TAG, "[UI] Display busy or not started; chat not opened");
+        return;
+    }
     ensure_timer();
     open_chat(&conv);
     lg_display_unlock();
@@ -1108,6 +1148,19 @@ static void refresh(lv_timer_t *timer)
     }
     const hh_status_t *st = ui_status();
     if (active == s_ui.chat_screen) {
+        if (s_ui.open.scope == LG_SCOPE_GROUP) {
+            /* The group was removed, or this handheld taken out of it: its conversation is
+             * gone (D52), so the list is the only honest thing to show. */
+            bool still = false;
+            for (uint8_t i = 0; i < st->n_groups; i++) {
+                still = still || (st->groups[i].id == s_ui.open.target && st->groups[i].member);
+            }
+            if (!still) {
+                ESP_LOGI(TAG, "[UI] Group %" PRIu32 " is gone; back to the list", s_ui.open.target);
+                ui_chat_open_list();
+                return;
+            }
+        }
         if (st->messages_version != s_ui.shown_messages) {
             refresh_messages(st, false);
             s_ui.shown_messages = st->messages_version;
@@ -1123,7 +1176,12 @@ static void refresh(lv_timer_t *timer)
 void ui_chat_open_list(void)
 {
     const lg_theme_t *t = lg_theme();
-    lg_display_lock(1000);   /* recursive: safe whether the caller holds it or not */
+    if (!lg_display_lock(3000)) {
+        /* Never draw without the lock: two tasks in LVGL at once corrupt its event list, and
+         * before the display starts there is no lock at all. */
+        ESP_LOGW(TAG, "[UI] Display busy or not started; conversation list not opened");
+        return;
+    }
     if (s_ui.list_screen == NULL) {
         s_ui.list_screen = lv_obj_create(NULL);
         lg_theme_apply_screen(s_ui.list_screen);
@@ -1132,7 +1190,9 @@ void ui_chat_open_list(void)
         lv_obj_set_style_pad_row(s_ui.list_screen, t->gap * 2, 0);
 
         lv_obj_t *head = lg_ui_row(s_ui.list_screen);
-        lg_ui_text(head, t->font_title, t->accent, "Messages");
+        lv_obj_t *heading = lg_ui_text(head, t->font_title, t->accent, "Messages");
+        lv_obj_set_flex_grow(heading, 1);
+        lg_ui_icon_button(head, LV_SYMBOL_PLUS, on_new_group, NULL);   /* a new group (D52) */
         lg_ui_icon_button(head, LV_SYMBOL_HOME, on_back_home, NULL);
 
         s_ui.list_rows = lg_ui_column(s_ui.list_screen, t->gap);

@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include "lg_roster.h"
 #include "lg_types.h"
 
 #ifdef __cplusplus
@@ -89,6 +90,25 @@ typedef struct {
     uint8_t  clients;
 } lg_hello_t;
 
+/*
+ * GROUPS: the whole group table (D52), little-endian:
+ *     0  u32  seq
+ *     4  u16  author (AP index)
+ *     6  u16  next_id
+ *     8  u8   count, 0..LG_MAX_GROUPS
+ *     9  count x LG_GROUP_ENTRY_LEN:
+ *          0  u16   id (not 0, below next_id, unique)
+ *          2  u32   members (roster user bits)
+ *          6  16 B  name, 1..15 bytes of UTF-8, NUL-padded
+ * The length is exactly 9 + count x 22: 185 bytes at most, inside even an ESP-NOW v1 frame.
+ */
+#define LG_GROUPS_HEAD_LEN   9u
+#define LG_GROUP_ENTRY_LEN   22u
+#define LG_GROUPS_MAX_LEN    (LG_GROUPS_HEAD_LEN + LG_MAX_GROUPS * LG_GROUP_ENTRY_LEN)
+
+/* GROUP_EDIT: u8 op, u16 id, u32 members, 16 B name (NUL-padded). Exactly 23 bytes. */
+#define LG_GROUP_EDIT_LEN    23u
+
 size_t lg_register_enc(const lg_register_t *v, uint8_t *out);
 bool   lg_register_dec(const uint8_t *in, size_t len, lg_register_t *v);
 size_t lg_register_ack_enc(const lg_register_ack_t *v, uint8_t *out);
@@ -101,6 +121,11 @@ size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out);
 bool   lg_time_sync_dec(const uint8_t *in, size_t len, lg_time_sync_t *v);
 size_t lg_hello_enc(const lg_hello_t *v, uint8_t *out);
 bool   lg_hello_dec(const uint8_t *in, size_t len, lg_hello_t *v);
+
+size_t lg_groups_enc(const lg_groups_t *v, uint8_t *out);
+bool   lg_groups_dec(const uint8_t *in, size_t len, lg_groups_t *v);
+size_t lg_group_edit_enc(const lg_group_edit_t *v, uint8_t *out);
+bool   lg_group_edit_dec(const uint8_t *in, size_t len, lg_group_edit_t *v);
 
 /* Strict UTF-8: rejects overlong forms, surrogates, code points above U+10FFFF, and NUL. */
 bool lg_utf8_valid(const uint8_t *s, size_t n);

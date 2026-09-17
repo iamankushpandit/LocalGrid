@@ -340,7 +340,12 @@ void ui_settings_build(const lg_identity_t *identity)
 
 void ui_settings_open(void)
 {
-    lg_display_lock(1000);
+    if (!lg_display_lock(3000)) {
+        /* Never draw without the lock: two tasks in LVGL at once corrupt its event list, and
+         * before the display starts there is no lock at all. */
+        ESP_LOGW(TAG, "[UI] Display busy or not started; Settings not opened");
+        return;
+    }
     if (s_ui.screen == NULL) {
         build_settings_screen();
     }

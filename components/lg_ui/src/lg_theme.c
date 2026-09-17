@@ -36,10 +36,16 @@ static lv_font_t s_small_emoji;
 static lv_font_t s_huge_emoji;
 static lv_font_t s_icon_emoji;
 
-static const lv_font_t *with_emoji(lv_font_t *copy, const lv_font_t *base)
+static const lv_font_t *with_emoji(lv_font_t *copy, const lv_font_t *base, const lv_font_t *emoji)
 {
     *copy = *base;
-    copy->fallback = &lg_font_emoji_20;
+    copy->fallback = emoji;
+    /* A label is as tall as its own font's line, so a fallback glyph taller than that is
+     * clipped. The line takes the taller of the two; at matched sizes that is a pixel. */
+    if (emoji->line_height > copy->line_height) {
+        copy->base_line = copy->base_line + (emoji->line_height - copy->line_height) / 2;
+        copy->line_height = emoji->line_height;
+    }
     return copy;
 }
 
@@ -93,16 +99,21 @@ void lg_theme_init(uint16_t width, uint16_t height, uint16_t px_per_10mm)
     /* One icon size everywhere, so a control never looks bigger than its neighbour.
      * 20 px is also the emoji font's only size, so a drawn face matches a drawn glyph. */
     s_theme.font_icon  = FONT_20;
+    /* Symbols carry no emoji, so they can shrink with the screen: at 20 px an arrow on a
+     * 2.8 in panel outweighed the name beside it. */
+    s_theme.font_symbol = compact ? FONT_16 : FONT_20;
     s_theme.pad = (int16_t)(short_side / 30);    /* 8 px on a 240 px side */
     s_theme.gap = (int16_t)(short_side / 48);    /* 5 px on a 240 px side */
     s_theme.touch_min = (int16_t)((px_per_10mm * 8u) / 10u);
-    s_theme.font_body = with_emoji(&s_body_emoji, s_theme.font_body);
-    s_theme.font_small = with_emoji(&s_small_emoji, s_theme.font_small);
+    /* Emoji inside text use the 14 px face: the 20 px one overflowed 12 and 14 px lines and
+     * was clipped in bubbles and banners. Keys and icons keep 20 px. */
+    s_theme.font_body = with_emoji(&s_body_emoji, s_theme.font_body, &lg_font_emoji_14);
+    s_theme.font_small = with_emoji(&s_small_emoji, s_theme.font_small, &lg_font_emoji_14);
     /* The magnified keycap uses the largest font, and emoji keys have to show in it.
      * The emoji font is one 20 px size, so an emoji there is drawn at 20 px inside a
      * 28 px line: still larger than the key it magnifies. */
-    s_theme.font_huge = with_emoji(&s_huge_emoji, s_theme.font_huge);
-    s_theme.font_icon = with_emoji(&s_icon_emoji, s_theme.font_icon);
+    s_theme.font_huge = with_emoji(&s_huge_emoji, s_theme.font_huge, &lg_font_emoji_20);
+    s_theme.font_icon = with_emoji(&s_icon_emoji, s_theme.font_icon, &lg_font_emoji_20);
     s_theme.stroke = (int16_t)(short_side / 120 > 2 ? short_side / 120 : 2);
     s_theme.hairline = (int16_t)(s_theme.stroke / 2);
 }

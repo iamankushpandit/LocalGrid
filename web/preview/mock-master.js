@@ -9,7 +9,9 @@
     configured: false, grid_name: "", password: "", timezone: "",
     time_offset_s: 0, time_quality: 0, token: "", csrf: "",
     failures: 0, locked_until: 0, boot_ms: Date.now(),
+    groups: [], groups_version: 0, next_group_id: 1,
   });
+  const USERS = [1, 2, 3, 4].map((d) => ({ device: d, name: `Handheld ${d}` }));
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || fresh(); } catch (e) { return fresh(); } };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(m)); } catch (e) { /* storage blocked */ } };
   let m = load();
@@ -87,7 +89,39 @@
             { node: 2, up: true, rssi: jitter(-73, 4), age_ms: Math.round(Math.random() * 2000) },
           ],
           devices: [],
+          users: USERS,
+          groups_version: m.groups_version || 0,
+          groups: m.groups || [],
         };
+      }
+
+      case "/api/groups": {   // mirrors lg_groups_apply_edit with the admin as editor (D52)
+        if (!loggedIn) fail("Log in to change groups.");
+        if (csrf !== m.csrf) fail("Request blocked. Reload the page and try again.");
+        m.groups = m.groups || [];
+        m.next_group_id = m.next_group_id || 1;
+        const members = String(body.devices || "").split(",").filter(Boolean).map(Number);
+        const name = body.name || "";
+        const g = m.groups.find((x) => x.id === body.id);
+        if (body.op !== "delete") {
+          const bytes = new TextEncoder().encode(name).length;
+          if (bytes === 0 || bytes > 15) fail("A group name is 1 to 15 bytes (fewer with accents or emoji).");
+          if (members.some((d) => !USERS.some((u) => u.device === d))) fail("Pick handhelds from the list.");
+        }
+        if (body.op === "create") {
+          if (m.groups.length >= 8) fail("There are already 8 groups. Remove one first.");
+          m.groups.push({ id: m.next_group_id++, name, members });
+        } else if (body.op === "update" || body.op === "delete") {
+          if (!g) fail("That group no longer exists. Reload the page.");
+          if (body.op === "delete") m.groups = m.groups.filter((x) => x !== g);
+          else if (members.length === 0) fail("Check the name, and pick at least one handheld.");
+          else Object.assign(g, { name, members });
+        } else {
+          fail("Unknown group action.");
+        }
+        m.groups_version = (m.groups_version || 0) + 1;
+        save();
+        return { ok: true };
       }
 
       case "/api/time": {

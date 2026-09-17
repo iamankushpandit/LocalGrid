@@ -101,6 +101,26 @@ static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body
     memcpy(sn->grid_state_last, body, sn->grid_state_len);
 }
 
+static void n_on_groups_changed(void *ctx)
+{
+    ((sim_node_t *)ctx)->groups_changed++;
+}
+
+/* The fixture table: FAMILY = Dad, Emma, Alex; KIDS = Emma, Alex; LEADERS = Dad, Ranger. */
+static void seed_groups(lg_roster_t *r)
+{
+    static const lg_group_t fixture[] = {
+        { LG_PROTO_FAMILY,  (1u << 0) | (1u << 1) | (1u << 2), "FAMILY"  },
+        { LG_PROTO_KIDS,    (1u << 1) | (1u << 2),             "KIDS"    },
+        { LG_PROTO_LEADERS, (1u << 0) | (1u << 3),             "LEADERS" },
+    };
+    r->groups.seq = 1;
+    r->groups.author = 0;
+    r->groups.next_id = 4;
+    r->groups.count = 3;
+    memcpy(r->groups.groups, fixture, sizeof(fixture));
+}
+
 /* ---- client io ---- */
 
 static bool c_send(void *ctx, const uint8_t *frame, size_t len)
@@ -120,7 +140,19 @@ static void c_event(void *ctx, const lg_client_event_t *ev)
         c->messages++;
     } else if (ev->type == LG_CEV_KEY_CHANGED) {
         c->key_changes++;
+    } else if (ev->type == LG_CEV_GROUPS) {
+        c->groups_events++;
+    } else if (ev->type == LG_CEV_GROUP_REFUSED) {
+        c->group_refusals++;
+        c->last_refusal = (uint8_t)ev->value;
     }
+}
+
+static void c_groups_removed(void *ctx, const uint16_t *removed, size_t n)
+{
+    sim_client_t *c = ctx;
+    c->removed_n = n;
+    memcpy(c->removed, removed, n * sizeof(removed[0]));
 }
 
 static uint32_t c_now(void *ctx)
@@ -176,8 +208,6 @@ sim_t *sim_create(void)
         lg_failures++;
         return NULL;
     }
-    const lg_roster_t *roster = lg_roster_prototype();
-
     for (int i = 0; i < SIM_NODES; i++) {
         sim_node_t *sn = &s->nodes[i];
         sn->sim = s;
@@ -193,8 +223,11 @@ sim_t *sim_create(void)
             .on_diag = n_on_diag,
             .on_time = n_on_time,
             .on_grid_state = n_on_grid_state,
+            .on_groups_changed = n_on_groups_changed,
         };
-        lg_node_init(&sn->node, (uint16_t)i, 1, roster, &io);
+        lg_roster_init_prototype(&sn->roster);
+        seed_groups(&sn->roster);
+        lg_node_init(&sn->node, (uint16_t)i, 1, &sn->roster, &io);
     }
 
     for (int i = 0; i < SIM_CLIENTS; i++) {
@@ -202,7 +235,9 @@ sim_t *sim_create(void)
         c->sim = s;
         c->index = i;
         c->node = -1;
-        uint32_t device = roster->users[i].device;
+        lg_roster_init_prototype(&c->roster);
+        seed_groups(&c->roster);
+        uint32_t device = c->roster.users[i].device;
         uint8_t priv[LG_X25519_LEN], pub[LG_X25519_LEN];
         CHECK_EQ(lg_x25519_keypair(priv, pub), 0);
         CHECK_EQ(lg_e2e_init(&c->e2e, device, priv), 0);
@@ -216,8 +251,9 @@ sim_t *sim_create(void)
             .set_time = c_set_time,
             .seal = c_seal,
             .open = c_open,
+            .on_groups_removed = c_groups_removed,
         };
-        lg_client_init(&c->client, device, 1, c->e2e.pub, roster, &io);
+        lg_client_init(&c->client, device, 1, c->e2e.pub, &c->roster, &io);
     }
     return s;
 }

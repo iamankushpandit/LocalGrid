@@ -8,6 +8,7 @@
 #include "hh_console.h"
 #include "hh_mem.h"
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -379,13 +380,56 @@ static int cmd_groups(int argc, char **argv)
     (void)argc;
     (void)argv;
     const hh_status_t *st = console_status();
-    printf("Groups in the grid roster: %u\n", st->n_groups);
-    printf("  ID  NAME              THIS HANDHELD\n");
+    printf("Groups, version %" PRIu32 ": %u\n", st->groups_version, st->n_groups);
+    printf("  ID  NAME              THIS HANDHELD  MEMBERS\n");
     for (uint8_t i = 0; i < st->n_groups; i++) {
-        printf("  %-2u  %-16s  %s\n", st->groups[i].id, st->groups[i].name,
+        printf("  %-2u  %-16s  %-13s ", st->groups[i].id, st->groups[i].name,
                st->groups[i].member ? "member" : "not a member");
+        for (uint32_t d = 1; d <= 32u; d++) {
+            if (st->groups[i].member_devices & (1u << (d - 1u))) {
+                printf(" %" PRIu32, d);
+            }
+        }
+        printf("\n");
+    }
+    if (st->group_problem[0] != '\0') {
+        printf("Last group edit refused: %s\n", st->group_problem);
     }
     return 0;
+}
+
+/* group new <name> <devices> | group set <id> <name> <devices> | group rm <id>; devices "1,2,3" */
+static int cmd_group(int argc, char **argv)
+{
+    uint32_t members = 0;
+    const char *devices = argc >= 4 ? argv[argc - 1] : NULL;
+    for (const char *p = devices; p != NULL && *p != '\0';) {
+        char *end = NULL;
+        unsigned long d = strtoul(p, &end, 10);
+        if (end == p || d < 1 || d > 32) {
+            printf("devices are handheld numbers separated by commas, e.g. 1,2\n");
+            return 1;
+        }
+        members |= 1u << (d - 1u);
+        p = *end == ',' ? end + 1 : end;
+    }
+    esp_err_t err;
+    if (argc == 4 && strcmp(argv[1], "new") == 0) {
+        err = hh_service_edit_group(0, argv[2], members, false);
+    } else if (argc == 5 && strcmp(argv[1], "set") == 0) {
+        err = hh_service_edit_group((uint16_t)strtoul(argv[2], NULL, 10), argv[3], members, false);
+    } else if (argc == 3 && strcmp(argv[1], "rm") == 0) {
+        err = hh_service_edit_group((uint16_t)strtoul(argv[2], NULL, 10), NULL, 0, true);
+    } else {
+        printf("usage: group new <name> <devices> | group set <id> <name> <devices> | group rm <id>\n");
+        return 1;
+    }
+    if (err == ESP_OK) {
+        printf("sent to the AP; run 'groups' for the result\n");
+    } else {
+        printf("not sent: %s\n", esp_err_to_name(err));
+    }
+    return err == ESP_OK ? 0 : 1;
 }
 
 /* send <device index | group name | all | urgent> <text...> */
@@ -548,7 +592,8 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "node",      .help = "node <index> | node auto: choose which node to use",      .func = cmd_node },
         { .command = "scan",      .help = "Scan the grid channel now",                               .func = cmd_scan },
         { .command = "reconnect", .help = "Drop the node session and join again",                    .func = cmd_reconnect },
-        { .command = "groups",    .help = "Groups in the roster and whether this handheld belongs",  .func = cmd_groups },
+        { .command = "groups",    .help = "Groups, members, and whether this handheld belongs",      .func = cmd_groups },
+        { .command = "group",     .help = "group new <name> <devices> | set <id> <name> <devices> | rm <id> (D52)", .func = cmd_group },
         { .command = "send",      .help = "send <device|group|all|urgent> <text>: send a message",   .func = cmd_send },
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },

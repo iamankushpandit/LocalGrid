@@ -149,13 +149,91 @@ static void test_bodies(void)
     buf[12] = 99;
     CHECK(!lg_msg_ack_dec(buf, LG_MSG_ACK_LEN, &a2));
 
-    const lg_roster_t *ro = lg_roster_prototype();
-    CHECK(lg_roster_is_member(ro, LG_PROTO_DAD, LG_PROTO_FAMILY));
-    CHECK(lg_roster_is_member(ro, LG_PROTO_DAD, LG_PROTO_LEADERS));
-    CHECK(!lg_roster_is_member(ro, LG_PROTO_RANGER, LG_PROTO_FAMILY));
-    CHECK(!lg_roster_is_member(ro, LG_PROTO_EMMA, 99));
-    CHECK(lg_roster_user(ro, 99) == NULL);
 }
+
+/* Groups made at run time (D52): the edit rules and the two body layouts. */
+static void test_groups(void)
+{
+    static lg_roster_t r;
+    lg_roster_init_prototype(&r);
+    CHECK_EQ(r.groups.count, 0);                        /* no built-in groups */
+    CHECK(lg_roster_user(&r, 99) == NULL);
+
+    lg_group_edit_t e = { .op = LG_GROUP_CREATE, .members = 1u << 1 };
+    memcpy(e.name, "Cooks", 5);
+    CHECK_EQ(lg_groups_apply_edit(&r, 1, &e, 2), 0);   /* device 1 (user 0) makes it */
+    CHECK_EQ(r.groups.count, 1);
+    CHECK_EQ(r.groups.groups[0].id, 1);
+    CHECK_EQ(r.groups.seq, 1);
+    CHECK_EQ(r.groups.author, 2);
+    CHECK(lg_roster_is_member(&r, 1, 1));               /* the maker is always in it */
+    CHECK(lg_roster_is_member(&r, 2, 1));
+    CHECK(!lg_roster_is_member(&r, 3, 1));
+    CHECK(!lg_roster_is_member(&r, 2, 99));
+
+    lg_group_edit_t u = { .op = LG_GROUP_UPDATE, .id = 1, .members = 1u << 3 };
+    memcpy(u.name, "Kitchen", 7);
+    CHECK_EQ(lg_groups_apply_edit(&r, 3, &u, 0), LG_ACK_REJ_NOT_MEMBER);   /* device 3 is not in it */
+    CHECK_EQ(r.groups.seq, 1);                          /* a refusal changes nothing */
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &u, 0), 0);    /* the admin may */
+    CHECK(strcmp(r.groups.groups[0].name, "Kitchen") == 0);
+    CHECK(lg_roster_is_member(&r, 4, 1));
+    CHECK(!lg_roster_is_member(&r, 1, 1));
+
+    lg_group_edit_t bad = { .op = LG_GROUP_CREATE, .members = 1u << 20 };
+    memcpy(bad.name, "Ghosts", 6);
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &bad, 0), LG_ACK_REJ_INVALID);    /* no such user */
+    bad.members = 0;
+    memset(bad.name, 0, sizeof(bad.name));
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &bad, 0), LG_ACK_REJ_INVALID);    /* empty name */
+    u.members = 0;
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &u, 0), LG_ACK_REJ_INVALID);      /* empty group */
+    lg_group_edit_t gone = { .op = LG_GROUP_DELETE, .id = 7 };
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &gone, 0), LG_ACK_REJ_UNKNOWN_TARGET);
+
+    for (int i = 0; i < (int)LG_MAX_GROUPS - 1; i++) {
+        CHECK_EQ(lg_groups_apply_edit(&r, 0, &e, 0), 0);
+    }
+    CHECK_EQ(r.groups.count, LG_MAX_GROUPS);
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &e, 0), LG_ACK_REJ_INVALID);      /* table full */
+
+    /* The table round-trips, and exact length and field checks hold. */
+    static uint8_t buf[LG_GROUPS_MAX_LEN + 1];
+    static lg_groups_t back;
+    size_t n = lg_groups_enc(&r.groups, buf);
+    CHECK_EQ(n, LG_GROUPS_MAX_LEN);
+    CHECK(lg_groups_dec(buf, n, &back));
+    CHECK(memcmp(&back, &r.groups, sizeof(back)) == 0);
+    CHECK(!lg_groups_dec(buf, n - 1, &back));
+    buf[LG_GROUPS_HEAD_LEN + LG_GROUP_ENTRY_LEN] = buf[LG_GROUPS_HEAD_LEN];   /* duplicate id */
+    buf[LG_GROUPS_HEAD_LEN + LG_GROUP_ENTRY_LEN + 1] = buf[LG_GROUPS_HEAD_LEN + 1];
+    CHECK(!lg_groups_dec(buf, n, &back));
+
+    /* Removing the first group: it is reported, ids are never reused, and the rest move up. */
+    static lg_groups_t before;
+    before = r.groups;
+    lg_group_edit_t del = { .op = LG_GROUP_DELETE, .id = 1 };
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &del, 0), 0);
+    uint16_t removed[LG_MAX_GROUPS];
+    CHECK_EQ(lg_groups_removed(&before, &r.groups, removed), 1);
+    CHECK_EQ(removed[0], 1);
+    CHECK_EQ(lg_groups_apply_edit(&r, 0, &e, 0), 0);
+    CHECK_EQ(r.groups.groups[r.groups.count - 1u].id, 9);
+    CHECK(lg_groups_newer(&r.groups, &before));
+    CHECK(!lg_groups_newer(&before, &r.groups));
+
+    lg_group_edit_t w = { .op = LG_GROUP_UPDATE, .id = 5, .members = 3 };
+    memcpy(w.name, "Hikers", 6);
+    uint8_t eb[LG_GROUP_EDIT_LEN];
+    CHECK_EQ(lg_group_edit_enc(&w, eb), LG_GROUP_EDIT_LEN);
+    lg_group_edit_t w2;
+    CHECK(lg_group_edit_dec(eb, LG_GROUP_EDIT_LEN, &w2));
+    CHECK(memcmp(&w, &w2, sizeof(w)) == 0);
+    CHECK(!lg_group_edit_dec(eb, LG_GROUP_EDIT_LEN - 1, &w2));
+    eb[7 + 10] = 'x';   /* bytes after the name's NUL must be padding */
+    CHECK(!lg_group_edit_dec(eb, LG_GROUP_EDIT_LEN, &w2));
+}
+
 
 void test_core(void)
 {
@@ -163,4 +241,5 @@ void test_core(void)
     test_dedup();
     test_utf8();
     test_bodies();
+    test_groups();
 }

@@ -838,6 +838,8 @@ The Wi-Fi passphrase and keys never travel in config; nodes already hold them fr
 
 **Honest limit:** HMAC under a key every node holds means a compromised node could forge config. Ed25519-signed config, with the signing key only on the master, is the post-MVP fix.
 
+**Prototype, groups (D52):** groups do not wait for this config object. The group table travels on its own as `GROUPS` (0x52, 9 + 22 bytes per group, at most 185), versioned by (seq, author AP) with the newest winning, flooded on link up and every 30 s, and saved in NVS on every AP. Any AP may make a new version, from the admin page or from a handheld's `GROUP_EDIT` (0x53, 23 bytes: op, id, members, name).
+
 ### 32. How clients obtain configuration
 
 Clients never contact the master.
@@ -845,6 +847,7 @@ Clients never contact the master.
 - `REGISTER` carries the client's cached generation. If the node's generation differs, the node sends a **client view** of the config: grid name, timezone, the client's own name, the device directory (names and indexes), groups the client belongs to with member names, and roaming and retention policy. Registry internals and revocation lists stay on nodes.
 - When a node applies a new generation, it pushes the client view to every attached client.
 - Clients store the last client view in NVS and use it while offline, for example to show names in history.
+- **Prototype, groups (D52):** a node sends `GROUPS` after `REGISTER_ACK` and whenever its table changes; a handheld keeps it only if newer, saves it in NVS, and deletes the messages of any group the new table no longer has.
 
 ---
 

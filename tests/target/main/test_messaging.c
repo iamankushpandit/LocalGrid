@@ -575,6 +575,150 @@ static void test_ping_pong(void)
     sim_destroy(s);
 }
 
+static bool tables_agree(sim_t *s, uint32_t seq, uint8_t count)
+{
+    bool ok = true;
+    for (int i = 0; i < SIM_NODES; i++) {
+        ok = ok && s->nodes[i].roster.groups.seq == seq && s->nodes[i].roster.groups.count == count;
+    }
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        if (s->clients[i].node >= 0) {
+            ok = ok && s->clients[i].roster.groups.seq == seq && s->clients[i].roster.groups.count == count;
+        }
+    }
+    return ok;
+}
+
+/* D52: groups made, changed, and removed from a handheld or the admin, across two hops. */
+static void test_group_edits(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_detach(s, RANGER);   /* rejoins later, and must be handed the table then */
+
+    /* Emma, on C, makes a group with Alex; the AP she is on authors the new version. */
+    lg_group_edit_t make = { .op = LG_GROUP_CREATE, .members = 1u << ALEX };
+    memcpy(make.name, "Hikers", 6);
+    CHECK_EQ(lg_client_edit_group(cl(s, EMMA), &make), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(tables_agree(s, 2, 4));
+    CHECK_EQ(s->nodes[0].roster.groups.author, 2);
+    CHECK_EQ(s->nodes[0].groups_changed, 1);   /* saved once per AP, however it arrived */
+    CHECK_EQ(s->nodes[2].groups_changed, 1);
+    CHECK_EQ(s->clients[DAD].groups_events, 1);
+    const lg_group_t *g = lg_roster_group(&s->clients[DAD].roster, 4);
+    CHECK(g != NULL && strcmp(g->name, "Hikers") == 0);
+    CHECK_EQ(s->clients[EMMA].group_refusals, 0);
+
+    /* The new group carries messages at once, to members only. */
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_GROUP, 4, 0, TXT("Trail at 9"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, ALEX, "Trail at 9"));
+    CHECK_EQ(cl(s, DAD)->inbox_count, 0);
+
+    /* A handheld outside the group may not change it: refused, nothing moves. */
+    lg_group_edit_t take = { .op = LG_GROUP_UPDATE, .id = 4, .members = 1u << DAD };
+    memcpy(take.name, "Mine", 4);
+    CHECK_EQ(lg_client_edit_group(cl(s, DAD), &take), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].group_refusals, 1);
+    CHECK_EQ(s->clients[DAD].last_refusal, LG_ACK_REJ_NOT_MEMBER);
+    CHECK(tables_agree(s, 2, 4));
+
+    /* The admin page on A renames it and adds Dad, with every backbone frame delivered twice. */
+    s->duplicate_backbone = true;
+    take.members = (1u << EMMA) | (1u << ALEX) | (1u << DAD);
+    CHECK_EQ(lg_node_edit_groups(&s->nodes[0].node, &take), 0);
+    CHECK(sim_pump(s));
+    s->duplicate_backbone = false;
+    CHECK(tables_agree(s, 3, 4));
+    CHECK_EQ(s->nodes[1].groups_changed, 2);
+    CHECK(lg_roster_is_member(&s->clients[EMMA].roster, LG_PROTO_DAD, 4));
+
+    /* An older table forged onto the backbone is forwarded but never adopted. */
+    static lg_groups_t old;
+    old = s->nodes[1].roster.groups;
+    old.seq = 1;
+    old.count = 0;
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t blen = lg_groups_enc(&old, body);
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.major = LG_PROTO_MAJOR;
+    e.minor = LG_PROTO_MINOR;
+    e.type = LG_T_GROUPS;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.ttl = LG_TTL_DEFAULT;
+    /* From an AP index no simulated AP uses: a forged sequence number under a real AP's identity
+     * would make that AP's own later frames look stale to the duplicate filter. */
+    e.origin_id = LG_NODE_ID_BASE | 7u;
+    e.origin_node = 7;
+    e.origin_boot = 1;
+    e.origin_seq = 7000;
+    static uint8_t frame[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, frame, sizeof(frame));
+    CHECK(flen > 0);
+    lg_node_on_backbone_frame(&s->nodes[1].node, 2, frame, (size_t)flen);
+    CHECK(sim_pump(s));
+    CHECK(tables_agree(s, 3, 4));
+
+    /* A malformed edit is counted and changes nothing. */
+    lg_env_t m;
+    memset(&m, 0, sizeof(m));
+    m.major = LG_PROTO_MAJOR;
+    m.minor = LG_PROTO_MINOR;
+    m.type = LG_T_GROUP_EDIT;
+    m.scope = LG_SCOPE_SYSTEM;
+    m.origin_id = LG_PROTO_DAD;
+    m.origin_boot = 99;   /* not Dad's real boot, so his own sequence numbers stay fresh */
+    m.origin_seq = 8000;
+    uint8_t junk[LG_GROUP_EDIT_LEN - 1] = { LG_GROUP_CREATE };
+    flen = lg_frame_build(&m, junk, sizeof(junk), frame, sizeof(frame));
+    CHECK(flen > 0);
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)flen);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 1u);
+    CHECK(tables_agree(s, 3, 4));
+
+    /* Removing FAMILY deletes its messages everywhere: Alex's received copy, and Dad's own
+     * unsent one, and nothing can be sent to it afterwards. */
+    CHECK(lg_client_send_text(cl(s, EMMA), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("Dinner at 7.")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, ALEX, "Dinner at 7."));
+    sim_detach(s, DAD);
+    int kept = lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("On my way"));
+    CHECK(kept >= 0);
+    sim_attach(s, DAD, 0);   /* re-offers it; delivered before the removal below */
+    lg_group_edit_t drop = { .op = LG_GROUP_DELETE, .id = LG_PROTO_FAMILY };
+    CHECK_EQ(lg_client_edit_group(cl(s, ALEX), &drop), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(tables_agree(s, 4, 3));
+    CHECK_EQ(s->clients[ALEX].removed_n, 1u);
+    CHECK_EQ(s->clients[ALEX].removed[0], LG_PROTO_FAMILY);
+    CHECK_EQ(s->clients[DAD].removed_n, 1u);
+    for (size_t i = 0; i < LG_INBOX_SIZE; i++) {
+        const lg_in_msg_t *in = &cl(s, ALEX)->inbox[i];
+        CHECK(!(in->scope == LG_SCOPE_GROUP && in->target == LG_PROTO_FAMILY));
+    }
+    CHECK_EQ(cl(s, DAD)->outbox[kept].state, LG_OUT_EMPTY);
+    CHECK_EQ(lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("hello?")), LG_ERR_ARG);
+
+    /* Ranger was away for all of it and gets the current table on registering. */
+    sim_attach(s, RANGER, 0);
+    CHECK(tables_agree(s, 4, 3));
+    CHECK_EQ(s->clients[RANGER].removed_n, 1u);   /* it held FAMILY, so it deletes it too */
+
+    /* A new group after a removal gets a fresh id: FAMILY's 1 is never reused. */
+    CHECK_EQ(lg_node_edit_groups(&s->nodes[2].node, &make), 0);
+    CHECK(sim_pump(s));
+    CHECK(tables_agree(s, 5, 4));
+    CHECK_EQ(s->clients[RANGER].roster.groups.groups[3].id, 5);
+    sim_destroy(s);
+}
+
 void test_messaging(void)
 {
     test_diag_echo();
@@ -584,6 +728,7 @@ void test_messaging(void)
     test_direct_two_hops_encrypted();
     test_direct_same_node();
     test_group();
+    test_group_edits();
     test_broadcast_and_rate_limit();
     test_duplicates_and_retransmit();
     test_offline_and_roam();

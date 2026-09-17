@@ -64,7 +64,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM16",
+      "port": "COM21",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -88,7 +88,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM18",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",

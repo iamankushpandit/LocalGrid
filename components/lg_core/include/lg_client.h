@@ -85,6 +85,8 @@ typedef enum {
     LG_CEV_TIME,             /* value: grid time, 0 when unset */
     LG_CEV_DECRYPT_FAILED,   /* value: author device */
     LG_CEV_KEY_CHANGED,      /* value: device whose advertised key differs from the pinned key */
+    LG_CEV_GROUPS,           /* value: number of groups removed; the table in the roster is newer */
+    LG_CEV_GROUP_REFUSED,    /* value: lg_ack_status_t the AP refused our last group edit with */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -98,6 +100,9 @@ typedef struct {
     void     (*on_event)(void *ctx, const lg_client_event_t *ev);
     uint32_t (*now_ms)(void *ctx);
     uint32_t (*local_time)(void *ctx);                 /* Unix seconds, 0 if unknown */
+    /* Optional. A newer group table replaced removed_n groups, listed in removed. Their
+     * messages have already left the outbox and inbox; the glue deletes its own copies (D52). */
+    void     (*on_groups_removed)(void *ctx, const uint16_t *removed, size_t removed_n);
     void     (*set_time)(void *ctx, uint32_t unix_s);
     /*
      * End-to-end encryption for 1:1 messages. seal writes pt_len + 16 bytes and
@@ -116,7 +121,8 @@ typedef struct {
     uint32_t           seq;
     uint32_t           attach_count;
     uint8_t            pubkey[LG_PUBKEY_LEN];
-    const lg_roster_t *roster;
+    lg_roster_t       *roster;             /* owned by the glue; replaced by newer group tables */
+    uint32_t           group_edit_seq;     /* our last GROUP_EDIT, to report its refusal */
     lg_client_io_t     io;
     bool               connected;
     bool               registered;
@@ -134,7 +140,7 @@ typedef struct {
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
-                    const lg_roster_t *roster, const lg_client_io_t *io);
+                    lg_roster_t *roster, const lg_client_io_t *io);
 
 /* The transport reached the node: sends REGISTER. */
 void lg_client_connected(lg_client_t *c);
@@ -153,6 +159,13 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len);
  */
 int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t flags,
                         const uint8_t *text, size_t len);
+
+/*
+ * Asks the AP to make, change, or remove a group (D52). Not retried: the AP answers with the new
+ * table (LG_CEV_GROUPS) or a refusal (LG_CEV_GROUP_REFUSED). LG_ERR_ARG for an unknown op,
+ * LG_ERR_SHORT when no session is registered.
+ */
+int lg_client_edit_group(lg_client_t *c, const lg_group_edit_t *edit);
 
 /* Retransmits pending messages; call about once a second. */
 void lg_client_tick(lg_client_t *c);

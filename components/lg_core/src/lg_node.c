@@ -161,6 +161,25 @@ static void push_time_to_local_clients(lg_node_t *n, uint8_t quality)
     }
 }
 
+static void send_groups_to_client(lg_node_t *n, uint32_t device)
+{
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t blen = lg_groups_enc(&n->roster->groups, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_GROUPS, LG_SCOPE_SYSTEM, device);
+    send_client(n, device, &e, body, blen);
+}
+
+static void push_groups_to_local_clients(lg_node_t *n)
+{
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *q = &n->presence[i];
+        if (q->in_use && is_local_online(n, q)) {
+            send_groups_to_client(n, q->device);
+        }
+    }
+}
+
 /* Floods a node-authored frame (TTL = default) after marking it seen locally. */
 static int flood_new(lg_node_t *n, uint8_t type, const uint8_t *body, size_t blen)
 {
@@ -391,9 +410,42 @@ static void handle_client_ack(lg_node_t *n, const lg_env_t *e, const uint8_t *bo
     }
 }
 
+/* The table changed on this node: save it, then send it everywhere it has to go. */
+static void groups_changed(lg_node_t *n)
+{
+    if (n->io.on_groups_changed != NULL) {
+        n->io.on_groups_changed(n->io.ctx);
+    }
+    (void)lg_node_announce_groups(n);
+    push_groups_to_local_clients(n);
+}
+
+static void handle_client_group_edit(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
+{
+    lg_group_edit_t edit;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_group_edit_dec(body, e->body_len, &edit)) {
+        n->stats.malformed++;
+        return;
+    }
+    lg_dedup_result_t d = lg_dedup_check(&n->dedup, e->origin_id, e->origin_boot, e->origin_seq);
+    if (d != LG_DEDUP_NEW) {
+        n->stats.duplicates++;   /* applied once already; the table it made has been sent */
+        return;
+    }
+    uint8_t status = lg_groups_apply_edit(n->roster, e->origin_id, &edit, n->self);
+    if (status != 0) {
+        reply_ack(n, e, status);
+        n->stats.rejected++;
+        return;
+    }
+    (void)lg_dedup_mark(&n->dedup, e->origin_id, e->origin_boot, e->origin_seq);
+    reply_ack(n, e, LG_ACK_ACCEPTED);
+    groups_changed(n);
+}
+
 /* ---- public API --------------------------------------------------------- */
 
-void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, const lg_roster_t *roster, const lg_node_io_t *io)
+void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roster, const lg_node_io_t *io)
 {
     memset(n, 0, sizeof(*n));
     n->self   = self;
@@ -442,6 +494,7 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         lg_env_t ae;
         env_from_node(n, &ae, LG_T_REGISTER_ACK, LG_SCOPE_SYSTEM, reg.device);
         send_client(n, reg.device, &ae, abody, alen);
+        send_groups_to_client(n, reg.device);
 
         for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
             if (n->presence[i].in_use) {
@@ -471,6 +524,9 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         break;
     case LG_T_MSG_ACK:
         handle_client_ack(n, &e, body);
+        break;
+    case LG_T_GROUP_EDIT:
+        handle_client_group_edit(n, &e, body);
         break;
     default:
         break;  /* unknown or not client-originated: ignored */
@@ -571,6 +627,22 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         }
         forward(n, &e, body, from_node);
         break;
+    case LG_T_GROUPS: {
+        lg_groups_t in;
+        if (e.scope != LG_SCOPE_SYSTEM || !lg_groups_dec(body, e.body_len, &in)) {
+            n->stats.malformed++;
+            break;
+        }
+        if (lg_groups_newer(&in, &n->roster->groups)) {
+            n->roster->groups = in;
+            if (n->io.on_groups_changed != NULL) {
+                n->io.on_groups_changed(n->io.ctx);
+            }
+            push_groups_to_local_clients(n);
+        }
+        forward(n, &e, body, from_node);
+        break;
+    }
     case LG_T_DIAG_ECHO:
         if (!lg_text_valid(body, e.body_len)) {
             n->stats.malformed++;
@@ -625,4 +697,20 @@ int lg_node_announce_grid_state(lg_node_t *n, const uint8_t *body, size_t len)
         return LG_ERR_ARG;
     }
     return flood_new(n, LG_T_GRID_STATE, body, len);
+}
+
+uint8_t lg_node_edit_groups(lg_node_t *n, const lg_group_edit_t *edit)
+{
+    uint8_t status = lg_groups_apply_edit(n->roster, 0, edit, n->self);
+    if (status == 0) {
+        groups_changed(n);
+    }
+    return status;
+}
+
+int lg_node_announce_groups(lg_node_t *n)
+{
+    uint8_t body[LG_GROUPS_MAX_LEN];
+    size_t blen = lg_groups_enc(&n->roster->groups, body);
+    return flood_new(n, LG_T_GROUPS, body, blen);
 }

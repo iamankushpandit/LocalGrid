@@ -106,7 +106,7 @@ static bool send_frame(lg_client_t *c, lg_env_t *e, const uint8_t *body, size_t 
 }
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
-                    const lg_roster_t *roster, const lg_client_io_t *io)
+                    lg_roster_t *roster, const lg_client_io_t *io)
 {
     memset(c, 0, sizeof(*c));
     c->device = device;
@@ -354,6 +354,63 @@ const lg_in_msg_t *lg_client_inbox(const lg_client_t *c, size_t newest_index)
     return &c->inbox[pos];
 }
 
+/* A removed group's messages go everywhere this core holds them (D52). */
+static void forget_group(lg_client_t *c, uint16_t id)
+{
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        lg_out_msg_t *m = &c->outbox[i];
+        if (m->state != LG_OUT_EMPTY && m->scope == LG_SCOPE_GROUP && m->target == id) {
+            memset(m, 0, sizeof(*m));
+        }
+    }
+    for (size_t i = 0; i < LG_INBOX_SIZE; i++) {
+        lg_in_msg_t *m = &c->inbox[i];
+        if (m->scope == LG_SCOPE_GROUP && m->target == id) {
+            memset(m->text, 0, sizeof(m->text));
+            m->len = 0;
+            m->scope = LG_SCOPE_SYSTEM;   /* an emptied slot, never shown as a message */
+        }
+    }
+}
+
+static void handle_groups(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
+{
+    lg_groups_t in;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_groups_dec(body, e->body_len, &in) ||
+        !lg_groups_newer(&in, &c->roster->groups)) {
+        return;   /* an older or equal table changes nothing here */
+    }
+    uint16_t removed[LG_MAX_GROUPS];
+    size_t n = lg_groups_removed(&c->roster->groups, &in, removed);
+    c->roster->groups = in;
+    for (size_t i = 0; i < n; i++) {
+        forget_group(c, removed[i]);
+    }
+    if (n > 0 && c->io.on_groups_removed != NULL) {
+        c->io.on_groups_removed(c->io.ctx, removed, n);
+    }
+    emit(c, LG_CEV_GROUPS, (uint32_t)n);
+}
+
+int lg_client_edit_group(lg_client_t *c, const lg_group_edit_t *edit)
+{
+    if (edit == NULL || edit->op < LG_GROUP_CREATE || edit->op > LG_GROUP_DELETE) {
+        return LG_ERR_ARG;
+    }
+    if (!c->registered) {
+        return LG_ERR_SHORT;
+    }
+    uint8_t body[LG_GROUP_EDIT_LEN];
+    size_t blen = lg_group_edit_enc(edit, body);
+    lg_env_t e;
+    base_env(c, &e, LG_T_GROUP_EDIT, LG_SCOPE_SYSTEM, 0);
+    if (!send_frame(c, &e, body, blen)) {
+        return LG_ERR_SHORT;
+    }
+    c->group_edit_seq = e.origin_seq;
+    return LG_OK;
+}
+
 static void handle_text(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
 {
     if (e->origin_id == c->device) {
@@ -413,6 +470,13 @@ static void handle_ack(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
 {
     lg_msg_ack_t a;
     if (!lg_msg_ack_dec(body, e->body_len, &a) || a.author != c->device) {
+        return;
+    }
+    if (c->group_edit_seq != 0 && a.boot == c->boot && a.seq == c->group_edit_seq) {
+        if (a.status != LG_ACK_ACCEPTED) {
+            emit(c, LG_CEV_GROUP_REFUSED, a.status);
+        }
+        c->group_edit_seq = 0;
         return;
     }
     for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
@@ -528,6 +592,9 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         break;
     case LG_T_MSG_ACK:
         handle_ack(c, &e, body);
+        break;
+    case LG_T_GROUPS:
+        handle_groups(c, &e, body);
         break;
     default:
         break;

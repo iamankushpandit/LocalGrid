@@ -49,7 +49,16 @@ typedef struct {
     char     name[HH_NAME_MAX];
     bool     member;        /* this handheld belongs to the group */
     uint8_t  members;       /* handhelds in the group, the denominator for a delivery count (D42) */
+    uint32_t member_devices;   /* bit (device - 1) set for each member, for the group editor (D52) */
 } hh_group_t;
+
+/* Every handheld in the roster, heard from or not: who a group can include (D52). */
+typedef struct {
+    uint32_t device;
+    char     name[HH_NAME_MAX];
+} hh_user_t;
+
+#define HH_GROUP_NAME_MAX  15   /* UTF-8 bytes, as LG_GROUP_NAME_MAX */
 
 typedef enum {
     HH_MSG_IN = 0,          /* received */
@@ -114,6 +123,10 @@ typedef struct {
     hh_person_t    people[LG_MAX_DEVICES];
     uint8_t        n_groups;
     hh_group_t     groups[LG_MAX_GROUPS];
+    uint32_t       groups_version;           /* changes when any group is made, changed, or removed */
+    char           group_problem[HH_PROBLEM_MAX];   /* why the AP refused our last group edit; empty if none */
+    uint8_t        n_users;
+    hh_user_t      users[LG_MAX_DEVICES];
     uint32_t       free_heap;
     uint32_t       min_free_heap;
 } hh_status_t;
@@ -154,3 +167,13 @@ const char *hh_message_state_text(const hh_message_t *m);
 
 /* Tells the author that one received 1:1 message has been shown. Reports each message once. */
 void hh_service_mark_read(uint32_t message_id);
+
+/*
+ * Groups (D52). Asks the AP to make a group (id 0), change one (name and members replace the
+ * old), or remove one (remove true; its messages are deleted on every handheld). members has
+ * bit (device - 1) set for each handheld in it; whoever makes a group is always added. Only a
+ * member may change or remove a group. The answer arrives as a new groups_version, or as
+ * group_problem when the AP refused. ESP_ERR_INVALID_ARG for a name of 0 or more than
+ * HH_GROUP_NAME_MAX bytes, ESP_ERR_NO_MEM when the queue is full.
+ */
+esp_err_t hh_service_edit_group(uint16_t id, const char *name, uint32_t members, bool remove);

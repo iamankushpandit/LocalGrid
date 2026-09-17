@@ -36,12 +36,15 @@ typedef enum {
     NODE_CMD_TIME_SET,
     NODE_CMD_CONFIG,
     NODE_CMD_GRID_ANNOUNCE,   /* settings changed on this AP: flood grid state now */
+    NODE_CMD_GROUP_EDIT,      /* the admin page changed a group (D52) */
+    NODE_CMD_GROUPS,          /* console: print the group table */
 } node_cmd_type_t;
 
 typedef struct {
     node_cmd_type_t type;
     uint32_t        value;
     char            text[LG_TEXT_MAX + 1];
+    lg_group_edit_t group;
 } node_cmd_t;
 
 typedef struct {
@@ -49,6 +52,7 @@ typedef struct {
     uint16_t      index;
     const char   *name;
     uint32_t      boot;
+    lg_roster_t   roster;          /* users are fixed; groups change and are saved (D52) */
     lg_node_t     core;
     int64_t       time_offset_s;   /* grid time = monotonic seconds + offset */
     uint8_t       time_quality;    /* lg_time_quality_t */

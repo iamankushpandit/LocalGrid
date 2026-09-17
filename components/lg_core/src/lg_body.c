@@ -179,3 +179,106 @@ bool lg_text_valid(const uint8_t *s, size_t n)
 {
     return s != NULL && n >= 1 && n <= LG_TEXT_MAX && lg_utf8_valid(s, n);
 }
+
+/* A name field is 16 bytes: 1..15 bytes of valid UTF-8, then NUL padding to the end. */
+static bool name_field_ok(const uint8_t *f)
+{
+    size_t n = 0;
+    while (n < LG_GROUP_NAME_MAX && f[n] != 0) {
+        n++;
+    }
+    if (n == 0 || !lg_utf8_valid(f, n)) {
+        return false;
+    }
+    for (size_t i = n; i < LG_GROUP_NAME_MAX + 1u; i++) {
+        if (f[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t lg_groups_enc(const lg_groups_t *v, uint8_t *out)
+{
+    uint8_t count = v->count <= LG_MAX_GROUPS ? v->count : (uint8_t)LG_MAX_GROUPS;
+    lg_wr32(out, v->seq);
+    lg_wr16(out + 4, v->author);
+    lg_wr16(out + 6, v->next_id);
+    out[8] = count;
+    for (size_t i = 0; i < count; i++) {
+        uint8_t *p = out + LG_GROUPS_HEAD_LEN + i * LG_GROUP_ENTRY_LEN;
+        const lg_group_t *g = &v->groups[i];
+        lg_wr16(p, g->id);
+        lg_wr32(p + 2, g->members);
+        memset(p + 6, 0, LG_GROUP_NAME_MAX + 1u);
+        for (size_t k = 0; k < LG_GROUP_NAME_MAX && g->name[k] != '\0'; k++) {
+            p[6 + k] = (uint8_t)g->name[k];
+        }
+    }
+    return LG_GROUPS_HEAD_LEN + count * LG_GROUP_ENTRY_LEN;
+}
+
+bool lg_groups_dec(const uint8_t *in, size_t len, lg_groups_t *v)
+{
+    if (len < LG_GROUPS_HEAD_LEN) {
+        return false;
+    }
+    uint8_t count = in[8];
+    if (count > LG_MAX_GROUPS || len != LG_GROUPS_HEAD_LEN + count * LG_GROUP_ENTRY_LEN) {
+        return false;
+    }
+    lg_groups_t t;
+    memset(&t, 0, sizeof(t));
+    t.seq     = lg_rd32(in);
+    t.author  = lg_rd16(in + 4);
+    t.next_id = lg_rd16(in + 6);
+    t.count   = count;
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *p = in + LG_GROUPS_HEAD_LEN + i * LG_GROUP_ENTRY_LEN;
+        lg_group_t *g = &t.groups[i];
+        g->id = lg_rd16(p);
+        g->members = lg_rd32(p + 2);
+        if (g->id == 0 || (t.next_id != 0 && g->id >= t.next_id) || !name_field_ok(p + 6)) {
+            return false;
+        }
+        for (size_t k = 0; k < i; k++) {
+            if (t.groups[k].id == g->id) {
+                return false;
+            }
+        }
+        memcpy(g->name, p + 6, LG_GROUP_NAME_MAX + 1u);
+    }
+    *v = t;
+    return true;
+}
+
+size_t lg_group_edit_enc(const lg_group_edit_t *v, uint8_t *out)
+{
+    out[0] = v->op;
+    lg_wr16(out + 1, v->id);
+    lg_wr32(out + 3, v->members);
+    memset(out + 7, 0, LG_GROUP_NAME_MAX + 1u);
+    for (size_t k = 0; k < LG_GROUP_NAME_MAX && v->name[k] != '\0'; k++) {
+        out[7 + k] = (uint8_t)v->name[k];
+    }
+    return LG_GROUP_EDIT_LEN;
+}
+
+bool lg_group_edit_dec(const uint8_t *in, size_t len, lg_group_edit_t *v)
+{
+    if (len != LG_GROUP_EDIT_LEN) {
+        return false;
+    }
+    memset(v, 0, sizeof(*v));
+    v->op = in[0];
+    v->id = lg_rd16(in + 1);
+    v->members = lg_rd32(in + 3);
+    if (v->op == LG_GROUP_DELETE) {
+        return true;   /* a removal names only the group */
+    }
+    if (!name_field_ok(in + 7)) {
+        return false;
+    }
+    memcpy(v->name, in + 7, LG_GROUP_NAME_MAX + 1u);
+    return true;
+}

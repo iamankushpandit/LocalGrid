@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 LV_FONT_DECLARE(lg_font_emoji_20)
+LV_FONT_DECLARE(lg_font_emoji_14)
 
 #define LG_EMOJI_COUNT 48u
 

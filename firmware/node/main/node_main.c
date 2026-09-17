@@ -126,6 +126,15 @@ static void io_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *bod
     grid_state_on_frame(origin_node, body, len);
 }
 
+static void io_on_groups_changed(void *ctx)
+{
+    (void)ctx;
+    const lg_groups_t *g = &g_app.roster.groups;
+    esp_err_t err = settings_groups_save(g);
+    ESP_LOGI(TAG, "[GRID] Groups version %" PRIu32 " (made on AP %u): %u group(s)%s", g->seq, g->author,
+             g->count, err == ESP_OK ? "" : "; not saved to flash");
+}
+
 static void io_on_time(void *ctx, uint16_t origin_node, uint32_t grid_time, uint8_t quality)
 {
     (void)ctx;
@@ -153,6 +162,7 @@ static void on_link(uint16_t node, bool up)
         /* A returning or new AP learns everything it missed: settings first, so a time
          * generation it has not seen demotes it before the time itself arrives (D45). */
         grid_state_announce();
+        (void)lg_node_announce_groups(&g_app.core);
         if (g_app.time_quality != LG_TIME_UNSET) {
             lg_node_announce_time(&g_app.core, g_app.time_quality);
         }
@@ -502,6 +512,33 @@ static void handle_command(const node_cmd_t *cmd)
     case NODE_CMD_GRID_ANNOUNCE:
         grid_state_announce();
         break;
+    case NODE_CMD_GROUP_EDIT: {
+        uint8_t status = lg_node_edit_groups(&g_app.core, &cmd->group);
+        if (status != 0) {
+            ESP_LOGW(TAG, "[GRID] Admin group edit (op %u, group %u) refused: status %u", cmd->group.op,
+                     cmd->group.id, status);
+        }
+        break;
+    }
+    case NODE_CMD_GROUPS: {
+        const lg_roster_t *r = &g_app.roster;
+        printf("Groups version %" PRIu32 " (made on AP %u), next id %u:\n", r->groups.seq, r->groups.author,
+               r->groups.next_id);
+        for (size_t i = 0; i < r->groups.count; i++) {
+            const lg_group_t *g = &r->groups.groups[i];
+            printf("  %-3u %-15s", g->id, g->name);
+            for (size_t u = 0; u < r->n_users && u < 32u; u++) {
+                if (g->members & (1u << u)) {
+                    printf(" %s,", r->users[u].name);
+                }
+            }
+            printf("\n");
+        }
+        if (r->groups.count == 0) {
+            printf("  none; make them on the admin page or a handheld\n");
+        }
+        break;
+    }
     case NODE_CMD_STATUS:
         print_status();
         break;
@@ -555,6 +592,7 @@ static void core_task(void *arg)
         if (now - last_grid_state >= GRID_STATE_ANNOUNCE_MS) {
             last_grid_state = now;
             grid_state_announce();
+            (void)lg_node_announce_groups(&g_app.core);   /* an AP that missed a change catches up */
         }
         if (g_app.time_quality == LG_TIME_AUTHORITATIVE && now - last_announce >= TIME_ANNOUNCE_MS) {
             last_announce = now;
@@ -601,8 +639,16 @@ void app_main(void)
         .on_diag = io_on_diag,
         .on_time = io_on_time,
         .on_grid_state = io_on_grid_state,
+        .on_groups_changed = io_on_groups_changed,
     };
-    lg_node_init(&g_app.core, g_app.index, g_app.boot, lg_roster_prototype(), &io);
+    lg_roster_init_prototype(&g_app.roster);
+    if (settings_groups_load(&g_app.roster.groups) == ESP_OK) {
+        ESP_LOGI(TAG, "[GRID] Groups version %" PRIu32 " (made on AP %u): %u group(s)", g_app.roster.groups.seq,
+                 g_app.roster.groups.author, g_app.roster.groups.count);
+    } else {
+        ESP_LOGI(TAG, "[GRID] No groups saved; waiting for another AP or an edit");
+    }
+    lg_node_init(&g_app.core, g_app.index, g_app.boot, &g_app.roster, &io);
 
     grid_state_init(g_app.index);
     ESP_ERROR_CHECK(lgbb_init(g_app.index, g_app.boot, s_backbone_key, on_backbone_frame, on_link, clients_count));

@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "lg_roster.h"
 
 #define SETTINGS_GRID_NAME_MAX  32
 #define SETTINGS_TZ_MAX         47
@@ -31,3 +32,10 @@ typedef struct {
 /* Loads settings; an absent or incompatible record yields configured == false. */
 esp_err_t settings_load(node_settings_t *out);
 esp_err_t settings_save(const node_settings_t *in);
+
+/*
+ * The group table (D52), kept as its GROUPS body under its own key, so a change of the admin
+ * record's layout never touches it. A missing or unreadable record leaves *out unchanged.
+ */
+esp_err_t settings_groups_load(lg_groups_t *out);
+esp_err_t settings_groups_save(const lg_groups_t *in);

@@ -92,6 +92,13 @@ static int cmd_time(int argc, char **argv)
     return 1;
 }
 
+static int cmd_groups(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return post(NODE_CMD_GROUPS, 0, NULL);
+}
+
 void console_start(void)
 {
     esp_console_repl_t *repl = NULL;
@@ -109,6 +116,7 @@ void console_start(void)
         { .command = "config",  .help = "Grid name, time zone, LocalMesh Access Point network, admin state (read-only)", .func = cmd_config },
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
+        { .command = "groups",  .help = "Groups, their members, and the table's version (D52)", .func = cmd_groups },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));

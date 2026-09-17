@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "freertos/semphr.h"
 #include "grid_state.h"
+#include "lg_body.h"
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
 #include "node_app.h"
@@ -60,6 +61,7 @@ typedef struct {
         uint8_t  state;
         uint16_t node;
     } devices[LG_MAX_DEVICES];
+    lg_roster_t roster;   /* a copy: users point at const data, groups are values (D52) */
 } snapshot_t;
 
 typedef struct {
@@ -106,6 +108,7 @@ void web_admin_publish_snapshot(void)
         s.devices[k].state = p->state;
         s.devices[k].node = p->node;
     }
+    s.roster = *r;
     xSemaphoreTake(w.lock, portMAX_DELAY);
     w.snap = s;
     xSemaphoreGive(w.lock);
@@ -538,7 +541,7 @@ static esp_err_t h_status(httpd_req_t *req)
     s = w.snap;
     xSemaphoreGive(w.lock);
 
-    static char out[3072];
+    static char out[4096];
     static node_settings_t cfg;
     grid_state_settings(&cfg);
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
@@ -562,6 +565,38 @@ static esp_err_t h_status(httpd_req_t *req)
         n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\",\"state\":\"%s\",\"node\":%d}",
                       i ? "," : "", s.devices[i].device, s.devices[i].name, state,
                       s.devices[i].node == LG_NODE_NONE ? -1 : (int)s.devices[i].node);
+    }
+    /* Every handheld in the roster, not only those seen, so a group can include one that has
+     * not connected yet; then the groups, members named by device (D52). */
+    const lg_roster_t *r = &s.roster;
+    if (n > 0 && (size_t)n < sizeof(out)) {
+        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"users\":[");
+    }
+    for (size_t i = 0; i < r->n_users && n > 0 && (size_t)n < sizeof(out); i++) {
+        char un[2 * 16 + 8];
+        json_escape(r->users[i].name, un, sizeof(un));
+        n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\"}", i ? "," : "",
+                      r->users[i].device, un);
+    }
+    if (n > 0 && (size_t)n < sizeof(out)) {
+        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"groups_version\":%" PRIu32 ",\"groups\":[", r->groups.seq);
+    }
+    for (size_t i = 0; i < r->groups.count && n > 0 && (size_t)n < sizeof(out); i++) {
+        const lg_group_t *g = &r->groups.groups[i];
+        char gn[2 * (LG_GROUP_NAME_MAX + 1u) + 8];
+        json_escape(g->name, gn, sizeof(gn));
+        n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"id\":%u,\"name\":\"%s\",\"members\":[", i ? "," : "",
+                      g->id, gn);
+        bool first = true;
+        for (size_t u = 0; u < r->n_users && u < 32u && n > 0 && (size_t)n < sizeof(out); u++) {
+            if (g->members & (1u << u)) {
+                n += snprintf(out + n, sizeof(out) - (size_t)n, "%s%" PRIu32, first ? "" : ",", r->users[u].device);
+                first = false;
+            }
+        }
+        if (n > 0 && (size_t)n < sizeof(out)) {
+            n += snprintf(out + n, sizeof(out) - (size_t)n, "]}");
+        }
     }
     if (n > 0 && (size_t)n < sizeof(out)) {
         n += snprintf(out + n, sizeof(out) - (size_t)n, "]}");
@@ -601,6 +636,97 @@ static esp_err_t h_time(httpd_req_t *req)
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+/* Devices as the page sends them, "1,3,4", to member bits of r. False for anything else. */
+static bool parse_members(const lg_roster_t *r, const char *list, uint32_t *out)
+{
+    uint32_t bits = 0;
+    const char *p = list;
+    while (*p != '\0') {
+        char *end = NULL;
+        unsigned long dev = strtoul(p, &end, 10);
+        if (end == p) {
+            return false;
+        }
+        int ui = lg_roster_user_index(r, (uint32_t)dev);
+        if (ui < 0 || ui >= 32) {
+            return false;
+        }
+        bits |= 1u << (unsigned)ui;
+        p = end;
+        if (*p == ',') {
+            p++;
+        } else if (*p != '\0') {
+            return false;
+        }
+    }
+    *out = bits;
+    return true;
+}
+
+static esp_err_t h_groups(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to change groups.");
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    char body[ADMIN_BODY_MAX];
+    char op[12], name[4 * (LG_GROUP_NAME_MAX + 1u)] = "", devices[160] = "";
+    uint64_t id = 0;
+    if (!read_body(req, body, sizeof(body)) || !json_string(body, "op", op, sizeof(op))) {
+        return send_error(req, "400 Bad Request", "Say what to do with the group.");
+    }
+    (void)json_uint64(body, "id", &id);
+    (void)json_string(body, "name", name, sizeof(name));
+    (void)json_string(body, "devices", devices, sizeof(devices));
+
+    /* Try the edit on a copy of the published table first, so the page hears why it would be
+     * refused; the core task then applies it to the real one. */
+    static snapshot_t snap;
+    xSemaphoreTake(w.lock, portMAX_DELAY);
+    snap = w.snap;
+    xSemaphoreGive(w.lock);
+    node_cmd_t cmd = { .type = NODE_CMD_GROUP_EDIT };
+    lg_group_edit_t *e = &cmd.group;
+    if (strcmp(op, "create") == 0) {
+        e->op = LG_GROUP_CREATE;
+    } else if (strcmp(op, "update") == 0) {
+        e->op = LG_GROUP_UPDATE;
+    } else if (strcmp(op, "delete") == 0) {
+        e->op = LG_GROUP_DELETE;
+    } else {
+        return send_error(req, "400 Bad Request", "Unknown group action.");
+    }
+    e->id = id <= 0xFFFFu ? (uint16_t)id : 0u;
+    if (e->op != LG_GROUP_DELETE) {
+        if (strlen(name) == 0 || strlen(name) > LG_GROUP_NAME_MAX) {
+            return send_error(req, "400 Bad Request", "A group name is 1 to 15 bytes (fewer with accents or emoji).");
+        }
+        memcpy(e->name, name, strlen(name));
+        if (!parse_members(&snap.roster, devices, &e->members)) {
+            return send_error(req, "400 Bad Request", "Pick handhelds from the list.");
+        }
+    }
+    switch (lg_groups_apply_edit(&snap.roster, 0, e, g_app.index)) {
+    case 0:
+        break;
+    case LG_ACK_REJ_UNKNOWN_TARGET:
+        return send_error(req, "404 Not Found", "That group no longer exists. Reload the page.");
+    default:
+        if (e->op == LG_GROUP_CREATE && snap.roster.groups.count >= LG_MAX_GROUPS) {
+            return send_error(req, "409 Conflict", "There are already 8 groups. Remove one first.");
+        }
+        return send_error(req, "400 Bad Request", "Check the name, and pick at least one handheld.");
+    }
+    if (xQueueSend(g_app.cmd_queue, &cmd, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return send_error(req, "503 Service Unavailable", "The AP is busy. Try again.");
+    }
+    ESP_LOGI(TAG, "[WEB] Admin group %s: id %u \"%s\"", op, e->id, e->name);
+    return send_json(req, "200 OK", "{\"ok\":true}");
+}
+
 esp_err_t web_admin_start(void)
 {
     w.lock = xSemaphoreCreateMutex();
@@ -627,6 +753,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/logout",   .method = HTTP_POST, .handler = h_logout },
         { .uri = "/api/status",   .method = HTTP_GET,  .handler = h_status },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
+        { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         httpd_register_uri_handler(server, &routes[i]);
