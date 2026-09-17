@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed (admin page stuck on "Connecting to this AP")
 - The merge left two `const esc` declarations in `admin.html` (main's strips characters, the Groups card's encodes them). A redeclared `const` is a syntax error, so no script ran and the page never left its loading card. The Groups helper is now `escHtml`. Checked with `node --check` on the page script and in the preview: setup, dashboard, availability, outages, and adding a group all render with no console errors. Flashed to MAIN, NORTH, and SOUTH.
+- The owner confirmed the page loads on a phone and set grid time. A group message then went end to end: the Freenove's `group new Cooks 1,2` reached both handhelds as groups version 4, and `send Cooks dinner at seven` arrived on the Hosyond with a notification, marked `delivered 1` on the sender.
 
 
 ### Fixed (both handhelds hung on the conversation list; merged onto main's monitoring work)
