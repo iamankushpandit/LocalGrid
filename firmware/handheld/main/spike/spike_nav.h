@@ -52,5 +52,14 @@ void spike_rename_touch(int16_t x, int16_t y, bool down);
 /* Blocks the spike task for up to 30 s a point while the three targets are pressed. */
 void spike_calibrate_run(uint16_t w, uint16_t h);
 
+/* Redraws whatever screen is current, after the banner, an alert, or the saver covered it. */
+void spike_redraw_current(void);
+
+/* True when that conversation's chat is the screen showing. */
+bool spike_chat_showing(uint8_t scope, uint32_t target);
+
+void spike_group_edit_redraw(void);
+void spike_rename_redraw(void);
+
 /* The service's status, refreshed on each call; spike task only. */
 const hh_status_t *spike_status(void);

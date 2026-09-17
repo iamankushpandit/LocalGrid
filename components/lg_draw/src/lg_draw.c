@@ -374,6 +374,21 @@ void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16
     }
 }
 
+void lg_paint_pixel(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t y, lg_color_t color, uint8_t alpha)
+{
+    if (alpha == 0 || x < clip->x || x >= clip->x + clip->w || y < clip->y || y >= clip->y + clip->h ||
+        x < c->band.x || x >= c->band.x + c->band.w || y < c->band.y || y >= c->band.y + c->band.h) {
+        return;
+    }
+    uint8_t *px = pixel(c, x, y);
+    lg_color_t col = color;
+    if (alpha < 255) {
+        col = blend(color, (lg_color_t)((px[0] << 8) | px[1]), alpha);
+    }
+    px[0] = (uint8_t)(col >> 8);
+    px[1] = (uint8_t)col;
+}
+
 uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,
                      uint16_t *starts, uint8_t max_lines)
 {

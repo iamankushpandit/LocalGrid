@@ -29,6 +29,7 @@
 #include "lg_envelope.h"
 #include "spike_kb.h"
 #include "spike_nav.h"
+#include "spike_overlay.h"
 #include "spike_theme.h"
 
 static const char *TAG = "UI";
@@ -463,6 +464,7 @@ void spike_chat_open(uint16_t w, uint16_t h, uint8_t scope, uint32_t target, con
     s.scroll = max_scroll();   /* newest at the bottom, in view */
     s.shown_messages = st->messages_version;
     s.newest_id = s.n_bubbles ? s.bubbles[s.n_bubbles - 1u].id : 0;
+    spike_notify_mark_seen(scope, target);
     draw_all();
     ESP_LOGI(TAG, "[UI] Spike chat with %s: %u message(s), content %d px", s.title, s.n_bubbles, s.content_h);
 }
@@ -476,6 +478,7 @@ void spike_chat_refresh(const hh_status_t *st)
 {
     if (st->messages_version != s.shown_messages) {
         s.shown_messages = st->messages_version;
+        spike_notify_mark_seen(s.scope, s.target);
         bool was_at_bottom = at_bottom();
         layout();
         uint32_t newest = s.n_bubbles ? s.bubbles[s.n_bubbles - 1u].id : 0;
@@ -608,4 +611,15 @@ void spike_chat_log(void)
              s.n_bubbles, s.content_h, s.list_paints, s.list_paints ? s.list_us / s.list_paints / 1000u : 0u,
              s.scroll_steps, s.scroll_steps ? s.scroll_us / s.scroll_steps / 1000u : 0u, key_paints,
              key_paints ? key_us / key_paints / 1000u : 0u);
+}
+
+void spike_chat_redraw(void)
+{
+    place(s.keyboard);   /* restores the scroll area an overlay turned off; the reader keeps their place */
+    draw_all();
+}
+
+bool spike_chat_is(uint8_t scope, uint32_t target)
+{
+    return s.scope == scope && (scope == LG_SCOPE_BROADCAST || s.target == target);
 }

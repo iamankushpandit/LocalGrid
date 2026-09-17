@@ -21,6 +21,7 @@
 #include "spike_kb.h"
 #include "spike_list.h"
 #include "spike_nav.h"
+#include "spike_overlay.h"
 #include "spike_theme.h"
 
 static const char *TAG = "UI";
@@ -58,7 +59,7 @@ static uint32_t convs_build(bool rebuild)
 {
     const hh_status_t *st = spike_status();
     uint32_t sig = 2166136261u;
-    sig = mix(sig, st->time_restricted);
+    sig = mix(mix(sig, st->time_restricted), spike_notify_unread_total());
     for (uint8_t i = 0; i < st->n_groups; i++) {
         sig = mix_str(mix(mix(sig, st->groups[i].id), st->groups[i].member), st->groups[i].name);
     }
@@ -70,17 +71,36 @@ static uint32_t convs_build(bool rebuild)
     }
     slist_begin("Messages", false, false);
     uint8_t n = 0;
+    char value[SLIST_VALUE_MAX];
+    uint32_t unread = spike_notify_unread(LG_SCOPE_BROADCAST, LG_TARGET_ALL);
+    if (unread) {
+        snprintf(value, sizeof(value), "%" PRIu32 " new", unread);
+    } else {
+        snprintf(value, sizeof(value), "%s", st->time_restricted ? "urgent only" : "broadcast");
+    }
     s_convs.refs[n] = (conv_ref_t){ LG_SCOPE_BROADCAST, LG_TARGET_ALL };
-    slist_add(ROW_ACTION, "Everyone", st->time_restricted ? "urgent only" : "broadcast", 0, n++);
+    slist_add(ROW_ACTION, "Everyone", value, 0, n++)->warn = unread > 0;
     for (uint8_t i = 0; i < st->n_groups && n < SLIST_ROWS - 2; i++) {
         if (st->groups[i].member) {
             s_convs.refs[n] = (conv_ref_t){ LG_SCOPE_GROUP, st->groups[i].id };
-            slist_add(ROW_ACTION, st->groups[i].name, "group", 0, n++);
+            unread = spike_notify_unread(LG_SCOPE_GROUP, st->groups[i].id);
+            if (unread) {
+                snprintf(value, sizeof(value), "%" PRIu32 " new", unread);
+            } else {
+                snprintf(value, sizeof(value), "group");
+            }
+            slist_add(ROW_ACTION, st->groups[i].name, value, 0, n++)->warn = unread > 0;
         }
     }
     for (uint8_t i = 0; i < st->n_people && n < SLIST_ROWS - 2; i++) {
         s_convs.refs[n] = (conv_ref_t){ LG_SCOPE_DIRECT, st->people[i].device };
-        slist_add(ROW_ACTION, st->people[i].name, st->people[i].online ? "online, encrypted" : "offline", 0, n++);
+        unread = spike_notify_unread(LG_SCOPE_DIRECT, st->people[i].device);
+        if (unread) {
+            snprintf(value, sizeof(value), "%" PRIu32 " new", unread);
+        } else {
+            snprintf(value, sizeof(value), "%s", st->people[i].online ? "online, encrypted" : "offline");
+        }
+        slist_add(ROW_ACTION, st->people[i].name, value, 0, n++)->warn = unread > 0;
     }
     if (st->n_people == 0) {
         slist_add(ROW_NOTE, NULL, "No other handheld seen yet, so there is no one to message directly.", -1, 0);
@@ -740,4 +760,14 @@ void spike_calibrate_run(uint16_t w, uint16_t h)
             (int16_t)(h * 30 / 100 + 30), F_SMALL);
     vTaskDelay(pdMS_TO_TICKS(1500));
     spike_go(NAV_SETTINGS, 0, SET_TAB_SCREEN, NULL);
+}
+
+void spike_group_edit_redraw(void)
+{
+    editor_show(true);
+}
+
+void spike_rename_redraw(void)
+{
+    rename_show();
 }

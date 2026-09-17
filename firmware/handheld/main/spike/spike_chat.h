@@ -13,6 +13,12 @@
  * LG_SCOPE_BROADCAST) and draws the whole screen. */
 void spike_chat_open(uint16_t w, uint16_t h, uint8_t scope, uint32_t target, const char *title);
 
+/* Draws the chat again where the reader left it (after an overlay). */
+void spike_chat_redraw(void);
+
+/* True when this chat is showing that conversation. */
+bool spike_chat_is(uint8_t scope, uint32_t target);
+
 /* Leaves the chat: turns the hardware scroll area off before another screen draws. */
 void spike_chat_close(void);
 

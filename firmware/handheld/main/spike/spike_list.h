@@ -65,6 +65,9 @@ slist_row_t *slist_add(slist_kind_t kind, const char *label, const char *value, 
  * keyboard). keep_scroll: stay where the reader was. */
 void slist_show(uint16_t w, uint16_t h, int16_t bottom, bool keep_scroll);
 
+/* Draws header and rows again where the reader was (after an overlay). */
+void slist_redraw(void);
+
 /* Rows changed but header and tabs did not: lays out again and repaints the list only. */
 void slist_update(void);
 

@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (no-LVGL UI: screen saver, notifications and alerts, and the logo)
+- `spike_overlay.c`, matching the LVGL firmware's behaviour:
+  - Banner: a 1:1 or group message for a conversation not on screen rings the bell and shows a banner at the top for 15 s; tapping it opens the conversation.
+  - Unread counts: kept per conversation and cleared when it is opened. The Messages tile shows "N new", and the conversation list shows "N new" per row in the warning colour.
+  - Alerts: a broadcast flashes a full-screen announcement (warning colour, 4 cycles, then still) with its chime; an urgent broadcast flashes the error colour and repeats the siren every 4 s. Both stay until the X is tapped (D41).
+  - Screen saver: after a minute untouched, if its setting is on, the green rain falls, drawn one character cell at a time. The first touch only dismisses it.
+  - While an alert or the saver covers the panel, screens do not paint; afterwards `spike_redraw_current()` redraws the screen where it was (chat and lists keep their scroll). A screen that repaints under the banner puts the banner back.
+- The home screen shows the LocalGrid mark beside the name, drawn from the SVG's shapes with smoothed edges at 26 px (`lg_paint_pixel()` added to `lg_draw`).
+- Console: `spike log` also prints the overlay's state (cover, banner, idle time, saver setting, unread total); `spike tap` goes through the overlay first and counts as activity, as a finger does.
+- Verified over serial on the Hosyond: the Freenove's 1:1 message gave `Notified: Pinky in Pinky`; its broadcast gave `Announcement alert: dinner is ready`, and a tap on the X gave `Alert closed`; with the saver switched on from Settings > Screen, `Screen saver on` after 60 s idle and `Screen saver off` on a tap. The saver setting had been off on the Hosyond. **Not verified by eye**: the logo, the banner, the alert, and the rain.
+
+
 ### Added (no-LVGL UI: Messages, Groups, and Settings on both handhelds)
 - Owner, after the scrolling test: add the Groups and Settings screens. The spike is now a whole handheld UI apart from the screen saver and the self test.
 - `spike_kb.c`: the keyboard, shared by chat, group names, and renaming. `spike_list.c`: a list screen (header with home or back and an optional +, optional tabs, and section, fact, action, choice, button, note, checkbox, and text-field rows) that scrolls with the panel's hardware scroll, repaints one row for a press or a typed character, and only rebuilds when what it shows changed. `spike_nav.h`: screens ask to move with `spike_go()`, and the spike task switches once the touch or refresh that asked has returned.

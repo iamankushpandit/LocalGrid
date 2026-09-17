@@ -93,6 +93,10 @@ void lg_paint_panel(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t
 void lg_paint_text(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t line_top, const lv_font_t *font,
                    const lv_font_t *fallback, lg_color_t fg, const char *text, size_t len);
 
+/* One pixel blended over what is in the band (alpha 255 = opaque), clipped. For small shapes
+ * such as the logo, drawn from distance tests. */
+void lg_paint_pixel(const lg_canvas_t *c, const lg_rect_t *clip, int16_t x, int16_t y, lg_color_t color, uint8_t alpha);
+
 /* Word-wraps text to max_w: starts[i] is the byte offset of line i, and starts[lines] the end of
  * the text, so starts needs max_lines + 1 entries. Returns the number of lines. */
 uint8_t lg_text_wrap(const lv_font_t *font, const lv_font_t *fallback, const char *text, int16_t max_w,

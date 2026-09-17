@@ -11,6 +11,7 @@
 #include "spike_ui.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -28,18 +29,12 @@
 #include "lg_envelope.h"
 #include "spike_chat.h"
 #include "spike_nav.h"
+#include "spike_list.h"
+#include "spike_overlay.h"
+#include "spike_theme.h"
 
 static const char *TAG = "UI";
 
-/* The Terminal theme's roles (lg_theme.c), as RGB565: the spike keeps its own copy of the table. */
-#define C_BG       lg_rgb(0x000000)
-#define C_SURFACE  lg_rgb(0x0A140F)
-#define C_OUTLINE  lg_rgb(0x1F3A2A)
-#define C_TEXT     lg_rgb(0xD2F5DE)
-#define C_MUTED    lg_rgb(0x7FA78F)
-#define C_ACCENT   lg_rgb(0x5FD38D)
-#define C_WARNING  lg_rgb(0xF0B64A)
-#define C_ERROR    lg_rgb(0xFF6B6B)
 
 #define TICK_MS      20
 #define REFRESH_MS   250
@@ -123,6 +118,95 @@ static lg_box_t text_box(int16_t x, int16_t y, int16_t w, int16_t h, const lv_fo
     return b;
 }
 
+/*
+ * The LocalGrid mark (assets/brand/localgrid-icon.svg, as on the admin page), drawn pixel by
+ * pixel from its shapes in the SVG's 64-unit grid: a rounded tile, two radio waves over the top
+ * node, the tent of links between three nodes, and a handheld in the middle joined to each. Edges
+ * are smoothed from each pixel's distance to the shape, so it reads at 26 px.
+ */
+#define LOGO_SIZE 26
+
+static float clampf(float v)
+{
+    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+static float segment_distance(float px, float py, float ax, float ay, float bx, float by)
+{
+    float vx = bx - ax;
+    float vy = by - ay;
+    float t = clampf(((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy));
+    float dx = px - (ax + t * vx);
+    float dy = py - (ay + t * vy);
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static void paint_logo(const lg_canvas_t *c, int16_t x0, int16_t y0)
+{
+    lg_rect_t box = { x0, y0, LOGO_SIZE, LOGO_SIZE };
+    lg_paint_panel(c, &box, &box, C_BAR, C_BG, C_BAR, 0, (uint8_t)(14 * LOGO_SIZE / 64));
+    float unit = 64.0f / LOGO_SIZE;   /* grid units per pixel */
+    for (int16_t py = 0; py < LOGO_SIZE; py++) {
+        int16_t sy = (int16_t)(y0 + py);
+        if (sy < c->band.y || sy >= c->band.y + c->band.h) {
+            continue;
+        }
+        for (int16_t px = 0; px < LOGO_SIZE; px++) {
+            float u = (px + 0.5f) * unit;
+            float v = (py + 0.5f) * unit;
+            int16_t sx = (int16_t)(x0 + px);
+            /* Waves: the upper quarter of two circles around the top node. */
+            float dx = u - 32.0f;
+            float dy = v - 22.0f;
+            if (dy < 0.0f && fabsf(dx) <= -dy) {
+                float r = sqrtf(dx * dx + dy * dy);
+                float a = clampf((1.5f - fabsf(r - 11.0f)) / unit + 0.5f) * 0.9f;
+                a += clampf((1.5f - fabsf(r - 18.0f)) / unit + 0.5f) * 0.5f;
+                lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf(a) * 255.0f));
+            }
+            /* The tent: links between the three nodes. */
+            float d = segment_distance(u, v, 32, 22, 14, 50);
+            float e = segment_distance(u, v, 14, 50, 50, 50);
+            float f = segment_distance(u, v, 50, 50, 32, 22);
+            d = d < e ? d : e;
+            d = d < f ? d : f;
+            lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((1.5f - d) / unit + 0.5f) * 255.0f));
+            /* The handheld's links to each node, fainter. */
+            d = segment_distance(u, v, 32, 22, 32, 39);
+            e = segment_distance(u, v, 14, 50, 32, 39);
+            f = segment_distance(u, v, 50, 50, 32, 39);
+            d = d < e ? d : e;
+            d = d < f ? d : f;
+            lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((1.0f - d) / unit + 0.5f) * 0.6f * 255.0f));
+            /* Nodes. */
+            static const float NODES[3][2] = { { 32, 22 }, { 14, 50 }, { 50, 50 } };
+            for (int n = 0; n < 3; n++) {
+                float nx = u - NODES[n][0];
+                float ny = v - NODES[n][1];
+                float dn = sqrtf(nx * nx + ny * ny);
+                lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((4.5f - dn) / unit + 0.5f) * 255.0f));
+            }
+            /* The handheld: a hollow ring. */
+            float hx = u - 32.0f;
+            float hy = v - 39.0f;
+            float dh = sqrtf(hx * hx + hy * hy);
+            lg_paint_pixel(c, &box, sx, sy, C_BAR, (uint8_t)(clampf((3.5f - dh) / unit + 0.5f) * 255.0f));
+            lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((1.0f - fabsf(dh - 3.5f)) / unit + 0.5f) * 255.0f));
+        }
+    }
+}
+
+static void paint_heading(const lg_canvas_t *c, void *ctx)
+{
+    const lg_box_t *b = ctx;
+    lg_paint_panel(c, &b->rect, &b->rect, C_BG, C_BG, C_BG, 0, 0);
+    int16_t logo_y = (int16_t)(b->rect.y + (b->rect.h - LOGO_SIZE) / 2);
+    paint_logo(c, PAD, logo_y);
+    lg_paint_text(c, &b->rect, (int16_t)(PAD + LOGO_SIZE + 6),
+                  (int16_t)(b->rect.y + (b->rect.h - b->font->line_height) / 2), b->font, NULL, b->fg, b->text,
+                  strlen(b->text));
+}
+
 static void draw_tile(tile_t *t, bool pressed)
 {
     lg_color_t bg = pressed ? C_OUTLINE : C_SURFACE;
@@ -136,14 +220,14 @@ static void draw_tile(tile_t *t, bool pressed)
 
 static void build_launcher(void)
 {
-    s.heading = text_box(0, PAD, (int16_t)s.w, 26, &lv_font_montserrat_20, C_ACCENT, C_BG, LG_ALIGN_LEFT, "LocalGrid");
+    s.heading = text_box(0, PAD - 2, (int16_t)s.w, 30, &lv_font_montserrat_20, C_ACCENT, C_BG, LG_ALIGN_LEFT, "LocalGrid");
     s.heading.pad = PAD;
-    s.subline = text_box(0, PAD + 26, (int16_t)s.w, 18, &lv_font_montserrat_12, C_MUTED, C_BG, LG_ALIGN_LEFT, "Starting");
+    s.subline = text_box(0, PAD + 28, (int16_t)s.w, 18, &lv_font_montserrat_12, C_MUTED, C_BG, LG_ALIGN_LEFT, "Starting");
     s.subline.pad = PAD;
 
     static const char *icons[TILE_COUNT] = { LV_SYMBOL_ENVELOPE, LV_SYMBOL_LIST, LV_SYMBOL_WIFI, LV_SYMBOL_SETTINGS };
     static const char *titles[TILE_COUNT] = { "Messages", "Groups", "Status", "Settings" };
-    int16_t top = (int16_t)(PAD + 26 + 18 + GAP);
+    int16_t top = (int16_t)(PAD + 28 + 18 + GAP);
     int16_t tw = (int16_t)((s.w - 2 * PAD - GAP) / 2);
     int16_t th = (int16_t)((s.h - top - PAD - GAP) / 2);
     for (int i = 0; i < TILE_COUNT; i++) {
@@ -171,7 +255,7 @@ static void show_launcher(void)
     s.screen = SCREEN_LAUNCHER;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
-    lg_draw_box(&s.heading);
+    lg_draw_region(&s.heading.rect, paint_heading, &s.heading);
     lg_draw_box(&s.subline);
     for (int i = 0; i < TILE_COUNT; i++) {
         draw_tile(&s.tiles[i], false);
@@ -247,7 +331,14 @@ static void refresh(void)
             s.subline.fg = st->problem[0] ? C_ERROR : C_WARNING;
         }
         lg_draw_set_text(&s.subline, text);
-        snprintf(text, sizeof(text), "%u known", st->n_people);
+        uint32_t unread = spike_notify_unread_total();
+        if (unread > 0) {
+            snprintf(text, sizeof(text), "%" PRIu32 " new", unread);
+            s.tiles[TILE_MESSAGES].detail.fg = C_ACCENT;
+        } else {
+            snprintf(text, sizeof(text), "%u known", st->n_people);
+            s.tiles[TILE_MESSAGES].detail.fg = C_MUTED;
+        }
         lg_draw_set_text(&s.tiles[TILE_MESSAGES].detail, text);
         snprintf(text, sizeof(text), "%u groups", st->n_groups);
         lg_draw_set_text(&s.tiles[TILE_GROUPS].detail, text);
@@ -281,6 +372,23 @@ static void refresh(void)
     if (!s.marked_status) {
         s.marked_status = true;
         hh_mem_mark("spike Status screen drawn");
+    }
+}
+
+bool spike_chat_showing(uint8_t scope, uint32_t target)
+{
+    return s.screen == SCREEN_CHAT && spike_chat_is(scope, target);
+}
+
+void spike_redraw_current(void)
+{
+    switch (s.screen) {
+    case SCREEN_LAUNCHER:   show_launcher(); refresh(); break;
+    case SCREEN_STATUS:     show_status(); refresh(); break;
+    case SCREEN_CHAT:       spike_chat_redraw(); break;
+    case SCREEN_GROUP_EDIT: spike_group_edit_redraw(); break;
+    case SCREEN_RENAME:     spike_rename_redraw(); break;
+    default:                slist_redraw(); break;   /* conversations, groups, settings, which AP */
     }
 }
 
@@ -390,6 +498,7 @@ static void on_tap(int16_t x, int16_t y, bool down)
 }
 
 static QueueHandle_t s_requests;
+static uint32_t s_last_touch;
 
 static void handle_request(const spike_req_t *r)
 {
@@ -417,9 +526,16 @@ static void handle_request(const spike_req_t *r)
     case SPIKE_TAP: {
         int16_t x = (int16_t)(r->arg >> 16);
         int16_t y = (int16_t)(r->arg & 0xFFFF);
-        on_tap(x, y, true);
+        /* A tap as the finger makes it: the overlay sees it first, then the screen, and it counts
+         * as activity for the screen saver. */
+        s_last_touch = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!spike_overlay_touch(x, y, true)) {
+            on_tap(x, y, true);
+        }
         apply_nav();
-        on_tap(x, y, false);   /* a tap: down, then up at the same place */
+        if (!spike_overlay_touch(x, y, false)) {
+            on_tap(x, y, false);
+        }
         break;
     }
     case SPIKE_SCROLL:
@@ -439,6 +555,7 @@ static void handle_request(const spike_req_t *r)
         break;
     case SPIKE_LOG:
         spike_chat_log();
+        spike_overlay_log((uint32_t)(esp_timer_get_time() / 1000), s_last_touch);
         break;
     case SPIKE_PAGE:
         if (s.screen == SCREEN_CHAT) {
@@ -455,27 +572,46 @@ static void spike_task(void *arg)
     uint32_t last_stats = 0;
     lg_draw_stats_t prev = *lg_draw_stats();
     bool was_down = false;
+    s_last_touch = (uint32_t)(esp_timer_get_time() / 1000);
     for (;;) {
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
         int16_t x = 0;
         int16_t y = 0;
         bool down = lg_draw_touch(&x, &y);
+        if (down) {
+            s_last_touch = now;
+        }
         if (down || was_down) {
-            on_tap(x, y, down);
+            uint64_t before = lg_draw_stats()->pixels;
+            if (!spike_overlay_touch(x, y, down)) {
+                on_tap(x, y, down);
+                if (lg_draw_stats()->pixels != before) {
+                    spike_overlay_screen_painted();
+                }
+            }
             apply_nav();
         }
         was_down = down;
+        spike_overlay_tick(now, s_last_touch);
         spike_req_t req;
         while (xQueueReceive(s_requests, &req, 0) == pdTRUE) {
             handle_request(&req);
             apply_nav();
+        }
+        if (spike_overlay_covering()) {
+            vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+            continue;   /* an alert or the saver owns the panel: screens do not paint */
         }
         if (s.screen == SCREEN_CHAT) {
             spike_chat_tick(now);
         }
         if (now - last_refresh >= REFRESH_MS) {
             last_refresh = now;
+            uint64_t before = lg_draw_stats()->pixels;
             refresh();
+            if (lg_draw_stats()->pixels != before) {
+                spike_overlay_screen_painted();
+            }
             apply_nav();
         }
         if (now - last_stats >= STATS_MS) {
@@ -504,6 +640,7 @@ esp_err_t spike_ui_start(const lg_board_t *board)
     s_requests = xQueueCreate(8, sizeof(spike_req_t));
     build_launcher();
     build_status();
+    spike_overlay_start(s.w, s.h);
     show_launcher();
     hh_mem_mark("after spike launcher");
     if (xTaskCreate(spike_task, "spike_ui", 6144, NULL, 4, NULL) != pdPASS) {

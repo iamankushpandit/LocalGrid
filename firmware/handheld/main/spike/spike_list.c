@@ -293,8 +293,10 @@ void slist_show(uint16_t w, uint16_t h, int16_t bottom, bool keep_scroll)
     s.plus_icon = (lg_rect_t){ (int16_t)(w - 80), 0, 40, SPIKE_HEAD_H };
     s.list = (lg_rect_t){ 0, top, (int16_t)w, (int16_t)(h - top - bottom) };
     layout();
-    if (!keep_scroll || s.scroll > max_scroll()) {
-        s.scroll = keep_scroll ? max_scroll() : 0;
+    if (!keep_scroll) {
+        s.scroll = 0;
+    } else if (s.scroll > max_scroll()) {
+        s.scroll = max_scroll();
     }
     lg_draw_scroll_area(s.list.y, s.list.h);   /* rows scroll; header, tabs, and keyboard stay fixed */
     lg_rect_t head = { 0, 0, (int16_t)w, top };
@@ -449,4 +451,9 @@ bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event)
         return true;
     }
     return false;
+}
+
+void slist_redraw(void)
+{
+    slist_show(s.w, s.h, s.bottom, true);
 }
