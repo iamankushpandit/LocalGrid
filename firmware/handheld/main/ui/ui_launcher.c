@@ -22,6 +22,7 @@
 #include "ui_alert.h"
 #include "ui_chat.h"
 #include "ui_home.h"
+#include "ui_group.h"
 #include "ui_notify.h"
 #include "ui_settings.h"
 
@@ -36,7 +37,7 @@ typedef struct {
     lv_obj_t *detail;
 } tile_t;
 
-enum { TILE_MESSAGES, TILE_STATUS, TILE_SETTINGS, TILE_COUNT };
+enum { TILE_MESSAGES, TILE_GROUPS, TILE_STATUS, TILE_SETTINGS, TILE_COUNT };
 
 static struct {
     lv_obj_t *screen;
@@ -51,6 +52,12 @@ static void on_messages(lv_event_t *e)
 {
     (void)e;
     ui_chat_open_list();
+}
+
+static void on_groups(lv_event_t *e)
+{
+    (void)e;
+    ui_group_open_list();
 }
 
 static void on_status(lv_event_t *e)
@@ -104,7 +111,7 @@ static void refresh(lv_timer_t *timer)
      * second: otherwise every tile's text is rewritten once a second for nothing. */
     uint32_t signature = (uint32_t)st->link * 7u + unread * 31u + st->n_people * 101u + st->n_nodes * 1009u +
                          (st->free_heap / 1024u) * 3u + (uint32_t)(st->preferred_node + 2) * 17u +
-                         (st->time_restricted ? 5u : 0u) + (st->grid_time / 60u) * 13u;
+                         (st->time_restricted ? 5u : 0u) + (st->grid_time / 60u) * 13u + st->n_groups * 1013u;
     if (signature == s_ui.shown_version) {
         return;
     }
@@ -141,6 +148,17 @@ static void refresh(lv_timer_t *timer)
         lv_obj_set_style_text_color(s_ui.tiles[TILE_MESSAGES].detail, t->muted, 0);
     }
     lg_ui_set_text(s_ui.tiles[TILE_MESSAGES].detail, text);
+
+    uint8_t mine = 0;
+    for (uint8_t i = 0; i < st->n_groups; i++) {
+        mine += st->groups[i].member ? 1u : 0u;
+    }
+    if (st->n_groups == 0) {
+        snprintf(text, sizeof(text), "none yet");
+    } else {
+        snprintf(text, sizeof(text), "%u, in %u", st->n_groups, mine);
+    }
+    lg_ui_set_text(s_ui.tiles[TILE_GROUPS].detail, text);
 
     snprintf(text, sizeof(text), "%u AP%s, %" PRIu32 " KB free", st->n_nodes, st->n_nodes == 1 ? "" : "s",
              st->free_heap / 1024u);
@@ -185,7 +203,9 @@ void ui_launcher_start(const lg_identity_t *identity)
     lv_obj_set_style_pad_column(grid, t->gap, 0);
     lv_obj_set_style_pad_row(grid, t->gap, 0);
 
-    make_tile(grid, full_w, tile_h, LV_SYMBOL_ENVELOPE, "Messages", on_messages, &s_ui.tiles[TILE_MESSAGES]);
+    /* Two by two: groups are their own place beside Messages, not a button inside it (D52). */
+    make_tile(grid, half_w, tile_h, LV_SYMBOL_ENVELOPE, "Messages", on_messages, &s_ui.tiles[TILE_MESSAGES]);
+    make_tile(grid, half_w, tile_h, LV_SYMBOL_LIST, "Groups", on_groups, &s_ui.tiles[TILE_GROUPS]);
     make_tile(grid, half_w, tile_h, LV_SYMBOL_WIFI, "Status", on_status, &s_ui.tiles[TILE_STATUS]);
     make_tile(grid, half_w, tile_h, LV_SYMBOL_SETTINGS, "Settings", on_settings, &s_ui.tiles[TILE_SETTINGS]);
 

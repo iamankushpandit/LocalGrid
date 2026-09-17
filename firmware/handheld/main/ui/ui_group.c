@@ -1,5 +1,10 @@
 /*
- * The group editor (D52).
+ * The Groups screen and the group editor (D52).
+ *
+ * Groups are their own place, a launcher tile beside Messages, not something tucked into the
+ * conversation list: the owner asked for that. The Groups screen lists every group with its
+ * members, marks the ones this handheld is not in (only members may change a group), and has +
+ * for a new one. Tapping a group this handheld belongs to opens the editor.
  *
  * A name, a tick for each handheld in the roster, Save, and for an existing group Remove,
  * which asks for a second tap because it deletes the group's messages on every handheld. The
@@ -10,6 +15,7 @@
 #include "ui_group.h"
 
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -18,7 +24,7 @@
 #include "lg_display.h"
 #include "lg_theme.h"
 #include "lg_ui_widgets.h"
-#include "ui_chat.h"
+#include "ui_launcher.h"
 #include "ui_screen.h"
 #include "ui_snapshot.h"
 
@@ -47,6 +53,15 @@ static struct {
     uint32_t  waiting_status;     /* status version when the edit was sent */
 } s_ui;
 
+/* The Groups screen: built when opened, freed when another screen replaces it (ui_screen.h). */
+static struct {
+    lv_obj_t *screen;
+    lv_obj_t *rows;
+    uint32_t  shown_groups;   /* groups_version drawn, so a new table redraws the list */
+    uint32_t  shown_users;    /* handhelds offered, which also changes what a row says */
+    bool      drawn;
+} s_list;
+
 static void set_problem(const char *text)
 {
     if (s_ui.problem != NULL) {
@@ -57,7 +72,7 @@ static void set_problem(const char *text)
 static void on_back(lv_event_t *e)
 {
     (void)e;
-    ui_chat_open_list();
+    ui_group_open_list();
 }
 
 static void forget(void)
@@ -158,16 +173,27 @@ static void on_remove(lv_event_t *e)
     send_edit(true);
 }
 
+static void draw_list(const hh_status_t *st);
+static void ensure_timer(void);
+
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
-    if (s_ui.screen == NULL || lv_screen_active() != s_ui.screen || !s_ui.waiting) {
+    lv_obj_t *active = lv_screen_active();
+    if (s_list.screen != NULL && active == s_list.screen) {
+        const hh_status_t *st = ui_status();
+        if (!s_list.drawn || st->groups_version != s_list.shown_groups || st->n_users != s_list.shown_users) {
+            draw_list(st);   /* only when the table or the handhelds changed, so taps are not lost to redraws */
+        }
+        return;
+    }
+    if (s_ui.screen == NULL || active != s_ui.screen || !s_ui.waiting) {
         return;
     }
     const hh_status_t *st = ui_status();
     if (st->groups_version != s_ui.waiting_groups) {
         s_ui.waiting = false;
-        ui_chat_open_list();   /* the new table is here: the list shows the result */
+        ui_group_open_list();   /* the new table is here: the list shows the result */
         return;
     }
     if (st->version != s_ui.waiting_status && st->group_problem[0] != '\0') {
@@ -188,11 +214,7 @@ void ui_group_open(uint16_t id)
         ESP_LOGW(TAG, "[UI] Display busy or not started; group editor not opened");
         return;
     }
-    static bool timer_started;
-    if (!timer_started) {
-        timer_started = true;
-        lv_timer_create(refresh, REFRESH_MS, NULL);   /* kept for good; it checks for a live screen */
-    }
+    ensure_timer();
     const lg_theme_t *t = lg_theme();
     const hh_status_t *st = ui_status();
     const hh_group_t *group = NULL;
@@ -203,7 +225,7 @@ void ui_group_open(uint16_t id)
     }
     if (id != 0 && group == NULL) {
         lg_display_unlock();
-        ui_chat_open_list();   /* removed while the editor was being opened */
+        ui_group_open_list();   /* removed while the editor was being opened */
         return;
     }
 
@@ -302,4 +324,129 @@ void ui_group_open(uint16_t id)
     lv_screen_load(s_ui.screen);
     lg_display_unlock();
     ESP_LOGI(TAG, "[UI] Group editor opened: %s", id == 0 ? "new group" : group->name);
+}
+
+/* ---- the Groups screen ---- */
+
+static void ensure_timer(void)
+{
+    static bool started;
+    if (!started) {
+        started = true;
+        lv_timer_create(refresh, REFRESH_MS, NULL);   /* kept for good; it checks for a live screen */
+    }
+}
+
+static void on_group_tapped(lv_event_t *e)
+{
+    ui_group_open((uint16_t)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void on_new_group(lv_event_t *e)
+{
+    (void)e;
+    ui_group_open(0);
+}
+
+static void on_home(lv_event_t *e)
+{
+    (void)e;
+    ui_launcher_open();
+}
+
+static void forget_list(void)
+{
+    memset(&s_list, 0, sizeof(s_list));
+}
+
+/* Member names for a row, from the handhelds this one knows; others by number, never invented. */
+static void member_text(const hh_status_t *st, const hh_group_t *g, char *out, size_t cap)
+{
+    size_t used = 0;
+    out[0] = '\0';
+    for (uint32_t dev = 1; dev <= 32u && used + 1 < cap; dev++) {
+        if ((g->member_devices & (1u << (dev - 1u))) == 0) {
+            continue;
+        }
+        const char *name = NULL;
+        for (uint8_t u = 0; u < st->n_users; u++) {
+            if (st->users[u].device == dev) {
+                name = st->users[u].name;
+            }
+        }
+        char number[16];
+        if (name == NULL) {
+            snprintf(number, sizeof(number), "Handheld %" PRIu32, dev);
+            name = number;
+        }
+        int n = snprintf(out + used, cap - used, "%s%s", used ? ", " : "", dev == st->device ? "you" : name);
+        used += n > 0 ? (size_t)n : 0u;
+    }
+}
+
+static void draw_list(const hh_status_t *st)
+{
+    const lg_theme_t *t = lg_theme();
+    lv_obj_clean(s_list.rows);
+    s_list.shown_groups = st->groups_version;
+    s_list.shown_users = st->n_users;
+    s_list.drawn = true;
+    if (st->n_groups == 0) {
+        lg_ui_label(s_list.rows, t->font_small, t->muted, "No groups yet. Tap + to make one.");
+        return;
+    }
+    for (uint8_t i = 0; i < st->n_groups; i++) {
+        const hh_group_t *g = &st->groups[i];
+        lv_obj_t *b = lv_button_create(s_list.rows);
+        lg_theme_style_button(b);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_height(b, LV_SIZE_CONTENT);
+        lv_obj_set_style_min_height(b, t->touch_min, 0);
+        lv_obj_set_style_pad_all(b, t->gap, 0);
+        lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(b, t->gap / 2, 0);
+        lg_ui_label(b, t->font_body, g->member ? t->text : t->muted, g->name);
+        char members[160];
+        member_text(st, g, members, sizeof(members));
+        char line[200];
+        snprintf(line, sizeof(line), "%s%s", members, g->member ? "" : "  (you are not in it)");
+        lg_ui_label(b, t->font_small, t->muted, line);
+        if (g->member) {
+            lv_obj_add_event_cb(b, on_group_tapped, LV_EVENT_CLICKED, (void *)(intptr_t)g->id);
+        } else {
+            lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);   /* only members may change a group */
+            lv_obj_set_style_border_color(b, t->outline, 0);
+        }
+    }
+}
+
+void ui_group_open_list(void)
+{
+    if (!lg_display_lock(3000)) {
+        /* Never draw without the lock: two tasks in LVGL at once corrupt its event list. */
+        ESP_LOGW(TAG, "[UI] Display busy or not started; Groups not opened");
+        return;
+    }
+    ensure_timer();
+    const lg_theme_t *t = lg_theme();
+    if (s_list.screen == NULL) {
+        s_list.screen = lv_obj_create(NULL);
+        lg_theme_apply_screen(s_list.screen);
+        lv_obj_set_flex_flow(s_list.screen, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_all(s_list.screen, t->pad, 0);
+        lv_obj_set_style_pad_row(s_list.screen, t->gap * 2, 0);
+
+        lv_obj_t *head = lg_ui_row(s_list.screen);
+        lv_obj_t *heading = lg_ui_text(head, t->font_title, t->accent, "Groups");
+        lv_obj_set_flex_grow(heading, 1);
+        lg_ui_icon_button(head, LV_SYMBOL_PLUS, on_new_group, NULL);
+        lg_ui_icon_button(head, LV_SYMBOL_HOME, on_home, NULL);
+
+        s_list.rows = lg_ui_column(s_list.screen, t->gap);
+        ui_screen_free_on_leave(s_list.screen, forget_list);
+    }
+    draw_list(ui_status());
+    lv_screen_load(s_list.screen);
+    lg_display_unlock();
+    ESP_LOGI(TAG, "[UI] Groups opened");
 }

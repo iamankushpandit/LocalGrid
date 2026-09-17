@@ -17,6 +17,7 @@
 #include "esp_system.h"
 #include "lg_envelope.h"
 #include "ui_chat.h"
+#include "ui_group.h"
 #include "hh_service.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_touch.h"
@@ -532,7 +533,7 @@ static int cmd_chat(int argc, char **argv)
 }
 
 /*
- * screen <settings|status|home>: opens that screen, so the screens can be driven from serial
+ * screen <settings|status|groups|home>: opens that screen, so the screens can be driven from serial
  * while testing (D23, D25, D28), the way `chat` already opens a conversation.
  *
  * Added for a specific reason: Settings is the deepest tree this firmware builds -- screen,
@@ -543,7 +544,7 @@ static int cmd_chat(int argc, char **argv)
 static int cmd_screen(int argc, char **argv)
 {
     if (argc != 2) {
-        printf("usage: screen <settings|status|home>\n");
+        printf("usage: screen <settings|status|groups|home>\n");
         return 1;
     }
     const char *which = argv[1];
@@ -557,12 +558,17 @@ static int cmd_screen(int argc, char **argv)
         printf("opened Status\n");
         return 0;
     }
+    if (strcmp(which, "groups") == 0) {
+        ui_group_open_list();
+        printf("opened Groups\n");
+        return 0;
+    }
     if (strcmp(which, "home") == 0) {
         ui_launcher_open();
         printf("opened the launcher\n");
         return 0;
     }
-    printf("unknown screen '%s'; try settings, status or home\n", which);
+    printf("unknown screen '%s'; try settings, status, groups or home\n", which);
     return 1;
 }
 
@@ -632,7 +638,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "send",      .help = "send <device|group|all|urgent> <text>: send a message",   .func = cmd_send },
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
-        { .command = "screen",    .help = "screen <settings|status|home>: open that screen",          .func = cmd_screen },
+        { .command = "screen",    .help = "screen <settings|status|groups|home>: open that screen",          .func = cmd_screen },
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },
         { .command = "tone",      .help = "tone [hz] [ms]: play one tone on the speaker",           .func = cmd_tone },
         { .command = "cue",       .help = "cue <sent|received|urgent>: play a notification sound",  .func = cmd_cue },

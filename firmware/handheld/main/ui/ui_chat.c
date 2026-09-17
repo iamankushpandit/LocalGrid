@@ -24,7 +24,6 @@
 #include "lg_theme.h"
 #include "lg_ui_screensaver.h"
 #include "lg_ui_widgets.h"
-#include "ui_group.h"
 #include "ui_launcher.h"
 #include "ui_notify.h"
 
@@ -68,7 +67,6 @@ static struct {
     lv_obj_t   *keyboard;
     lv_obj_t   *keyboard_label;
     lv_obj_t   *controls;
-    lv_obj_t   *edit_group;      /* the pencil in a group chat's header; hidden elsewhere */
     conv_t      convs[CONVS_MAX];
     uint8_t     n_convs;
     conv_t      open;
@@ -863,20 +861,6 @@ static void on_back_to_list(lv_event_t *e)
     ui_chat_open_list();   /* the list was freed when the chat replaced it; this builds it again */
 }
 
-static void on_new_group(lv_event_t *e)
-{
-    (void)e;
-    ui_group_open(0);
-}
-
-static void on_edit_group(lv_event_t *e)
-{
-    (void)e;
-    if (s_ui.open.scope == LG_SCOPE_GROUP) {
-        ui_group_open((uint16_t)s_ui.open.target);
-    }
-}
-
 static void on_back_home(lv_event_t *e)
 {
     (void)e;
@@ -904,7 +888,6 @@ static void forget_chat(void)
     s_ui.keyboard = NULL;
     s_ui.keyboard_label = NULL;
     s_ui.controls = NULL;
-    s_ui.edit_group = NULL;
     s_ui.empty_note = NULL;
     s_ui.shown_count = 0;
     s_ui.in_chat = false;
@@ -947,7 +930,6 @@ static void build_chat_screen(void)
     s_ui.chat_title = lg_ui_text(head, t->font_body, t->accent, "Chat");
     lv_obj_set_flex_grow(s_ui.chat_title, 1);
     lv_label_set_long_mode(s_ui.chat_title, LV_LABEL_LONG_DOT);
-    s_ui.edit_group = lg_ui_icon_button(head, LV_SYMBOL_EDIT, on_edit_group, NULL);   /* groups only (D52) */
     lg_ui_icon_button(head, LV_SYMBOL_LEFT, on_back_to_list, NULL);
 
     s_ui.chat_hint = lg_ui_label(s_ui.chat_screen, t->font_small, t->warning, "");
@@ -1019,11 +1001,6 @@ static void open_chat(const conv_t *conv)
     }
     const hh_status_t *st = ui_status();
     lg_ui_set_text(s_ui.chat_title, conv->title);
-    if (conv->scope == LG_SCOPE_GROUP) {
-        lv_obj_remove_flag(s_ui.edit_group, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s_ui.edit_group, LV_OBJ_FLAG_HIDDEN);
-    }
     lv_textarea_set_text(s_ui.input, "");
     update_hint(st);
     refresh_messages(st, true);   /* a different conversation: start the list again */
@@ -1195,7 +1172,6 @@ void ui_chat_open_list(void)
         lv_obj_t *head = lg_ui_row(s_ui.list_screen);
         lv_obj_t *heading = lg_ui_text(head, t->font_title, t->accent, "Messages");
         lv_obj_set_flex_grow(heading, 1);
-        lg_ui_icon_button(head, LV_SYMBOL_PLUS, on_new_group, NULL);   /* a new group (D52) */
         lg_ui_icon_button(head, LV_SYMBOL_HOME, on_back_home, NULL);
 
         s_ui.list_rows = lg_ui_column(s_ui.list_screen, t->gap);

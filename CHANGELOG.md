@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (Groups is its own tile on the handheld)
+- Owner: groups should be their own thing, not made from inside Messages. The launcher is two by two: Messages and Groups, then Status and Settings. The Groups tile says how many groups there are and how many this handheld is in.
+- The Groups screen (`ui_group_open_list()` in `ui/ui_group.c`) lists every group with its members, named from the handhelds this one knows ("you" for itself). Groups this handheld is not in are muted and not tappable, since only members may change them. + makes a group; tapping a group opens the editor, whose Save, Remove, and back return to Groups. It redraws only when the group table or the known handhelds change, so a tap is never lost to a redraw.
+- Messages no longer has the + and group chats no longer have the pencil. Console: `screen groups`.
+- Flashed to both handhelds; six rounds of `screen groups` and `screen home` on each with no crash, Hosyond 104 KB free. **Not verified by touch.**
+
+
 ### Changed (D53: an AP takes grid time back from a handheld)
 - Flashing and the brownout-prone hub restart APs, and grid time lived only in their RAM, so the owner kept having to set it again although both handhelds still had it. An AP with no time now takes it from a registering handheld whose clock the grid set: new optional node io `on_client_time`, called before `REGISTER_ACK` so the ack carries the time back. The AP logs `[TIME] Took grid time ... from handheld N`, marks its stratum unknown so any AP closer to the source corrects it, and floods it at once. No wire change: `REGISTER.client_time` was already sent, and is 0 on a handheld the grid never set.
 - Verified on the bench: `tests/target` on SOUTH, `LG_TESTS: 666 checks, 0 failures`. APs flashed one at a time, then all three restarted together through their serial ports (twice). All reported `Grid time 0 (UNSET)`; about 5 s after boot MAIN logged `[TIME] Took grid time 1789655713 from handheld 2 (this AP had none)`, and NORTH and SOUTH took it from MAIN within 30 ms (`from AP 0 (stratum 255)`). Nobody touched the admin page.
