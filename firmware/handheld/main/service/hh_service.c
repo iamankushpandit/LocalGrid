@@ -355,8 +355,15 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
             m->grid_time = in->grid_time;
             ring_set_text(m, (const char *)in->text, in->len);
-            ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
-                     m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+            if (in->scope == LG_SCOPE_DIRECT) {
+                /* Never the text of a 1:1 message (AGENTS.md): author, boot, and seq identify it. */
+                ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: 1:1 boot %" PRIu32 " seq %" PRIu32 ", %u bytes",
+                         in->author, roster_name(in->author), m->urgent ? " URGENT" : "", in->boot, in->seq,
+                         (unsigned)in->len);
+            } else {
+                ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
+                         m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+            }
         }
         break;
     }
@@ -799,17 +806,25 @@ static void drain_send_queue(void)
             m->seq = o->seq;
             m->grid_time = o->grid_time;
             m->state = state_from_outbox(o);
-            ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
-                     req.scope == LG_SCOPE_DIRECT ? "device" : req.scope == LG_SCOPE_GROUP ? "group" : "everyone",
-                     m->target, m->text);
+            if (req.scope == LG_SCOPE_DIRECT) {
+                ESP_LOGI("MSG", "[MSG] Sent%s to device %" PRIu32 ": 1:1 boot %" PRIu32 " seq %" PRIu32 ", %u bytes",
+                         req.urgent ? " URGENT" : "", m->target, o->boot, o->seq, (unsigned)req.len);
+            } else {
+                ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
+                         req.scope == LG_SCOPE_GROUP ? "group" : "everyone", m->target, m->text);
+            }
         } else {
             m->state = HH_MSG_REFUSED;
             m->reject = rc == LG_ERR_TIME ? HH_REFUSE_TIME : rc == LG_ERR_FULL ? HH_REFUSE_FULL : HH_REFUSE_INVALID;
-            ESP_LOGW("MSG", "[MSG] Not sent (%s): %s",
-                     m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
-                     : m->reject == HH_REFUSE_FULL ? "outbox full"
-                                                   : "not allowed: unknown target, bad text, or no key yet",
-                     m->text);
+            const char *why = m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
+                              : m->reject == HH_REFUSE_FULL ? "outbox full"
+                                                            : "not allowed: unknown target, bad text, or no key yet";
+            if (req.scope == LG_SCOPE_DIRECT) {
+                ESP_LOGW("MSG", "[MSG] Not sent (%s): 1:1 to device %" PRIu32 ", %u bytes", why, m->target,
+                         (unsigned)req.len);
+            } else {
+                ESP_LOGW("MSG", "[MSG] Not sent (%s): %s", why, m->text);
+            }
         }
     }
 }

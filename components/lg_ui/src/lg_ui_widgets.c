@@ -204,6 +204,10 @@ void lg_ui_toast(const char *text, lv_event_cb_t on_click)
             lv_obj_add_event_cb(s_toast, on_click, LV_EVENT_CLICKED, NULL);
         }
         s_toast_timer = lv_timer_create(toast_hide, TOAST_MS, NULL);
+        /* LVGL deletes a timer whose repeat count runs out, which left s_toast_timer pointing at freed
+         * memory: the next banner wrote into the heap and both handhelds crashed in malloc and free
+         * during a chaos run. Paused instead, the timer stays ours to reset for every banner. */
+        lv_timer_set_auto_delete(s_toast_timer, false);
         lv_timer_set_repeat_count(s_toast_timer, 1);
     }
     lv_label_set_text(s_toast_label, text);

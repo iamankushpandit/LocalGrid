@@ -61,7 +61,7 @@ typedef struct {
 typedef enum {
     LG_AUDIO_NONE = 0,       /* nothing this firmware can drive */
     LG_AUDIO_DAC,            /* classic ESP32 internal DAC into a small amplifier */
-    LG_AUDIO_ES8311_I2S,     /* codec on I2S; unusable until its pins are known */
+    LG_AUDIO_ES8311_I2S,     /* codec: I2C control on the touch bus, samples over I2S */
 } lg_audio_kind_t;
 
 typedef struct {

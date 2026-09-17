@@ -74,11 +74,15 @@ static int cmd_tone(int argc, char **argv)
     uint32_t hz = argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 10) : 1000u;
     uint32_t ms = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : 300u;
     if (!lg_bsp_audio_available()) {
-        printf("No sound: this board has no speaker, or its codec is not driven yet\n");
+        printf("No sound: this board has no speaker, or its codec did not start\n");
         return 0;
     }
     printf("Playing %" PRIu32 " Hz for %" PRIu32 " ms\n", hz, ms);
-    return lg_bsp_audio_tone(hz, ms) == ESP_OK ? 0 : 1;
+    esp_err_t err = lg_bsp_audio_tone(hz, ms);
+    if (err != ESP_OK) {
+        printf("Not played: %s\n", esp_err_to_name(err));
+    }
+    return err == ESP_OK ? 0 : 1;
 }
 
 static int cmd_cue(int argc, char **argv)
@@ -96,11 +100,15 @@ static int cmd_cue(int argc, char **argv)
         return 1;
     }
     if (!lg_bsp_audio_available()) {
-        printf("No sound: this board has no speaker, or its codec is not driven yet\n");
+        printf("No sound: this board has no speaker, or its codec did not start\n");
         return 0;
     }
     printf("Playing the %s cue\n", which);
-    return lg_bsp_audio_cue(cue) == ESP_OK ? 0 : 1;
+    esp_err_t err = lg_bsp_audio_cue(cue);
+    if (err != ESP_OK) {
+        printf("Not played: %s\n", esp_err_to_name(err));
+    }
+    return err == ESP_OK ? 0 : 1;
 }
 
 static int cmd_i2cscan(int argc, char **argv)

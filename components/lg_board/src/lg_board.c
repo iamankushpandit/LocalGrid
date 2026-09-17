@@ -62,13 +62,12 @@ static const lg_board_t BOARDS[] = {
          * and there must not be one: the transducer hangs off the codec's amplifier.
          *
          * The wiring below was established on this board rather than inferred, and three
-         * parts of it are easy to get wrong: the amplifier enable is active LOW, MCLK has to
-         * come from the APLL because 160 MHz will not divide to 6.144 MHz, and the codec's
-         * volume register resets to its minimum. None of these pins touch GPIO33 to 37,
+         * parts of it are easy to get wrong: the amplifier enable is active LOW, MCLK is 384
+         * times the sample rate (6.144 MHz at 16 kHz), and the codec's DAC volume register
+         * resets to silence. The S3 has no audio PLL, so MCLK comes from the PLL through the
+         * I2S fractional divider. None of these pins touch GPIO33 to 37,
          * which are the octal PSRAM lines here and must never be assigned.
-         *
-         * The driver for this path is not written yet, so the board reports no sound for now;
-         * the pins are recorded here so that work starts from facts. */
+         * lg_bsp_audio.c drives it. */
         .audio = { .kind = LG_AUDIO_ES8311_I2S, .speaker = LG_PIN_NONE, .codec_addr = 0x18,
                    .i2s_mclk = 4, .i2s_bclk = 5, .i2s_ws = 7, .i2s_dout = 8, .i2s_din = 6,
                    .amp_enable = 1, .amp_active_low = true, .max_volume = 85 },
