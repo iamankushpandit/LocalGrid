@@ -18,6 +18,7 @@
 #include "lg_envelope.h"
 #include "ui_chat.h"
 #include "ui_group.h"
+#include "spike_ui.h"
 #include "hh_service.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_touch.h"
@@ -548,6 +549,13 @@ static int cmd_screen(int argc, char **argv)
         return 1;
     }
     const char *which = argv[1];
+#if CONFIG_LG_HH_UI_SPIKE
+    if (strcmp(which, "status") == 0 || strcmp(which, "home") == 0) {
+        spike_ui_request(strcmp(which, "status") == 0);
+        printf("asked the spike for %s\n", which);
+        return 0;
+    }
+#endif
     if (strcmp(which, "settings") == 0) {
         ui_settings_open();
         printf("opened Settings; run 'status' to read the drawing task's stack after it drew\n");

@@ -5,6 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (spike: handheld UI without LVGL, measured on the Hosyond)
+- `components/lg_draw`: a retained-box renderer. A box (panel, border, rounded corners, one line of text) is redrawn only when asked, and only its own rectangle goes to the panel, in bands of lg_bsp's 24-line DMA buffer. Glyphs come straight from LVGL's generated font tables (uncompressed 4 bpp) with the 14 px emoji face as fallback; LVGL is never started. Touch uses the same two-sample confirmation as the LVGL input path.
+- `firmware/handheld/main/spike/spike_ui.c`, behind `CONFIG_LG_HH_UI_SPIKE` (`sdkconfig.spike`): the 2x2 launcher and a live Status screen. Console `screen status|home` drives it. Not a product build: no messaging screens.
+- Build: `idf.py -B build-spike -D SDKCONFIG=sdkconfig.spike-esp32 -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.spike" build`, zero warnings; image 999 KB against 1,192 KB.
+- Measured on the Hosyond, same boot and same console steps as the LVGL build (free heap / lowest since boot):
+  - Display start: LVGL, display and touch cost 31 KB; lg_draw, display and touch cost 14 KB (11.5 KB of it the draw buffer both need).
+  - Launcher idle: LVGL 104 KB / 101 KB; spike 120 KB / 116 KB.
+  - Status screen shown: LVGL 93 KB / 90 KB; spike 120 KB / 116 KB.
+  - Largest free block stayed 108 KB with the spike; LVGL left 92 to 104 KB.
+  - The spike's boxes are static (about 7 KB of .bss) where LVGL's objects are heap, and the numbers above already include that.
+  - Redraw: the Status screen, with its clock, heap figures, and a box counter changing, sent 1.8 full screens of pixels per 10 s in about 50 boxes, 115 to 126 ms of drawing per 10 s (about 1.2% of a core). The idle launcher sent nothing. Switching screens costs one clear plus its boxes, 2.2 to 2.7 screens.
+- **Not verified**: how the text looks on the panel, and touch; the owner has to look. The Hosyond is running the spike, without messaging, until it is flashed back.
+
+
 ### Changed (Groups is its own tile on the handheld)
 - Owner: groups should be their own thing, not made from inside Messages. The launcher is two by two: Messages and Groups, then Status and Settings. The Groups tile says how many groups there are and how many this handheld is in.
 - The Groups screen (`ui_group_open_list()` in `ui/ui_group.c`) lists every group with its members, named from the handhelds this one knows ("you" for itself). Groups this handheld is not in are muted and not tappable, since only members may change them. + makes a group; tapping a group opens the editor, whose Save, Remove, and back return to Groups. It redraws only when the group table or the known handhelds change, so a tap is never lost to a redraw.

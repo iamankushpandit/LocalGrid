@@ -27,6 +27,7 @@
 #include "nvs_flash.h"
 #include "ui_launcher.h"
 #include "ui_settings.h"
+#include "spike_ui.h"
 
 static const char *TAG = "HH";
 
@@ -98,6 +99,16 @@ void app_main(void)
         ESP_LOGE("TEST", "[TEST] Self test: %s", lg_selftest_summary());
     }
     hh_mem_mark("after self test");
+
+#if CONFIG_LG_HH_UI_SPIKE
+    /* The no-LVGL spike: LVGL is linked for its font tables but never started. */
+    if (board == NULL || spike_ui_start(board) != ESP_OK) {
+        ESP_LOGE(TAG, "[UI] Spike did not start");
+    }
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#endif
 
     static lg_display_t display;
     if (!lg_board_has_display(board) || lg_display_start(board, &display) != ESP_OK) {
