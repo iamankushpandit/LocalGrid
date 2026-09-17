@@ -592,17 +592,17 @@ static esp_err_t h_status(httpd_req_t *req)
                       i ? "," : "", s.devices[i].device, s.devices[i].name, state,
                       s.devices[i].node == LG_NODE_NONE ? -1 : (int)s.devices[i].node);
     }
-    /* Every handheld in the roster, not only those seen, so a group can include one that has
-     * not connected yet; then the groups, members named by device (D52). */
+    /* Handhelds the grid has seen, the same list as the Handhelds card: roster places nobody has
+     * taken are not offered as group members. Then the groups, members named by device (D52). */
     const lg_roster_t *r = &s.roster;
     if (n > 0 && (size_t)n < sizeof(out)) {
         n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"users\":[");
     }
-    for (size_t i = 0; i < r->n_users && n > 0 && (size_t)n < sizeof(out); i++) {
-        char un[2 * 16 + 8];
-        json_escape(r->users[i].name, un, sizeof(un));
+    for (size_t i = 0; i < s.n_devices && n > 0 && (size_t)n < sizeof(out); i++) {
+        char un[2 * sizeof(s.devices[i].name) + 8];
+        json_escape(s.devices[i].name, un, sizeof(un));
         n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\"}", i ? "," : "",
-                      r->users[i].device, un);
+                      s.devices[i].device, un);
     }
     if (n > 0 && (size_t)n < sizeof(out)) {
         n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"groups_version\":%" PRIu32 ",\"groups\":[", r->groups.seq);

@@ -53,7 +53,7 @@ typedef struct {
     uint32_t member_devices;   /* bit (device - 1) set for each member, for the group editor (D52) */
 } hh_group_t;
 
-/* Every handheld in the roster, heard from or not: who a group can include (D52). */
+/* This handheld and every handheld the grid has told it about: who a group can include (D52). */
 typedef struct {
     uint32_t device;
     char     name[HH_NAME_MAX];

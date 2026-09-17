@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Fixed (both handhelds hung on the conversation list; merged onto main's monitoring work)
+- Both handhelds were found with the task watchdog firing every 5 s, the drawing task spinning in `lv_event_mark_deleted` under `rebuild_list`. Cause: the groups branch still built the alert layer and notification watcher after `ui_launcher_start()` released the display lock, the race main had already fixed. The merge keeps one lock held across the whole start-up; the two versions together would have taken the lock twice and released it once.
+- All five boards had been flashed from the groups branch, replacing main's uncommitted work (AP monitoring, D48 to D51). That work was committed on main and merged here. Conflicts were additive (handheld names beside groups); `.chips` on the admin page kept main's style, and the group member picker uses `.members`.
+- `tests/target`: the simulator no longer fit the classic ESP32's largest free block (151 KB asked, 130 KB available) once names and per-device rosters were both in it. Its event queue and capture buffer are static now; `LG_TESTS: 651 checks, 0 failures` on SOUTH.
+- Group member pickers (handheld and admin page) list only handhelds the grid has seen, never the roster's unclaimed places (owner: "Do not Mock Handhelds 3 and 4"). The preview mock has two handhelds.
+- Flashed NORTH, SOUTH, and both handhelds. Ten rounds of `chat` and `screen home` on each handheld: no watchdog, panic or restart; Hosyond 105 KB free. **MAIN is off USB** and still runs the earlier groups build without monitoring or names, so it disagrees with the other APs until it is reflashed. Ports now: NORTH COM16, SOUTH COM18.
+
+
 ### Added (D52: groups made and removed at run time)
 - FAMILY, KIDS and LEADERS are no longer built in. A grid starts with no groups; the admin page (new Groups card, `POST /api/groups`) and handhelds (a + on the Messages screen, a pencil in a group chat, `ui/ui_group.c`) make, rename, change members of, and remove groups. A handheld may change only a group it is in, and is always in a group it makes. Up to 8 groups; names 1 to 15 bytes.
 - Protocol: `LG_T_GROUPS` (0x52) carries the whole table, `LG_T_GROUP_EDIT` (0x53) carries one edit from a handheld. Both have exact-length decoders. The table is versioned (seq, author AP), newest wins, and ids only grow. `lg_roster_t` now holds the group table by value, with membership as bits per group; `lg_node_t` and `lg_client_t` take a mutable roster owned by the firmware. New core calls: `lg_groups_apply_edit`, `lg_groups_newer`, `lg_groups_removed`, `lg_node_edit_groups`, `lg_node_announce_groups`, `lg_client_edit_group`; events `LG_CEV_GROUPS`, `LG_CEV_GROUP_REFUSED`; io `on_groups_changed` (node) and `on_groups_removed` (client). `lg_roster_prototype()` is replaced by `lg_roster_init_prototype()`, which has users only.

@@ -200,6 +200,8 @@ static int c_open(void *ctx, uint32_t peer, const uint8_t *pub, const uint8_t *n
     return lg_e2e_open(&((sim_client_t *)ctx)->e2e, peer, pub, nonce, aad, aad_len, ct, ct_len, out);
 }
 
+static sim_ev_t s_capture[SIM_CAPTURE];   /* one simulation at a time, so one capture buffer */
+static sim_ev_t s_queue[SIM_QUEUE];       /* and one event queue */
 static sim_t *s_reserved;       /* one simulation exists at a time; tests create and destroy in turn */
 static bool   s_reserved_in_use;
 
@@ -226,6 +228,8 @@ sim_t *sim_create(void)
         lg_failures++;
         return NULL;
     }
+    s->capture = s_capture;
+    s->queue = s_queue;
     for (int i = 0; i < SIM_NODES; i++) {
         sim_node_t *sn = &s->nodes[i];
         sn->sim = s;

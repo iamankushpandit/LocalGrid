@@ -77,14 +77,15 @@ struct sim {
     sim_node_t   nodes[SIM_NODES];
     bool         link[SIM_NODES][SIM_NODES];
     sim_client_t clients[SIM_CLIENTS];
-    sim_ev_t     queue[SIM_QUEUE];
+    sim_ev_t    *queue;                  /* SIM_QUEUE events, static like the capture buffer */
     size_t       head;
     size_t       count;
     bool         overflow;
     uint32_t     now_ms;
     uint32_t     grid_time;
     bool         duplicate_backbone;
-    sim_ev_t     capture[SIM_CAPTURE];   /* backbone frames, for eavesdropping checks */
+    sim_ev_t    *capture;                /* SIM_CAPTURE backbone frames, for eavesdropping checks: static,
+                                          * so the heap block the simulation needs stays under 136 KB */
     size_t       capture_count;
 };
 

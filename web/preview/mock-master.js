@@ -11,7 +11,7 @@
     failures: 0, locked_until: 0, boot_ms: Date.now(),
     groups: [], groups_version: 0, next_group_id: 1,
   });
-  const USERS = [1, 2, 3, 4].map((d) => ({ device: d, name: `Handheld ${d}` }));
+  const USERS = [1, 2].map((d) => ({ device: d, name: `Handheld ${d}` }));
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || fresh(); } catch (e) { return fresh(); } };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(m)); } catch (e) { /* storage blocked */ } };
   let m = load();

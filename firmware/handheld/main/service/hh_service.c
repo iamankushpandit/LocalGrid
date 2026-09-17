@@ -1189,11 +1189,18 @@ static void publish(void)
         o->node = p->node;
         o->online = s.link == HH_LINK_ONLINE && p->state == LG_PRES_ONLINE;
     }
+    /* Who a group can include: this handheld and those the grid has told it about. Roster
+     * places no handheld has taken are never offered: they would be people who do not exist. */
     st->n_users = 0;
     for (size_t i = 0; i < roster->n_users && st->n_users < LG_MAX_DEVICES; i++) {
+        uint32_t dev = roster->users[i].device;
+        const lg_peer_t *p = lg_client_peer(&s.client, dev);
+        if (dev != s.device && (p == NULL || !p->in_use)) {
+            continue;
+        }
         hh_user_t *o = &st->users[st->n_users++];
-        o->device = roster->users[i].device;
-        snprintf(o->name, sizeof(o->name), "%s", roster->users[i].name);
+        o->device = dev;
+        snprintf(o->name, sizeof(o->name), "%s", roster_name(dev));
     }
     st->n_groups = 0;
     for (size_t i = 0; i < roster->groups.count && st->n_groups < LG_MAX_GROUPS; i++) {
