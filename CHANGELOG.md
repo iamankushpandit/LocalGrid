@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Fixed (admin page stuck on "Connecting to this AP")
+- The merge left two `const esc` declarations in `admin.html` (main's strips characters, the Groups card's encodes them). A redeclared `const` is a syntax error, so no script ran and the page never left its loading card. The Groups helper is now `escHtml`. Checked with `node --check` on the page script and in the preview: setup, dashboard, availability, outages, and adding a group all render with no console errors. Flashed to MAIN, NORTH, and SOUTH.
+
+
 ### Fixed (both handhelds hung on the conversation list; merged onto main's monitoring work)
 - Both handhelds were found with the task watchdog firing every 5 s, the drawing task spinning in `lv_event_mark_deleted` under `rebuild_list`. Cause: the groups branch still built the alert layer and notification watcher after `ui_launcher_start()` released the display lock, the race main had already fixed. The merge keeps one lock held across the whole start-up; the two versions together would have taken the lock twice and released it once.
 - All five boards had been flashed from the groups branch, replacing main's uncommitted work (AP monitoring, D48 to D51). That work was committed on main and merged here. Conflicts were additive (handheld names beside groups); `.chips` on the admin page kept main's style, and the group member picker uses `.members`.

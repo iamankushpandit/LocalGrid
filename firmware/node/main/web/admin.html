@@ -385,14 +385,14 @@
   });
 
   // ---- groups (D52) ----
-  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const escHtml = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   let editingId = 0;          // 0: the form makes a new group
   let knownUsers = [];
   let knownGroups = [];
 
   function renderMemberChoices(checked) {
     $("group-members").innerHTML = knownUsers.map((u) =>
-      `<label class="member"><input type="checkbox" value="${u.device}" ${checked.includes(u.device) ? "checked" : ""}>${esc(u.name)}</label>`
+      `<label class="member"><input type="checkbox" value="${u.device}" ${checked.includes(u.device) ? "checked" : ""}>${escHtml(u.name)}</label>`
     ).join("");
   }
 
@@ -411,7 +411,7 @@
     knownGroups = s.groups || [];
     const name = (d) => (knownUsers.find((u) => u.device === d) || { name: `Handheld ${d}` }).name;
     $("groups-body").innerHTML = knownGroups.map((g) =>
-      `<tr><td>${esc(g.name)}</td><td>${g.members.map((d) => esc(name(d))).join(", ")}</td>` +
+      `<tr><td>${escHtml(g.name)}</td><td>${g.members.map((d) => escHtml(name(d))).join(", ")}</td>` +
       `<td class="actions"><button class="ghost" data-edit="${g.id}">Edit</button>` +
       `<button class="danger" data-remove="${g.id}">Remove</button></td></tr>`
     ).join("");
