@@ -57,7 +57,6 @@ static const char *TAG = "NET";
 #define NODE_EXPIRE_MS        150000
 #define RSSI_FLOOR_DBM        (-85)
 #define STICKY_BONUS_DB       3
-#define LOAD_SOFT_LIMIT       8
 #define JOIN_TIMEOUT_MS       8000
 #define TCP_CONNECT_WAIT_MS   3000
 #define TCP_RETRY_MS          300
@@ -77,6 +76,21 @@ static const char *TAG = "NET";
 #define TIME_RESCAN_MS        10000
 #define TIME_MOVE_HOLDOFF_MS  120000
 #define TIME_PREFER_DB        30
+
+/*
+ * Load balancing (D54). Every AP heard at BALANCE_RSSI_DBM or better is good enough, and among
+ * those a handheld joins the one with the fewest handhelds, signal breaking ties. While online it
+ * moves to another good AP only when that AP has fewer handhelds than its own would have without
+ * it, so a move always evens the load and two handhelds never swap back and forth. It waits until
+ * it has been online BALANCE_MIN_ONLINE_MS plus BALANCE_STAGGER_MS per device number, rescans
+ * first, and moves at most once per BALANCE_HOLDOFF_MS, so handhelds that all see the same crowded
+ * AP leave it one at a time, each seeing the move of the one before.
+ */
+#define BALANCE_RSSI_DBM      (-70)
+#define BALANCE_MIN_ONLINE_MS 60000
+#define BALANCE_STAGGER_MS    20000
+#define BALANCE_HOLDOFF_MS    180000
+#define BALANCE_SCAN_AGE_MS   10000
 #define RSSI_POLL_MS          2000
 #define TICK_MS               1000
 #define PUBLISH_MS            1000
@@ -174,6 +188,7 @@ static struct {
     uint32_t  last_publish_ms;
     uint32_t  no_time_since_ms;     /* 0, or when this AP was first seen without time while another had it */
     uint32_t  last_time_move_ms;
+    uint32_t  last_balance_ms;      /* when this handheld last moved to even the load, 0 never */
     int64_t   time_offset_s;
     bool      time_set;
     uint16_t  rx_fill;
@@ -653,7 +668,22 @@ static bool node_usable(const node_cand_t *c, uint32_t now)
            now - c->heard_ms <= NODE_FRESH_MS;
 }
 
-/* Selection score from answer 10: signal, stickiness, load, and backbone health. */
+/* Handhelds registered with AP i other than this one. The beacon counts this handheld on the AP it
+ * is registered with, which must not count against staying there. */
+static int others_on(int i)
+{
+    int clients = s.cand[i].clients;
+    if (s.link == HH_LINK_ONLINE && i == (int)s.client.node && clients > 0) {
+        clients--;
+    }
+    return clients;
+}
+
+/*
+ * Selection score (answer 10, D54). In order of weight: an AP with a working backbone, then one
+ * with grid time, then any AP with good signal ahead of a weak one, then the fewest other
+ * handhelds, then signal (with a small bonus for the AP last used).
+ */
 static int pick_node(uint32_t now)
 {
     bool any_backbone = false;
@@ -677,14 +707,14 @@ static int pick_node(uint32_t now)
         if (i == s.last_node) {
             score += STICKY_BONUS_DB;
         }
-        if (c->clients > LOAD_SOFT_LIMIT) {
-            score -= 3 * (c->clients - LOAD_SOFT_LIMIT);
+        if (c->rssi >= BALANCE_RSSI_DBM) {
+            score += 1000 - 100 * others_on(i);   /* good signal: the fewest handhelds wins (D54) */
         }
         if (any_backbone && !(c->flags & LG_DISC_FLAG_BACKBONE)) {
-            score -= 20;
+            score -= 100000;
         }
         if (any_time && !(c->flags & LG_DISC_FLAG_TIME)) {
-            score -= TIME_PREFER_DB;   /* without grid time only urgent broadcasts go out (D6) */
+            score -= 10000 + TIME_PREFER_DB;   /* without grid time only urgent broadcasts go out (D6) */
         }
         if (score > best_score) {
             best_score = score;
@@ -695,6 +725,7 @@ static int pick_node(uint32_t now)
 }
 
 static void drop_link(const char *why, bool retry_now);
+static void leave_gracefully(void);
 
 /* Online on an AP with no grid time while another usable AP has it: move, once it has lasted. */
 static bool time_move_due(uint32_t now)
@@ -730,7 +761,55 @@ static bool time_move_due(uint32_t now)
     s.last_time_move_ms = now;
     s.no_time_since_ms = 0;
     ESP_LOGW(TAG, "[TIME] Moving from %s to %s, which has grid time", here->ssid, s.cand[better].ssid);
+    leave_gracefully();
     drop_link("Moving to an AP that has grid time", true);
+    return true;
+}
+
+/*
+ * A planned move: close the session while still associated, so the AP sees the FIN and stops
+ * counting this handheld at once. Dropping Wi-Fi first left the AP counting it until its 30 s idle
+ * timeout, and a second handheld balancing in that window moved away from an AP that was no
+ * longer crowded.
+ */
+static void leave_gracefully(void)
+{
+    if (s.sock >= 0) {
+        shutdown(s.sock, SHUT_RDWR);
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+}
+
+/* Online, and another good AP carries fewer handhelds than this one would without us: move (D54). */
+static bool balance_move_due(uint32_t now)
+{
+    int current = (int)s.client.node;
+    if (s.preferred >= 0 || current < 0 || current >= HH_MAX_NODES || s.no_time_since_ms != 0) {
+        return false;   /* a chosen AP stays chosen, and a move for grid time comes first */
+    }
+    uint32_t wait = BALANCE_MIN_ONLINE_MS + BALANCE_STAGGER_MS * (s.device % 8u);
+    if (now - s.online_since_ms < wait ||
+        (s.last_balance_ms != 0 && now - s.last_balance_ms < BALANCE_HOLDOFF_MS)) {
+        return false;
+    }
+    const node_cand_t *here = &s.cand[current];
+    int best = pick_node(now);
+    if (best < 0 || best == current || !here->valid || s.cand[best].rssi < BALANCE_RSSI_DBM ||
+        others_on(best) >= others_on(current)) {
+        return false;
+    }
+    if (now - s.last_scan_ms >= BALANCE_SCAN_AGE_MS) {
+        start_scan(now);   /* decide on fresh counts: another handheld may just have moved */
+        return false;
+    }
+    if (s_scanning) {
+        return false;
+    }
+    s.last_balance_ms = now;
+    ESP_LOGW(TAG, "[ROAM] Balancing: %s has %d other handheld(s), %s has %d; moving", here->ssid, others_on(current),
+             s.cand[best].ssid, others_on(best));
+    leave_gracefully();
+    drop_link("Moving to an AP with fewer handhelds", true);
     return true;
 }
 
@@ -1122,6 +1201,9 @@ static void step(uint32_t now)
             break;
         }
         if (time_move_due(now)) {
+            break;
+        }
+        if (balance_move_due(now)) {
             break;
         }
         if (now - s.last_scan_ms >= (s.no_time_since_ms != 0 ? TIME_RESCAN_MS : RESCAN_ONLINE_MS)) {

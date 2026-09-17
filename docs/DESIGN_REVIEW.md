@@ -247,6 +247,8 @@ score = EWMA_RSSI_dBm
 
 Retry policy: on failure, next-best candidate immediately; after all candidates fail, back off 1, 2, 4, 8, then every 10 s with a fresh scan each time. UI shows SEARCHING.
 
+**Prototype, load (D54):** the load term above is replaced. APs at -70 dBm or better are equal on signal and ranked by fewest registered handhelds, signal breaking ties; a handheld online moves only to an AP with fewer handhelds than its own would have without it, after 60 s online plus a 20 s per-device stagger, at most once every 3 minutes, closing its session first.
+
 ### 11. Roaming strategy
 
 ESP-IDF roaming is always **break-before-make**. Espressif rejected make-before-break for single-radio chips. lwIP tears down sockets on disconnect. So the design goal is not a seamless roam; it is a short, bounded gap that the messaging layer hides.

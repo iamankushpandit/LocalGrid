@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (D54: handhelds spread across the APs)
+- Owner: if all APs are in range, not every handheld should join the same one. Before, the choice was signal plus a 3 dB bonus for the last AP, and load only counted above 8 handhelds, so every handheld joined the strongest AP.
+- Joining (`pick_node`): APs heard at -70 dBm or better are all good enough; among them the one with the fewest other registered handhelds wins, and signal breaks ties. Backbone first and grid time second still outrank load. A handheld's own registration is not counted against the AP it is on.
+- Rebalancing while online (`balance_move_due`): move only to a good AP with fewer handhelds than this one would have without us; wait 60 s online plus 20 s times the device number, rescan first, then move; at most once every 3 minutes; never with a fixed AP chosen, and a move for grid time comes first. Logged as `[ROAM] Balancing: MAIN has 1 other handheld(s), NORTH has 0; moving`.
+- A planned move (for balance or for grid time) now closes the TCP session while still associated and waits 150 ms, so the AP drops the handheld from its count at once. Before, the AP counted a departed handheld until its 30 s idle timeout, and the first test showed the second handheld moving away from an AP the first had already left.
+- Verified on both handhelds (no-LVGL builds): both pinned to MAIN with `node 0`, then `node auto`. After the graceful-close fix, exactly one move: the Freenove (device 1) balanced to NORTH at 122 s, the Hosyond stayed on MAIN, and nothing moved in the following 150 s. The LVGL handheld firmware also builds for both chips with zero warnings.
+- Phones are not balanced: they choose their own AP (D46).
+
+
 ### Added (no-LVGL UI: screen saver, notifications and alerts, and the logo)
 - `spike_overlay.c`, matching the LVGL firmware's behaviour:
   - Banner: a 1:1 or group message for a conversation not on screen rings the bell and shows a banner at the top for 15 s; tapping it opens the conversation.
