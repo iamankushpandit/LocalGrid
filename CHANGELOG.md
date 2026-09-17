@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (handheld RAM: 24 KB back, and PSRAM on the FNK0104B)
+- From the static RAM audit, the low-risk cuts plus the inbox:
+  - Removing a group compacts the message ring in place instead of through a 6.7 KB scratch copy.
+  - The console reads messages one at a time (`hh_service_message()`) instead of keeping a 6.7 KB copy of the list.
+  - Handhelds build `lg_client` with a one-slot inbox (`LG_INBOX_SIZE=1u`, set for every component in `firmware/handheld/CMakeLists.txt`; `lg_client.h` keeps 32 by default for the simulator). The service copies each message out as it arrives, so this frees 8.3 KB.
+  - One names buffer for saving and loading instead of two (1 KB). The self test's two E2E keys live on the heap only while it runs (1.3 KB).
+- Measured on the Hosyond with the LVGL launcher idle: 128 KB free, lowest 125 KB. It was 104 KB, lowest 101 KB, before.
+- FNK0104B: 8 MB octal PSRAM enabled (`sdkconfig.defaults.esp32s3`: octal, 80 MHz, malloc above 4 KB may use it, Wi-Fi and lwIP buffers prefer it). Boot logs `Adding pool of 8192K of PSRAM memory to heap allocator`. With the launcher idle: internal 161 KB free, lowest 128 KB, largest block 88 KB; PSRAM 8,122 KB free of 8,192 KB. Internal RAM is about 15 KB lower than without PSRAM (the driver reserves 32 KB of internal RAM for DMA and the mapping takes some), so internal RAM is still the figure that runs out; tuning is open.
+- Memory is reported as internal 8-bit RAM everywhere (`[MEM]` marks, console `status`, the Status screen), since with PSRAM on, the old free-heap call counted the 8 MB and hid what runs out. PSRAM is reported beside it: `[MEM] ...; PSRAM free N of M KB, lowest L KB`, `status` prints a `PSRAM:` line (`none on this board` on the Hosyond), and the Status screen adds it when present. The console's figure had also included the classic ESP32's 32-bit-only RAM, which made it 35 KB higher than the `[MEM]` line; both now agree.
+- Built for esp32 and esp32s3 with zero warnings and flashed to both handhelds. `tests/target` was not rerun: the `lg_core` change is an `#ifndef` around the existing default, so the simulator build is unchanged.
+
+
 ### Added (spike: handheld UI without LVGL, measured on the Hosyond)
 - `components/lg_draw`: a retained-box renderer. A box (panel, border, rounded corners, one line of text) is redrawn only when asked, and only its own rectangle goes to the panel, in bands of lg_bsp's 24-line DMA buffer. Glyphs come straight from LVGL's generated font tables (uncompressed 4 bpp) with the 14 px emoji face as fallback; LVGL is never started. Touch uses the same two-sample confirmation as the LVGL input path.
 - `firmware/handheld/main/spike/spike_ui.c`, behind `CONFIG_LG_HH_UI_SPIKE` (`sdkconfig.spike`): the 2x2 launcher and a live Status screen. Console `screen status|home` drives it. Not a product build: no messaging screens.

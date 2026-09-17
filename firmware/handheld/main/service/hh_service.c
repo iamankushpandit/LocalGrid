@@ -217,13 +217,17 @@ static const char *roster_name(uint32_t device)
     return u != NULL ? u->name : "Unknown handheld";
 }
 
+/* One buffer for saving and loading names: both run on the service task, and a buffer each
+ * cost 1 KB. */
+static uint8_t s_names_blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];
+
 /*
  * Every name this handheld knows, kept in flash as one blob of packed NAME records (D48, D49), so
  * names survive a restart even before an AP is in range. Written only when a name changes.
  */
 static void save_names(void)
 {
-    static uint8_t blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];   /* about 1 KB: kept off the stack */
+    uint8_t *blob = s_names_blob;
     size_t used = 0;
     for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
         if (s.client.names[i].version != 0) {
@@ -246,8 +250,8 @@ static void save_names(void)
 
 static void load_names(void)
 {
-    static uint8_t blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];   /* about 1 KB: kept off the stack */
-    size_t len = sizeof(blob);
+    uint8_t *blob = s_names_blob;
+    size_t len = sizeof(s_names_blob);
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
         return;
@@ -343,18 +347,23 @@ static void ring_update_from_outbox(uint32_t slot)
 static void ring_forget_group(uint16_t id)
 {
     xSemaphoreTake(s.lock, portMAX_DELAY);
-    static hh_message_t kept[HH_MESSAGES];
+    /* In place, oldest first: the write position never passes the read position, so no scratch
+     * copy of the ring is needed (it was 6.7 KB of static RAM). */
     uint8_t n = 0;
     for (uint8_t i = 0; i < s.ring_count; i++) {
         const hh_message_t *m = &s.ring[(s.ring_head + i) % HH_MESSAGES];
-        if (!(m->scope == LG_SCOPE_GROUP && m->target == id)) {
-            kept[n++] = *m;
+        if (m->scope == LG_SCOPE_GROUP && m->target == id) {
+            continue;
         }
+        if (n != i) {
+            s.ring[(s.ring_head + n) % HH_MESSAGES] = *m;
+        }
+        n++;
     }
     uint8_t dropped = (uint8_t)(s.ring_count - n);
-    memset(s.ring, 0, sizeof(s.ring));
-    memcpy(s.ring, kept, n * sizeof(kept[0]));
-    s.ring_head = 0;
+    for (uint8_t i = n; i < s.ring_count; i++) {
+        memset(&s.ring[(s.ring_head + i) % HH_MESSAGES], 0, sizeof(s.ring[0]));
+    }
     s.ring_count = n;
     s.msg_version++;
     s.dirty = true;
@@ -1226,8 +1235,11 @@ static void publish(void)
     st->groups_version = roster->groups.seq;
     snprintf(st->group_problem, sizeof(st->group_problem), "%s", s.group_problem);
     st->messages_version = s.msg_version;
-    st->free_heap = esp_get_free_heap_size();
-    st->min_free_heap = esp_get_minimum_free_heap_size();
+    st->free_heap = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    st->min_free_heap = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    st->psram_total = (uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    st->psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    st->psram_min_free = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
     xSemaphoreGive(s.lock);
     s.dirty = false;
     s.last_publish_ms = now;
@@ -1570,6 +1582,20 @@ esp_err_t hh_service_send(uint8_t scope, uint32_t target, bool urgent, const cha
     send_req_t req = { .scope = scope, .urgent = urgent, .target = target, .len = (uint16_t)len };
     memcpy(req.text, text, len);
     return xQueueSend(s.send_queue, &req, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+bool hh_service_message(size_t newest_index, hh_message_t *out)
+{
+    if (s.lock == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    bool found = newest_index < s.ring_count;
+    if (found) {
+        *out = s.ring[(s.ring_head + s.ring_count - 1u - newest_index) % HH_MESSAGES];
+    }
+    xSemaphoreGive(s.lock);
+    return found;
 }
 
 size_t hh_service_messages(hh_message_t *out, size_t max)

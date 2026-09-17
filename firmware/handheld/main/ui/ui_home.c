@@ -196,7 +196,7 @@ static void refresh(lv_timer_t *timer)
         return;
     }
     const lg_theme_t *t = lg_theme();
-    char text[96];
+    char text[128];
 
     lg_ui_set_text(s_ui.name, st->name[0] != '\0' ? st->name : "Not in the grid roster");
 
@@ -266,8 +266,14 @@ static void refresh(lv_timer_t *timer)
         s_ui.last_lists = lists;
     }
 
-    snprintf(text, sizeof(text), "Memory %u KB free, %u KB lowest", (unsigned)(st->free_heap / 1024u),
-             (unsigned)(st->min_free_heap / 1024u));
+    if (st->psram_total > 0) {
+        snprintf(text, sizeof(text), "Memory %u KB free, %u KB lowest; PSRAM %u of %u KB free",
+                 (unsigned)(st->free_heap / 1024u), (unsigned)(st->min_free_heap / 1024u),
+                 (unsigned)(st->psram_free / 1024u), (unsigned)(st->psram_total / 1024u));
+    } else {
+        snprintf(text, sizeof(text), "Memory %u KB free, %u KB lowest", (unsigned)(st->free_heap / 1024u),
+                 (unsigned)(st->min_free_heap / 1024u));
+    }
     lg_ui_set_text(s_ui.memory, text);
 
     const lg_selftest_result_t *test = lg_selftest_last();

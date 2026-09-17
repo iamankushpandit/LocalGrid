@@ -1,2 +1,13 @@
 # The Freenove FNK0104B has only native USB, so the console (and the "id" responder) uses USB-Serial/JTAG.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# The FNK0104B's 8 MB octal PSRAM (owner, 2026-09-17). Octal mode and 80 MHz, as design review
+# answer on this board records; GPIO33 to 37 are its lines and are never assigned. malloc may use
+# it for blocks above 4 KB, and Wi-Fi and lwIP buffers may live there, so internal RAM is kept for
+# DMA, stacks, and small allocations. The Hosyond has no PSRAM and does not see these settings.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

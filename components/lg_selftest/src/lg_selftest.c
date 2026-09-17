@@ -9,6 +9,7 @@
 #include "lg_selftest.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -199,14 +200,25 @@ static void test_hkdf(void)
 /* One 1:1 message sealed and opened, the way two handhelds do it. */
 static void test_e2e(void)
 {
-    static lg_e2e_t alice;
-    static lg_e2e_t bob;
+    /* On the heap for the length of the test: kept static they held 1.3 KB for good. */
+    lg_e2e_t *a = calloc(1, sizeof(lg_e2e_t));
+    lg_e2e_t *b = calloc(1, sizeof(lg_e2e_t));
+    if (a == NULL || b == NULL) {
+        check(false, "e2e memory");
+        free(a);
+        free(b);
+        return;
+    }
+#define alice (*a)
+#define bob   (*b)
     uint8_t apriv[LG_X25519_LEN];
     uint8_t apub[LG_X25519_LEN];
     uint8_t bpriv[LG_X25519_LEN];
     uint8_t bpub[LG_X25519_LEN];
     if (lg_x25519_keypair(apriv, apub) != 0 || lg_x25519_keypair(bpriv, bpub) != 0) {
         check(false, "e2e keypairs");
+        free(a);
+        free(b);
         return;
     }
     check(lg_e2e_init(&alice, 1, apriv) == 0, "e2e init sender");
@@ -231,6 +243,12 @@ static void test_e2e(void)
           "e2e aad tamper refused");
     lg_secure_zero(apriv, sizeof(apriv));
     lg_secure_zero(bpriv, sizeof(bpriv));
+#undef alice
+#undef bob
+    lg_secure_zero(a, sizeof(*a));
+    lg_secure_zero(b, sizeof(*b));
+    free(a);
+    free(b);
 }
 
 const lg_selftest_result_t *lg_selftest_quick(void)

@@ -24,7 +24,12 @@ extern "C" {
 #endif
 
 #define LG_OUTBOX_SIZE          16u
+/* A firmware that copies each message out as it arrives can build with a smaller inbox: the
+ * handheld service keeps its own list and reads only the newest entry, so it uses 1 (8.3 KB less
+ * RAM). The on-board simulator keeps 32 and reads the inbox directly. */
+#ifndef LG_INBOX_SIZE
 #define LG_INBOX_SIZE           32u
+#endif
 #define LG_RESEND_MS            3000u
 #define LG_CLIENT_DEDUP_SLOTS   LG_MAX_DEVICES
 

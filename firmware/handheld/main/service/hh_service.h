@@ -128,8 +128,11 @@ typedef struct {
     char           group_problem[HH_PROBLEM_MAX];   /* why the AP refused our last group edit; empty if none */
     uint8_t        n_users;
     hh_user_t      users[LG_MAX_DEVICES];
-    uint32_t       free_heap;
+    uint32_t       free_heap;                /* internal RAM: what runs out (PSRAM is counted apart) */
     uint32_t       min_free_heap;
+    uint32_t       psram_total;              /* 0 on a board without PSRAM */
+    uint32_t       psram_free;
+    uint32_t       psram_min_free;
 } hh_status_t;
 
 /* Starts the service task. On failure the snapshot carries the problem for the screen. */
@@ -157,6 +160,10 @@ void hh_service_reconnect(void);
  * long, ESP_ERR_NO_MEM when the queue is full.
  */
 esp_err_t hh_service_send(uint8_t scope, uint32_t target, bool urgent, const char *text);
+
+/* Copies one message, 0 being the newest; false when there are not that many. For readers that
+ * need one at a time and should not hold a copy of the whole list (the console). */
+bool hh_service_message(size_t newest_index, hh_message_t *out);
 
 /* Copies up to max messages, newest first; returns how many were copied. */
 size_t hh_service_messages(hh_message_t *out, size_t max);

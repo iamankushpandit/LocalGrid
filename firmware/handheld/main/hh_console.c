@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "esp_console.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "lg_envelope.h"
 #include "ui_chat.h"
@@ -36,7 +37,7 @@
  * nine in all, about 21 KB of RAM on a board that has none to spare.
  */
 static hh_status_t  s_console_status;
-static hh_message_t s_console_msgs[HH_MESSAGES];
+static hh_message_t s_console_msg;   /* one at a time: a copy of every message cost 6.7 KB */
 
 static const hh_status_t *console_status(void)
 {
@@ -212,9 +213,17 @@ static int cmd_status(int argc, char **argv)
     /* Live figures, not the snapshot's: the service has not published one yet in the first
      * seconds after a boot, and console.py resets the board before it asks, so this line was
      * reporting "0 KB free" on a board with 91 KB. */
-    printf("  memory: %" PRIu32 " KB free, %" PRIu32 " KB lowest\n",
-           (uint32_t)(esp_get_free_heap_size() / 1024u),
-           (uint32_t)(esp_get_minimum_free_heap_size() / 1024u));
+    printf("  memory: %" PRIu32 " KB free, %" PRIu32 " KB lowest (internal RAM)\n",
+           (uint32_t)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024u),
+           (uint32_t)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024u));
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+        printf("  PSRAM: %" PRIu32 " KB free of %" PRIu32 " KB, %" PRIu32 " KB lowest\n",
+               (uint32_t)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024u),
+               (uint32_t)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024u),
+               (uint32_t)(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM) / 1024u));
+    } else {
+        printf("  PSRAM: none on this board\n");
+    }
     /* Screens are built and refreshed on the drawing task, and LVGL's layout recurses, so a
      * deeply nested screen can overflow that stack. The panic says a stack overflowed but
      * never how close the boards that survive are, which is the figure worth watching. */
@@ -356,11 +365,13 @@ static int cmd_msgs(int argc, char **argv)
         }
     }
     const hh_status_t *st = console_status();
-    hh_message_t *msgs = s_console_msgs;
-    size_t n = hh_service_messages(msgs, want);
+    size_t n = 0;
+    while (n < want && hh_service_message(n, &s_console_msg)) {
+        n++;
+    }
     printf("Messages, newest first: %u\n", (unsigned)n);
-    for (size_t i = 0; i < n; i++) {
-        const hh_message_t *m = &msgs[i];
+    for (size_t i = 0; i < n && hh_service_message(i, &s_console_msg); i++) {
+        const hh_message_t *m = &s_console_msg;
         if (m->mine) {
             printf("  to ");
             print_target(m, st);
