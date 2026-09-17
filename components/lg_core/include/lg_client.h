@@ -87,6 +87,7 @@ typedef enum {
     LG_CEV_KEY_CHANGED,      /* value: device whose advertised key differs from the pinned key */
     LG_CEV_GROUPS,           /* value: number of groups removed; the table in the roster is newer */
     LG_CEV_GROUP_REFUSED,    /* value: lg_ack_status_t the AP refused our last group edit with */
+    LG_CEV_NAME,             /* value: device whose name changed, this handheld's own included */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -133,6 +134,7 @@ typedef struct {
     uint16_t           inbox_head;
     uint16_t           inbox_count;
     lg_peer_t          peers[LG_MAX_DEVICES];
+    lg_name_t          names[LG_MAX_DEVICES];   /* indexed by roster user index; version 0 = none */
     lg_dedup_entry_t   dedup_slots[LG_CLIENT_DEDUP_SLOTS];
     lg_dedup_t         dedup;
     uint32_t           decrypt_failures;
@@ -182,6 +184,22 @@ const lg_in_msg_t *lg_client_inbox(const lg_client_t *c, size_t newest_index);
  */
 bool lg_client_mark_read(lg_client_t *c, uint32_t author, uint32_t boot, uint32_t seq);
 const lg_peer_t   *lg_client_peer(const lg_client_t *c, uint32_t device);
+
+/*
+ * Names (D50). A handheld chooses its own name; the grid carries the newest version to everyone.
+ *
+ * lg_client_set_name takes 1..LG_NAME_MAX - 1 bytes of UTF-8, gives it a version above every one
+ * this handheld used before, emits LG_CEV_NAME, and sends it now if registered (and again on every
+ * registration). The version is at least boot << 12, and the boot counter is kept in flash, so it
+ * grows across reboots without a second counter. Returns LG_OK or LG_ERR_ARG.
+ */
+int lg_client_set_name(lg_client_t *c, const uint8_t *text, size_t len);
+
+/* Loads a name kept in flash at boot, this handheld's or another's. Taken only if newer. */
+bool lg_client_restore_name(lg_client_t *c, const lg_name_t *name);
+
+/* The newest name known for device, or NULL when none was chosen (the roster name applies). */
+const lg_name_t *lg_client_name(const lg_client_t *c, uint32_t device);
 
 #ifdef __cplusplus
 }

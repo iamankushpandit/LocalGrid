@@ -9,6 +9,7 @@
 #include "lg_proto_config.h"
 #include "lwip/sockets.h"
 #include "node_app.h"
+#include "power_trace.h"
 
 static const char *TAG = "NET";
 
@@ -113,6 +114,7 @@ static void accept_one(uint32_t now)
     slot->last_rx_ms = now;
     inet_ntoa_r(peer.sin_addr, slot->addr, sizeof(slot->addr));
     ESP_LOGI(TAG, "[NET] Session opened from %s", slot->addr);
+    ptrace_event(PTRACE_SESSION);
 }
 
 static void on_registered(sess_t *x)

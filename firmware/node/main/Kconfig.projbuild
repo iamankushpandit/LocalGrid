@@ -16,4 +16,38 @@ menu "LocalGrid AP"
             Normal builds offer PMF (capable, not required). Turning it off is an A/B test
             for handhelds that disassociate with reason 2. Keep it on in normal builds.
 
+    config LG_NODE_HEARTBEAT
+        bool "Log an [UP] line every second (uptime, heap, stations, links, frames, events)"
+        default y
+        help
+            Prints uptime, heap, links, handhelds, and time state once a second from the core
+            task, so a long capture shows exactly when an AP crashed, browned out, or hung.
+            Turn it off for a quiet console.
+
+    config LG_NODE_WIFI_TX_POWER_QDBM
+        int "Wi-Fi transmit power ceiling in quarter dBm, 0 for the driver default"
+        default 0
+        range 0 84
+        help
+            Radio transmit bursts are the largest current spikes on an AP. On a weak USB supply
+            a lower ceiling (for example 52, which is 13 dBm) is an A/B test for brownouts: build
+            with it set, flash every AP, and compare brownout counts over the same hours. Range
+            and link quality drop as it goes down.
+
+    config LG_NODE_SUPPLY_SENSE_GPIO
+        int "Supply sense pin (ADC1 input behind a divider), -1 for none"
+        default -1
+        range -1 39
+        help
+            The Elegoo AP boards have no supply sense, so `power` reports only restart causes.
+            Wire a divider from 5 V to an ADC1 pin (GPIO32 to GPIO39 on the classic ESP32; for
+            example 100 k to 5 V and 100 k to ground, a 2:1 ratio) and set its GPIO here.
+
+    config LG_NODE_SUPPLY_DIVIDER_MILLI
+        int "Supply divider ratio in thousandths"
+        default 2000
+        range 1000 10000
+        help
+            Supply voltage divided by the voltage at the pin, times 1000. 2000 for equal resistors.
+
 endmenu

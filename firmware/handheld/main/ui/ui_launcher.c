@@ -203,6 +203,9 @@ void ui_launcher_start(const lg_identity_t *identity)
     hh_mem_mark("after Status screen");
     ui_settings_build(identity);
     hh_mem_mark("after Settings screen");
+    /* Built without the lock, the alert layer's widgets went onto LVGL's top layer while the drawing
+     * task walked that tree, and a debug build with object checks crashed on every Hosyond boot
+     * reading freed child arrays. The lock taken at the top of this function is still held. */
     ui_alert_start();   /* the announcement flash and the emergency takeover */
     hh_mem_mark("after alert layer");
     ui_notify_start();

@@ -128,6 +128,29 @@ static void test_utf8(void)
 
 static void test_bodies(void)
 {
+    /* TIME_SYNC carries milliseconds and stratum; the 5-byte form still decodes as unknown. */
+    {
+        uint8_t tb[LG_TIME_SYNC_LEN];
+        lg_time_sync_t t = { .grid_time = 1789590000u, .millis = 987, .quality = LG_TIME_CARRIED, .stratum = 2 };
+        CHECK_EQ(lg_time_sync_enc(&t, tb), LG_TIME_SYNC_LEN);
+        lg_time_sync_t t2;
+        CHECK(lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));
+        CHECK_EQ(t2.grid_time, 1789590000u);
+        CHECK_EQ(t2.millis, 987);
+        CHECK_EQ(t2.quality, LG_TIME_CARRIED);
+        CHECK_EQ(t2.stratum, 2);
+        uint8_t v1[LG_TIME_SYNC_LEN_V1];                          /* old senders: seconds, then quality */
+        lg_wr32(v1, 1789590000u);
+        v1[4] = LG_TIME_CARRIED;
+        CHECK(lg_time_sync_dec(v1, LG_TIME_SYNC_LEN_V1, &t2));
+        CHECK_EQ(t2.grid_time, 1789590000u);
+        CHECK_EQ(t2.millis, 0);
+        CHECK_EQ(t2.stratum, LG_STRATUM_UNKNOWN);
+        lg_wr16(tb + 4, 1000u);
+        CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));     /* milliseconds past the second */
+        CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN - 1u, &t2));
+    }
+
     uint8_t buf[64];
     lg_register_t r = { .device = 2, .attach_epoch = 4097, .client_time = 123, .caps = 5 };
     for (size_t i = 0; i < LG_PUBKEY_LEN; i++) {

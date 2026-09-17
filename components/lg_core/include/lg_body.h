@@ -74,12 +74,40 @@ typedef struct {
     uint8_t  pubkey[LG_PUBKEY_LEN];
 } lg_presence_t;
 
-/* TIME_SYNC: master -> nodes, node -> clients. */
-#define LG_TIME_SYNC_LEN 5u
+/*
+ * NAME: handheld -> its AP when renamed or on registering, AP -> APs (flooded), AP -> handhelds.
+ *   u32 device | u32 version | u8 length (1..LG_NAME_MAX - 1) | that many bytes of UTF-8, no NUL
+ * Only the handheld itself sets its name. Its version always grows, across reboots too (see
+ * lg_client_set_name), and every holder keeps the highest version it has seen, so copies that
+ * met in any order agree. A record no newer than the one held is dropped and not forwarded.
+ */
+#define LG_NAME_LEN_MIN 10u
+#define LG_NAME_LEN_MAX (9u + LG_NAME_MAX - 1u)
+typedef struct {
+    uint32_t device;
+    uint32_t version;          /* 0: no name chosen; the roster name applies */
+    uint8_t  len;
+    char     text[LG_NAME_MAX];   /* NUL-terminated after decoding */
+} lg_name_t;
+
+/*
+ * TIME_SYNC: AP -> APs (flooded), AP -> its handhelds.
+ *   u32 grid time, Unix seconds | u16 milliseconds into that second (0..999) |
+ *   u8 quality | u8 stratum
+ * Stratum is the distance from where grid time was set: 0 on the AP an admin set it on, one more
+ * on each AP that took it from another, LG_STRATUM_UNKNOWN when the sender does not say. APs take
+ * corrections only from a lower stratum, so time flows outward from its source and never loops
+ * between APs that carry it. The 5-byte form without milliseconds or stratum still decodes.
+ */
+#define LG_TIME_SYNC_LEN        8u
+#define LG_TIME_SYNC_LEN_V1     5u
+#define LG_STRATUM_UNKNOWN      255u
 typedef enum { LG_TIME_UNSET = 0, LG_TIME_CARRIED = 1, LG_TIME_AUTHORITATIVE = 2 } lg_time_quality_t;
 typedef struct {
     uint32_t grid_time;
+    uint16_t millis;
     uint8_t  quality;
+    uint8_t  stratum;
 } lg_time_sync_t;
 
 /* NODE_HELLO: node -> neighbors, every 2 s. */
@@ -119,6 +147,10 @@ size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out);
 bool   lg_presence_dec(const uint8_t *in, size_t len, lg_presence_t *v);
 size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out);
 bool   lg_time_sync_dec(const uint8_t *in, size_t len, lg_time_sync_t *v);
+size_t lg_name_enc(const lg_name_t *v, uint8_t *out);   /* out holds LG_NAME_LEN_MAX bytes */
+bool   lg_name_dec(const uint8_t *in, size_t len, lg_name_t *v);
+/* True if text is 1..LG_NAME_MAX - 1 bytes of valid UTF-8. */
+bool   lg_name_valid(const uint8_t *text, size_t len);
 size_t lg_hello_enc(const lg_hello_t *v, uint8_t *out);
 bool   lg_hello_dec(const uint8_t *in, size_t len, lg_hello_t *v);
 

@@ -105,6 +105,79 @@ static bool send_frame(lg_client_t *c, lg_env_t *e, const uint8_t *body, size_t 
     return c->io.send(c->io.ctx, buf, (size_t)flen);
 }
 
+/* ---- names (D50) --------------------------------------------------------- */
+
+static lg_name_t *name_slot(lg_client_t *c, uint32_t device)
+{
+    int ui = lg_roster_user_index(c->roster, device);
+    return ui >= 0 && ui < (int)LG_MAX_DEVICES ? &c->names[ui] : NULL;
+}
+
+static bool name_take(lg_client_t *c, const lg_name_t *name)
+{
+    lg_name_t *slot = name_slot(c, name->device);
+    if (slot == NULL || name->version <= slot->version) {
+        return false;
+    }
+    *slot = *name;
+    return true;
+}
+
+static void send_own_name(lg_client_t *c)
+{
+    const lg_name_t *own = lg_client_name(c, c->device);
+    if (own == NULL || !c->registered) {
+        return;
+    }
+    uint8_t body[LG_NAME_LEN_MAX];
+    size_t blen = lg_name_enc(own, body);
+    lg_env_t e;
+    base_env(c, &e, LG_T_NAME, LG_SCOPE_SYSTEM, c->device);
+    (void)send_frame(c, &e, body, blen);
+}
+
+int lg_client_set_name(lg_client_t *c, const uint8_t *text, size_t len)
+{
+    lg_name_t *slot = name_slot(c, c->device);
+    if (slot == NULL || !lg_name_valid(text, len)) {
+        return LG_ERR_ARG;
+    }
+    uint32_t floor = c->boot << 12;
+    lg_name_t name = {
+        .device  = c->device,
+        .version = slot->version >= floor ? slot->version + 1u : floor,
+        .len     = (uint8_t)len,
+    };
+    if (name.version == 0) {
+        name.version = 1;   /* boot 0 on a fresh board */
+    }
+    memcpy(name.text, text, len);
+    name.text[len] = 0;
+    *slot = name;
+    emit(c, LG_CEV_NAME, c->device);
+    send_own_name(c);
+    return LG_OK;
+}
+
+bool lg_client_restore_name(lg_client_t *c, const lg_name_t *name)
+{
+    if (name == NULL || name->version == 0 || !lg_name_valid((const uint8_t *)name->text, name->len)) {
+        return false;
+    }
+    lg_name_t copy = *name;
+    copy.text[copy.len] = 0;
+    return name_take(c, &copy);
+}
+
+const lg_name_t *lg_client_name(const lg_client_t *c, uint32_t device)
+{
+    int ui = lg_roster_user_index(c->roster, device);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES || c->names[ui].version == 0) {
+        return NULL;
+    }
+    return &c->names[ui];
+}
+
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
                     lg_roster_t *roster, const lg_client_io_t *io)
 {
@@ -547,6 +620,7 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         c->node = a.node;
         apply_time(c, a.grid_time);
         emit(c, LG_CEV_REGISTERED, a.node);
+        send_own_name(c);   /* the AP keeps the newest; an older copy it holds is replaced */
         for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
             if (c->outbox[i].state == LG_OUT_PENDING) {
                 transmit(c, i);   /* re-offer with the original id; nodes deduplicate */
@@ -575,6 +649,13 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
             }
         }
         emit(c, LG_CEV_PRESENCE, p.device);
+        break;
+    }
+    case LG_T_NAME: {
+        lg_name_t name;
+        if (e.scope == LG_SCOPE_SYSTEM && lg_name_dec(body, e.body_len, &name) && name_take(c, &name)) {
+            emit(c, LG_CEV_NAME, name.device);
+        }
         break;
     }
     case LG_T_PONG:

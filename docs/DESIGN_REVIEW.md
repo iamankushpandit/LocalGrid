@@ -402,6 +402,7 @@ Four layers, each independently versioned:
 | 0x20 | PRESENCE_UPDATE | SYSTEM | node → nodes, node → clients |
 | 0x21 | PRESENCE_REQUEST | SYSTEM | client → node, node → node |
 | 0x22 | PRESENCE_DIGEST | SYSTEM | node → nodes (every 30 s) |
+| 0x23 | NAME | SYSTEM | client → node, node → nodes (flood), node → clients. A handheld's chosen name, versioned, newest wins (D50). Body: u32 device, u32 version, u8 length, 1..23 bytes of UTF-8 |
 | 0x30 | TEXT_MESSAGE | DIRECT / GROUP / BROADCAST | any |
 | 0x31 | MESSAGE_ACK | DIRECT | any |
 | 0x40 | CONFIG_ANNOUNCE | SYSTEM | master → nodes |

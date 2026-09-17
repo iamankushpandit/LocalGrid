@@ -7,7 +7,9 @@
 
 #include "esp_console.h"
 #include "esp_log.h"
+#include "lg_power.h"
 #include "node_app.h"
+#include "sdkconfig.h"
 
 static int post(node_cmd_type_t type, uint32_t value, const char *text)
 {
@@ -121,6 +123,12 @@ void console_start(void)
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
     }
+    /* power: this board has no supply sense unless CONFIG_LG_NODE_SUPPLY_SENSE_GPIO names a
+     * divider on an ADC1 pin; either way it reports restarts by cause, which is where a
+     * sagging supply shows on an AP. */
+    (void)lg_power_init(CONFIG_LG_NODE_SUPPLY_SENSE_GPIO, CONFIG_LG_NODE_SUPPLY_DIVIDER_MILLI);
+    lg_power_set_report_hook(node_print_restarts);
+    ESP_ERROR_CHECK(lg_power_register_command());
     esp_console_register_help_command();
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
 }

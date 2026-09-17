@@ -61,7 +61,7 @@ typedef struct {
 typedef enum {
     LG_AUDIO_NONE = 0,       /* nothing this firmware can drive */
     LG_AUDIO_DAC,            /* classic ESP32 internal DAC into a small amplifier */
-    LG_AUDIO_ES8311_I2S,     /* codec on I2S; unusable until its pins are known */
+    LG_AUDIO_ES8311_I2S,     /* codec: I2C control on the touch bus, samples over I2S */
 } lg_audio_kind_t;
 
 typedef struct {
@@ -90,6 +90,10 @@ typedef struct {
     lg_touch_profile_t touch;
     lg_audio_profile_t audio;
     int8_t             boot_button;
+    /* Supply sense: an ADC1 pin behind a resistor divider, or LG_PIN_NONE. Ratio in
+     * thousandths (2000 = 2:1). The vendor's ratio, checked against a meter only where noted. */
+    int8_t             supply_sense;
+    uint16_t           supply_divider_milli;
 } lg_board_t;
 
 /* Returns the profile for a board code (e.g. "HY3"), or NULL if unknown. */

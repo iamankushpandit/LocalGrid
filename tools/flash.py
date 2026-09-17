@@ -197,11 +197,16 @@ def release_and_close(ser):
     """Close a port so the board keeps running.
 
     On the bench's CP210x/CH340 auto-reset boards a plain close leaves the control lines in a
-    state that holds the chip in reset. Releasing DTR and RTS first costs one reboot but leaves
-    the board running (verified with NORTH watching MAIN's backbone link)."""
+    state that holds the chip in reset. Releasing RTS and then DTR leaves the board
+    running without a reboot; the opposite order reboots it once more on close."""
     try:
-        ser.dtr = False
+        # RTS first. The auto-reset circuit pulls EN low while RTS is asserted and DTR is not,
+        # so dropping DTR first resets the board on the way out: every tool run used to restart
+        # a board twice, once opening and once closing, and the second one, unseen, wiped grid
+        # time on every AP a tool had touched. Dropping RTS first passes through the state that
+        # only holds IO0 low, which a running board ignores.
         ser.rts = False
+        ser.dtr = False
         time.sleep(0.1)
     except (OSError, ValueError):
         pass

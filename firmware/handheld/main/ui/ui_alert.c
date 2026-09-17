@@ -8,10 +8,12 @@
  * The flash is the screen's own colour, not the backlight. A backlight blinking on and off
  * reads as a board fault; a panel changing colour reads as something demanding attention.
  *
- * An announcement clears itself after a few seconds, because "the food is ready" stops being
- * news. An emergency stays until somebody taps it, and keeps flashing and sounding while it
- * waits: D6 lets urgent broadcasts through when grid time is unset and nothing else can be
- * sent, so if one is on screen it is the only thing the grid managed to say.
+ * Neither kind goes away by itself or by a stray touch: only the X closes it (D41, revised), so
+ * a message nobody was looking at is still there when someone picks the handheld up. An
+ * announcement stops flashing after a few cycles and waits quietly; an emergency keeps
+ * flashing and sounding while it waits: D6 lets urgent broadcasts through when grid time is
+ * unset and nothing else can be sent, so if one is on screen it is the only thing the grid
+ * managed to say.
  */
 #include "ui_alert.h"
 
@@ -26,8 +28,7 @@
 static const char *TAG = "UI";
 
 #define FLASH_MS          260   /* one half-cycle: fast enough to catch an eye, slow enough to read through */
-#define ANNOUNCE_FLASHES  8     /* four full cycles, then it settles and waits to clear */
-#define ANNOUNCE_HOLD_MS  6000  /* how long the words stay after the flashing stops */
+#define ANNOUNCE_FLASHES  8     /* four full cycles, then it settles and waits for the X */
 #define EMERGENCY_REPEAT_MS 4000 /* the siren again, while nobody has acknowledged it */
 
 static struct {
@@ -35,9 +36,8 @@ static struct {
     lv_obj_t   *kind_label;
     lv_obj_t   *who_label;
     lv_obj_t   *text_label;
-    lv_obj_t   *dismiss;
+    lv_obj_t   *close;
     lv_timer_t *flash;
-    lv_timer_t *clear;
     lv_timer_t *repeat;
     uint8_t     flashes_left;
     bool        lit;            /* which half of the flash we are in */
@@ -51,19 +51,16 @@ static void hide(void)
     if (s.flash != NULL) {
         lv_timer_pause(s.flash);
     }
-    if (s.clear != NULL) {
-        lv_timer_pause(s.clear);
-    }
     if (s.repeat != NULL) {
         lv_timer_pause(s.repeat);
     }
     lv_obj_add_flag(s.cover, LV_OBJ_FLAG_HIDDEN);
 }
 
-static void on_tapped(lv_event_t *e)
+static void on_close(lv_event_t *e)
 {
     (void)e;
-    ESP_LOGI(TAG, "[UI] Alert acknowledged");
+    ESP_LOGI(TAG, "[UI] Alert closed");
     hide();
 }
 
@@ -89,14 +86,6 @@ static void on_flash(lv_timer_t *timer)
         /* Stop flashing but leave the words up, so it can be read rather than only noticed. */
         lv_timer_pause(s.flash);
         paint(true);
-    }
-}
-
-static void on_clear(lv_timer_t *timer)
-{
-    (void)timer;
-    if (s.kind == UI_ALERT_ANNOUNCEMENT) {
-        hide();
     }
 }
 
@@ -130,17 +119,18 @@ void ui_alert_start(void)
     s.text_label = lg_ui_label(s.cover, t->font_title, t->bg, "");
     lv_obj_set_style_text_align(s.text_label, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* Only an emergency asks to be acknowledged; an announcement goes away by itself. */
-    s.dismiss = lg_ui_button(s.cover, "Dismiss", on_tapped, NULL);
-
-    /* A tap anywhere clears it too: the button says what to do, the whole screen accepts it. */
-    lv_obj_add_event_cb(s.cover, on_tapped, LV_EVENT_CLICKED, NULL);
+    /*
+     * The X is the only way out, for both kinds. It floats in the corner outside the column so
+     * the words stay centred. The cover stays clickable with no handler of its own, so a touch
+     * elsewhere neither closes the alert nor reaches the screen underneath.
+     */
+    s.close = lg_ui_icon_button(s.cover, LV_SYMBOL_CLOSE, on_close, NULL);
+    lv_obj_add_flag(s.close, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_align(s.close, LV_ALIGN_TOP_RIGHT, 0, 0);
 
     s.flash = lv_timer_create(on_flash, FLASH_MS, NULL);
-    s.clear = lv_timer_create(on_clear, ANNOUNCE_HOLD_MS, NULL);
     s.repeat = lv_timer_create(on_repeat, EMERGENCY_REPEAT_MS, NULL);
     lv_timer_pause(s.flash);
-    lv_timer_pause(s.clear);
     lv_timer_pause(s.repeat);
     lv_obj_add_flag(s.cover, LV_OBJ_FLAG_HIDDEN);
 }
@@ -168,12 +158,6 @@ void ui_alert_show(ui_alert_kind_t kind, const char *who, const char *text)
     lg_ui_set_text(s.kind_label, emergency ? "URGENT" : "ANNOUNCEMENT");
     lg_ui_set_text(s.who_label, who != NULL ? who : "");
     lg_ui_set_text(s.text_label, text != NULL ? text : "");
-    if (emergency) {
-        lv_obj_remove_flag(s.dismiss, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s.dismiss, LV_OBJ_FLAG_HIDDEN);
-    }
-
     /* The saver owns the top layer while it runs, so an alert underneath it would be invisible. */
     lg_ui_screensaver_dismiss();
 
@@ -186,14 +170,11 @@ void ui_alert_show(ui_alert_kind_t kind, const char *who, const char *text)
     lv_timer_reset(s.flash);
     lv_timer_resume(s.flash);
     if (emergency) {
-        lv_timer_pause(s.clear);
         lv_timer_reset(s.repeat);
         lv_timer_resume(s.repeat);
         lg_bsp_audio_cue(LG_CUE_URGENT);
     } else {
         lv_timer_pause(s.repeat);
-        lv_timer_reset(s.clear);
-        lv_timer_resume(s.clear);
         lg_bsp_audio_cue(LG_CUE_ANNOUNCE);
     }
     ESP_LOGI(TAG, "[UI] %s alert: %s", emergency ? "Emergency" : "Announcement", text != NULL ? text : "");

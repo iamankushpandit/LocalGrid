@@ -17,6 +17,7 @@
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
 #include "node_app.h"
+#include "power_trace.h"
 #include "sessions.h"
 #include "settings.h"
 
@@ -62,6 +63,18 @@ typedef struct {
         uint16_t node;
     } devices[LG_MAX_DEVICES];
     lg_roster_t roster;   /* a copy: users point at const data, groups are values (D52) */
+    /* Every AP this one knows about, with the facts each announced (D45), taken on the core
+     * task so the web task never reads grid_state while it changes. */
+    size_t          n_aps;
+    grid_ap_info_t  aps[LG_MAX_NODES];
+    uint8_t         avail[LG_MAX_NODES][GRID_AVAIL_BYTES];   /* packed, two bits a minute */
+    uint32_t        avail_newest_min;
+    size_t          n_incidents;
+    grid_incident_t incidents[GRID_INCIDENTS];
+    uint32_t        time_set_unix;
+    uint16_t        time_set_on;
+    uint32_t        time_generation;
+    uint16_t        time_from;
 } snapshot_t;
 
 typedef struct {
@@ -109,6 +122,16 @@ void web_admin_publish_snapshot(void)
         s.devices[k].node = p->node;
     }
     s.roster = *r;
+    for (uint16_t ap = 0; ap < LG_MAX_NODES; ap++) {
+        if (grid_state_ap(ap, &s.aps[s.n_aps])) {
+            grid_state_avail(ap, s.avail[s.n_aps]);
+            s.n_aps++;
+        }
+    }
+    s.n_incidents = grid_state_incidents(s.incidents, GRID_INCIDENTS);
+    grid_state_time_info(&s.time_set_unix, &s.time_set_on, &s.time_generation);
+    s.time_from = grid_state_sync_source();
+    s.avail_newest_min = grid_state_avail_newest_minute();
     xSemaphoreTake(w.lock, portMAX_DELAY);
     w.snap = s;
     xSemaphoreGive(w.lock);
@@ -139,6 +162,7 @@ static bool random_token(char *out)
 
 static esp_err_t send_json(httpd_req_t *req, const char *status, const char *json)
 {
+    ptrace_event(PTRACE_WEB);
     httpd_resp_set_status(req, status);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -371,7 +395,8 @@ static void login_failed(void)
 
 static bool post_time(uint64_t unix_ms)
 {
-    node_cmd_t cmd = { .type = NODE_CMD_TIME_SET, .value = (uint32_t)(unix_ms / 1000u) };
+    node_cmd_t cmd = { .type = NODE_CMD_TIME_SET, .value = (uint32_t)(unix_ms / 1000u),
+                       .millis = (uint16_t)(unix_ms % 1000u) };
     return xQueueSend(g_app.cmd_queue, &cmd, pdMS_TO_TICKS(500)) == pdTRUE;
 }
 
@@ -408,6 +433,7 @@ static bool valid_timezone(const char *tz)
 
 static esp_err_t h_index(httpd_req_t *req)
 {
+    ptrace_event(PTRACE_WEB);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
@@ -541,7 +567,7 @@ static esp_err_t h_status(httpd_req_t *req)
     s = w.snap;
     xSemaphoreGive(w.lock);
 
-    static char out[4096];
+    static char out[4096];   /* small fields and the group table; AP history goes out as bytes (/api/history, D49) */
     static node_settings_t cfg;
     grid_state_settings(&cfg);
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
@@ -605,6 +631,71 @@ static esp_err_t h_status(httpd_req_t *req)
         return send_error(req, "500 Internal Server Error", "Status too large.");
     }
     return send_json(req, "200 OK", out);
+}
+
+/*
+ * GET /api/history: the APs, their availability, and the outage log, as bytes (D49). The page
+ * decodes it; nothing here is turned into text. Little-endian, layout 1:
+ *
+ * header, 16 B:  u8 layout | u8 this AP | u8 AP count | u8 incident count |
+ *                u32 grid time the admin last set it (0 unknown) | u8 AP it was set on (255 unknown) |
+ *                u8 AP this AP last synced from (255 never) | u16 reserved |
+ *                u32 grid minute of the newest availability entry (0: not anchored to grid time)
+ * AP, 76 B each: u8 AP | u8 flags (bit 0: this AP) | u8 time quality | u8 stratum |
+ *                u8 last synced from (255 never) | u8 reset reason (esp_reset_reason_t) |
+ *                i16 correction at that sync, ms | u32 uptime s | u32 seconds since heard |
+ *                u32 seconds since that sync (0xFFFFFFFF never) | u32 boot | u32 previous run s |
+ *                16 B name | 30 B availability, two bits a minute, oldest first | u16 reserved
+ * incident, 16 B each, newest first: grid_incident_t exactly as stored (grid_state.h)
+ */
+#define HIST_HEADER  16u
+#define HIST_AP      76u
+
+static esp_err_t h_history(httpd_req_t *req)
+{
+    if (session_from_request(req) == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to see grid status.");
+    }
+    static snapshot_t sn;
+    xSemaphoreTake(w.lock, portMAX_DELAY);
+    sn = w.snap;
+    xSemaphoreGive(w.lock);
+
+    static uint8_t out[HIST_HEADER + LG_MAX_NODES * HIST_AP + GRID_INCIDENTS * sizeof(grid_incident_t)];
+    memset(out, 0, sizeof(out));
+    out[0] = 1u;
+    out[1] = (uint8_t)sn.node;
+    out[2] = (uint8_t)sn.n_aps;
+    out[3] = (uint8_t)sn.n_incidents;
+    lg_wr32(out + 4, sn.time_set_unix);
+    out[8] = sn.time_set_on == GRID_NO_AP ? 255u : (uint8_t)sn.time_set_on;
+    out[9] = sn.time_from == GRID_NO_AP ? 255u : (uint8_t)sn.time_from;
+    lg_wr32(out + 12, sn.avail_newest_min);
+    size_t n = HIST_HEADER;
+    for (size_t i = 0; i < sn.n_aps; i++, n += HIST_AP) {
+        const grid_ap_info_t *a = &sn.aps[i];
+        uint8_t *e = out + n;
+        e[0] = (uint8_t)a->ap;
+        e[1] = a->self ? 1u : 0u;
+        e[2] = a->time_quality;
+        e[3] = a->stratum;
+        e[4] = a->sync_from == GRID_NO_AP ? 255u : (uint8_t)a->sync_from;
+        e[5] = a->reset_reason;
+        lg_wr16(e + 6, (uint16_t)a->sync_drift_ms);
+        lg_wr32(e + 8, a->uptime_s);
+        lg_wr32(e + 12, a->heard_age_s);
+        lg_wr32(e + 16, a->sync_age_s);
+        lg_wr32(e + 20, a->boot);
+        lg_wr32(e + 24, a->prev_run_s);
+        memcpy(e + 28, a->name, GRID_AP_NAME_MAX + 1u);
+        memcpy(e + 44, sn.avail[i], GRID_AVAIL_BYTES);
+    }
+    memcpy(out + n, sn.incidents, sn.n_incidents * sizeof(grid_incident_t));
+    n += sn.n_incidents * sizeof(grid_incident_t);
+    ptrace_event(PTRACE_WEB);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, (const char *)out, (ssize_t)n);
 }
 
 static esp_err_t h_time(httpd_req_t *req)
@@ -752,6 +843,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/login",    .method = HTTP_POST, .handler = h_login },
         { .uri = "/api/logout",   .method = HTTP_POST, .handler = h_logout },
         { .uri = "/api/status",   .method = HTTP_GET,  .handler = h_status },
+        { .uri = "/api/history",  .method = HTTP_GET,  .handler = h_history },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
     };

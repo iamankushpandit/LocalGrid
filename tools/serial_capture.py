@@ -29,8 +29,13 @@ def parse_send(spec):
 def release(ser):
     """Drop both control lines, then close. A plain close holds CP210x and CH340 boards in reset."""
     try:
-        ser.dtr = False
+        # RTS first. The auto-reset circuit pulls EN low while RTS is asserted and DTR is not,
+        # so dropping DTR first resets the board on the way out: every tool run used to restart
+        # a board twice, once opening and once closing, and the second one, unseen, wiped grid
+        # time on every AP a tool had touched. Dropping RTS first passes through the state that
+        # only holds IO0 low, which a running board ignores.
         ser.rts = False
+        ser.dtr = False
         time.sleep(0.1)
     except (OSError, ValueError):
         pass

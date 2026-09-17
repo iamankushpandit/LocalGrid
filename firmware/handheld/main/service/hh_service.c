@@ -66,6 +66,17 @@ static const char *TAG = "NET";
 #define PING_INTERVAL_MS      10000
 #define PONG_TIMEOUT_MS       25000
 #define RESCAN_ONLINE_MS      60000
+/*
+ * Moving for grid time. APs flag in their beacon whether they hold grid time. A handheld on an
+ * AP without it, while another usable AP in range has it, moves -- but only once that has been
+ * true for TIME_MOVE_AFTER_MS, rescanning every TIME_RESCAN_MS meanwhile, and not again within
+ * TIME_MOVE_HOLDOFF_MS. Linked APs share time within seconds (D45), so this matters only when
+ * the grid is split; the delays keep a handheld from bouncing while an AP is still catching up.
+ */
+#define TIME_MOVE_AFTER_MS    30000
+#define TIME_RESCAN_MS        10000
+#define TIME_MOVE_HOLDOFF_MS  120000
+#define TIME_PREFER_DB        30
 #define RSSI_POLL_MS          2000
 #define TICK_MS               1000
 #define PUBLISH_MS            1000
@@ -89,6 +100,7 @@ typedef enum {
     EV_RECONNECT,
     EV_MARK_READ,
     EV_GROUP_EDIT,
+    EV_RENAME,
 } ev_type_t;
 
 typedef struct {
@@ -100,6 +112,7 @@ typedef struct {
     int32_t value;                 /* disconnect reason, or preferred node */
     uint32_t id[3];                /* EV_MARK_READ: author, boot, seq of the message read */
     lg_group_edit_t group;         /* EV_GROUP_EDIT, members as roster user bits */
+    char    new_name[LG_NAME_MAX];  /* EV_RENAME: NUL-terminated */
 } ev_t;
 
 typedef struct {
@@ -159,6 +172,8 @@ static struct {
     uint32_t  last_rssi_ms;
     uint32_t  last_tick_ms;
     uint32_t  last_publish_ms;
+    uint32_t  no_time_since_ms;     /* 0, or when this AP was first seen without time while another had it */
+    uint32_t  last_time_move_ms;
     int64_t   time_offset_s;
     bool      time_set;
     uint16_t  rx_fill;
@@ -191,10 +206,68 @@ static void set_problem(const char *text)
     s.dirty = true;
 }
 
+/* The name a handheld chose (D50), or its roster name until it chooses one. Service task only. */
 static const char *roster_name(uint32_t device)
 {
+    const lg_name_t *chosen = lg_client_name(&s.client, device);
+    if (chosen != NULL) {
+        return chosen->text;
+    }
     const lg_user_t *u = lg_roster_user(&s.roster, device);
     return u != NULL ? u->name : "Unknown handheld";
+}
+
+/*
+ * Every name this handheld knows, kept in flash as one blob of packed NAME records (D48, D49), so
+ * names survive a restart even before an AP is in range. Written only when a name changes.
+ */
+static void save_names(void)
+{
+    static uint8_t blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];   /* about 1 KB: kept off the stack */
+    size_t used = 0;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (s.client.names[i].version != 0) {
+            used += lg_name_enc(&s.client.names[i], blob + used);
+        }
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = used > 0 ? nvs_set_blob(h, "names", blob, used) : nvs_erase_key(h, "names");
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW("GRID", "[GRID] Names not saved: %s", esp_err_to_name(err));
+    }
+}
+
+static void load_names(void)
+{
+    static uint8_t blob[LG_MAX_DEVICES * LG_NAME_LEN_MAX];   /* about 1 KB: kept off the stack */
+    size_t len = sizeof(blob);
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    esp_err_t err = nvs_get_blob(h, "names", blob, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return;
+    }
+    unsigned loaded = 0;
+    for (size_t at = 0; at + LG_NAME_LEN_MIN <= len;) {
+        size_t rec = 9u + blob[at + 8];
+        lg_name_t name;
+        if (at + rec > len || !lg_name_dec(blob + at, rec, &name)) {
+            break;   /* a damaged tail loses only what follows it */
+        }
+        loaded += lg_client_restore_name(&s.client, &name) ? 1u : 0u;
+        at += rec;
+    }
+    ESP_LOGI("GRID", "[GRID] Loaded %u chosen name(s) from flash", loaded);
 }
 
 /* ---- message list (service task only; readers take the lock) ---- */
@@ -395,7 +468,7 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         s.backoff_ms = 0;
         set_problem("");
         ESP_LOGI("GRID", "[GRID] Registered with node %" PRIu32 " as device %" PRIu32 " (%s)", ev->value, s.device,
-                 s.user->name);
+                 roster_name(s.device));
         ESP_LOGI(TAG, "[NET] Online; free heap %" PRIu32 " KB, lowest %" PRIu32 " KB",
                  esp_get_free_heap_size() / 1024, esp_get_minimum_free_heap_size() / 1024);
         break;
@@ -407,6 +480,12 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         }
         break;
     }
+    case LG_CEV_NAME:
+        ESP_LOGI("GRID", "[GRID] Device %" PRIu32 " is now called \"%s\"%s", ev->value, roster_name(ev->value),
+                 ev->value == s.device ? " (this handheld)" : "");
+        save_names();
+        s.dirty = true;
+        break;
     case LG_CEV_TIME:
         if (ev->value == 0) {
             ESP_LOGW("TIME", "[TIME] Grid time is not set: only receiving and urgent broadcasts (D6)");
@@ -428,8 +507,15 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
             m->grid_time = in->grid_time;
             ring_set_text(m, (const char *)in->text, in->len);
-            ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
-                     m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+            if (in->scope == LG_SCOPE_DIRECT) {
+                /* Never the text of a 1:1 message (AGENTS.md): author, boot, and seq identify it. */
+                ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: 1:1 boot %" PRIu32 " seq %" PRIu32 ", %u bytes",
+                         in->author, roster_name(in->author), m->urgent ? " URGENT" : "", in->boot, in->seq,
+                         (unsigned)in->len);
+            } else {
+                ESP_LOGI("MSG", "[MSG] From %" PRIu32 " (%s)%s: %.*s", in->author, roster_name(in->author),
+                         m->urgent ? " URGENT" : "", (int)in->len, (const char *)in->text);
+            }
         }
         break;
     }
@@ -562,9 +648,13 @@ static bool node_usable(const node_cand_t *c, uint32_t now)
 static int pick_node(uint32_t now)
 {
     bool any_backbone = false;
+    bool any_time = false;
     for (int i = 0; i < HH_MAX_NODES; i++) {
         if (node_usable(&s.cand[i], now) && (s.cand[i].flags & LG_DISC_FLAG_BACKBONE)) {
             any_backbone = true;
+        }
+        if (node_usable(&s.cand[i], now) && (s.cand[i].flags & LG_DISC_FLAG_TIME)) {
+            any_time = true;
         }
     }
     int best = -1;
@@ -584,12 +674,55 @@ static int pick_node(uint32_t now)
         if (any_backbone && !(c->flags & LG_DISC_FLAG_BACKBONE)) {
             score -= 20;
         }
+        if (any_time && !(c->flags & LG_DISC_FLAG_TIME)) {
+            score -= TIME_PREFER_DB;   /* without grid time only urgent broadcasts go out (D6) */
+        }
         if (score > best_score) {
             best_score = score;
             best = i;
         }
     }
     return best;
+}
+
+static void drop_link(const char *why, bool retry_now);
+
+/* Online on an AP with no grid time while another usable AP has it: move, once it has lasted. */
+static bool time_move_due(uint32_t now)
+{
+    int current = (int)s.client.node;
+    const node_cand_t *here = current >= 0 && current < HH_MAX_NODES ? &s.cand[current] : NULL;
+    bool here_lacks = here != NULL && here->valid && !(here->flags & LG_DISC_FLAG_TIME);
+    int better = -1;
+    for (int i = 0; here_lacks && i < HH_MAX_NODES; i++) {
+        if (i != current && node_usable(&s.cand[i], now) && (s.cand[i].flags & LG_DISC_FLAG_TIME) &&
+            (s.preferred < 0 || s.preferred == i)) {
+            better = i;
+            break;
+        }
+    }
+    if (better < 0) {
+        if (s.no_time_since_ms != 0) {
+            ESP_LOGI(TAG, "[TIME] No longer waiting to move for grid time");
+        }
+        s.no_time_since_ms = 0;
+        return false;
+    }
+    if (s.no_time_since_ms == 0) {
+        s.no_time_since_ms = now;
+        ESP_LOGI(TAG, "[TIME] %s has no grid time and %s does; moving in %d s unless it catches up",
+                 here->ssid, s.cand[better].ssid, TIME_MOVE_AFTER_MS / 1000);
+        return false;
+    }
+    if (now - s.no_time_since_ms < TIME_MOVE_AFTER_MS ||
+        (s.last_time_move_ms != 0 && now - s.last_time_move_ms < TIME_MOVE_HOLDOFF_MS)) {
+        return false;
+    }
+    s.last_time_move_ms = now;
+    s.no_time_since_ms = 0;
+    ESP_LOGW(TAG, "[TIME] Moving from %s to %s, which has grid time", here->ssid, s.cand[better].ssid);
+    drop_link("Moving to an AP that has grid time", true);
+    return true;
 }
 
 static void drop_link(const char *why, bool retry_now)
@@ -753,9 +886,10 @@ static void on_scan_done(uint32_t now)
             continue;
         }
         found += node_usable(c, now) ? 1 : 0;
-        ESP_LOGI(TAG, "[NET] Heard node %d \"%s\" %d dBm, %u attached, %u free, backbone %s, %" PRIu32 " ms ago", i,
-                 c->ssid[0] != '\0' ? c->ssid : "(name unknown)", c->rssi, c->clients, c->free_slots,
-                 (c->flags & LG_DISC_FLAG_BACKBONE) ? "yes" : "no", now - c->heard_ms);
+        ESP_LOGI(TAG, "[NET] Heard AP %d \"%s\" %d dBm, %u attached, %u free, backbone %s, grid time %s, %" PRIu32
+                 " ms ago", i, c->ssid[0] != '\0' ? c->ssid : "(name unknown)", c->rssi, c->clients, c->free_slots,
+                 (c->flags & LG_DISC_FLAG_BACKBONE) ? "yes" : "no", (c->flags & LG_DISC_FLAG_TIME) ? "yes" : "no",
+                 now - c->heard_ms);
     }
     ESP_LOGI(TAG, "[NET] Scan done: %u records, %d usable node(s)", (unsigned)n, found);
     s.dirty = true;
@@ -837,6 +971,13 @@ static void handle_event(const ev_t *ev, uint32_t now)
                  ev->id[0], ev->id[1], ev->id[2], told ? "sent" : "refused");
         break;
     }
+    case EV_RENAME: {
+        size_t len = strlen(ev->new_name);   /* hh_service_set_name copied at most LG_NAME_MAX - 1 bytes */
+        if (lg_client_set_name(&s.client, (const uint8_t *)ev->new_name, len) != LG_OK) {
+            ESP_LOGW("GRID", "[GRID] Rename refused: the name is empty, too long, or not UTF-8");
+        }
+        break;
+    }
     default:
         break;
     }
@@ -898,17 +1039,25 @@ static void drain_send_queue(void)
             m->seq = o->seq;
             m->grid_time = o->grid_time;
             m->state = state_from_outbox(o);
-            ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
-                     req.scope == LG_SCOPE_DIRECT ? "device" : req.scope == LG_SCOPE_GROUP ? "group" : "everyone",
-                     m->target, m->text);
+            if (req.scope == LG_SCOPE_DIRECT) {
+                ESP_LOGI("MSG", "[MSG] Sent%s to device %" PRIu32 ": 1:1 boot %" PRIu32 " seq %" PRIu32 ", %u bytes",
+                         req.urgent ? " URGENT" : "", m->target, o->boot, o->seq, (unsigned)req.len);
+            } else {
+                ESP_LOGI("MSG", "[MSG] Sent%s to %s %" PRIu32 ": %s", req.urgent ? " URGENT" : "",
+                         req.scope == LG_SCOPE_GROUP ? "group" : "everyone", m->target, m->text);
+            }
         } else {
             m->state = HH_MSG_REFUSED;
             m->reject = rc == LG_ERR_TIME ? HH_REFUSE_TIME : rc == LG_ERR_FULL ? HH_REFUSE_FULL : HH_REFUSE_INVALID;
-            ESP_LOGW("MSG", "[MSG] Not sent (%s): %s",
-                     m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
-                     : m->reject == HH_REFUSE_FULL ? "outbox full"
-                                                   : "not allowed: unknown target, bad text, or no key yet",
-                     m->text);
+            const char *why = m->reject == HH_REFUSE_TIME   ? "grid time is not set, so only urgent broadcasts go out"
+                              : m->reject == HH_REFUSE_FULL ? "outbox full"
+                                                            : "not allowed: unknown target, bad text, or no key yet";
+            if (req.scope == LG_SCOPE_DIRECT) {
+                ESP_LOGW("MSG", "[MSG] Not sent (%s): 1:1 to device %" PRIu32 ", %u bytes", why, m->target,
+                         (unsigned)req.len);
+            } else {
+                ESP_LOGW("MSG", "[MSG] Not sent (%s): %s", why, m->text);
+            }
         }
     }
 }
@@ -963,7 +1112,10 @@ static void step(uint32_t now)
             drop_link("The node stopped answering", false);
             break;
         }
-        if (now - s.last_scan_ms >= RESCAN_ONLINE_MS) {
+        if (time_move_due(now)) {
+            break;
+        }
+        if (now - s.last_scan_ms >= (s.no_time_since_ms != 0 ? TIME_RESCAN_MS : RESCAN_ONLINE_MS)) {
             start_scan(now);   /* keeps the nodes-in-range list fresh */
         }
         break;
@@ -1006,6 +1158,7 @@ static void publish(void)
     st->time_restricted = lg_client_time_restricted(&s.client);
     st->grid_time = st->time_restricted ? 0 : io_local_time(NULL);
     st->preferred_node = s.preferred;
+    snprintf(st->name, sizeof(st->name), "%s", roster_name(s.device));
 
     st->n_nodes = 0;
     for (int i = 0; i < HH_MAX_NODES; i++) {
@@ -1017,6 +1170,7 @@ static void publish(void)
             o->rssi = c->rssi;
             o->clients = c->clients;
             o->backbone = (c->flags & LG_DISC_FLAG_BACKBONE) != 0;
+            o->has_time = (c->flags & LG_DISC_FLAG_TIME) != 0;
         }
     }
 
@@ -1031,7 +1185,7 @@ static void publish(void)
         }
         hh_person_t *o = &st->people[st->n_people++];
         o->device = dev;
-        snprintf(o->name, sizeof(o->name), "%s", roster->users[i].name);
+        snprintf(o->name, sizeof(o->name), "%s", roster_name(dev));
         o->node = p->node;
         o->online = s.link == HH_LINK_ONLINE && p->state == LG_PRES_ONLINE;
     }
@@ -1245,10 +1399,12 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
         .on_groups_removed = io_groups_removed,
     };
     lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, &s.roster, &io);
+    load_names();
+    snprintf(s.status.name, sizeof(s.status.name), "%s", roster_name(s.device));
     if (xTaskCreate(service_task, "hh_net", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, "Network task did not start");
     }
-    ESP_LOGI(TAG, "[NET] Handheld service started: device %" PRIu32 " (%s), boot %" PRIu32, s.device, s.user->name,
+    ESP_LOGI(TAG, "[NET] Handheld service started: device %" PRIu32 " (%s), boot %" PRIu32, s.device, roster_name(s.device),
              s.boot);
     return ESP_OK;
 }
@@ -1327,6 +1483,20 @@ void hh_service_mark_read(uint32_t message_id)
     if (found) {
         xQueueSend(s.queue, &ev, 0);
     }
+}
+
+esp_err_t hh_service_set_name(const char *name)
+{
+    if (s.queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    size_t len = name != NULL ? strlen(name) : 0;
+    if (!lg_name_valid((const uint8_t *)name, len)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ev_t ev = { .type = EV_RENAME };
+    memcpy(ev.new_name, name, len);   /* the rest is already zero */
+    return xQueueSend(s.queue, &ev, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 void hh_service_prefer_node(int node)

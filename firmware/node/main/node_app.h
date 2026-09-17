@@ -43,6 +43,7 @@ typedef enum {
 typedef struct {
     node_cmd_type_t type;
     uint32_t        value;
+    uint16_t        millis;        /* NODE_CMD_TIME_SET: milliseconds into value's second */
     char            text[LG_TEXT_MAX + 1];
     lg_group_edit_t group;
 } node_cmd_t;
@@ -54,8 +55,10 @@ typedef struct {
     uint32_t      boot;
     lg_roster_t   roster;          /* users are fixed; groups change and are saved (D52) */
     lg_node_t     core;
-    int64_t       time_offset_s;   /* grid time = monotonic seconds + offset */
+    int64_t       time_offset_ms;  /* grid time in ms = monotonic ms + offset */
+    int32_t       time_slew_ms;    /* correction still being spread into the offset */
     uint8_t       time_quality;    /* lg_time_quality_t */
+    uint8_t       time_stratum;    /* 0 where the admin set it, +1 per hop, LG_STRATUM_UNKNOWN */
     QueueHandle_t cmd_queue;
 } node_app_t;
 
@@ -63,4 +66,11 @@ extern node_app_t g_app;
 
 uint32_t app_now_ms(void);
 uint32_t app_grid_time(void);
+/* Grid time as Unix milliseconds, 0 when unset. */
+uint64_t app_grid_time_ms(void);
+/* A newer admin setting of the time exists elsewhere: forget this AP's distance from the old one. */
+void     app_time_follow_new_generation(void);
+/* Core task, about ten times a second: spreads a small correction instead of stepping. */
+void     app_time_slew(uint32_t elapsed_ms);
 void     console_start(void);
+void     node_print_restarts(void);   /* restart counts by cause; safe from the console task */

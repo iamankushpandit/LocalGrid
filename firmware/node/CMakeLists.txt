@@ -9,7 +9,7 @@ endif()
 # brought in the handheld UI stack (lg_bsp, lg_ui) and made the component manager download and
 # compile LVGL, which nodes must never carry (D27).
 set(LG_COMPONENTS "${CMAKE_CURRENT_LIST_DIR}/../../components")
-set(EXTRA_COMPONENT_DIRS "${LG_COMPONENTS}/lg_core" "${LG_COMPONENTS}/lg_crypto" "${LG_COMPONENTS}/lg_identity")
+set(EXTRA_COMPONENT_DIRS "${LG_COMPONENTS}/lg_core" "${LG_COMPONENTS}/lg_crypto" "${LG_COMPONENTS}/lg_identity" "${LG_COMPONENTS}/lg_power")
 set(COMPONENTS main)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

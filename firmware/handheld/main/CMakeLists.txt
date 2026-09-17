@@ -15,5 +15,5 @@ idf_component_register(SRCS "hh_main.c"
                             "ui/ui_notify.c"
                             "ui/ui_alert.c"
                        INCLUDE_DIRS "." "service" "ui" "../../common"
-                       REQUIRES lg_core lg_crypto lg_identity lg_board lg_bsp lg_ui lg_selftest
+                       REQUIRES lg_core lg_crypto lg_identity lg_board lg_bsp lg_ui lg_selftest lg_power
                                 esp_wifi esp_netif esp_event nvs_flash lwip esp_timer console)

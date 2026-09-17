@@ -1,4 +1,5 @@
 #include "ble_adv.h"
+#include "power_trace.h"
 
 #include <string.h>
 
@@ -109,6 +110,7 @@ void ble_adv_update(const uint8_t *payload, size_t len)
         return;   /* unchanged: leave the running advertisement alone */
     }
     set_payload(payload, len);
+    ptrace_event(PTRACE_BLE_UPDATE);
     if (!s_synced) {
         return;   /* on_sync starts advertising with the new payload */
     }

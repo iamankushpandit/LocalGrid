@@ -720,6 +720,9 @@ static bool t9_type(lv_obj_t *ta, const char *txt)
     lv_textarea_add_text(ta, one);
     if (s_ui.t9_timer == NULL) {
         s_ui.t9_timer = lv_timer_create(t9_forget, T9_PAUSE_MS, NULL);
+        /* Not deleted when its one run ends, or the reset below and the delete on leaving the chat
+         * would touch freed memory (the banner timer crashed both handhelds that way). */
+        lv_timer_set_auto_delete(s_ui.t9_timer, false);
     }
     lv_timer_reset(s_ui.t9_timer);
     lv_timer_resume(s_ui.t9_timer);

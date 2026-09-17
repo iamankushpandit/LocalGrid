@@ -13,7 +13,7 @@
  * Pins live in the board profile (D9). On a board with no way to make a sound every call here
  * returns ESP_ERR_NOT_SUPPORTED and does nothing, so callers need no board knowledge: the
  * Hosyond has a DAC on a free pin, while the FNK0104B's speaker is behind an ES8311 codec
- * whose I2S pins are not yet known, so it stays silent rather than pretending.
+ * driven over I2C and I2S, set up at the first sound once the touch driver has opened the bus.
  */
 #pragma once
 
@@ -46,7 +46,9 @@ bool lg_bsp_audio_available(void);
  *
  * The cosine generator attenuates in four fixed steps (0, -6, -12, -18 dB) and the DAC path
  * has no gain register at all, so a slider pretending to be continuous would be a lie: OFF,
- * LOW, MEDIUM and HIGH are exactly what the part can do. HIGH is full amplitude.
+ * LOW, MEDIUM and HIGH are exactly what the part can do. HIGH is full amplitude. The codec
+ * path uses the same steps so a cue sounds alike on every board, under a fixed ceiling from
+ * the board profile's max_volume.
  *
  * OFF is the mute, and it silences ordinary cues and the console's own tone alike. An URGENT
  * broadcast ignores both the mute and the volume and always plays at full: D6 lets urgent
@@ -77,7 +79,8 @@ esp_err_t lg_bsp_audio_cue(lg_cue_t cue);
 
 /*
  * One tone, for bring-up and for the serial console: the frequency in Hz (the cosine
- * generator's floor is about 130 Hz) and how long to hold it. Queued like a cue.
+ * generator's floor is about 130 Hz; the codec path's ceiling is below 8000 Hz, half its
+ * sample rate) and how long to hold it. Queued like a cue.
  */
 esp_err_t lg_bsp_audio_tone(uint32_t hz, uint32_t ms);
 

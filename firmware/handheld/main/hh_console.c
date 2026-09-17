@@ -7,6 +7,7 @@
  */
 #include "hh_console.h"
 #include "hh_mem.h"
+#include "lg_power.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -75,11 +76,15 @@ static int cmd_tone(int argc, char **argv)
     uint32_t hz = argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 10) : 1000u;
     uint32_t ms = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : 300u;
     if (!lg_bsp_audio_available()) {
-        printf("No sound: this board has no speaker, or its codec is not driven yet\n");
+        printf("No sound: this board has no speaker, or its codec did not start\n");
         return 0;
     }
     printf("Playing %" PRIu32 " Hz for %" PRIu32 " ms\n", hz, ms);
-    return lg_bsp_audio_tone(hz, ms) == ESP_OK ? 0 : 1;
+    esp_err_t err = lg_bsp_audio_tone(hz, ms);
+    if (err != ESP_OK) {
+        printf("Not played: %s\n", esp_err_to_name(err));
+    }
+    return err == ESP_OK ? 0 : 1;
 }
 
 static int cmd_cue(int argc, char **argv)
@@ -97,11 +102,15 @@ static int cmd_cue(int argc, char **argv)
         return 1;
     }
     if (!lg_bsp_audio_available()) {
-        printf("No sound: this board has no speaker, or its codec is not driven yet\n");
+        printf("No sound: this board has no speaker, or its codec did not start\n");
         return 0;
     }
     printf("Playing the %s cue\n", which);
-    return lg_bsp_audio_cue(cue) == ESP_OK ? 0 : 1;
+    esp_err_t err = lg_bsp_audio_cue(cue);
+    if (err != ESP_OK) {
+        printf("Not played: %s\n", esp_err_to_name(err));
+    }
+    return err == ESP_OK ? 0 : 1;
 }
 
 static int cmd_i2cscan(int argc, char **argv)
@@ -226,14 +235,14 @@ static int cmd_nodes(int argc, char **argv)
     (void)argv;
     const hh_status_t *st = console_status();
     printf("Nodes in range: %u\n", st->n_nodes);
-    printf("  NODE  SSID              RSSI  ATTACHED  BACKBONE  STATE\n");
+    printf("  AP    NAME              RSSI  ATTACHED  BACKBONE  TIME  STATE\n");
     for (uint8_t i = 0; i < st->n_nodes; i++) {
         const hh_node_seen_t *n = &st->nodes[i];
         const char *state = st->link == HH_LINK_ONLINE && st->node == (int)n->node ? "connected"
                             : st->preferred_node == (int)n->node                  ? "chosen"
                                                                                  : "";
-        printf("  %-4u  %-16s  %-4d  %-8u  %-8s  %s\n", n->node, n->ssid, n->rssi, n->clients,
-               n->backbone ? "yes" : "no", state);
+        printf("  %-4u  %-16s  %-4d  %-8u  %-8s  %-4s  %s\n", n->node, n->ssid, n->rssi, n->clients,
+               n->backbone ? "yes" : "no", n->has_time ? "yes" : "no", state);
     }
     return 0;
 }
@@ -557,6 +566,32 @@ static int cmd_screen(int argc, char **argv)
     return 1;
 }
 
+/* name [new name...]: shows this handheld's name, or renames it (D50). */
+static int cmd_name(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("%s\n", console_status()->name);
+        return 0;
+    }
+    char name[HH_NAME_MAX] = { 0 };
+    size_t len = 0;
+    for (int i = 1; i < argc; i++) {
+        size_t part = strlen(argv[i]) + (i > 1 ? 1u : 0u);
+        if (len + part > HH_NAME_MAX - 1u) {
+            printf("too long: at most %u bytes\n", (unsigned)(HH_NAME_MAX - 1));
+            return 1;
+        }
+        len += (size_t)snprintf(name + len, sizeof(name) - len, "%s%s", i > 1 ? " " : "", argv[i]);
+    }
+    esp_err_t err = hh_service_set_name(name);
+    if (err != ESP_OK) {
+        printf("not renamed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("renamed; every AP and handheld gets it when this handheld is online\n");
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     (void)argc;
@@ -605,6 +640,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "saver",     .help = "saver [on|off]: the screen saver, kept in NVS",         .func = cmd_saver },
         { .command = "volume",    .help = "volume [off|low|medium|high]: notification loudness, kept in NVS", .func = cmd_volume },
         { .command = "mem",       .help = "Heap now: free, lowest, largest block",                   .func = cmd_mem },
+        { .command = "name",      .help = "name [new name]: show or change this handheld's name",     .func = cmd_name },
         { .command = "reboot",    .help = "Restart this handheld",                                   .func = cmd_reboot },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
@@ -613,6 +649,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
             return err;
         }
     }
+    (void)lg_power_register_command();   /* power [-m s [-i ms] [-q]], shared with the APs */
     esp_console_register_help_command();
     return esp_console_start_repl(repl);
 }

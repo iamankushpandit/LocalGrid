@@ -43,6 +43,9 @@ static struct {
     lv_obj_t            *nodes_screen;
     lv_obj_t            *nodes_bar;
     lv_obj_t            *nodes_list;
+    lv_obj_t            *rename_screen;
+    lv_obj_t            *rename_input;
+    lv_obj_t            *rename_note;
     uint32_t             shown_signature;
     uint32_t             shown_nodes_signature;
 } s_ui;
@@ -64,6 +67,9 @@ static uint32_t settings_signature(const hh_status_t *st)
     uint32_t h = 2166136261u;
     h = mix(h, (uint32_t)st->preferred_node);
     h = mix(h, (uint32_t)st->link);
+    h = mix(h, (uint32_t)st->node);
+    h = mix(h, (uint32_t)((uint8_t)(st->rssi + 128) / 6u));   /* ~6 dB steps, not noise */
+    h = mix(h, st->grid_time != 0 ? 1u : 0u);
     h = mix(h, st->device);
     /*
      * Coarse buckets, deliberately. Free heap moves every second, and while it was in this
@@ -126,6 +132,47 @@ static void on_node_picked(lv_event_t *e)
     ui_settings_open();
 }
 
+/* ---- rename (D50) ---- */
+
+static void build_rename_screen(void);
+
+static void on_rename(lv_event_t *e)
+{
+    (void)e;
+    if (s_ui.rename_screen == NULL) {
+        build_rename_screen();
+    }
+    lv_textarea_set_text(s_ui.rename_input, ui_status()->name);
+    lv_screen_load(s_ui.rename_screen);
+}
+
+/* The keyboard's OK key, or Enter in the one-line field. */
+static void on_rename_ready(lv_event_t *e)
+{
+    (void)e;
+    if (s_ui.rename_input == NULL) {
+        return;   /* already left */
+    }
+    const lg_theme_t *t = lg_theme();
+    const char *name = lv_textarea_get_text(s_ui.rename_input);
+    esp_err_t err = hh_service_set_name(name);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "[UI] Rename requested");
+        ui_settings_open();
+        return;
+    }
+    lv_obj_set_style_text_color(s_ui.rename_note, t->error, 0);
+    lg_ui_set_text(s_ui.rename_note, err == ESP_ERR_INVALID_ARG
+                                         ? "Not saved: a name needs 1 to 23 bytes; emoji count as 4."
+                                         : "Not saved: the handheld is busy. Try again.");
+}
+
+static void on_rename_cancel(lv_event_t *e)
+{
+    (void)e;
+    ui_settings_open();
+}
+
 static void on_reconnect(lv_event_t *e)
 {
     (void)e;
@@ -138,11 +185,15 @@ static void on_scan(lv_event_t *e)
     hh_service_scan_now();
 }
 
-/* Tapping steps through the four levels the hardware actually has and wraps at the top. */
-static void on_sound(lv_event_t *e)
+/* One button per level the hardware actually has (D40); the button's user data is the level. */
+static void on_volume(lv_event_t *e)
 {
-    (void)e;
-    lg_bsp_audio_set_volume((uint8_t)((lg_bsp_audio_volume() + 1u) % LG_VOLUME_STEPS));
+    lg_bsp_audio_set_volume((uint8_t)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void on_test_sound(lv_event_t *e)
+{
+    lg_bsp_audio_cue((lg_cue_t)(intptr_t)lv_event_get_user_data(e));
 }
 
 static void on_saver(lv_event_t *e)
@@ -182,44 +233,56 @@ static void rebuild_settings(const hh_status_t *st)
         snprintf(value, sizeof(value), "AP %d", st->preferred_node);
     }
     ui_list_action(s_ui.list, "Which AP", value, on_choose_node, NULL);
-    ui_list_action(s_ui.list, "Reconnect now", NULL, on_reconnect, NULL);
-    ui_list_action(s_ui.list, "Look for APs", NULL, on_scan, NULL);
-    ui_list_note(s_ui.list, "Grid time comes from the master's page; a handheld never sets it.");
+    lv_obj_t *buttons = ui_list_buttons(s_ui.list);
+    ui_list_button(buttons, "Reconnect", UI_BUTTON_MAIN, on_reconnect, NULL);
+    ui_list_button(buttons, "Look for APs", UI_BUTTON_PLAIN, on_scan, NULL);
+    if (st->link == HH_LINK_ONLINE && st->node >= 0) {
+        snprintf(value, sizeof(value), "AP %d, %d dBm", st->node, st->rssi);
+    } else {
+        snprintf(value, sizeof(value), "no AP");
+    }
+    ui_list_fact(s_ui.list, "Connected to", value);
+    ui_list_fact(s_ui.list, "Grid time", st->grid_time != 0 ? "set" : "not set");
+    ui_list_note(s_ui.list, "Grid time is set on any AP's admin page; a handheld never sets it.");
 
     ui_list_clear(s_ui.sound_list);
     if (lg_bsp_audio_available()) {
-        ui_list_action(s_ui.sound_list, "Volume", lg_bsp_audio_volume_name(lg_bsp_audio_volume()),
-                       on_sound, NULL);
+        static const char *const levels[LG_VOLUME_STEPS] = { "Off", "Low", "Med", "High" };
+        ui_list_choice(s_ui.sound_list, "Volume", levels, LG_VOLUME_STEPS, lg_bsp_audio_volume(), on_volume);
+        buttons = ui_list_buttons(s_ui.sound_list);
+        ui_list_button(buttons, "Test sound", UI_BUTTON_MAIN, on_test_sound, (void *)(intptr_t)LG_CUE_RECEIVED);
+        ui_list_button(buttons, "Test urgent", UI_BUTTON_PLAIN, on_test_sound, (void *)(intptr_t)LG_CUE_URGENT);
         ui_list_note(s_ui.sound_list, "A bell when a message arrives, and three notes for an urgent one.");
         ui_list_note(s_ui.sound_list,
                      "Off silences the handheld except for urgent broadcasts, which always sound.");
     } else {
-        ui_list_row(s_ui.sound_list, "Volume", "no speaker on this board");
+        ui_list_fact(s_ui.sound_list, "Volume", "no speaker on this board");
     }
 
     ui_list_clear(s_ui.screen_list);
-    if (lg_bsp_touch_can_calibrate()) {
-        ui_list_action(s_ui.screen_list, "Calibrate touch", lg_bsp_touch_needs_calibration() ? "needed" : NULL,
-                       on_calibrate, NULL);
-    } else {
-        ui_list_row(s_ui.screen_list, "Touch", "no calibration needed");
-    }
     ui_list_action(s_ui.screen_list, "Screen saver", lg_ui_screensaver_enabled() ? "on" : "off",
                    on_saver, NULL);
+    if (lg_bsp_touch_can_calibrate()) {
+        lv_obj_t *row = ui_list_action(s_ui.screen_list, "Calibrate touch",
+                                       lg_bsp_touch_needs_calibration() ? "needed" : NULL, on_calibrate, NULL);
+        ui_list_value_warn(row);
+    } else {
+        ui_list_fact(s_ui.screen_list, "Touch", "no calibration needed");
+    }
     ui_list_note(s_ui.screen_list, "Green rain covers the panel after a minute untouched; a touch clears it.");
 
     ui_list_clear(s_ui.device_list);
-    ui_list_row(s_ui.device_list, "Name", st->name);
+    ui_list_action(s_ui.device_list, "Name", st->name, on_rename, NULL);
     snprintf(value, sizeof(value), "%" PRIu32, st->device);
-    ui_list_row(s_ui.device_list, "Device number", value);
-    ui_list_row(s_ui.device_list, "Board",
-                s_ui.identity != NULL && s_ui.identity->present ? s_ui.identity->board : "unknown");
-    ui_list_row(s_ui.device_list, "Identity",
-                s_ui.identity != NULL && s_ui.identity->present ? s_ui.identity->id : "none");
-    snprintf(value, sizeof(value), "%" PRIu32 " KB free, %" PRIu32 " KB lowest", st->free_heap / 1024u,
+    ui_list_fact(s_ui.device_list, "Device number", value);
+    ui_list_fact(s_ui.device_list, "Board",
+                 s_ui.identity != NULL && s_ui.identity->present ? s_ui.identity->board : "unknown");
+    ui_list_fact(s_ui.device_list, "Identity",
+                 s_ui.identity != NULL && s_ui.identity->present ? s_ui.identity->id : "none");
+    snprintf(value, sizeof(value), "%" PRIu32 " KB, lowest %" PRIu32, st->free_heap / 1024u,
              st->min_free_heap / 1024u);
-    ui_list_row(s_ui.device_list, "Memory", value);
-    ui_list_action(s_ui.device_list, "Restart", NULL, on_restart, NULL);
+    ui_list_fact(s_ui.device_list, "Memory", value);
+    ui_list_button(s_ui.device_list, "Restart", UI_BUTTON_DANGER, on_restart, NULL);
     ui_list_note(s_ui.device_list, "The self test and its last result live on the Status screen (D33).");
 }
 
@@ -279,6 +342,13 @@ static void forget_settings(void)
     s_ui.shown_signature = 0;
 }
 
+static void forget_rename(void)
+{
+    s_ui.rename_screen = NULL;
+    s_ui.rename_input = NULL;
+    s_ui.rename_note = NULL;
+}
+
 static void forget_nodes(void)
 {
     s_ui.nodes_screen = NULL;
@@ -308,12 +378,12 @@ static void build_settings_screen(void)
     lv_obj_set_width(s_ui.tabs, LV_PCT(100));
     lv_obj_set_style_bg_opa(s_ui.tabs, LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_font(s_ui.tabs, t->font_small, 0);
-    lv_obj_set_style_text_color(s_ui.tabs, t->text, 0);
 
     s_ui.list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Grid"));
     s_ui.sound_list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Sound"));
     s_ui.screen_list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Screen"));
     s_ui.device_list = ui_list_create(lv_tabview_add_tab(s_ui.tabs, "Device"));
+    lg_theme_style_tabview(s_ui.tabs);   /* after the tabs exist: it styles each one */
     ui_screen_free_on_leave(s_ui.screen, forget_settings);
 }
 
@@ -329,6 +399,52 @@ static void build_nodes_screen(void)
     s_ui.nodes_bar = ui_bar_create(s_ui.nodes_screen, "Which AP", on_back_to_settings);
     s_ui.nodes_list = ui_list_create(s_ui.nodes_screen);
     ui_screen_free_on_leave(s_ui.nodes_screen, forget_nodes);
+}
+
+/*
+ * The name field over LVGL's own keyboard. OK saves and goes back to Settings; the keyboard's
+ * hide key goes back without saving. The field counts characters and the grid counts bytes, so
+ * the byte limit is checked when saving and explained on the screen when it is exceeded.
+ */
+static void build_rename_screen(void)
+{
+    const lg_theme_t *t = lg_theme();
+    s_ui.rename_screen = lv_obj_create(NULL);
+    lg_theme_apply_screen(s_ui.rename_screen);
+    lv_obj_remove_flag(s_ui.rename_screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(s_ui.rename_screen, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_ui.rename_screen, t->pad, 0);
+    lv_obj_set_style_pad_row(s_ui.rename_screen, t->gap, 0);
+    (void)ui_bar_create(s_ui.rename_screen, "Name", on_rename_cancel);
+
+    s_ui.rename_input = lv_textarea_create(s_ui.rename_screen);
+    lv_textarea_set_one_line(s_ui.rename_input, true);
+    lv_textarea_set_max_length(s_ui.rename_input, HH_NAME_MAX - 1);
+    lv_obj_set_width(s_ui.rename_input, LV_PCT(100));
+    lv_obj_set_style_bg_color(s_ui.rename_input, t->surface, 0);
+    lv_obj_set_style_border_color(s_ui.rename_input, t->accent, 0);
+    lv_obj_set_style_border_width(s_ui.rename_input, t->stroke, 0);
+    lv_obj_set_style_radius(s_ui.rename_input, t->radius, 0);
+    lv_obj_set_style_text_color(s_ui.rename_input, t->text, 0);
+    lv_obj_set_style_text_font(s_ui.rename_input, t->font_body, 0);
+    lv_obj_set_style_bg_color(s_ui.rename_input, t->accent, LV_PART_CURSOR);
+    lv_obj_set_style_border_color(s_ui.rename_input, t->accent, LV_PART_CURSOR);
+    /* On the field only: the keyboard sends its OK and hide keys to both itself and the field,
+     * and the first handler loads Settings, which frees this screen. */
+    lv_obj_add_event_cb(s_ui.rename_input, on_rename_ready, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(s_ui.rename_input, on_rename_cancel, LV_EVENT_CANCEL, NULL);
+    lv_obj_add_state(s_ui.rename_input, LV_STATE_FOCUSED);   /* shows the cursor */
+
+    s_ui.rename_note = lg_ui_label(s_ui.rename_screen, t->font_small, t->muted,
+                                   "Every AP and handheld in the grid gets the new name.");
+
+    lv_obj_t *kb = lv_keyboard_create(s_ui.rename_screen);
+    lv_keyboard_set_textarea(kb, s_ui.rename_input);
+    lv_obj_set_width(kb, LV_PCT(100));
+    lv_obj_set_flex_grow(kb, 1);
+    lv_obj_set_style_bg_color(kb, t->bg, 0);
+    lv_obj_set_style_text_font(kb, t->font_body, 0);   /* falls back to the emoji font */
+    ui_screen_free_on_leave(s_ui.rename_screen, forget_rename);
 }
 
 /* Screens are built when opened and freed when left (ui_screen.h); only the timer lives on. */

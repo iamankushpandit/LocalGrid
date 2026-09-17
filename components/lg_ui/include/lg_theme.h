@@ -68,6 +68,20 @@ void lg_theme_style_button(lv_obj_t *button);
 /* A secondary button: small text and tight padding, still a full touch target tall. */
 void lg_theme_style_button_small(lv_obj_t *button);
 
+/*
+ * A button filled with one of the theme's colours (accent for the main action on a page, error
+ * for something destructive), with the background colour as ink so the words read on the fill.
+ */
+void lg_theme_style_button_filled(lv_obj_t *button, lv_color_t fill);
+
+/*
+ * Styles an lv_tabview's tab strip and pages from the theme, replacing LVGL's default theme,
+ * which draws a white strip and a blue selected tab. The selected tab joins the page: it takes the
+ * page's surface and an accent outline, and the others stay in the bar colour with muted
+ * names. Call after every tab has been added.
+ */
+void lg_theme_style_tabview(lv_obj_t *tabview);
+
 #ifdef __cplusplus
 }
 #endif

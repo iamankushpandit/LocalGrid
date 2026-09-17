@@ -26,6 +26,7 @@ extern "C" {
 #define LG_PUBKEY_LEN           32u          /* X25519 public key */
 #define LG_DIRECT_BODY_MAX      (LG_TEXT_MAX + LG_AEAD_TAG_LEN)
 #define LG_GRID_STATE_MAX       256u         /* bytes in one GRID_STATE body; its layout belongs to AP firmware */
+#define LG_NAME_MAX             24u          /* a handheld's chosen name: up to 23 UTF-8 bytes plus a NUL */
 
 typedef enum {
     LG_OK             = 0,
