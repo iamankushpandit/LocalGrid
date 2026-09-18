@@ -12,6 +12,7 @@
  * Not yet: BLE observer (D4), proactive roaming (answer 11), messaging screens (P6).
  * BSSIDs stay in memory and are never logged (D21).
  */
+#include "hh_battery.h"
 #include "hh_mem.h"
 #include "hh_service.h"
 
@@ -36,6 +37,7 @@
 #include "lg_client.h"
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
+#include "lg_timekeep.h"
 #include "lg_roster.h"
 #include "lg_secrets.h"
 #include "lwip/sockets.h"
@@ -148,6 +150,22 @@ typedef struct {
     char     text[HH_TEXT_MAX + 1];
 } send_req_t;
 
+/* A push-to-talk frame on its way to the AP (D61). */
+typedef struct {
+    uint8_t  scope;
+    uint32_t target;
+    uint16_t len;
+    uint8_t  frame[HH_VOICE_FRAME_MAX];
+} voice_req_t;
+
+#define VOICE_QUEUE_LEN 4   /* 400 ms of talk: more than that behind means the link is too slow anyway */
+/*
+ * Wi-Fi power save holds frames for a dozing handheld at the AP until the next beacon, so talk
+ * arrived in bursts with gaps longer than the player waits and was cut short. While talk flows
+ * either way, and VOICE_AWAKE_MS after, the radio stays awake.
+ */
+#define VOICE_AWAKE_MS  10000
+
 static struct {
     uint32_t          device;
     const lg_user_t  *user;
@@ -196,6 +214,12 @@ static struct {
     uint8_t   tx[2 + LG_FRAME_MAX];
 
     QueueHandle_t send_queue;
+    QueueHandle_t voice_queue;
+    const hh_voice_io_t *voice_io;
+    int           voice_refused;       /* the last local refusal reported, so a talk reports it once */
+    uint32_t      voice_ms;            /* last talk frame sent or received, 0 never */
+    bool          voice_awake;         /* power save is off for talk */
+    bool          sending_voice;       /* io_send: a talk frame, which may be dropped rather than wait */
     hh_message_t  ring[HH_MESSAGES];   /* oldest at ring_head */
     uint8_t       ring_head;
     uint8_t       ring_count;
@@ -447,6 +471,8 @@ static bool io_send(void *ctx, const uint8_t *frame, size_t len)
         int n = send(s.sock, s.tx + sent, total - sent, 0);
         if (n > 0) {
             sent += (size_t)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && sent == 0 && s.sending_voice) {
+            return false;   /* a talk frame with nowhere to go is dropped; the session is fine */
         } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && now_ms() < deadline) {
             vTaskDelay(pdMS_TO_TICKS(5));
         } else {
@@ -474,6 +500,7 @@ static void io_set_time(void *ctx, uint32_t unix_s)
     (void)ctx;
     s.time_offset_s = (int64_t)unix_s - mono_s();
     s.time_set = true;
+    lg_timekeep_save(unix_s);   /* so this handheld can carry it back after its own restart (D60) */
     ESP_LOGI("TIME", "[TIME] Clock set from the grid: %" PRIu32, unix_s);
 }
 
@@ -568,6 +595,12 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         ESP_LOGI("GRID", "[GRID] Groups version %" PRIu32 " (made on AP %u): %u group(s), %" PRIu32 " removed",
                  s.roster.groups.seq, s.roster.groups.author, s.roster.groups.count, ev->value);
         break;
+    case LG_CEV_VOICE_REFUSED:
+        ESP_LOGW("MSG", "[MSG] The AP refused talk: status %" PRIu32, ev->value);
+        if (s.voice_io != NULL && s.voice_io->on_refused != NULL) {
+            s.voice_io->on_refused((int)ev->value);
+        }
+        break;
     case LG_CEV_GROUP_REFUSED:
         snprintf(s.group_problem, sizeof(s.group_problem), "%s",
                  ev->value == LG_ACK_REJ_NOT_MEMBER       ? "Only members can change this group" :
@@ -580,6 +613,19 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         break;
     }
     s.dirty = true;
+}
+
+/* A talk frame for this handheld (D61), already opened if it was 1:1. Straight to the voice
+ * module's queue: nothing here is kept, logged, or retried. */
+static void io_voice(void *ctx, const lg_env_t *env, const uint8_t *payload, size_t len)
+{
+    (void)ctx;
+    if (s.voice_io == NULL || s.voice_io->on_frame == NULL) {
+        return;
+    }
+    s.voice_ms = now_ms();
+    uint32_t conversation = env->scope == LG_SCOPE_DIRECT ? env->origin_id : env->target;
+    s.voice_io->on_frame(env->origin_id, env->origin_boot, env->scope, conversation, payload, len);
 }
 
 static int io_seal(void *ctx, uint32_t peer, const uint8_t *pub, const uint8_t *nonce, const uint8_t *aad,
@@ -1155,8 +1201,50 @@ static void drain_send_queue(void)
     }
 }
 
+/* Talk frames (D61): each goes once, as soon as it is here. A refusal this handheld makes itself
+ * (no grid time, offline) is reported once per talk, not once per tenth of a second. */
+static void drain_voice_queue(void)
+{
+    static voice_req_t req;
+    while (s.voice_queue != NULL && xQueueReceive(s.voice_queue, &req, 0) == pdTRUE) {
+        lg_voice_hdr_t h;
+        if (lg_voice_hdr_dec(req.frame, req.len, &h) && h.frame == 0) {
+            s.voice_refused = 0;   /* a new talk */
+        }
+        s.voice_ms = now_ms();
+        s.sending_voice = true;
+        int rc = s.link == HH_LINK_ONLINE ? lg_client_send_voice(&s.client, req.scope, req.target, req.frame, req.len)
+                                          : LG_ERR_SHORT;
+        s.sending_voice = false;
+        if (rc == LG_ERR_FULL) {
+            continue;   /* this frame was dropped at a full socket; the next may get through */
+        }
+        if (rc < 0 && rc != s.voice_refused) {
+            s.voice_refused = rc;
+            ESP_LOGW("MSG", "[MSG] Talk not sent: %s", lg_err_str(rc));
+            if (s.voice_io != NULL && s.voice_io->on_refused != NULL) {
+                s.voice_io->on_refused(rc);
+            }
+        }
+    }
+}
+
+/* Power save off while talk flows, back on once it has been quiet a while. */
+static void voice_power(void)
+{
+    /* Its own clock: voice_ms is stamped after the loop read `now`, and now - voice_ms would wrap. */
+    uint32_t now = now_ms();
+    bool want = s.voice_ms != 0 && now - s.voice_ms < VOICE_AWAKE_MS;
+    if (want != s.voice_awake) {
+        s.voice_awake = want;
+        esp_wifi_set_ps(want ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+        ESP_LOGI(TAG, "[NET] Radio %s", want ? "kept awake for talk" : "back to power save");
+    }
+}
+
 static void step(uint32_t now)
 {
+    voice_power();
     if (s.send_failed) {
         drop_link("Session send failed", false);
         return;
@@ -1204,6 +1292,9 @@ static void step(uint32_t now)
         if (now - heard > PONG_TIMEOUT_MS) {
             drop_link("The node stopped answering", false);
             break;
+        }
+        if (s.voice_awake) {
+            break;   /* talk is flowing: no move to another AP and no scan until it has been quiet a while */
         }
         if (time_move_due(now)) {
             break;
@@ -1351,6 +1442,7 @@ static void service_task(void *arg)
             poll_socket(50);
         }
         now = now_ms();
+        drain_voice_queue();
         drain_send_queue();
         step(now);
         if (s.dirty || now - s.last_publish_ms >= PUBLISH_MS) {
@@ -1456,10 +1548,12 @@ static esp_err_t fail_start(esp_err_t err, const char *problem)
 
 esp_err_t hh_service_start(const lg_identity_t *identity)
 {
+    hh_battery_start();   /* D62: first, so the badge works even when the network cannot start */
     s.lock = xSemaphoreCreateMutex();
     s.queue = xQueueCreate(QUEUE_LEN, sizeof(ev_t));
     s.send_queue = xQueueCreate(SEND_QUEUE_LEN, sizeof(send_req_t));
-    if (s.lock == NULL || s.queue == NULL || s.send_queue == NULL) {
+    s.voice_queue = xQueueCreate(VOICE_QUEUE_LEN, sizeof(voice_req_t));
+    if (s.lock == NULL || s.queue == NULL || s.send_queue == NULL || s.voice_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
     s.status.node = -1;
@@ -1472,6 +1566,14 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     s.user = lg_roster_user(&s.roster, s.device);
     if (s.user == NULL) {
         return fail_start(ESP_ERR_NOT_FOUND, "This handheld's device index is not in the grid roster");
+    }
+    /* The clock kept across this handheld's own restart (D60), so it has something to carry back to
+     * an AP that came back without one (D53). The RTC counted the time we were away. */
+    uint32_t kept = lg_timekeep_restore();
+    if (kept != 0) {
+        s.time_offset_s = (int64_t)kept - mono_s();
+        s.time_set = true;
+        ESP_LOGI("TIME", "[TIME] Clock %" PRIu32 " kept across the restart", kept);
     }
     xSemaphoreTake(s.lock, portMAX_DELAY);
     s.status.device = s.device;
@@ -1504,6 +1606,7 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
         .seal = io_seal,
         .open = io_open,
         .on_groups_removed = io_groups_removed,
+        .on_voice = io_voice,
     };
     lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, &s.roster, &io);
     load_names();
@@ -1726,4 +1829,26 @@ size_t hh_service_messages(hh_message_t *out, size_t max)
     }
     xSemaphoreGive(s.lock);
     return n;
+}
+
+void hh_service_set_voice_io(const hh_voice_io_t *io)
+{
+    s.voice_io = io;
+}
+
+esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len)
+{
+    if ((scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP) || frame == NULL || len == 0 ||
+        len > HH_VOICE_FRAME_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s.voice_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    static voice_req_t req;   /* only the capture task sends, so one staging copy is enough */
+    req.scope = scope;
+    req.target = target;
+    req.len = (uint16_t)len;
+    memcpy(req.frame, frame, len);
+    return xQueueSend(s.voice_queue, &req, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }

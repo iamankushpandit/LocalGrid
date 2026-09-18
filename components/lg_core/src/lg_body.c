@@ -69,6 +69,37 @@ bool lg_msg_ack_dec(const uint8_t *in, size_t len, lg_msg_ack_t *v)
     return v->status >= LG_ACK_ACCEPTED && v->status <= LG_ACK_REJ_NOT_ALLOWED;
 }
 
+size_t lg_voice_hdr_enc(const lg_voice_hdr_t *h, uint8_t *out)
+{
+    out[0] = h->codec;
+    out[1] = h->flags;
+    lg_wr16(out + 2, h->talk);
+    lg_wr16(out + 4, h->frame);
+    lg_wr16(out + 6, (uint16_t)h->predictor);
+    out[8] = h->step_index;
+    out[9] = 0;
+    return LG_VOICE_HDR_LEN;
+}
+
+bool lg_voice_hdr_dec(const uint8_t *body, size_t len, lg_voice_hdr_t *out)
+{
+    if (body == NULL || len < LG_VOICE_HDR_LEN || len > LG_VOICE_PAYLOAD_MAX) {
+        return false;
+    }
+    if (body[0] != LG_VOICE_CODEC_IMA_8K || body[8] > LG_VOICE_STEP_MAX || body[9] != 0) {
+        return false;
+    }
+    if (out != NULL) {
+        out->codec      = body[0];
+        out->flags      = body[1];
+        out->talk       = lg_rd16(body + 2);
+        out->frame      = lg_rd16(body + 4);
+        out->predictor  = (int16_t)lg_rd16(body + 6);
+        out->step_index = body[8];
+    }
+    return true;
+}
+
 size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out)
 {
     lg_wr32(out, v->device);

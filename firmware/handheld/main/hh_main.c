@@ -11,6 +11,7 @@
 #include "hh_console.h"
 #include "hh_mem.h"
 #include "hh_service.h"
+#include "hh_voice.h"
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
 #include "lg_identity.h"
@@ -77,6 +78,12 @@ void app_main(void)
         ESP_LOGE(TAG, "[NET] Network service not started: %s", esp_err_to_name(err));
     }
     hh_mem_mark("after network service start (Wi-Fi driver)");
+
+    /* Push-to-talk (D61) after the service it sends through; the FNK0104B talks, every board with
+     * a speaker listens. */
+    if (err == ESP_OK && (err = hh_voice_start()) != ESP_OK) {
+        ESP_LOGE(TAG, "[NET] Push-to-talk not started: %s", esp_err_to_name(err));
+    }
 
     /* Decision D24: the product firmware keeps the self test. This is the quick part, which
      * needs no simulated grid, so it runs at every boot. */

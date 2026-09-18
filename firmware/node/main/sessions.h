@@ -19,3 +19,6 @@ void    sess_poll(int timeout_ms);
 void    sess_send(uint32_t device, const uint8_t *frame, size_t len);
 uint8_t sess_registered_count(void);
 void    sess_print(void);
+
+/* Talk frames dropped because a listener's socket was full (D61): the AP never waits on one. */
+uint32_t sess_voice_dropped(void);

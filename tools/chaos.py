@@ -130,7 +130,9 @@ def make_schedule(rng, n_aps, n_hhs, args):
         if t >= end:
             return plan
         r = rng.random()
-        if args.blackout and aps and r < 0.05:
+        if args.scenario == "blackout":
+            victims = list(aps)          # every experiment is the whole grid going away and coming back
+        elif args.blackout and aps and r < 0.05:
             victims = list(aps)
         elif max_down >= 2 and r < 0.20:
             victims = rng.sample(aps, 2)
@@ -140,7 +142,7 @@ def make_schedule(rng, n_aps, n_hhs, args):
             victims = [rng.choice(hhs)]       # never every handheld: probes need a sender and a receiver
         else:
             continue
-        kind = "hold" if rng.random() < 0.7 else "pulse"
+        kind = "hold" if args.scenario == "blackout" or rng.random() < 0.7 else "pulse"
         outage = outage_seconds(rng) if kind == "hold" else 0
         plan.append({"n": len(plan) + 1, "at_s": round(t), "victims": list(victims),
                      "kind": kind, "outage_s": outage})
@@ -528,6 +530,10 @@ class Chaos:
             why.append(f"APs disagree on settings version {sorted(versions)}")
         return why
 
+    def grid_has_time(self):
+        """True once any AP that is up reports grid time it did not get from the PC."""
+        return any(self.present(a) and a.status is not None and a.status["time"] != "UNSET" for a in self.aps)
+
     def backbone_whole(self):
         live = [a for a in self.aps if self.present(a)]
         return all(a.links >= {o.index for o in live} - {a.index} for a in live)
@@ -830,9 +836,21 @@ class Chaos:
                                     lambda v=v: self.pulse(v), 12):
                     exp["unconfirmed"].append(f"{v.name} release")
         self.event("released", n=e["n"], unconfirmed=exp["unconfirmed"])
-        if blackout and self.args.set_time:
+        if blackout:
+            # D53 says the handhelds carry grid time back to an AP that restarted without it. This is the
+            # scenario that tests it, so the run watches for that before falling back to the PC's clock, and
+            # records which of the two put the grid back in business.
             self.wait(90, until=self.backbone_whole)
-            self.set_time()
+            carried = self.wait(self.args.time_recovery, until=self.grid_has_time)
+            self.event("time_after_blackout", carried=bool(carried),
+                       waited_s=round(self.args.time_recovery if not carried else 0, 1))
+            if carried:
+                self.say("grid time came back from a handheld (D53)")
+            else:
+                self.finding("grid time did not come back from a handheld after every AP restarted (D53); "
+                             "the PC set it instead")
+                if self.args.set_time:
+                    self.set_time()
         linked = self.wait(self.args.recovery_timeout, until=self.backbone_whole)
         exp["relink_s"] = round(time.monotonic() - released, 1) if linked else None
         # Steady also needs each AP's 30 s status line since its restart, so recovery_s can trail relink_s by 30 s.
@@ -1005,7 +1023,7 @@ def self_check():
     # Safety rules on many seeds and grid sizes: never every AP without --blackout, never every handheld.
     schedules = 0
     for n_aps, n_hhs in ((3, 2), (2, 2), (4, 3), (1, 2), (3, 1)):
-        args = argparse.Namespace(hours=12, min_gap=3, max_gap=15, blackout=False, max_aps_down=2)
+        args = argparse.Namespace(hours=12, min_gap=3, max_gap=15, blackout=False, max_aps_down=2, scenario="mixed")
         for seed in range(100):
             schedules += 1
             for e in make_schedule(random.Random(seed), n_aps, n_hhs, args):
@@ -1044,6 +1062,11 @@ def main():
     ap.add_argument("--max-gap", type=float, default=15, help="minutes between experiments, upper bound")
     ap.add_argument("--max-aps-down", type=int, default=2, help="APs out at once; capped at all APs but one")
     ap.add_argument("--blackout", action="store_true", help="allow every AP out at once (grid time is lost and set again)")
+    ap.add_argument("--scenario", choices=["mixed", "blackout"], default="mixed",
+                    help="mixed: random faults. blackout: every experiment takes all APs out together (implies --blackout)")
+    ap.add_argument("--time-recovery", type=float, default=120,
+                    help="seconds after a blackout to wait for grid time to come back from a handheld (D53) "
+                         "before the PC sets it")
     ap.add_argument("--recovery-timeout", type=float, default=180, help="seconds after release to reach steady state")
     ap.add_argument("--probe-interval", type=float, default=45, help="seconds between handheld messages")
     ap.add_argument("--no-set-time", dest="set_time", action="store_false",
@@ -1051,6 +1074,8 @@ def main():
     ap.add_argument("--quiet-handhelds", action="store_true",
                     help="set handheld volume off for the run and restore it at the end")
     args = ap.parse_args()
+    if args.scenario == "blackout":
+        args.blackout = True
 
     if args.self_check:
         return self_check()

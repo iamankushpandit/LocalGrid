@@ -953,6 +953,395 @@ static void test_group_edits(void)
     sim_destroy(s);
 }
 
+/* ---- live voice (D61) ---------------------------------------------------- */
+
+/* A voice payload: header for (talk, frame) and data_len bytes of data, all `fill` or from text. */
+static size_t voice_payload(uint8_t *out, uint16_t talk, uint16_t frame, uint8_t flags,
+                            const char *text, size_t data_len, uint8_t fill)
+{
+    lg_voice_hdr_t h = {
+        .codec = LG_VOICE_CODEC_IMA_8K, .flags = flags, .talk = talk, .frame = frame,
+        .predictor = -1234, .step_index = 40,
+    };
+    size_t n = lg_voice_hdr_enc(&h, out);
+    if (text != NULL) {
+        memcpy(out + n, text, data_len);
+    } else {
+        memset(out + n, fill, data_len);
+    }
+    return n + data_len;
+}
+
+/* Builds a VOICE frame by hand, as a handheld or a neighbour would, with any contents. */
+static int voice_frame(uint8_t *frame, uint32_t author, uint32_t boot, uint32_t seq, uint8_t scope,
+                       uint32_t target, uint16_t flags, const uint8_t *body, size_t blen)
+{
+    lg_env_t e = {
+        .type = LG_T_VOICE, .scope = scope, .flags = flags, .target = target, .ttl = LG_TTL_DEFAULT,
+        .origin_id = author, .origin_boot = boot, .origin_seq = seq, .grid_time = T0,
+    };
+    return lg_frame_build(&e, body, blen, frame, LG_FRAME_MAX);
+}
+
+static bool outbox_empty(const lg_client_t *c)
+{
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        if (c->outbox[i].state != LG_OUT_EMPTY) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void test_voice_body(void)
+{
+    uint8_t b[LG_VOICE_PAYLOAD_MAX + 2];
+    memset(b, 0, sizeof(b));
+    lg_voice_hdr_t h = {
+        .codec = LG_VOICE_CODEC_IMA_8K, .flags = LG_VOICE_END, .talk = 0xBEEF, .frame = 3,
+        .predictor = -1234, .step_index = 88,
+    };
+    CHECK_EQ(lg_voice_hdr_enc(&h, b), LG_VOICE_HDR_LEN);
+    lg_voice_hdr_t d;
+    CHECK(lg_voice_hdr_dec(b, LG_VOICE_HDR_LEN, &d));           /* an END frame may carry no data */
+    CHECK_EQ(d.codec, LG_VOICE_CODEC_IMA_8K);
+    CHECK_EQ(d.flags, LG_VOICE_END);
+    CHECK_EQ(d.talk, 0xBEEF);
+    CHECK_EQ(d.frame, 3);
+    CHECK_EQ(d.predictor, -1234);
+    CHECK_EQ(d.step_index, 88);
+    CHECK(lg_voice_hdr_dec(b, LG_VOICE_PAYLOAD_MAX, NULL));     /* 100 ms of ADPCM fits */
+    CHECK(!lg_voice_hdr_dec(b, LG_VOICE_HDR_LEN - 1u, NULL));
+    CHECK(!lg_voice_hdr_dec(b, LG_VOICE_PAYLOAD_MAX + 1u, NULL));
+    b[0] = 2;
+    CHECK(!lg_voice_hdr_dec(b, LG_VOICE_HDR_LEN, NULL));        /* unknown codec */
+    b[0] = LG_VOICE_CODEC_IMA_8K;
+    b[8] = 89;
+    CHECK(!lg_voice_hdr_dec(b, LG_VOICE_HDR_LEN, NULL));        /* step index past the table */
+    b[8] = 0;
+    b[9] = 1;
+    CHECK(!lg_voice_hdr_dec(b, LG_VOICE_HDR_LEN, NULL));        /* reserved byte */
+    CHECK_EQ(LG_VOICE_SAMPLES / 2u, LG_VOICE_DATA_MAX);
+    /* The largest sealed frame fits one ESP-NOW v2 frame. */
+    CHECK(LG_ENV_SIZE + LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN <= LG_FRAME_MAX);
+}
+
+static void test_voice_group(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    uint32_t text_seq = cl(s, DAD)->seq;
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    size_t n = voice_payload(p, 1, 0, 0, NULL, 40, 0xA5);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 1);              /* two hops away */
+    CHECK_EQ(s->clients[ALEX].voice_frames, 1);
+    CHECK_EQ(s->clients[RANGER].voice_frames, 0);            /* not a member */
+    CHECK_EQ(s->clients[DAD].voice_frames, 0);               /* never the author's own */
+    CHECK_EQ(s->clients[EMMA].voice_author, LG_PROTO_DAD);
+    CHECK_EQ(s->clients[EMMA].voice_scope, LG_SCOPE_GROUP);
+    CHECK_EQ(s->clients[EMMA].voice_len, n);
+    CHECK(memcmp(s->clients[EMMA].voice_last, p, n) == 0);
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK_EQ(s->nodes[i].node.stats.voice, 1);
+    }
+    /* Live only: nothing stored, nothing queued, no ack, and text sequences untouched. */
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        CHECK_EQ(cl(s, i)->inbox_count, 0);
+    }
+    CHECK(outbox_empty(cl(s, DAD)));
+    CHECK_EQ(s->clients[DAD].voice_refusals, 0);
+    CHECK_EQ(cl(s, DAD)->seq, text_seq);
+
+    /* The release frame carries no data and still arrives. */
+    n = voice_payload(p, 1, 1, LG_VOICE_END, NULL, 0, 0);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    CHECK_EQ(s->clients[ALEX].voice_frames, 2);
+    CHECK_EQ(s->clients[EMMA].voice_len, LG_VOICE_HDR_LEN);
+    CHECK_EQ(s->clients[EMMA].voice_last[1], LG_VOICE_END);
+
+    /* KIDS: Emma to Alex, and Dad hears nothing. */
+    n = voice_payload(p, 9, 0, 0, NULL, 20, 0x11);
+    CHECK_EQ(lg_client_send_voice(cl(s, EMMA), LG_SCOPE_GROUP, LG_PROTO_KIDS, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[ALEX].voice_frames, 3);
+    CHECK_EQ(s->clients[ALEX].voice_author, LG_PROTO_EMMA);
+    CHECK_EQ(s->clients[DAD].voice_frames, 0);
+    CHECK_EQ(s->clients[RANGER].voice_frames, 0);
+    sim_destroy(s);
+}
+
+static void test_voice_direct(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    static const char secret[] = "VOICE-SECRET-VOICE-SECRET-VOICE-SECRET";
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    size_t n = voice_payload(p, 2, 0, 0, secret, sizeof(secret) - 1u, 0);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 1);
+    CHECK_EQ(s->clients[EMMA].voice_scope, LG_SCOPE_DIRECT);
+    CHECK_EQ(s->clients[EMMA].voice_len, n);
+    CHECK(memcmp(s->clients[EMMA].voice_last, p, n) == 0);   /* decrypted at the target */
+    CHECK_EQ(s->clients[ALEX].voice_frames, 0);
+    CHECK_EQ(s->clients[RANGER].voice_frames, 0);
+    CHECK(!sim_captured_contains(s, "VOICE-SECRET"));        /* sealed on the backbone */
+
+    /* Same AP. */
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_RANGER, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[RANGER].voice_frames, 1);
+
+    /* Arguments the handheld refuses before anything leaves. */
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_BROADCAST, LG_TARGET_ALL, p, n), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, 99, p, n), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_DAD, p, n), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, 77, p, n), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, LG_VOICE_HDR_LEN - 1u), LG_ERR_ARG);
+    lg_peer_t *emma = NULL;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (cl(s, DAD)->peers[i].in_use && cl(s, DAD)->peers[i].device == LG_PROTO_EMMA) {
+            emma = &cl(s, DAD)->peers[i];
+        }
+    }
+    CHECK(emma != NULL);
+    if (emma != NULL) {
+        emma->has_key = 0;
+        CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_ERR_ARG);
+        emma->has_key = 1;
+    }
+
+    /* A frame that does not open is dropped and counted, never played. */
+    lg_peer_t *dad = NULL;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (cl(s, EMMA)->peers[i].in_use && cl(s, EMMA)->peers[i].device == LG_PROTO_DAD) {
+            dad = &cl(s, EMMA)->peers[i];
+        }
+    }
+    CHECK(dad != NULL);
+    if (dad != NULL) {
+        uint32_t fails = cl(s, EMMA)->decrypt_failures;
+        dad->pubkey[0] ^= 1u;
+        CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+        CHECK(sim_pump(s));
+        CHECK_EQ(cl(s, EMMA)->decrypt_failures, fails + 1u);
+        CHECK_EQ(s->clients[EMMA].voice_frames, 1);
+        dad->pubkey[0] ^= 1u;
+        /* The failed frame did not advance the newest-seen mark: the next one plays. */
+        CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+        CHECK(sim_pump(s));
+        CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    }
+    sim_destroy(s);
+}
+
+static void test_voice_duplicates_and_order(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_link(s, 0, 2, true);           /* full mesh: every flood reaches nodes twice */
+    s->duplicate_backbone = true;      /* and every backbone frame is delivered twice */
+
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    size_t n = voice_payload(p, 3, 0, 0, NULL, 40, 0x33);
+    uint32_t dups = s->nodes[2].node.stats.duplicates;
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 1);
+    CHECK_EQ(s->clients[ALEX].voice_frames, 1);
+    CHECK(s->nodes[2].node.stats.duplicates > dups);
+    CHECK_EQ(s->nodes[2].node.stats.voice, 1);
+
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+
+    /* Dad's session offers his first voice frame again: older than the newest, so dropped. */
+    uint8_t frame[LG_FRAME_MAX];
+    int len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 1u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    CHECK(len > 0);
+    uint32_t voice0 = s->nodes[0].node.stats.voice;
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.voice, voice0);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    CHECK_EQ(s->clients[DAD].voice_refusals, 0);   /* a stale frame is not refused, just dropped */
+
+    /* The handheld keeps its own newest-only mark per author, and a new boot starts it again. */
+    lg_client_t *emma = cl(s, EMMA);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 1u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_client_on_frame(emma, frame, (size_t)len);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 100u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_client_on_frame(emma, frame, (size_t)len);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 3);
+    lg_client_on_frame(emma, frame, (size_t)len);                /* the same frame twice */
+    CHECK_EQ(s->clients[EMMA].voice_frames, 3);
+    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 1u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_client_on_frame(emma, frame, (size_t)len);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 4);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 200u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_client_on_frame(emma, frame, (size_t)len);                /* from the boot before */
+    CHECK_EQ(s->clients[EMMA].voice_frames, 4);
+    /* A voice frame without the voice bit, or a bad header, is not voice. */
+    len = voice_frame(frame, LG_PROTO_DAD, 2, 500u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_client_on_frame(emma, frame, (size_t)len);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 4);
+    p[9] = 1;
+    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 5u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_client_on_frame(emma, frame, (size_t)len);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 4);
+
+    /* A neighbour's malformed voice frame is counted, never delivered. */
+    uint32_t bad = s->nodes[1].node.stats.malformed;
+    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 9u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_node_on_backbone_frame(&s->nodes[1].node, 0, frame, (size_t)len);
+    p[9] = 0;
+    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 9u, LG_SCOPE_DIRECT, LG_PROTO_ALEX, 0, p, n);
+    lg_node_on_backbone_frame(&s->nodes[1].node, 0, frame, (size_t)len);   /* 1:1 must be sealed */
+    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 9u, LG_SCOPE_BROADCAST, LG_TARGET_ALL, 0, p, n);
+    lg_node_on_backbone_frame(&s->nodes[1].node, 0, frame, (size_t)len);   /* never broadcast */
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].node.stats.malformed, bad + 3u);
+    CHECK_EQ(s->clients[ALEX].voice_frames, 1);
+    sim_destroy(s);
+}
+
+static void test_voice_refusals(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    size_t n = voice_payload(p, 4, 0, 0, NULL, 40, 0x44);
+
+    /* Ranger is not in FAMILY: one refusal, then quiet for a second however many frames follow. */
+    CHECK_EQ(lg_client_send_voice(cl(s, RANGER), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[RANGER].voice_refusals, 1);
+    CHECK_EQ(s->clients[RANGER].last_voice_refusal, LG_ACK_REJ_NOT_MEMBER);
+    for (int i = 0; i < 5; i++) {
+        s->now_ms += 100;
+        CHECK_EQ(lg_client_send_voice(cl(s, RANGER), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+        CHECK(sim_pump(s));
+    }
+    CHECK_EQ(s->clients[RANGER].voice_refusals, 1);
+    s->now_ms += LG_VOICE_REFUSE_MS;
+    CHECK_EQ(lg_client_send_voice(cl(s, RANGER), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[RANGER].voice_refusals, 2);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 0);
+    CHECK_EQ(s->clients[DAD].voice_frames, 0);
+    CHECK(outbox_empty(cl(s, RANGER)));
+
+    /* 1:1 to a handheld that is offline. */
+    sim_detach(s, EMMA);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].voice_refusals, 1);
+    CHECK_EQ(s->clients[DAD].last_voice_refusal, LG_ACK_REJ_OFFLINE);
+
+    /* A clock outside the tolerance is refused by the AP, as for text. */
+    s->now_ms += LG_VOICE_REFUSE_MS;
+    s->clients[DAD].clock = T0 - (LG_TIME_TOLERANCE_S + 60);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].voice_refusals, 2);
+    CHECK_EQ(s->clients[DAD].last_voice_refusal, LG_ACK_REJ_TIME);
+    CHECK_EQ(s->clients[ALEX].voice_frames, 0);
+
+    /* No grid time: the handheld refuses before sending. Not registered: nothing to send on. */
+    s->clients[DAD].clock = 0;
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_ERR_TIME);
+    s->clients[DAD].clock = T0;
+    sim_detach(s, RANGER);
+    CHECK_EQ(lg_client_send_voice(cl(s, RANGER), LG_SCOPE_GROUP, LG_PROTO_LEADERS, p, n), LG_ERR_SHORT);
+
+    /* A voice frame without the voice sequence bit, or sent to everyone, is invalid. The first
+     * one's refusal names a text sequence, so the handheld cannot take it for a voice refusal. */
+    uint8_t frame[LG_FRAME_MAX];
+    uint32_t rejected = s->nodes[1].node.stats.rejected;
+    uint32_t voice1 = s->nodes[1].node.stats.voice;
+    int len = voice_frame(frame, LG_PROTO_ALEX, 1, 7000u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_node_on_session_frame(&s->nodes[1].node, &s->clients[ALEX].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].node.stats.rejected, rejected + 1u);
+    CHECK_EQ(s->nodes[1].node.stats.voice, voice1);
+    CHECK_EQ(s->clients[ALEX].voice_refusals, 0);
+    CHECK(outbox_empty(cl(s, ALEX)));
+    s->now_ms += LG_VOICE_REFUSE_MS;
+    len = voice_frame(frame, LG_PROTO_ALEX, 1, LG_VOICE_SEQ_BIT | 1u, LG_SCOPE_BROADCAST, LG_TARGET_ALL, 0, p, n);
+    lg_node_on_session_frame(&s->nodes[1].node, &s->clients[ALEX].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[ALEX].voice_refusals, 1);
+    CHECK_EQ(s->clients[ALEX].last_voice_refusal, LG_ACK_REJ_INVALID);
+    /* A sealed 1:1 body longer than the largest frame is invalid (checked by length only). */
+    s->now_ms += LG_VOICE_REFUSE_MS;
+    static uint8_t big[LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN + 1u];
+    len = voice_frame(frame, LG_PROTO_ALEX, 1, LG_VOICE_SEQ_BIT | 2u, LG_SCOPE_DIRECT, LG_PROTO_DAD,
+                      LG_FLAG_E2E_PAYLOAD, big, sizeof(big));
+    lg_node_on_session_frame(&s->nodes[1].node, &s->clients[ALEX].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[ALEX].voice_refusals, 2);
+    CHECK_EQ(s->clients[ALEX].last_voice_refusal, LG_ACK_REJ_INVALID);
+    CHECK_EQ(s->clients[DAD].voice_frames, 0);
+    sim_destroy(s);
+}
+
+/* Voice sequences carry their own bit, so voice never pushes the text dedup window forward. */
+static void test_voice_keeps_text_fresh(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    int d = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Before the talk"));
+    CHECK(d >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 1);
+
+    uint32_t text_seq = cl(s, DAD)->seq;
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    size_t n = voice_payload(p, 5, 0, 0, NULL, 40, 0x55);
+    for (int i = 0; i < 5; i++) {
+        CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+        CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+        CHECK(sim_pump(s));
+    }
+    CHECK_EQ(s->clients[EMMA].voice_frames, 10);
+    CHECK_EQ(cl(s, DAD)->seq, text_seq);
+
+    /* The text's acknowledgement was lost: its retransmission is a duplicate, not stale. */
+    uint32_t dups = s->nodes[0].node.stats.duplicates;
+    cl(s, DAD)->outbox[d].state = LG_OUT_PENDING;
+    s->now_ms += LG_RESEND_MS + 1;
+    lg_client_tick(cl(s, DAD));
+    CHECK(sim_pump(s));
+    CHECK(s->nodes[0].node.stats.duplicates > dups);
+    CHECK_EQ(cl(s, DAD)->outbox[d].state, LG_OUT_ACCEPTED);
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 1);
+
+    /* New text after the talk is delivered on every AP and handheld. */
+    int g = lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("After the talk"));
+    CHECK(g >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "After the talk"));
+    CHECK(newest_is(s, ALEX, "After the talk"));
+    CHECK_EQ(cl(s, DAD)->outbox[g].delivered_count, 2);
+    sim_destroy(s);
+}
+
 void test_messaging(void)
 {
     test_diag_echo();
@@ -974,4 +1363,10 @@ void test_messaging(void)
     test_ping_pong();
     test_read_receipt();
     test_names();
+    test_voice_body();
+    test_voice_group();
+    test_voice_direct();
+    test_voice_duplicates_and_order();
+    test_voice_refusals();
+    test_voice_keeps_text_fresh();
 }

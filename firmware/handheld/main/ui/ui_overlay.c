@@ -10,6 +10,9 @@
  *   until Read is tapped.
  * - After a minute untouched, if the setting is on, green characters fall down the panel. The
  *   first touch only dismisses it; the screen underneath is redrawn.
+ * - While the handheld is locked (D62), alerts still take the screen and are read as usual, and
+ *   afterwards the lock screen comes back; other messages chime and count as unread, with no
+ *   banner, and do not wake the saver.
  *
  * Nothing here is allocated: the rain is fixed arrays, and the banner and alert draw straight to
  * the panel. When one goes away, the screen underneath is redrawn by the router.
@@ -25,6 +28,7 @@
 #include "lg_bsp_audio.h"
 #include "lg_bsp_settings.h"
 #include "lg_envelope.h"
+#include "ui_lock.h"
 #include "ui_nav.h"
 #include "ui_theme.h"
 
@@ -387,8 +391,9 @@ static void watch(uint32_t now)
         return;
     }
     const char *who = sender_name(st, newest.author);
-    if (s.cover == OV_SAVER) {
-        s.cover = OV_NONE;   /* wake the screen for it */
+    bool locked = ui_lock_active();
+    if (s.cover == OV_SAVER && (n_scope == LG_SCOPE_BROADCAST || !locked)) {
+        s.cover = OV_NONE;   /* wake the screen for it (locked: only for an alert, the rest has no banner) */
         ui_redraw_current();
     }
     if (n_scope == LG_SCOPE_BROADCAST) {
@@ -410,6 +415,12 @@ static void watch(uint32_t now)
         snprintf(s.banner_text, sizeof(s.banner_text), "%s: %s", who, newest.text);
     }
     (void)lg_bsp_audio_cue(LG_CUE_RECEIVED);
+    if (locked) {
+        /* D62: the sound and the unread count, but no banner: tapping one opens the chat, and
+         * nothing under the lock may be reached. */
+        ESP_LOGI(TAG, "[UI] Notified while locked: %s in %s", who, s.pending_title);
+        return;
+    }
     s.banner = true;
     s.banner_down = false;
     s.banner_since = now;
@@ -431,6 +442,21 @@ void ui_overlay_start(uint16_t w, uint16_t h)
     int16_t bw = (int16_t)(w / 2);
     int16_t bh = (int16_t)(F_TITLE->line_height + 20);
     s.read_button = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - ALERT_FRAME - 10 - bh), bw, bh };
+}
+
+bool ui_overlay_saver_now(uint32_t now_ms)
+{
+    if (s.cover != OV_NONE || !lg_bsp_setting_get_bool("saver", true)) {
+        return false;
+    }
+    show_saver(now_ms);
+    return true;
+}
+
+void ui_overlay_drop_banner(void)
+{
+    s.banner = false;
+    s.banner_down = false;
 }
 
 bool ui_overlay_covering(void)

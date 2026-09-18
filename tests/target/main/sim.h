@@ -70,6 +70,13 @@ typedef struct {
     size_t      removed_n;
     lg_roster_t roster;
     uint32_t    name_events;      /* LG_CEV_NAME */
+    uint32_t    voice_frames;     /* io.on_voice calls (D61) */
+    uint32_t    voice_author;     /* of the last one */
+    uint8_t     voice_scope;
+    uint16_t    voice_len;
+    uint8_t     voice_last[64];   /* its first bytes of payload */
+    uint32_t    voice_refusals;   /* LG_CEV_VOICE_REFUSED */
+    uint8_t     last_voice_refusal;
     lg_e2e_t    e2e;
     lg_client_t client;
 } sim_client_t;

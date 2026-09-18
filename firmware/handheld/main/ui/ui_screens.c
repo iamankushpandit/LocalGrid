@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hh_service.h"
+#include "hh_voice.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_settings.h"
 #include "lg_bsp_touch.h"
@@ -108,11 +109,47 @@ static uint32_t convs_build(bool rebuild)
     return sig;
 }
 
+/* Holding a person or group talks to them (D61), on a board with a microphone. */
+static bool can_talk(void)
+{
+    hh_voice_state_t vs;
+    hh_voice_state(&vs);
+    return vs.can_talk;
+}
+
+static void mark_talk_rows(void)
+{
+    if (!can_talk()) {
+        return;
+    }
+    for (uint8_t i = 0; i < slist_count(); i++) {
+        slist_row_t *r = slist_row(i);
+        if (r->kind == ROW_ACTION && r->id == 0 && r->arg >= 0 && r->arg < SLIST_ROWS) {
+            r->talk = s_convs.refs[r->arg].scope == LG_SCOPE_DIRECT || s_convs.refs[r->arg].scope == LG_SCOPE_GROUP;
+        }
+    }
+}
+
+static void hold_talk(const slist_event_t *ev, uint8_t scope, uint32_t target)
+{
+    if (ev->type == SLIST_HOLD) {
+        esp_err_t err = hh_voice_ptt_start(scope, target);
+        ESP_LOGI("UI", "[UI] Hold to talk on a list row: %s", err == ESP_OK ? "talking" : esp_err_to_name(err));
+        if (err != ESP_OK) {
+            slist_hold_refused();
+        }
+    } else if (ev->type == SLIST_HOLD_END) {
+        hh_voice_ptt_stop();
+        ESP_LOGI("UI", "[UI] List row released: talk ended");
+    }
+}
+
 void ui_convs_open(uint16_t w, uint16_t h)
 {
     s_w = w;
     s_h = h;
     s_convs.shown = convs_build(true);
+    mark_talk_rows();
     slist_show(w, h, 0, false);
 }
 
@@ -121,6 +158,7 @@ void ui_convs_refresh(void)
     uint32_t sig = convs_build(false);
     if (sig != s_convs.shown) {
         s_convs.shown = convs_build(true);
+        mark_talk_rows();
         slist_update();
     }
 }
@@ -134,6 +172,9 @@ void ui_convs_touch(int16_t x, int16_t y, bool down)
     } else if (ev.type == SLIST_ROW && ev.id == 0 && ev.arg < SLIST_ROWS) {
         const conv_ref_t *c = &s_convs.refs[ev.arg];
         ui_go(NAV_CHAT, c->scope, c->target, slist_row(ev.index)->label);
+    } else if ((ev.type == SLIST_HOLD || ev.type == SLIST_HOLD_END) && ev.arg >= 0 && ev.arg < SLIST_ROWS) {
+        const conv_ref_t *c = &s_convs.refs[ev.arg];
+        hold_talk(&ev, c->scope, c->target);
     }
 }
 
@@ -182,6 +223,7 @@ static uint32_t groups_build(bool rebuild)
         const hh_group_t *g = &st->groups[i];
         slist_row_t *r = slist_add(ROW_ACTION, g->name, g->member ? "" : "not in it", 1, g->id);
         r->muted = !g->member;   /* only members may change a group */
+        r->talk = g->member && can_talk();   /* and only members may talk to it (D61) */
         char members[SLIST_VALUE_MAX];
         member_names(st, g, members, sizeof(members));
         slist_add(ROW_NOTE, NULL, members, -1, 0);
@@ -214,6 +256,8 @@ void ui_groups_touch(int16_t x, int16_t y, bool down)
         ui_go(NAV_HOME, 0, 0, NULL);
     } else if (ev.type == SLIST_PLUS) {
         ui_go(NAV_GROUP_EDIT, 0, 0, NULL);
+    } else if (ev.type == SLIST_HOLD || ev.type == SLIST_HOLD_END) {
+        hold_talk(&ev, LG_SCOPE_GROUP, (uint32_t)ev.arg);
     } else if (ev.type == SLIST_ROW && ev.id == 1) {
         ui_go(NAV_GROUP_EDIT, 0, (uint32_t)ev.arg, NULL);
     }
@@ -424,10 +468,11 @@ void ui_group_edit_touch(int16_t x, int16_t y, bool down)
 
 enum { SET_TAB_GRID, SET_TAB_SOUND, SET_TAB_SCREEN, SET_TAB_DEVICE };
 enum { SET_WHICH_AP = 20, SET_RECONNECT, SET_SCAN, SET_VOLUME, SET_TEST, SET_SAVER, SET_CALIBRATE, SET_NAME,
-       SET_RESTART };
+       SET_RESTART, SET_TALK };
 
 static const char *const SET_TABS[] = { "Grid", "Sound", "Screen", "Device" };
 static const char *const VOLUME_NAMES[LG_VOLUME_STEPS] = { "Off", "Low", "Med", "High" };
+static const char *const TALK_NAMES[LG_TALK_STEPS] = { "Normal", "Loud", "Louder" };
 
 static struct {
     uint8_t  tab;
@@ -441,6 +486,7 @@ static uint32_t settings_build(bool rebuild)
     uint32_t sig = mix(mix(mix(2166136261u, s_set.tab), st->link), (uint32_t)(st->preferred_node + 2));
     sig = mix_str(mix(sig, st->grid_time != 0), st->node_ssid);
     sig = mix(mix(sig, lg_bsp_audio_volume()), lg_bsp_setting_get_bool("saver", true));
+    sig = mix(sig, lg_bsp_audio_talk_boost());
     sig = mix(mix_str(sig, st->name), lg_bsp_touch_needs_calibration());
     sig = mix(mix(sig, st->free_heap / 4096u), s_set.restart_armed);
     if (!rebuild) {
@@ -465,6 +511,10 @@ static uint32_t settings_build(bool rebuild)
             r->options = VOLUME_NAMES;
             r->n_options = LG_VOLUME_STEPS;
             r->selected = lg_bsp_audio_volume();
+            r = slist_add(ROW_CHOICE, "Talk loudness", NULL, SET_TALK, 0);
+            r->options = TALK_NAMES;
+            r->n_options = LG_TALK_STEPS;
+            r->selected = lg_bsp_audio_talk_boost();
             slist_add(ROW_BUTTON, "Test sound", NULL, SET_TEST, LG_CUE_RECEIVED)->style = BTN_MAIN;
             slist_add(ROW_BUTTON, "Test urgent", NULL, SET_TEST, LG_CUE_URGENT)->style = BTN_PLAIN;
             slist_add(ROW_NOTE, NULL, "A bell when a message arrives, and three notes for an urgent one.", -1, 0);
@@ -556,6 +606,10 @@ void ui_settings_touch(int16_t x, int16_t y, bool down)
         break;
     case SET_VOLUME:
         lg_bsp_audio_set_volume((uint8_t)ev.arg);
+        ui_settings_refresh();
+        break;
+    case SET_TALK:
+        lg_bsp_audio_set_talk_boost((uint8_t)ev.arg);
         ui_settings_refresh();
         break;
     case SET_TEST:

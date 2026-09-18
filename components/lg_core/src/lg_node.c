@@ -382,6 +382,13 @@ static void deliver_fanout(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
 
 /* ---- client-originated traffic ----------------------------------------- */
 
+/* The owner's time rule: grid time is set and the author's clock is within tolerance of it. */
+static bool time_ok(const lg_node_t *n, const lg_env_t *e)
+{
+    uint32_t now = node_grid_time(n);
+    return now != 0 && e->grid_time != 0 && absdiff(now, e->grid_time) <= LG_TIME_TOLERANCE_S;
+}
+
 static uint8_t validate_text(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
 {
     const lg_roster_t *r = n->roster;
@@ -409,11 +416,8 @@ static uint8_t validate_text(lg_node_t *n, const lg_env_t *e, const uint8_t *bod
 
     /* Owner rule: wrong or unset time allows only URGENT broadcasts. */
     bool urgent_broadcast = e->scope == LG_SCOPE_BROADCAST && (e->flags & LG_FLAG_URGENT) != 0;
-    if (!urgent_broadcast) {
-        uint32_t now = node_grid_time(n);
-        if (now == 0 || e->grid_time == 0 || absdiff(now, e->grid_time) > LG_TIME_TOLERANCE_S) {
-            return LG_ACK_REJ_TIME;
-        }
+    if (!urgent_broadcast && !time_ok(n, e)) {
+        return LG_ACK_REJ_TIME;
     }
 
     if (e->scope == LG_SCOPE_BROADCAST) {
@@ -480,6 +484,131 @@ static void handle_client_text(lg_node_t *n, const lg_env_t *e, const uint8_t *b
         deliver_direct(n, &f, body, buf, (size_t)flen, LG_NODE_NONE);
     } else {
         deliver_fanout(n, &f, body, buf, (size_t)flen, LG_NODE_NONE);
+    }
+}
+
+/* ---- voice (D61) --------------------------------------------------------- */
+
+/* Format only, as for 1:1 text: the node never sees a 1:1 voice payload. An END frame may carry
+ * no data, so the shortest body is the sealed header alone. */
+static bool voice_body_ok(const lg_env_t *e, const uint8_t *body)
+{
+    if ((e->origin_seq & LG_VOICE_SEQ_BIT) == 0) {
+        return false;
+    }
+    if (e->scope == LG_SCOPE_DIRECT) {
+        return (e->flags & LG_FLAG_E2E_PAYLOAD) != 0 &&
+               e->body_len >= LG_VOICE_HDR_LEN + LG_AEAD_TAG_LEN &&
+               e->body_len <= LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN;
+    }
+    if (e->scope == LG_SCOPE_GROUP) {
+        return (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 && e->target <= 0xFFFFu &&
+               lg_voice_hdr_dec(body, e->body_len, NULL);
+    }
+    return false;   /* never broadcast */
+}
+
+static uint8_t validate_voice(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
+{
+    const lg_roster_t *r = n->roster;
+    if (!voice_body_ok(e, body)) {
+        return LG_ACK_REJ_INVALID;
+    }
+    if (e->scope == LG_SCOPE_DIRECT) {
+        if (lg_roster_user(r, e->target) == NULL || e->target == e->origin_id) {
+            return LG_ACK_REJ_UNKNOWN_TARGET;
+        }
+    } else {
+        if (lg_roster_group_index(r, (uint16_t)e->target) < 0) {
+            return LG_ACK_REJ_UNKNOWN_TARGET;
+        }
+        if (!lg_roster_is_member(r, e->origin_id, (uint16_t)e->target)) {
+            return LG_ACK_REJ_NOT_MEMBER;
+        }
+    }
+    if (!time_ok(n, e)) {
+        return LG_ACK_REJ_TIME;   /* voice follows non-urgent text (D6) */
+    }
+    if (e->scope == LG_SCOPE_DIRECT) {
+        const lg_presence_entry_t *p = presence_find(n, e->target);
+        if (p == NULL || p->state != LG_PRES_ONLINE) {
+            return LG_ACK_REJ_OFFLINE;
+        }
+    }
+    return 0;
+}
+
+/* Takes a voice frame if it is the newest from its author; the table never touches text dedup. */
+static bool voice_take(lg_node_t *n, const lg_env_t *e)
+{
+    int ui = lg_roster_user_index(n->roster, e->origin_id);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
+        return false;
+    }
+    lg_voice_seen_t *seen = &n->voice_seen[ui];
+    if (!lg_voice_newer(seen, e->origin_boot, e->origin_seq)) {
+        n->stats.duplicates++;
+        return false;
+    }
+    seen->boot = e->origin_boot;
+    seen->seq  = e->origin_seq;
+    n->stats.voice++;
+    return true;
+}
+
+static void handle_client_voice(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
+{
+    int ui = lg_roster_user_index(n->roster, e->origin_id);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
+        n->stats.rejected++;
+        return;
+    }
+    uint8_t status = validate_voice(n, e, body);
+    if (status != 0) {
+        n->stats.rejected++;
+        /* Ten frames a second would bring ten refusals: say it once a second at most. */
+        uint32_t now = node_now_ms(n);
+        if (!n->has_voice_refused[ui] || now - n->voice_refused_ms[ui] >= LG_VOICE_REFUSE_MS) {
+            n->has_voice_refused[ui] = true;
+            n->voice_refused_ms[ui] = now;
+            reply_ack(n, e, status);
+        }
+        return;
+    }
+    if (!voice_take(n, e)) {
+        return;   /* no ack: voice is never acknowledged when taken */
+    }
+    lg_env_t f = *e;
+    f.ttl = LG_TTL_DEFAULT;
+    f.origin_node = n->self;
+    f.flags &= (uint16_t)~LG_FLAG_RELAYED;
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&f, body, e->body_len, buf, sizeof(buf));
+    if (flen < 0) {
+        return;
+    }
+    if (f.scope == LG_SCOPE_DIRECT) {
+        deliver_direct(n, &f, body, buf, (size_t)flen, LG_NODE_NONE);
+    } else {
+        deliver_fanout(n, &f, body, buf, (size_t)flen, LG_NODE_NONE);
+    }
+}
+
+static void handle_backbone_voice(lg_node_t *n, uint16_t from_node, const lg_env_t *e,
+                                  const uint8_t *frame, size_t len)
+{
+    const uint8_t *body = lg_frame_body(frame);
+    if (!voice_body_ok(e, body) || lg_roster_user(n->roster, e->origin_id) == NULL) {
+        n->stats.malformed++;
+        return;
+    }
+    if (!voice_take(n, e)) {
+        return;
+    }
+    if (e->scope == LG_SCOPE_DIRECT) {
+        deliver_direct(n, e, body, frame, len, from_node);
+    } else {
+        deliver_fanout(n, e, body, frame, len, from_node);
     }
 }
 
@@ -629,6 +758,9 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
     case LG_T_TEXT:
         handle_client_text(n, &e, body);
         break;
+    case LG_T_VOICE:
+        handle_client_voice(n, &e, body);
+        break;
     case LG_T_MSG_ACK:
         handle_client_ack(n, &e, body);
         break;
@@ -679,6 +811,10 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         return;
     }
     n->stats.rx_backbone++;
+    if (e.type == LG_T_VOICE) {
+        handle_backbone_voice(n, from_node, &e, frame, len);   /* its own table, not the dedup window */
+        return;
+    }
     if (lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq) != LG_DEDUP_NEW) {
         n->stats.duplicates++;
         return;

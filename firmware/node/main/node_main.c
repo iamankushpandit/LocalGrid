@@ -26,6 +26,7 @@
 #include "grid_state.h"
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
+#include "lg_timekeep.h"
 #include "lg_secrets.h"
 #include "node_app.h"
 #include "nvs_flash.h"
@@ -97,6 +98,7 @@ static void set_grid_time_ms(uint64_t unix_ms, uint8_t quality, uint8_t stratum)
     g_app.time_slew_ms = 0;
     g_app.time_quality = quality;
     g_app.time_stratum = stratum;
+    lg_timekeep_save((uint32_t)(unix_ms / 1000u));   /* so a restart keeps it (D60) */
     ptrace_event(PTRACE_TIME);
 }
 
@@ -290,7 +292,14 @@ static void io_on_time(void *ctx, uint16_t origin_node, const lg_time_sync_t *t)
 static void io_on_client_time(void *ctx, uint32_t device, uint32_t unix_s)
 {
     (void)ctx;
-    if (g_app.time_quality != LG_TIME_UNSET || unix_s < 1700000000u) {
+    if (g_app.time_quality != LG_TIME_UNSET) {
+        return;
+    }
+    if (unix_s < 1700000000u) {
+        /* Before 2023-11-14 is not a clock the grid ever set. Logged, because a silent drop here
+         * looks exactly like the carry-back never happening. */
+        ESP_LOGW("TIME", "[TIME] Handheld %" PRIu32 " offered grid time %" PRIu32 ": too old to believe", device,
+                 unix_s);
         return;
     }
     set_grid_time_ms((uint64_t)unix_s * 1000u, LG_TIME_CARRIED, LG_STRATUM_UNKNOWN);
@@ -872,6 +881,18 @@ void app_main(void)
     }
     lg_node_init(&g_app.core, g_app.index, g_app.boot, &g_app.roster, &io);
     load_names();
+
+    /*
+     * The clock this AP had before it restarted (D60). The RTC counted the seconds it was away, so
+     * this is the time now rather than the time then; it comes back as CARRIED at unknown stratum,
+     * so any AP that knows it is closer to where an admin set it corrects this one at once.
+     */
+    uint32_t kept = lg_timekeep_restore();
+    if (kept != 0) {
+        set_grid_time_ms((uint64_t)kept * 1000u, LG_TIME_CARRIED, LG_STRATUM_UNKNOWN);
+        grid_state_note_sync(GRID_NO_AP, 0);
+        ESP_LOGI("TIME", "[TIME] Grid time %" PRIu32 " kept across the restart", kept);
+    }
 
     grid_state_init(g_app.index);
     ESP_ERROR_CHECK(lgbb_init(g_app.index, g_app.boot, s_backbone_key, on_backbone_frame, on_link, clients_count));

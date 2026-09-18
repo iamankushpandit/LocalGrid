@@ -93,6 +93,7 @@ typedef enum {
     LG_CEV_GROUPS,           /* value: number of groups removed; the table in the roster is newer */
     LG_CEV_GROUP_REFUSED,    /* value: lg_ack_status_t the AP refused our last group edit with */
     LG_CEV_NAME,             /* value: device whose name changed, this handheld's own included */
+    LG_CEV_VOICE_REFUSED,    /* value: lg_ack_status_t an AP refused our voice with (D61) */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -119,6 +120,13 @@ typedef struct {
                 const uint8_t *aad, size_t aad_len, const uint8_t *pt, size_t pt_len, uint8_t *out);
     int (*open)(void *ctx, uint32_t peer, const uint8_t *peer_pub, const uint8_t *nonce,
                 const uint8_t *aad, size_t aad_len, const uint8_t *ct, size_t ct_len, uint8_t *out);
+    /*
+     * Optional. A live voice frame for us arrived (D61): 1:1 to this handheld or a group it is in,
+     * never our own. payload is the decrypted plaintext, a valid header (lg_voice_hdr_dec) and
+     * 0..LG_VOICE_DATA_MAX data bytes, valid only during the call. Frames arrive newest-only per
+     * author: one no newer than the last from that author in the same boot has been dropped.
+     */
+    void (*on_voice)(void *ctx, const lg_env_t *env, const uint8_t *payload, size_t len);
 } lg_client_io_t;
 
 typedef struct {
@@ -144,6 +152,8 @@ typedef struct {
     lg_dedup_t         dedup;
     uint32_t           decrypt_failures;
     uint32_t           last_pong_ms;       /* now_ms when the node last answered a PING, 0 never */
+    uint32_t           voice_seq;          /* our voice counter, without LG_VOICE_SEQ_BIT (D61) */
+    lg_voice_seen_t    voice_seen[LG_MAX_DEVICES];   /* newest voice per author, by roster user index */
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
@@ -166,6 +176,18 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len);
  */
 int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t flags,
                         const uint8_t *text, size_t len);
+
+/*
+ * Sends one live voice frame (D61). payload is the plaintext: a voice header (lg_voice_hdr_enc)
+ * and 0..LG_VOICE_DATA_MAX data bytes. scope is LG_SCOPE_DIRECT (target = device; sealed like
+ * 1:1 text, so the peer's key must be known) or LG_SCOPE_GROUP (target = group ID; plain).
+ * Sent once: no outbox, no retry, no ack requested. The AP says nothing when it takes the frame
+ * and refuses at most once a second with LG_CEV_VOICE_REFUSED.
+ * Returns LG_OK, LG_ERR_ARG (bad scope, target, or payload, or no key for the peer),
+ * LG_ERR_TIME (lg_client_time_restricted), LG_ERR_SHORT (not registered),
+ * LG_ERR_FULL (the transport did not take the frame).
+ */
+int lg_client_send_voice(lg_client_t *c, uint8_t scope, uint32_t target, const uint8_t *payload, size_t len);
 
 /*
  * Asks the AP to make, change, or remove a group (D52). Not retried: the AP answers with the new

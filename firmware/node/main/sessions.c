@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "lg_envelope.h"
 #include "lg_proto_config.h"
 #include "lwip/sockets.h"
 #include "node_app.h"
@@ -16,6 +17,7 @@ static const char *TAG = "NET";
 #define SESS_MAX              LG_PROTO_MAX_STATIONS
 #define SESS_IDLE_MS          30000u
 #define SESS_REGISTER_MS      5000u
+#define SEND_WAIT_MS          2000u   /* the longest one handheld may hold up the core task */
 
 typedef struct {
     int      fd;
@@ -29,6 +31,7 @@ typedef struct {
 
 static sess_t s_sess[SESS_MAX];
 static int s_listen_fd = -1;
+static uint32_t s_voice_dropped;   /* talk frames a listener could not take at once (D61) */
 
 static void close_quiet(sess_t *x)
 {
@@ -237,6 +240,17 @@ void sess_send(uint32_t device, const uint8_t *frame, size_t len)
         memcpy(out + 2, frame, len);
         size_t total = 2 + len;
         size_t sent = 0;
+        /*
+         * This runs on the core task, which serves every session and the backbone, so it must not
+         * wait long for one slow handheld. It used to wait up to SESS_IDLE_MS: a listener that fell
+         * behind during push-to-talk froze the AP, the talker's socket filled, and every handheld on
+         * the AP dropped within seconds (D61). A talk frame that cannot go out at once is dropped
+         * for that listener -- a tenth of a second of their audio -- and anything else waits at most
+         * SEND_WAIT_MS. A frame already partly sent must finish or the session closes, because the
+         * stream would be out of step.
+         */
+        bool voice = len > 1 && frame[1] == LG_T_VOICE;
+        uint32_t started = app_now_ms();
         while (sent < total) {
             int n = send(x->fd, out + sent, total - sent, 0);
             if (n > 0) {
@@ -244,10 +258,14 @@ void sess_send(uint32_t device, const uint8_t *frame, size_t len)
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                vTaskDelay(1);   /* bounded by SO_SNDTIMEO on the blocking path */
-                if (app_now_ms() - x->last_rx_ms > SESS_IDLE_MS) {
+                if (voice && sent == 0) {
+                    s_voice_dropped++;
+                    return;
+                }
+                if (app_now_ms() - started > SEND_WAIT_MS) {
                     break;
                 }
+                vTaskDelay(1);
                 continue;
             }
             break;
@@ -281,4 +299,9 @@ void sess_print(void)
             printf("  %-6" PRIu32 "  %-15s  %" PRIu32 "\n", x->device, x->addr, now - x->last_rx_ms);
         }
     }
+}
+
+uint32_t sess_voice_dropped(void)
+{
+    return s_voice_dropped;
 }

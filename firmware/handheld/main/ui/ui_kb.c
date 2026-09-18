@@ -4,18 +4,39 @@
 #include <string.h>
 
 #include "esp_timer.h"
+#include "lg_bsp_settings.h"
 #include "ui_theme.h"
 
 #define KEY_ROW_H      32
 #define KEY_ROWS       4
 #define KEYS_MAX       40
 #define EMOJI_PER_PAGE 24u
+#define T9_PAUSE_MS    900u   /* long enough to find the next key, short enough not to wait on it */
+#define T9_NONE        0xFFu
+
+/*
+ * The phone keypad, and why it is the default (owner, 2026-09-17). A qwerty row is ten keys
+ * across a 240 px panel: 24 px a key, narrower than a fingertip, and typing "ankush" on the
+ * Freenove came out "abjudh" -- every miss one key to the side. The keypad is four columns, 60 px
+ * a key, and letters come from tapping a key until the one you want shows, as SMS phones did.
+ * Qwerty is still there, one key away, and whichever was used last is remembered (D59).
+ */
+#define T9_KEYS 10
+static const char *const T9_LABEL[T9_KEYS] = {
+    "1 .,?", "2 abc", "3 def", "4 ghi", "5 jkl", "6 mno", "7 pqrs", "8 tuv", "9 wxyz", "0 space",
+};
+static const char *const T9_CYCLE[T9_KEYS] = {
+    ".,?1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", " 0",
+};
 
 typedef enum {
     K_TEXT,
     K_BACKSPACE,
     K_HIDE,
     K_SHIFT,
+    K_T9,              /* a keypad key: text holds the characters it steps through */
+    K_PAGE_BACK,       /* back to the letters page in use, without changing which that is */
+    K_PAGE_KEYPAD,
     K_PAGE_LETTERS,
     K_PAGE_NUMBERS,
     K_PAGE_EMOJI,
@@ -26,11 +47,13 @@ typedef enum {
 typedef struct {
     lg_rect_t rect;
     char      label[8];
-    char      text[8];    /* UTF-8 inserted by K_TEXT */
+    char      text[8];    /* UTF-8 inserted by K_TEXT, or the cycle of a K_T9 key */
     uint8_t   action;
 } key_t;
 
-typedef enum { PAGE_LETTERS, PAGE_NUMBERS, PAGE_EMOJI } page_t;
+typedef enum { PAGE_KEYPAD, PAGE_LETTERS, PAGE_NUMBERS, PAGE_EMOJI } page_t;
+
+#define KB_SETTING "kbqwerty"   /* true: the full keyboard, false: the phone keypad */
 
 static struct {
     uint16_t w;
@@ -40,6 +63,10 @@ static struct {
     page_t   page;
     uint8_t  shift;        /* 0 off, 1 next letter only, 2 caps lock */
     uint8_t  emoji_page;
+    uint8_t  t9_key;       /* the keypad key a run of taps is on, T9_NONE between runs */
+    uint8_t  t9_tap;       /* how far through that key's characters the run has stepped */
+    bool     t9_upper;     /* the run started with shift on, so it stays upper case */
+    uint32_t t9_ms;        /* when the last tap landed */
     key_t    keys[KEYS_MAX];
     uint8_t  n_keys;
     int      pressed;      /* -1 none */
@@ -88,6 +115,21 @@ static void build(void)
     int16_t r3 = (int16_t)(y0 + 3 * KEY_ROW_H);
     int16_t wide = (int16_t)(kw * 3 / 2);
     switch (s.page) {
+    case PAGE_KEYPAD: {
+        /* Four columns: the digits people already know, and the controls down the right. */
+        int16_t cw = (int16_t)(s.w / 4);
+        for (uint8_t i = 0; i < T9_KEYS - 1u; i++) {
+            add_key(K_T9, T9_LABEL[i], T9_CYCLE[i], (int16_t)((i % 3) * cw), (int16_t)(y0 + (i / 3) * KEY_ROW_H), cw);
+        }
+        add_key(K_BACKSPACE, LG_SYMBOL_BACKSPACE, NULL, (int16_t)(3 * cw), y0, cw);
+        add_key(K_SHIFT, LG_SYMBOL_UP, NULL, (int16_t)(3 * cw), (int16_t)(y0 + KEY_ROW_H), cw);
+        add_key(K_PAGE_EMOJI, LG_EMOJI[0], NULL, (int16_t)(3 * cw), (int16_t)(y0 + 2 * KEY_ROW_H), cw);
+        add_key(K_PAGE_NUMBERS, "123", NULL, 0, r3, cw);
+        add_key(K_T9, T9_LABEL[T9_KEYS - 1u], T9_CYCLE[T9_KEYS - 1u], cw, r3, cw);
+        add_key(K_PAGE_LETTERS, "abc", NULL, (int16_t)(2 * cw), r3, cw);
+        add_key(K_HIDE, LG_SYMBOL_DOWN, NULL, (int16_t)(3 * cw), r3, cw);
+        return;
+    }
     case PAGE_LETTERS: {
         bool upper = s.shift > 0;
         add_chars("qwertyuiop", x0, y0, kw, upper);
@@ -106,7 +148,7 @@ static void build(void)
         add_chars("_.,?!'\"", (int16_t)(x0 + wide), (int16_t)(y0 + 2 * KEY_ROW_H), kw, false);
         add_key(K_BACKSPACE, LG_SYMBOL_BACKSPACE, NULL, (int16_t)(x0 + wide + 7 * kw), (int16_t)(y0 + 2 * KEY_ROW_H),
                 wide);
-        add_key(K_PAGE_LETTERS, "ABC", NULL, x0, r3, wide);
+        add_key(K_PAGE_BACK, "abc", NULL, x0, r3, wide);
         break;
     case PAGE_EMOJI: {
         uint8_t first = (uint8_t)(s.emoji_page * EMOJI_PER_PAGE);
@@ -115,7 +157,7 @@ static void build(void)
             add_key(K_TEXT, LG_EMOJI[first + i], LG_EMOJI[first + i], (int16_t)(i % 8 * ew),
                     (int16_t)(y0 + (i / 8) * KEY_ROW_H), ew);
         }
-        add_key(K_PAGE_LETTERS, "ABC", NULL, x0, r3, wide);
+        add_key(K_PAGE_BACK, "abc", NULL, x0, r3, wide);
         add_key(K_EMOJI_PREV, LG_SYMBOL_LEFT, NULL, (int16_t)(x0 + wide), r3, kw);
         add_key(K_EMOJI_NEXT, LG_SYMBOL_RIGHT, NULL, (int16_t)(x0 + wide + kw), r3, kw);
         add_key(K_TEXT, "space", " ", (int16_t)(x0 + wide + 2 * kw), r3, (int16_t)(4 * kw));
@@ -125,7 +167,7 @@ static void build(void)
     }
     }
     add_key(K_PAGE_EMOJI, LG_EMOJI[0], NULL, (int16_t)(x0 + wide), r3, kw);
-    add_key(K_TEXT, ",", ",", (int16_t)(x0 + wide + kw), r3, kw);
+    add_key(K_PAGE_KEYPAD, "123", NULL, (int16_t)(x0 + wide + kw), r3, kw);   /* back to the keypad */
     add_key(K_TEXT, "space", " ", (int16_t)(x0 + wide + 2 * kw), r3, (int16_t)(4 * kw));
     add_key(K_TEXT, ".", ".", (int16_t)(x0 + wide + 6 * kw), r3, kw);
     add_key(K_HIDE, LG_SYMBOL_DOWN, NULL, (int16_t)(x0 + wide + 7 * kw), r3, wide);
@@ -138,7 +180,7 @@ static void paint_key(const lg_canvas_t *c, void *ctx)
     bool locked = k->action == K_SHIFT && s.shift == 2;
     lg_paint_panel(c, &k->rect, &k->rect, pressed || locked ? C_OUTLINE : C_SURFACE, C_BG,
                    locked ? C_ACCENT : C_OUTLINE, 1, 4);
-    const lg_font_t *f = k->action == K_TEXT ? F_BODY : F_ICON;
+    const lg_font_t *f = k->action == K_TEXT ? F_BODY : k->action == K_T9 ? F_SMALL : F_ICON;
     const lg_font_t *fb = s.page == PAGE_EMOJI ? F_EMOJI_KEY : F_EMOJI;
     lg_color_t fg = (k->action == K_SHIFT && s.shift > 0) ? C_ACCENT : C_TEXT;
     int16_t tw = lg_draw_text_width(f, fb, k->label);
@@ -175,6 +217,8 @@ void ui_kb_open(uint16_t screen_w, uint16_t screen_h, char *buf, size_t cap)
     s.cap = cap;
     s.pressed = -1;
     s.was_down = false;
+    s.t9_key = T9_NONE;
+    s.page = lg_bsp_setting_get_bool(KB_SETTING, false) ? PAGE_LETTERS : PAGE_KEYPAD;
     build();
 }
 
@@ -184,10 +228,64 @@ void ui_kb_draw(void)
     lg_draw_region(&a, paint_all, NULL);
 }
 
+/* Removes the last character of the buffer, whatever its length in bytes. */
+static size_t drop_last(size_t len)
+{
+    while (len > 0) {
+        char ch = s.buf[--len];
+        if ((ch & 0xC0) != 0x80) {
+            break;
+        }
+    }
+    if (s.buf != NULL) {
+        s.buf[len] = '\0';
+    }
+    return len;
+}
+
 static kb_event_t press(const key_t *k)
 {
     size_t len = s.buf != NULL ? strlen(s.buf) : 0;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    bool same_run = k->action == K_T9 && s.t9_key != T9_NONE && s.t9_key < s.n_keys &&
+                    strcmp(s.keys[s.t9_key].text, k->text) == 0 && now - s.t9_ms < T9_PAUSE_MS;
+    if (k->action != K_T9) {
+        s.t9_key = T9_NONE;   /* any other key ends the run */
+    }
     switch (k->action) {
+    case K_T9: {
+        /* The same key again steps the letter on; a different key, or a pause, starts a new one. */
+        const char *cycle = k->text;
+        size_t n = strlen(cycle);
+        if (same_run) {
+            len = drop_last(len);
+            s.t9_tap = (uint8_t)((s.t9_tap + 1u) % n);
+        } else {
+            s.t9_tap = 0;
+            s.t9_upper = s.shift > 0;
+        }
+        for (uint8_t i = 0; i < s.n_keys; i++) {
+            if (s.keys[i].action == K_T9 && strcmp(s.keys[i].text, cycle) == 0) {
+                s.t9_key = i;
+                break;
+            }
+        }
+        s.t9_ms = now;
+        char one = cycle[s.t9_tap];
+        if (s.t9_upper && one >= 'a' && one <= 'z') {
+            one = (char)(one - 'a' + 'A');
+        }
+        if (s.buf != NULL && len + 2 <= s.cap) {
+            s.buf[len] = one;
+            s.buf[len + 1] = '\0';
+        }
+        if (s.shift == 1) {
+            s.shift = 0;   /* one capital, then back to lower case */
+            build();
+            ui_kb_draw();
+        }
+        return KB_TEXT_CHANGED;
+    }
     case K_TEXT: {
         size_t n = strlen(k->text);
         if (s.buf != NULL && len + n + 1 <= s.cap) {
@@ -201,21 +299,21 @@ static kb_event_t press(const key_t *k)
         return KB_TEXT_CHANGED;
     }
     case K_BACKSPACE:
-        while (len > 0) {
-            char ch = s.buf[--len];
-            if ((ch & 0xC0) != 0x80) {
-                break;   /* removed the start of a character */
-            }
-        }
-        if (s.buf != NULL) {
-            s.buf[len] = '\0';
-        }
+        (void)drop_last(len);
         return KB_TEXT_CHANGED;
     case K_SHIFT:
         s.shift = (uint8_t)((s.shift + 1u) % 3u);   /* off, one capital, caps lock */
         break;
+    case K_PAGE_BACK:
+        s.page = lg_bsp_setting_get_bool(KB_SETTING, false) ? PAGE_LETTERS : PAGE_KEYPAD;
+        break;
+    case K_PAGE_KEYPAD:
+        s.page = PAGE_KEYPAD;
+        lg_bsp_setting_set_bool(KB_SETTING, false);   /* whichever was used last comes back (D59) */
+        break;
     case K_PAGE_LETTERS:
         s.page = PAGE_LETTERS;
+        lg_bsp_setting_set_bool(KB_SETTING, true);
         break;
     case K_PAGE_NUMBERS:
         s.page = PAGE_NUMBERS;
@@ -267,9 +365,12 @@ bool ui_kb_touch(int16_t x, int16_t y, bool down, kb_event_t *event)
     s.pressed = -1;
     key_t k = s.keys[idx];
     draw_key(&s.keys[idx]);
-    if (lg_rect_hit(&k.rect, x, y)) {
-        *event = press(&k);
-    }
+    /* The key that was pressed, not the one under the lift: a fingertip rolls a few pixels as it
+     * leaves the glass, and on a 24 px key that landed on the neighbour (owner: "ankush" came out
+     * "abjudh"). x and y are the lift point and are deliberately unused. */
+    (void)x;
+    (void)y;
+    *event = press(&k);
     return true;
 }
 
@@ -277,6 +378,24 @@ kb_event_t ui_kb_type(const char *text)
 {
     kb_event_t last = KB_NOTHING;
     for (const char *p = text; *p != '\0'; p++) {
+        /* On the keypad a letter is a run of taps on its key, which is what a finger does. */
+        if (s.page == PAGE_KEYPAD) {
+            for (uint8_t i = 0; i < s.n_keys && s.keys[i].action == K_T9; i++) {
+                const char *at = strchr(s.keys[i].text, *p);
+                if (at == NULL) {
+                    continue;
+                }
+                key_t k = s.keys[i];
+                for (size_t tap = 0; tap <= (size_t)(at - s.keys[i].text); tap++) {
+                    if (press(&k) == KB_TEXT_CHANGED) {
+                        last = KB_TEXT_CHANGED;
+                    }
+                }
+                s.t9_key = T9_NONE;   /* the next letter starts its own run, however quick this was */
+                break;
+            }
+            continue;
+        }
         for (uint8_t i = 0; i < s.n_keys; i++) {
             if (s.keys[i].action == K_TEXT && s.keys[i].text[0] == *p && s.keys[i].text[1] == '\0') {
                 s.pressed = i;
@@ -296,7 +415,11 @@ kb_event_t ui_kb_type(const char *text)
 
 void ui_kb_page(int page)
 {
-    key_t k = { .action = page == 1 ? K_PAGE_NUMBERS : page == 2 ? K_PAGE_EMOJI : page == 3 ? K_SHIFT : K_PAGE_LETTERS };
+    key_t k = { .action = page == 1   ? K_PAGE_NUMBERS
+                        : page == 2   ? K_PAGE_EMOJI
+                        : page == 3   ? K_SHIFT
+                        : page == 4   ? K_PAGE_KEYPAD
+                                      : K_PAGE_LETTERS };
     (void)press(&k);
 }
 

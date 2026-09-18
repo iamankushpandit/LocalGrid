@@ -204,3 +204,40 @@ esp_err_t hh_service_edit_group(uint16_t id, const char *name, uint32_t members,
  * or malformed name; ESP_ERR_NO_MEM when the queue is full.
  */
 esp_err_t hh_service_set_name(const char *name);
+
+/*
+ * Battery (D62), sampled by the service (service/hh_battery.c) every 2 s, filtered over about
+ * 40 s, mapped through a LiPo curve, and held in a 2-point deadband. Returns 0..100, or -1 for
+ * no badge: the board cannot measure, or the reading is outside what a cell can be. Without a
+ * battery fitted it reads the charger's output, about 4.1 to 4.2 V, and says so. Any task; it
+ * only copies a published byte, so screens may call it every refresh and repaint on a change.
+ */
+#define HH_BATTERY_LOW_PERCENT 15   /* at or below: the badge turns the error colour */
+
+int8_t hh_service_battery_percent(void);
+
+/* ---- push-to-talk frames (D61) ----
+ *
+ * The voice module (main/voice) owns the microphone and speaker; the service only carries its
+ * frames. A frame is a voice header and its ADPCM data (lg_body.h), at most HH_VOICE_FRAME_MAX
+ * bytes, and it is sent once: no outbox, no retry, no ack.
+ */
+#define HH_VOICE_FRAME_MAX 410   /* LG_VOICE_HDR_LEN + LG_VOICE_DATA_MAX */
+
+typedef struct {
+    /* A frame for this handheld: author, and the conversation it belongs to (scope DIRECT with
+     * target = author, or GROUP with the group id). Called on the service task: copy and return. */
+    void (*on_frame)(uint32_t author, uint32_t boot, uint8_t scope, uint32_t target, const uint8_t *frame,
+                     size_t len);
+    /* A talk could not go out: a positive lg_ack_status_t when an AP refused it, a negative
+     * lg_err_t when this handheld would not send it (LG_ERR_TIME, LG_ERR_SHORT when offline).
+     * Called on the service task. */
+    void (*on_refused)(int reason);
+} hh_voice_io_t;
+
+/* Registers the voice module's callbacks; io must outlive the service. */
+void hh_service_set_voice_io(const hh_voice_io_t *io);
+
+/* Queues one frame for the AP. ESP_ERR_NO_MEM when the queue is full (the frame is dropped),
+ * ESP_ERR_INVALID_ARG for a bad scope or length. */
+esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len);

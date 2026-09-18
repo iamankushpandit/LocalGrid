@@ -12,7 +12,6 @@
 #include "ui_main.h"
 
 #include <inttypes.h>
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +24,7 @@
 #include "freertos/task.h"
 #include "hh_mem.h"
 #include "hh_service.h"
+#include "hh_voice.h"
 #include "lg_bsp_touch.h"
 #include "lg_draw.h"
 #include "lg_emoji.h"
@@ -33,6 +33,7 @@
 #include "ui_chat.h"
 #include "ui_nav.h"
 #include "ui_list.h"
+#include "ui_lock.h"
 #include "ui_overlay.h"
 #include "ui_theme.h"
 
@@ -75,10 +76,9 @@ static struct {
     lg_box_t    heading;
     lg_box_t    subline;
     tile_t      tiles[TILE_COUNT];
-    lg_box_t    back;
     lg_box_t    labels[STATUS_ROWS];
     lg_box_t    values[STATUS_ROWS];
-    int         pressed;          /* tile or -2 for back, -1 none */
+    int         pressed;          /* launcher tile, -1 none */
     hh_status_t st;
     bool        marked_status;
     /* A screen change asked for by a screen, done after its touch or refresh returns. */
@@ -121,93 +121,16 @@ static lg_box_t text_box(int16_t x, int16_t y, int16_t w, int16_t h, const lg_fo
     return b;
 }
 
-/*
- * The LocalGrid mark (assets/brand/localgrid-icon.svg, as on the admin page), drawn pixel by
- * pixel from its shapes in the SVG's 64-unit grid: a rounded tile, two radio waves over the top
- * node, the tent of links between three nodes, and a handheld in the middle joined to each. Edges
- * are smoothed from each pixel's distance to the shape, so it reads at 26 px.
- */
-#define LOGO_SIZE 26
-
-static float clampf(float v)
-{
-    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-}
-
-static float segment_distance(float px, float py, float ax, float ay, float bx, float by)
-{
-    float vx = bx - ax;
-    float vy = by - ay;
-    float t = clampf(((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy));
-    float dx = px - (ax + t * vx);
-    float dy = py - (ay + t * vy);
-    return sqrtf(dx * dx + dy * dy);
-}
-
-static void paint_logo(const lg_canvas_t *c, int16_t x0, int16_t y0)
-{
-    lg_rect_t box = { x0, y0, LOGO_SIZE, LOGO_SIZE };
-    lg_paint_panel(c, &box, &box, C_BAR, C_BG, C_BAR, 0, (uint8_t)(14 * LOGO_SIZE / 64));
-    float unit = 64.0f / LOGO_SIZE;   /* grid units per pixel */
-    for (int16_t py = 0; py < LOGO_SIZE; py++) {
-        int16_t sy = (int16_t)(y0 + py);
-        if (sy < c->band.y || sy >= c->band.y + c->band.h) {
-            continue;
-        }
-        for (int16_t px = 0; px < LOGO_SIZE; px++) {
-            float u = (px + 0.5f) * unit;
-            float v = (py + 0.5f) * unit;
-            int16_t sx = (int16_t)(x0 + px);
-            /* Waves: the upper quarter of two circles around the top node. */
-            float dx = u - 32.0f;
-            float dy = v - 22.0f;
-            if (dy < 0.0f && fabsf(dx) <= -dy) {
-                float r = sqrtf(dx * dx + dy * dy);
-                float a = clampf((1.5f - fabsf(r - 11.0f)) / unit + 0.5f) * 0.9f;
-                a += clampf((1.5f - fabsf(r - 18.0f)) / unit + 0.5f) * 0.5f;
-                lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf(a) * 255.0f));
-            }
-            /* The tent: links between the three nodes. */
-            float d = segment_distance(u, v, 32, 22, 14, 50);
-            float e = segment_distance(u, v, 14, 50, 50, 50);
-            float f = segment_distance(u, v, 50, 50, 32, 22);
-            d = d < e ? d : e;
-            d = d < f ? d : f;
-            lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((1.5f - d) / unit + 0.5f) * 255.0f));
-            /* The handheld's links to each node, fainter. */
-            d = segment_distance(u, v, 32, 22, 32, 39);
-            e = segment_distance(u, v, 14, 50, 32, 39);
-            f = segment_distance(u, v, 50, 50, 32, 39);
-            d = d < e ? d : e;
-            d = d < f ? d : f;
-            lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((1.0f - d) / unit + 0.5f) * 0.6f * 255.0f));
-            /* Nodes. */
-            static const float NODES[3][2] = { { 32, 22 }, { 14, 50 }, { 50, 50 } };
-            for (int n = 0; n < 3; n++) {
-                float nx = u - NODES[n][0];
-                float ny = v - NODES[n][1];
-                float dn = sqrtf(nx * nx + ny * ny);
-                lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((4.5f - dn) / unit + 0.5f) * 255.0f));
-            }
-            /* The handheld: a hollow ring. */
-            float hx = u - 32.0f;
-            float hy = v - 39.0f;
-            float dh = sqrtf(hx * hx + hy * hy);
-            lg_paint_pixel(c, &box, sx, sy, C_BAR, (uint8_t)(clampf((3.5f - dh) / unit + 0.5f) * 255.0f));
-            lg_paint_pixel(c, &box, sx, sy, C_ACCENT, (uint8_t)(clampf((1.0f - fabsf(dh - 3.5f)) / unit + 0.5f) * 255.0f));
-        }
-    }
-}
-
 static void paint_heading(const lg_canvas_t *c, void *ctx)
 {
     const lg_box_t *b = ctx;
     lg_paint_panel(c, &b->rect, &b->rect, C_BG, C_BG, C_BG, 0, 0);
-    int16_t logo_y = (int16_t)(b->rect.y + (b->rect.h - LOGO_SIZE) / 2);
-    paint_logo(c, PAD, logo_y);
-    lg_paint_text(c, &b->rect, (int16_t)(PAD + LOGO_SIZE + 6),
+    int16_t logo_y = (int16_t)(b->rect.y + (b->rect.h - UI_LOGO_SIZE) / 2);
+    ui_paint_logo(c, PAD, logo_y);
+    lg_paint_text(c, &b->rect, (int16_t)(PAD + UI_LOGO_SIZE + 6),
                   (int16_t)(b->rect.y + (b->rect.h - b->font->line_height) / 2), b->font, NULL, b->fg, b->text,
                   strlen(b->text));
+    ui_bar_paint(c);   /* battery and padlock at the right of the heading row (D62) */
 }
 
 static void draw_tile(tile_t *t, bool pressed)
@@ -258,6 +181,7 @@ static void show_launcher(void)
     s.screen = SCREEN_LAUNCHER;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
+    (void)ui_bar_place((int16_t)(s.w - PAD), s.heading.rect.y, s.heading.rect.h);
     lg_draw_region(&s.heading.rect, paint_heading, &s.heading);
     lg_draw_box(&s.subline);
     for (int i = 0; i < TILE_COUNT; i++) {
@@ -271,8 +195,6 @@ static const char *ROW_NAMES[STATUS_ROWS] = {
 
 static void build_status(void)
 {
-    s.back = text_box((int16_t)(s.w - 44), PAD, 36, 28, &lg_font_montserrat_20, C_ACCENT, C_BG, LG_ALIGN_CENTER,
-                      LG_SYMBOL_LEFT);
     for (int i = 0; i < STATUS_ROWS; i++) {
         int16_t y = (int16_t)(44 + i * 24);
         s.labels[i] = text_box(PAD, y, 100, 22, &lg_font_montserrat_12, C_MUTED, C_BG, LG_ALIGN_LEFT, ROW_NAMES[i]);
@@ -287,10 +209,14 @@ static void show_status(void)
     s.screen = SCREEN_STATUS;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
-    lg_box_t title = text_box(0, PAD, 140, 28, &lg_font_montserrat_20, C_ACCENT, C_BG, LG_ALIGN_LEFT, "Status");
-    title.pad = PAD;
+    /* Home is the house at the left, as on every screen but the launcher (D62). */
+    int16_t title_right = ui_bar_place((int16_t)(s.w - PAD), PAD, 28);
+    int16_t title_left = ui_bar_home(PAD, 28);
+    lg_box_t title = text_box(title_left, PAD, (int16_t)(title_right - title_left), 28, &lg_font_montserrat_20,
+                              C_ACCENT, C_BG, LG_ALIGN_LEFT, "Status");
+    title.pad = 2;
     lg_draw_box(&title);
-    lg_draw_box(&s.back);
+    ui_bar_draw();
     for (int i = 0; i < STATUS_ROWS; i++) {
         s.values[i].text[0] = '\0';   /* force every value to draw once */
         lg_draw_box(&s.labels[i]);
@@ -308,10 +234,43 @@ static const char *link_word(hh_link_t link)
     }
 }
 
+/*
+ * While someone is being played, a mark in the header's spare slot (left of the battery) says so on
+ * every screen, so a talk from another conversation is not a voice from nowhere (D61). The chat for
+ * that conversation also names them in its title. Painted every refresh while it is up, because a
+ * screen's own header paint clears the slot.
+ */
+static void voice_mark(void)
+{
+    static bool shown;
+    hh_voice_state_t vs;
+    hh_voice_state(&vs);
+    bool on = vs.heard != 0 || vs.talking;
+    if (!on && !shown) {
+        return;
+    }
+    shown = on;
+    lg_rect_t r = ui_bar_spare_rect();
+    if (r.w <= 0) {
+        return;
+    }
+    lg_box_t b;
+    memset(&b, 0, sizeof(b));
+    b.rect = r;
+    b.bg = b.outside = C_BG;
+    b.font = &lg_font_montserrat_16;
+    b.fg = vs.talking ? C_ERROR : C_WARNING;
+    b.align = LG_ALIGN_CENTER;
+    snprintf(b.text, sizeof(b.text), "%s", on ? LG_SYMBOL_WIFI : "");
+    lg_draw_box(&b);
+}
+
 static void refresh(void)
 {
     const hh_status_t *st = ui_status();
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    (void)ui_bar_refresh();   /* the badge repaints only when the charge shown changes */
+    voice_mark();
     switch (s.screen) {
     case SCREEN_CHAT:       ui_chat_refresh(st); return;
     case SCREEN_CONVS:      ui_convs_refresh(); return;
@@ -387,15 +346,36 @@ static void refresh(void)
 
 bool ui_chat_showing(uint8_t scope, uint32_t target)
 {
-    return s.screen == SCREEN_CHAT && ui_chat_is(scope, target);
+    return s.screen == SCREEN_CHAT && !ui_lock_active() && ui_chat_is(scope, target);
+}
+
+/*
+ * The chat screen (ui_chat.c) places the bar in its header (house, battery, padlock) but paints
+ * only its title and back arrow, so the bar is drawn here whenever it has repainted the screen.
+ */
+static void chat_bar(void)
+{
+    ui_bar_draw();
+}
+
+static void chat_bar_if_repainted(uint64_t pixels_before)
+{
+    if (s.screen == SCREEN_CHAT && !ui_lock_active() &&
+        lg_draw_stats()->pixels - pixels_before >= (uint64_t)s.w * s.h / 2u) {
+        ui_bar_draw();
+    }
 }
 
 void ui_redraw_current(void)
 {
+    if (ui_lock_active()) {
+        ui_lock_draw();   /* after an alert or the saver: back to the lock, never the screen under it */
+        return;
+    }
     switch (s.screen) {
     case SCREEN_LAUNCHER:   show_launcher(); refresh(); break;
     case SCREEN_STATUS:     show_status(); refresh(); break;
-    case SCREEN_CHAT:       ui_chat_redraw(); break;
+    case SCREEN_CHAT:       ui_chat_redraw(); chat_bar(); break;
     case SCREEN_GROUP_EDIT: ui_group_edit_redraw(); break;
     case SCREEN_RENAME:     ui_rename_redraw(); break;
     default:                slist_redraw(); break;   /* conversations, groups, settings, which AP */
@@ -404,8 +384,8 @@ void ui_redraw_current(void)
 
 static void apply_nav(void)
 {
-    if (!s.nav_pending) {
-        return;
+    if (!s.nav_pending || ui_lock_active()) {
+        return;   /* while locked a screen change waits, and is made when the lock is released */
     }
     s.nav_pending = false;
     s.pressed = -1;
@@ -430,6 +410,7 @@ static void apply_nav(void)
     case NAV_CHAT:
         s.screen = SCREEN_CHAT;
         ui_chat_open(s.w, s.h, s.nav_scope, s.nav_target, s.nav_title);
+        chat_bar();
         break;
     case NAV_GROUPS:
         s.screen = SCREEN_GROUPS;
@@ -460,6 +441,9 @@ static void apply_nav(void)
 
 static void on_tap(int16_t x, int16_t y, bool down)
 {
+    if (ui_lock_active() || ui_bar_touch(x, y, down)) {
+        return;   /* the lock takes every touch; a press on the padlock is the bar's */
+    }
     switch (s.screen) {
     case SCREEN_CONVS:      ui_convs_touch(x, y, down); return;
     case SCREEN_GROUPS:     ui_groups_touch(x, y, down); return;
@@ -494,17 +478,8 @@ static void on_tap(int16_t x, int16_t y, bool down)
         if (ui_chat_touch(x, y, down)) {
             ui_go(NAV_CONVERSATIONS, 0, 0, NULL);
         }
-    } else {
-        bool on_back = lg_rect_hit(&s.back.rect, x, y);
-        if (down && s.pressed < 0 && on_back) {
-            s.pressed = -2;
-        } else if (!down && s.pressed == -2) {
-            s.pressed = -1;
-            if (on_back) {
-                ui_go(NAV_HOME, 0, 0, NULL);
-            }
-        }
     }
+    /* Status has nothing to tap but the bar's house, which ui_bar_touch took above. */
 }
 
 static QueueHandle_t s_requests;
@@ -515,12 +490,10 @@ static void handle_request(const ui_req_t *r)
 {
     switch (r->cmd) {
     case UI_HOME:
-        show_launcher();
-        refresh();
+        ui_go(NAV_HOME, 0, 0, NULL);   /* through navigation, so it waits while locked */
         break;
     case UI_STATUS:
-        show_status();
-        refresh();
+        ui_go(NAV_STATUS, 0, 0, NULL);
         break;
     case UI_CHAT:
         ui_go(NAV_CHAT, r->scope, r->target, r->text);
@@ -534,6 +507,7 @@ static void handle_request(const ui_req_t *r)
         /* A tap as the finger makes it: the overlay sees it first, then the screen, and it counts
          * as activity for the screen saver. */
         s_last_touch = (uint32_t)(esp_timer_get_time() / 1000);
+        uint64_t before = lg_draw_stats()->pixels;
         if (!ui_overlay_touch(x, y, true)) {
             on_tap(x, y, true);
         }
@@ -541,21 +515,25 @@ static void handle_request(const ui_req_t *r)
         if (!ui_overlay_touch(x, y, false)) {
             on_tap(x, y, false);
         }
+        chat_bar_if_repainted(before);
         break;
     }
     case UI_SCROLL:
-        if (s.screen == SCREEN_CHAT) {
+        if (s.screen == SCREEN_CHAT && !ui_lock_active()) {
             ui_chat_scroll_by((int16_t)r->arg);
         }
         break;
     case UI_KEYBOARD:
-        if (s.screen == SCREEN_CHAT) {
+        if (s.screen == SCREEN_CHAT && !ui_lock_active()) {
             ui_chat_keyboard(r->arg != 0);
+            chat_bar();
         }
         break;
     case UI_TYPE:
-        if (s.screen == SCREEN_CHAT) {
+        if (s.screen == SCREEN_CHAT && !ui_lock_active()) {
+            uint64_t before = lg_draw_stats()->pixels;
             ui_chat_type(r->text);
+            chat_bar_if_repainted(before);
         }
         break;
     case UI_LOG:
@@ -563,7 +541,7 @@ static void handle_request(const ui_req_t *r)
         ui_overlay_log((uint32_t)(esp_timer_get_time() / 1000), s_last_touch);
         break;
     case UI_PAGE:
-        if (s.screen == SCREEN_CHAT) {
+        if (s.screen == SCREEN_CHAT && !ui_lock_active()) {
             ui_chat_page(r->arg);
         }
         break;
@@ -586,10 +564,13 @@ static void ui_task(void *arg)
         if (down) {
             s_last_touch = now;
         }
+        bool taken = false;   /* the overlay had this sample: the lock must not see it */
         if (down || was_down) {
             uint64_t before = lg_draw_stats()->pixels;
-            if (!ui_overlay_touch(x, y, down)) {
+            taken = ui_overlay_touch(x, y, down);
+            if (!taken) {
                 on_tap(x, y, down);
+                chat_bar_if_repainted(before);
                 if (lg_draw_stats()->pixels != before) {
                     ui_overlay_screen_painted();
                 }
@@ -607,17 +588,28 @@ static void ui_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(TICK_MS));
             continue;   /* an alert or the saver owns the panel: screens do not paint */
         }
-        if (s.screen == SCREEN_CHAT) {
-            ui_chat_tick(now);
-        }
-        if (now - last_refresh >= REFRESH_MS) {
-            last_refresh = now;
-            uint64_t before = lg_draw_stats()->pixels;
-            refresh();
-            if (lg_draw_stats()->pixels != before) {
-                ui_overlay_screen_painted();
+        if (ui_lock_active()) {
+            if (ui_lock_tick(now, down && !taken, x, y)) {
+                s_last_touch = now;
+                if (s.nav_pending) {
+                    apply_nav();   /* a screen asked for while locked */
+                } else {
+                    ui_redraw_current();
+                }
             }
-            apply_nav();
+        } else {
+            if (s.screen == SCREEN_CHAT) {
+                ui_chat_tick(now);
+            }
+            if (now - last_refresh >= REFRESH_MS) {
+                last_refresh = now;
+                uint64_t before = lg_draw_stats()->pixels;
+                refresh();
+                if (lg_draw_stats()->pixels != before) {
+                    ui_overlay_screen_painted();
+                }
+                apply_nav();
+            }
         }
         if (now - last_stats >= STATS_MS) {
             last_stats = now;
@@ -651,6 +643,7 @@ esp_err_t ui_start(const lg_board_t *board)
     build_launcher();
     build_status();
     ui_overlay_start(s.w, s.h);
+    ui_lock_start(s.w, s.h);
     show_launcher();
     hh_mem_mark("after launcher");
     if (xTaskCreate(ui_task, "ui", 6144, NULL, 4, &s_task) != pdPASS) {

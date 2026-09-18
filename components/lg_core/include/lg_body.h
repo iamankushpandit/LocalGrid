@@ -141,6 +141,53 @@ typedef struct {
  * LG_GROUP_ANNOUNCERS carries the announcer bits in `members`; id and name are unused. */
 #define LG_GROUP_EDIT_LEN    23u
 
+/*
+ * VOICE (D61): live push-to-talk, 1:1 or group, never broadcast, stored, or retried.
+ * Plaintext payload = 10-byte header + 0..LG_VOICE_DATA_MAX bytes of codec data:
+ *     0  u8   codec        LG_VOICE_CODEC_IMA_8K: IMA ADPCM, 8 kHz mono, two samples a byte
+ *     1  u8   flags        LG_VOICE_END on the last frame of a talk (release); other bits 0 today
+ *     2  u16  talk         which press of the talk button, so a receiver tells talks apart
+ *     4  u16  frame        frame number within the talk, from 0
+ *     6  i16  predictor    ADPCM decoder state at the first sample of this frame
+ *     8  u8   step_index   ADPCM step index, 0..88
+ *     9  u8   reserved     0
+ * Each frame carries the decoder state, so a lost frame costs 100 ms and nothing after it.
+ * DIRECT bodies are that payload sealed like 1:1 text (LG_FLAG_E2E_PAYLOAD, 16-byte tag);
+ * GROUP bodies are the plain payload. origin_seq always has LG_VOICE_SEQ_BIT set.
+ */
+#define LG_VOICE_HDR_LEN      10u
+#define LG_VOICE_CODEC_IMA_8K 1u
+#define LG_VOICE_END          0x01u        /* last frame of a talk (release) */
+#define LG_VOICE_STEP_MAX     88u
+#define LG_VOICE_PAYLOAD_MAX  (LG_VOICE_HDR_LEN + LG_VOICE_DATA_MAX)
+typedef struct {
+    uint8_t  codec;
+    uint8_t  flags;
+    uint16_t talk;
+    uint16_t frame;
+    int16_t  predictor;
+    uint8_t  step_index;
+} lg_voice_hdr_t;
+
+/* Writes LG_VOICE_HDR_LEN bytes and returns that length. */
+size_t lg_voice_hdr_enc(const lg_voice_hdr_t *h, uint8_t *out);
+/* body = header + 0..LG_VOICE_DATA_MAX data bytes. Rejects unknown codec, step_index > 88,
+ * reserved != 0, and any other length. out may be NULL to check only. */
+bool   lg_voice_hdr_dec(const uint8_t *body, size_t len, lg_voice_hdr_t *out);
+
+/* The newest voice frame seen from one author: voice is only ever played forward, so a frame
+ * no newer than this within the same boot is dropped. seq 0 means none seen (voice seqs carry
+ * LG_VOICE_SEQ_BIT, so they are never 0). */
+typedef struct {
+    uint32_t boot;
+    uint32_t seq;
+} lg_voice_seen_t;
+
+static inline bool lg_voice_newer(const lg_voice_seen_t *s, uint32_t boot, uint32_t seq)
+{
+    return s->seq == 0 || boot > s->boot || (boot == s->boot && seq > s->seq);
+}
+
 size_t lg_register_enc(const lg_register_t *v, uint8_t *out);
 bool   lg_register_dec(const uint8_t *in, size_t len, lg_register_t *v);
 size_t lg_register_ack_enc(const lg_register_ack_t *v, uint8_t *out);

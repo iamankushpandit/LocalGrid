@@ -43,6 +43,7 @@ typedef enum {
     LG_T_NAME            = 0x23,   /* a handheld's chosen name, versioned; newest wins everywhere */
     LG_T_TEXT            = 0x30,
     LG_T_MSG_ACK         = 0x31,
+    LG_T_VOICE           = 0x40,   /* live push-to-talk frame, 1:1 or group; never stored or retried (D61) */
     LG_T_TIME_SYNC       = 0x50,
     LG_T_GRID_STATE      = 0x51,   /* AP to AP only: replicated admin settings and time generation (D45) */
     LG_T_GROUPS          = 0x52,   /* AP to AP and AP to handheld: the whole group table and its version (D52) */

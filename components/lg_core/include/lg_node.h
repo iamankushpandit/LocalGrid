@@ -15,6 +15,10 @@
  *   BROADCAST  flood once; every node delivers to all its local users.
  *   Loops end at the dedup window and TTL; there is no forwarding state.
  *
+ * VOICE (D61) routes like TEXT, DIRECT or GROUP only, but is never acknowledged when taken and
+ * is suppressed by a newest-only table per author instead of the dedup window. A refused voice
+ * frame is answered with MSG_ACK at most once a second per author.
+ *
  * DIRECT bodies are end-to-end ciphertext. Nodes never see 1:1 plaintext and
  * reject DIRECT text that is not marked LG_FLAG_E2E_PAYLOAD.
  */
@@ -33,6 +37,7 @@ extern "C" {
 #define LG_NODE_DEDUP_SLOTS       48u
 #define LG_BROADCAST_INTERVAL_MS  10000u   /* per user, routine broadcasts */
 #define LG_URGENT_INTERVAL_MS     2000u    /* per user, URGENT broadcasts */
+#define LG_VOICE_REFUSE_MS        1000u    /* per user: at most one voice refusal this often (D61) */
 
 typedef struct {
     void *ctx;
@@ -87,6 +92,7 @@ typedef struct {
     uint32_t duplicates;
     uint32_t rejected;
     uint32_t malformed;
+    uint32_t voice;             /* voice frames taken here and delivered or passed on (D61) */
 } lg_node_stats_t;
 
 typedef struct {
@@ -102,6 +108,11 @@ typedef struct {
     lg_dedup_entry_t    dedup_slots[LG_NODE_DEDUP_SLOTS];
     lg_dedup_t          dedup;
     lg_node_stats_t     stats;
+    /* Voice (D61) keeps out of the text dedup: its sequences carry LG_VOICE_SEQ_BIT, which would
+     * push a text window past every text retransmission. Indexed by roster user index. */
+    lg_voice_seen_t     voice_seen[LG_MAX_DEVICES];
+    uint32_t            voice_refused_ms[LG_MAX_DEVICES];
+    bool                has_voice_refused[LG_MAX_DEVICES];
 } lg_node_t;
 
 void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roster, const lg_node_io_t *io);

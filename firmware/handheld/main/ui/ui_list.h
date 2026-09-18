@@ -35,6 +35,7 @@ typedef struct {
     bool               warn;        /* value in the warning colour */
     bool               focused;     /* a field being typed into */
     bool               muted;       /* a row that cannot be used */
+    bool               talk;        /* holding it talks (D61): SLIST_HOLD, then SLIST_HOLD_END */
     int16_t            id;
     int32_t            arg;
     char               label[SLIST_LABEL_MAX];
@@ -46,7 +47,11 @@ typedef struct {
     int16_t            h;
 } slist_row_t;
 
-typedef enum { SLIST_NONE, SLIST_ROW, SLIST_TAB, SLIST_BACK, SLIST_PLUS } slist_event_type_t;
+/* SLIST_HOLD: a talk row has been held SLIST_HOLD_MS; SLIST_HOLD_END: that finger let go, and it is
+ * not also a tap. */
+typedef enum { SLIST_NONE, SLIST_ROW, SLIST_TAB, SLIST_BACK, SLIST_PLUS, SLIST_HOLD, SLIST_HOLD_END } slist_event_type_t;
+
+#define SLIST_HOLD_MS 400
 
 typedef struct {
     uint8_t type;
@@ -55,7 +60,8 @@ typedef struct {
     uint8_t index;    /* the row index, or the tab */
 } slist_event_t;
 
-/* Starts a new set of rows. back: the header icon is a back arrow, else a house. plus: a + too. */
+/* Starts a new set of rows. back: a back arrow at the header's right (SLIST_BACK); every list also
+ * has the house at its left, which goes home without the screen seeing it. plus: a + too. */
 void slist_begin(const char *title, bool back, bool plus);
 void slist_tabs(const char *const *names, uint8_t n, uint8_t selected);
 
@@ -78,4 +84,8 @@ slist_row_t *slist_row(uint8_t index);
 uint8_t slist_count(void);
 
 bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event);
+
+/* The screen could not start the talk a SLIST_HOLD asked for: the row goes back to its pressed look,
+ * and letting go does nothing. */
+void slist_hold_refused(void);
 void slist_scroll_by(int16_t dy);

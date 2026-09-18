@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_timer.h"
+
+#include "ui_lock.h"
 #include "ui_theme.h"
 
 #define TAB_H        30
@@ -28,6 +31,8 @@ static struct {
     uint8_t           n;
     lg_rect_t         head_icon;
     lg_rect_t         plus_icon;
+    int16_t           title_left;     /* the title starts here, after the house (D62) */
+    int16_t           title_right;    /* the title ends here, before the battery and padlock */
     lg_rect_t         list;
     int16_t           bottom;
     int16_t           content_h;
@@ -38,7 +43,15 @@ static struct {
     int16_t           down_y;
     int16_t           down_scroll;
     bool              dragging;
+    uint32_t          down_ms;
+    bool              holding;        /* a talk row held past SLIST_HOLD_MS: talking */
+    bool              hold_refused;   /* ...but the talk did not start; the lift is ignored */
 } s = { .pressed = -1 };
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
 void slist_begin(const char *title, bool back, bool plus)
 {
@@ -158,6 +171,13 @@ static void paint_row(const lg_canvas_t *c, uint8_t i)
         text_in(c, &box, F_SMALL, r->warn ? C_WARNING : C_TEXT, r->value, LG_ALIGN_RIGHT, 2);
         break;
     case ROW_ACTION: {
+        if (pressed && s.holding) {
+            /* Talking to this row (D61): red, and says how to stop. */
+            lg_paint_panel(c, &s.list, &box, C_ERROR, C_BG, C_ERROR, 1, 6);
+            text_in(c, &box, F_BODY, C_ACCENT_INK, r->label, LG_ALIGN_LEFT, 8);
+            text_in(c, &box, F_SMALL, C_ACCENT_INK, "Talking... let go", LG_ALIGN_RIGHT, 8);
+            break;
+        }
         lg_paint_panel(c, &s.list, &box, pressed ? C_OUTLINE : C_SURFACE, C_BG, C_OUTLINE, 1, 6);
         lg_rect_t inner = { box.x, box.y, (int16_t)(box.w - 18), box.h };
         text_in(c, &inner, F_BODY, r->muted ? C_MUTED : C_TEXT, r->label, LG_ALIGN_LEFT, 8);
@@ -264,9 +284,12 @@ static void paint_header(const lg_canvas_t *c, void *ctx)
     (void)ctx;
     lg_rect_t head = { 0, 0, (int16_t)s.w, (int16_t)(UI_HEAD_H + (s.n_tabs ? TAB_H : 0)) };
     lg_paint_panel(c, &head, &head, C_BG, C_BG, C_BG, 0, 0);
-    lg_rect_t title = { 0, 0, (int16_t)(s.w - 80), UI_HEAD_H };
-    text_in(c, &title, F_BODY, C_ACCENT, s.title, LG_ALIGN_LEFT, UI_PAD);
-    text_in(c, &s.head_icon, F_ICON, C_ACCENT, s.back ? LG_SYMBOL_LEFT : LG_SYMBOL_HOME, LG_ALIGN_CENTER, 0);
+    lg_rect_t title = { s.title_left, 0, (int16_t)(s.title_right - s.title_left), UI_HEAD_H };
+    text_in(c, &title, F_BODY, C_ACCENT, s.title, LG_ALIGN_LEFT, 2);
+    ui_bar_paint(c);   /* the house at the left, the battery and padlock at the right */
+    if (s.back) {
+        text_in(c, &s.head_icon, F_ICON, C_ACCENT, LG_SYMBOL_LEFT, LG_ALIGN_CENTER, 0);
+    }
     if (s.plus) {
         text_in(c, &s.plus_icon, F_ICON, C_ACCENT, LG_SYMBOL_PLUS, LG_ALIGN_CENTER, 0);
     }
@@ -289,8 +312,13 @@ void slist_show(uint16_t w, uint16_t h, int16_t bottom, bool keep_scroll)
     s.h = h;
     s.bottom = bottom;
     int16_t top = (int16_t)(UI_HEAD_H + (s.n_tabs ? TAB_H : 0));
-    s.head_icon = (lg_rect_t){ (int16_t)(w - 40), 0, 40, UI_HEAD_H };
-    s.plus_icon = (lg_rect_t){ (int16_t)(w - 80), 0, 40, UI_HEAD_H };
+    /* Home is the house at the left on every list (ui_bar_home); the right-hand icon is only a
+     * back arrow, on screens that have a parent other than home. */
+    int16_t edge = (int16_t)(s.back ? w - 40 : w - UI_PAD);
+    s.head_icon = s.back ? (lg_rect_t){ edge, 0, 40, UI_HEAD_H } : (lg_rect_t){ 0, 0, 0, 0 };
+    s.plus_icon = (lg_rect_t){ (int16_t)(edge - 40), 0, 40, UI_HEAD_H };
+    s.title_right = ui_bar_place(s.plus ? s.plus_icon.x : edge, 0, UI_HEAD_H);
+    s.title_left = ui_bar_home(0, UI_HEAD_H);
     s.list = (lg_rect_t){ 0, top, (int16_t)w, (int16_t)(h - top - bottom) };
     layout();
     if (!keep_scroll) {
@@ -391,6 +419,9 @@ bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event)
         s.down_y = y;
         s.down_scroll = s.scroll;
         s.dragging = false;
+        s.down_ms = now_ms();
+        s.holding = false;
+        s.hold_refused = false;
         int i = row_at(x, y);
         if (i >= 0 && tappable(&s.rows[i])) {
             s.pressed_seg = s.rows[i].kind == ROW_CHOICE ? segment_at(&s.rows[i], x, y) : -1;
@@ -402,6 +433,18 @@ bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event)
         return lg_rect_hit(&s.list, x, y);
     }
     if (down) {
+        if (s.holding || s.hold_refused) {
+            return true;   /* a talking finger may wander; it only matters when it lets go */
+        }
+        if (s.pressed >= 0 && !s.dragging && s.rows[s.pressed].talk && now_ms() - s.down_ms >= SLIST_HOLD_MS) {
+            s.holding = true;
+            slist_repaint_row((uint8_t)s.pressed);
+            event->type = SLIST_HOLD;
+            event->id = s.rows[s.pressed].id;
+            event->arg = s.rows[s.pressed].arg;
+            event->index = (uint8_t)s.pressed;
+            return true;
+        }
         int16_t dy = (int16_t)(y - s.down_y);
         if (!s.dragging && (dy > DRAG_START || dy < -DRAG_START) && max_scroll() > 0) {
             s.dragging = true;
@@ -420,6 +463,22 @@ bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event)
         return false;
     }
     s.was_down = false;
+    if (s.holding || s.hold_refused) {
+        int i = s.pressed;
+        if (s.holding) {
+            event->type = SLIST_HOLD_END;
+            event->id = s.rows[i].id;
+            event->arg = s.rows[i].arg;
+            event->index = (uint8_t)i;
+        }
+        s.holding = false;
+        s.hold_refused = false;
+        s.pressed = -1;
+        if (i >= 0) {
+            slist_repaint_row((uint8_t)i);
+        }
+        return true;
+    }
     if (s.dragging) {
         s.dragging = false;
         return true;
@@ -451,6 +510,15 @@ bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event)
         return true;
     }
     return false;
+}
+
+void slist_hold_refused(void)
+{
+    s.holding = false;
+    s.hold_refused = true;
+    if (s.pressed >= 0) {
+        slist_repaint_row((uint8_t)s.pressed);
+    }
 }
 
 void slist_redraw(void)

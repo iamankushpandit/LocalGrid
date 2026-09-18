@@ -21,7 +21,11 @@
 #include "ui_nav.h"
 #include "hh_service.h"
 #include "lg_bsp_audio.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lg_bsp_touch.h"
+#include "lg_draw.h"
 #include "lg_bsp_settings.h"
 #include "lg_identity.h"
 
@@ -566,6 +570,50 @@ static int cmd_ui(int argc, char **argv)
 
 /* screen <home|status|messages|groups|settings>: opens that screen, the way `chat` opens a
  * conversation, so every screen can be reached from serial (D23, D25, D28). */
+/*
+ * touch [seconds]: prints what the panel reports against what the screens are told, so a finger
+ * landing on the wrong key can be read as numbers instead of guessed at (D23, D28). One line per
+ * press: the controller's own reading, then the screen pixel it maps to.
+ */
+static int cmd_touch(int argc, char **argv)
+{
+    if (!lg_bsp_touch_present()) {
+        printf("This board has no touch panel\n");
+        return 0;
+    }
+    uint32_t seconds = argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 10) : 10u;
+    if (seconds == 0 || seconds > 60u) {
+        seconds = 10u;
+    }
+    printf("Tap the screen for %" PRIu32 " s (a corner at a time tells the most)\n", seconds);
+    uint32_t end = (uint32_t)(esp_timer_get_time() / 1000) + seconds * 1000u;
+    int16_t last_x = -1;
+    int16_t last_y = -1;
+    uint32_t presses = 0;
+    while ((uint32_t)(esp_timer_get_time() / 1000) < end) {
+        lg_bsp_touch_raw_t raw;
+        if (lg_bsp_touch_read_raw(&raw)) {
+            int16_t x = 0;
+            int16_t y = 0;
+            bool mapped = lg_bsp_touch_map(&raw, &x, &y);
+            if (raw.x != last_x || raw.y != last_y) {
+                last_x = raw.x;
+                last_y = raw.y;
+                presses++;
+                if (mapped) {
+                    printf("  raw %4d,%4d -> screen %3d,%3d\n", raw.x, raw.y, x, y);
+                } else {
+                    printf("  raw %4d,%4d -> not mapped (uncalibrated)\n", raw.x, raw.y);
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    printf("%" PRIu32 " sample(s); the screen is %u by %u\n", presses, (unsigned)lg_draw_width(),
+           (unsigned)lg_draw_height());
+    return 0;
+}
+
 static int cmd_screen(int argc, char **argv)
 {
     static const struct {
@@ -622,6 +670,192 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+/* ---------------------------------------------------------------------------------------- *
+ * mic: the push-to-talk audio path on one board, for tuning and bring-up.
+ *
+ *   mic level [s]   peak and RMS of each 100 ms frame, for setting the gain (default 5 s)
+ *   mic loop [s]    records s seconds (default 3), IMA ADPCM-encodes it into a bounded buffer,
+ *                   then decodes and plays it back: microphone, codec, ADPCM and speaker, end
+ *                   to end, with no radio in the way
+ *   mic gain [0-7]  the microphone's digital gain in 6 dB steps (not kept across a reboot)
+ *
+ * Frames are the owner's PTT frames: 8 kHz mono, 100 ms, 800 samples, 400 bytes of ADPCM.
+ * ---------------------------------------------------------------------------------------- */
+#include <math.h>
+#include "hh_adpcm.h"
+
+#define MIC_FRAME       800    /* 100 ms at 8 kHz */
+#define MIC_LOOP_MAX_S  10     /* 40 KB of ADPCM, in PSRAM where there is some */
+#define MIC_READ_MS     300
+
+/* Full scale as dBFS, with a floor so silence prints as a number. */
+static float mic_dbfs(float v)
+{
+    return v < 1.0f ? -90.3f : 20.0f * log10f(v / 32767.0f);
+}
+
+/* One frame's loudest sample and RMS. */
+static void mic_measure(const int16_t *pcm, size_t n, int32_t *peak, float *rms)
+{
+    int32_t p = 0;
+    int64_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        int32_t v = pcm[i] < 0 ? -(int32_t)pcm[i] : pcm[i];
+        p = v > p ? v : p;
+        sum += (int64_t)pcm[i] * pcm[i];
+    }
+    *peak = p;
+    *rms = n > 0 ? sqrtf((float)sum / (float)n) : 0.0f;
+}
+
+static uint32_t mic_seconds(int argc, char **argv, uint32_t fallback)
+{
+    uint32_t s = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : fallback;
+    return s == 0 || s > MIC_LOOP_MAX_S ? fallback : s;
+}
+
+static int mic_level(uint32_t seconds, int16_t *frame)
+{
+    esp_err_t err = lg_bsp_audio_mic_start();
+    if (err != ESP_OK) {
+        printf("microphone would not start: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("Speak at about 30 cm for %" PRIu32 " s (digital gain +%u dB). Aim for RMS -30 to -18 dBFS, "
+           "peaks below -3.\n", seconds, (unsigned)lg_bsp_audio_mic_gain() * 6u);
+    int32_t top = 0;
+    for (uint32_t f = 0; f < seconds * 10u; f++) {
+        int n = lg_bsp_audio_mic_read(frame, MIC_FRAME, MIC_READ_MS);
+        if (n < 0) {
+            printf("read failed: %s\n", esp_err_to_name(-n));
+            break;
+        }
+        int32_t peak = 0;
+        float rms = 0.0f;
+        mic_measure(frame, (size_t)n, &peak, &rms);
+        top = peak > top ? peak : top;
+        printf("  %2" PRIu32 ".%" PRIu32 " s  peak %5" PRId32 " (%6.1f dBFS)  rms %7.1f (%6.1f dBFS)%s\n",
+               f / 10u, f % 10u, peak, (double)mic_dbfs((float)peak), (double)rms, (double)mic_dbfs(rms),
+               n < MIC_FRAME ? "  short" : "");
+    }
+    lg_bsp_audio_mic_stop();
+    printf("loudest sample %" PRId32 " (%.1f dBFS)%s\n", top, (double)mic_dbfs((float)top),
+           top >= 32000 ? ": clipping, turn the gain down" : top < 200 ? ": nearly silent, is the mic working?" : "");
+    return 0;
+}
+
+static int mic_loop(uint32_t seconds, int16_t *frame)
+{
+    const uint32_t frames = seconds * 10u;
+    const size_t bytes = (size_t)frames * (MIC_FRAME / 2u);
+    uint8_t *adpcm = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (adpcm == NULL) {
+        adpcm = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);   /* no PSRAM: try internal RAM */
+    }
+    if (adpcm == NULL) {
+        printf("no room for %u bytes of ADPCM\n", (unsigned)bytes);
+        return 1;
+    }
+    esp_err_t err = lg_bsp_audio_mic_start();
+    if (err != ESP_OK) {
+        printf("microphone would not start: %s\n", esp_err_to_name(err));
+        heap_caps_free(adpcm);
+        return 1;
+    }
+    printf("Recording %" PRIu32 " s: speak now\n", seconds);
+    hh_adpcm_state_t enc = { 0, 0 };
+    int32_t top = 0;
+    uint32_t got = 0;
+    int64_t t0 = esp_timer_get_time();
+    for (; got < frames; got++) {
+        int n = lg_bsp_audio_mic_read(frame, MIC_FRAME, MIC_READ_MS);
+        if (n < 0) {
+            printf("read failed: %s\n", esp_err_to_name(-n));
+            break;
+        }
+        if (n < MIC_FRAME) {
+            memset(frame + n, 0, (MIC_FRAME - (size_t)n) * sizeof(int16_t));
+        }
+        int32_t peak = 0;
+        float rms = 0.0f;
+        mic_measure(frame, MIC_FRAME, &peak, &rms);
+        top = peak > top ? peak : top;
+        hh_adpcm_encode(&enc, frame, MIC_FRAME, adpcm + (size_t)got * (MIC_FRAME / 2u));
+    }
+    lg_bsp_audio_mic_stop();
+    int64_t t1 = esp_timer_get_time();
+    printf("Recorded %" PRIu32 " frames in %" PRId64 " ms, loudest %" PRId32 " (%.1f dBFS), %u bytes of ADPCM\n",
+           got, (t1 - t0) / 1000, top, (double)mic_dbfs((float)top), (unsigned)(got * (MIC_FRAME / 2u)));
+
+    err = lg_bsp_audio_voice_start();
+    if (err != ESP_OK) {
+        printf("speaker would not open: %s\n", esp_err_to_name(err));
+        heap_caps_free(adpcm);
+        return 1;
+    }
+    printf("Playing back (volume %s)\n", lg_bsp_audio_volume_name(lg_bsp_audio_volume()));
+    hh_adpcm_state_t dec = { 0, 0 };
+    uint32_t played = 0;
+    for (; played < got; played++) {
+        hh_adpcm_decode(&dec, adpcm + (size_t)played * (MIC_FRAME / 2u), MIC_FRAME, frame);
+        err = lg_bsp_audio_voice_write(frame, MIC_FRAME, 1000);
+        if (err != ESP_OK) {
+            printf("playback stopped: %s\n", esp_err_to_name(err));
+            break;
+        }
+    }
+    lg_bsp_audio_voice_stop();
+    heap_caps_free(adpcm);
+    printf("Played %" PRIu32 " of %" PRIu32 " frames in %" PRId64 " ms\n", played, got,
+           (esp_timer_get_time() - t1) / 1000);
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_mic(int argc, char **argv)
+{
+    const char *what = argc > 1 ? argv[1] : "";
+    if (strcmp(what, "level") != 0 && strcmp(what, "loop") != 0 && strcmp(what, "gain") != 0) {
+        printf("mic level [s] | mic loop [s] | mic gain [0-7]\n");
+        return 1;
+    }
+    if (!lg_bsp_audio_can_record()) {
+        printf("no microphone on this board\n");
+        return 0;
+    }
+    if (strcmp(what, "gain") == 0) {
+        if (argc > 2) {
+            esp_err_t err = lg_bsp_audio_mic_gain_set((uint8_t)strtoul(argv[2], NULL, 10));
+            if (err != ESP_OK) {
+                printf("not set: %s (0 to 7)\n", esp_err_to_name(err));
+                return 1;
+            }
+        }
+        printf("mic digital gain %u (+%u dB) over +30 dB PGA and +4.5 dB ADC volume\n",
+               (unsigned)lg_bsp_audio_mic_gain(), (unsigned)lg_bsp_audio_mic_gain() * 6u);
+        return 0;
+    }
+    int16_t *frame = heap_caps_malloc(MIC_FRAME * sizeof(int16_t), MALLOC_CAP_8BIT);
+    if (frame == NULL) {
+        printf("no room for a frame\n");
+        return 1;
+    }
+    int rc = strcmp(what, "level") == 0 ? mic_level(mic_seconds(argc, argv, 5u), frame)
+                                        : mic_loop(mic_seconds(argc, argv, 3u), frame);
+    heap_caps_free(frame);
+    return rc;
+}
+
+static esp_err_t mic_register(void)
+{
+    const esp_console_cmd_t cmd = {
+        .command = "mic",
+        .help = "mic level [s] | loop [s] | gain [0-7]: microphone level, record-and-play test, gain",
+        .func = cmd_mic,
+    };
+    return esp_console_cmd_register(&cmd);
+}
+/* ------------------------------------------------------------------------- end of mic */
+
 esp_err_t hh_console_start(const lg_identity_t *identity)
 {
     s_identity = identity;
@@ -653,6 +887,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
         { .command = "screen",    .help = "screen <home|status|messages|groups|settings>: open that screen", .func = cmd_screen },
+        { .command = "touch",     .help = "touch [seconds]: what the panel reports and where it lands", .func = cmd_touch },
         { .command = "ui",        .help = "ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <p> | log", .func = cmd_ui },
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },
         { .command = "tone",      .help = "tone [hz] [ms]: play one tone on the speaker",           .func = cmd_tone },
@@ -670,6 +905,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
             return err;
         }
     }
+    (void)mic_register();                /* mic level | loop | gain, push-to-talk audio */
     (void)lg_power_register_command();   /* power [-m s [-i ms] [-q]], shared with the APs */
     esp_console_register_help_command();
     return esp_console_start_repl(repl);

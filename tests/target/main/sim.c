@@ -173,7 +173,20 @@ static void c_event(void *ctx, const lg_client_event_t *ev)
         c->last_refusal = (uint8_t)ev->value;
     } else if (ev->type == LG_CEV_NAME) {
         c->name_events++;
+    } else if (ev->type == LG_CEV_VOICE_REFUSED) {
+        c->voice_refusals++;
+        c->last_voice_refusal = (uint8_t)ev->value;
     }
+}
+
+static void c_voice(void *ctx, const lg_env_t *env, const uint8_t *payload, size_t len)
+{
+    sim_client_t *c = ctx;
+    c->voice_frames++;
+    c->voice_author = env->origin_id;
+    c->voice_scope = env->scope;
+    c->voice_len = (uint16_t)len;
+    memcpy(c->voice_last, payload, len < sizeof(c->voice_last) ? len : sizeof(c->voice_last));
 }
 
 static void c_groups_removed(void *ctx, const uint16_t *removed, size_t n)
@@ -287,6 +300,7 @@ sim_t *sim_create(void)
             .seal = c_seal,
             .open = c_open,
             .on_groups_removed = c_groups_removed,
+            .on_voice = c_voice,
         };
         lg_client_init(&c->client, device, 1, c->e2e.pub, &c->roster, &io);
     }

@@ -64,7 +64,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM21",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -76,7 +76,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM16",
+      "port": "COM23",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -88,7 +88,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM18",
+      "port": "COM19",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -100,7 +100,7 @@
     },
     {
       "name": "hosyond",
-      "port": "COM11",
+      "port": "COM13",
       "role": "H",
       "board": "HY3",
       "firmware": "handheld",
@@ -119,6 +119,17 @@
       "id_created": 1789493922,
       "notes": "Prototype roster user 'Handheld 1'. Run the test app with --firmware tests.",
       "device_index": 1
+    },
+    {
+      "name": "birthdaysuite",
+      "port": "COM22",
+      "role": "H",
+      "board": "F4B",
+      "firmware": "handheld",
+      "id": "LG-H-F4B-4VV3QPWGE8",
+      "notes": "Second Freenove FNK0104B, added 2026-09-17. Device 3; named BirthdaySuite on the grid (D50).",
+      "device_index": 3,
+      "id_created": 1789692132
     }
   ]
 }

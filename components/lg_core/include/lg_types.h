@@ -27,6 +27,12 @@ extern "C" {
 #define LG_DIRECT_BODY_MAX      (LG_TEXT_MAX + LG_AEAD_TAG_LEN)
 #define LG_GRID_STATE_MAX       256u         /* bytes in one GRID_STATE body; its layout belongs to AP firmware */
 #define LG_NAME_MAX             24u          /* a handheld's chosen name: up to 23 UTF-8 bytes plus a NUL */
+/* Live push-to-talk voice (D61). Voice frames take origin_seq from a per-boot counter of their
+ * own with this bit set, so text sequences and nonces never collide with voice and voice never
+ * enters the text duplicate windows. */
+#define LG_VOICE_SEQ_BIT        0x80000000u
+#define LG_VOICE_SAMPLES        800u         /* 100 ms of 8 kHz mono per frame */
+#define LG_VOICE_DATA_MAX       400u         /* IMA ADPCM bytes for LG_VOICE_SAMPLES */
 
 typedef enum {
     LG_OK             = 0,

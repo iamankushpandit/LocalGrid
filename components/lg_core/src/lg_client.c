@@ -351,6 +351,128 @@ int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t
     return slot;
 }
 
+/* ---- voice (D61) --------------------------------------------------------- */
+
+int lg_client_send_voice(lg_client_t *c, uint8_t scope, uint32_t target, const uint8_t *payload, size_t len)
+{
+    if (c == NULL || !lg_voice_hdr_dec(payload, len, NULL)) {
+        return LG_ERR_ARG;
+    }
+    const lg_peer_t *p = NULL;
+    switch (scope) {
+    case LG_SCOPE_DIRECT:
+        if (target == LG_TARGET_ALL || target == c->device || lg_roster_user(c->roster, target) == NULL ||
+            c->io.seal == NULL) {
+            return LG_ERR_ARG;
+        }
+        break;
+    case LG_SCOPE_GROUP:
+        if (target > 0xFFFFu || lg_roster_group_index(c->roster, (uint16_t)target) < 0) {
+            return LG_ERR_ARG;
+        }
+        break;
+    default:
+        return LG_ERR_ARG;   /* never broadcast */
+    }
+    if (lg_client_time_restricted(c)) {
+        return LG_ERR_TIME;   /* voice follows the time rule of non-urgent text (D6) */
+    }
+    if (!c->registered) {
+        return LG_ERR_SHORT;
+    }
+    if (scope == LG_SCOPE_DIRECT) {
+        p = peer_find(c, target);
+        if (p == NULL || !p->has_key) {
+            return LG_ERR_ARG;
+        }
+    }
+
+    c->voice_seq = (c->voice_seq + 1u) & ~LG_VOICE_SEQ_BIT;
+    if (c->voice_seq == 0) {
+        c->voice_seq = 1;
+    }
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.type        = LG_T_VOICE;
+    e.scope       = scope;
+    e.target      = target;
+    e.origin_id   = c->device;
+    e.origin_boot = c->boot;
+    e.origin_seq  = LG_VOICE_SEQ_BIT | c->voice_seq;
+    e.grid_time   = c_local_time(c);
+
+    if (scope == LG_SCOPE_DIRECT) {
+        e.flags = LG_FLAG_E2E_PAYLOAD;
+        uint8_t nonce[LG_E2E_NONCE_LEN];
+        uint8_t aad[LG_E2E_AAD_LEN];
+        uint8_t ct[LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN];
+        lg_e2e_nonce(&e, nonce);
+        lg_e2e_aad(&e, aad);
+        int n = c->io.seal(c->io.ctx, target, p->pubkey, nonce, aad, sizeof(aad), payload, len, ct);
+        if (n != (int)(len + LG_AEAD_TAG_LEN)) {
+            return LG_ERR_ARG;
+        }
+        return send_frame(c, &e, ct, (size_t)n) ? LG_OK : LG_ERR_FULL;
+    }
+    return send_frame(c, &e, payload, len) ? LG_OK : LG_ERR_FULL;
+}
+
+static void handle_voice(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
+{
+    if (e->origin_id == c->device || (e->origin_seq & LG_VOICE_SEQ_BIT) == 0 || c->io.on_voice == NULL) {
+        return;
+    }
+    int ui = lg_roster_user_index(c->roster, e->origin_id);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
+        return;
+    }
+    lg_voice_seen_t *seen = &c->voice_seen[ui];
+    if (!lg_voice_newer(seen, e->origin_boot, e->origin_seq)) {
+        return;   /* a copy by another path, or late: voice only plays forward */
+    }
+
+    uint8_t plain[LG_VOICE_PAYLOAD_MAX];
+    size_t plen;
+    if (e->scope == LG_SCOPE_DIRECT) {
+        if (e->target != c->device || (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 ||
+            e->body_len < LG_VOICE_HDR_LEN + LG_AEAD_TAG_LEN ||
+            e->body_len > LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN) {
+            return;
+        }
+        const lg_peer_t *p = peer_find(c, e->origin_id);
+        if (p == NULL || !p->has_key || c->io.open == NULL) {
+            c->decrypt_failures++;   /* counted, but ten frames a second raise no events */
+            return;
+        }
+        uint8_t nonce[LG_E2E_NONCE_LEN];
+        uint8_t aad[LG_E2E_AAD_LEN];
+        lg_e2e_nonce(e, nonce);
+        lg_e2e_aad(e, aad);
+        int n = c->io.open(c->io.ctx, e->origin_id, p->pubkey, nonce, aad, sizeof(aad), body, e->body_len, plain);
+        if (n < 0) {
+            c->decrypt_failures++;
+            return;
+        }
+        plen = (size_t)n;
+    } else if (e->scope == LG_SCOPE_GROUP) {
+        if ((e->flags & LG_FLAG_E2E_PAYLOAD) != 0 || e->target > 0xFFFFu ||
+            !lg_roster_is_member(c->roster, c->device, (uint16_t)e->target) ||
+            e->body_len > sizeof(plain)) {
+            return;
+        }
+        memcpy(plain, body, e->body_len);
+        plen = e->body_len;
+    } else {
+        return;
+    }
+    if (!lg_voice_hdr_dec(plain, plen, NULL)) {
+        return;
+    }
+    seen->boot = e->origin_boot;
+    seen->seq  = e->origin_seq;
+    c->io.on_voice(c->io.ctx, e, plain, plen);
+}
+
 static void apply_time(lg_client_t *c, uint32_t grid_time)
 {
     if (grid_time == 0) {
@@ -549,6 +671,14 @@ static void handle_ack(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
     if (!lg_msg_ack_dec(body, e->body_len, &a) || a.author != c->device) {
         return;
     }
+    if ((a.seq & LG_VOICE_SEQ_BIT) != 0) {
+        /* Voice is never acknowledged when taken; an ack naming a voice frame is a refusal (D61). */
+        if (a.boot == c->boot && a.status != LG_ACK_ACCEPTED && a.status != LG_ACK_DELIVERED &&
+            a.status != LG_ACK_READ) {
+            emit(c, LG_CEV_VOICE_REFUSED, a.status);
+        }
+        return;
+    }
     if (c->group_edit_seq != 0 && a.boot == c->boot && a.seq == c->group_edit_seq) {
         if (a.status != LG_ACK_ACCEPTED) {
             emit(c, LG_CEV_GROUP_REFUSED, a.status);
@@ -677,6 +807,9 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         break;
     case LG_T_MSG_ACK:
         handle_ack(c, &e, body);
+        break;
+    case LG_T_VOICE:
+        handle_voice(c, &e, body);
         break;
     case LG_T_GROUPS:
         handle_groups(c, &e, body);

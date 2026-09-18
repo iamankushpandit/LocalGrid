@@ -22,6 +22,13 @@ void ui_overlay_tick(uint32_t now_ms, uint32_t last_touch_ms);
 /* A screen repainted something: put the banner back on top if it is showing. */
 void ui_overlay_screen_painted(void);
 
+/* Starts the screen saver now, if its setting is on and nothing covers the panel (the lock hands
+ * over to it, D62). True when it started. */
+bool ui_overlay_saver_now(uint32_t now_ms);
+
+/* Takes the new-message banner away without a redraw: the lock screen is about to cover it. */
+void ui_overlay_drop_banner(void);
+
 void ui_overlay_log(uint32_t now_ms, uint32_t last_touch_ms);
 
 uint32_t ui_notify_unread(uint8_t scope, uint32_t target);

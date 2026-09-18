@@ -16,6 +16,9 @@
  * - Any conversation: 1:1 (end-to-end encrypted by the service), a group, or everyone. A group
  *   message counts delivered and read handhelds instead of naming one state (D42), and under our
  *   own group or broadcast message a line names who has read it (D58).
+ * - Push-to-talk (D61): in a 1:1 or group chat, on a board with a microphone, a full-width bar
+ *   under the field while the keyboard is down. Hold it to talk; letting go sends the end. While
+ *   someone talks in this conversation the title says who, and the bar says to wait.
  *
  * RAM holds a layout per message (id, position, height, side), never its text: a bubble fetches
  * its message from the service when painted.
@@ -29,10 +32,12 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "hh_service.h"
+#include "hh_voice.h"
 #include "lg_draw.h"
 #include "lg_emoji.h"
 #include "lg_envelope.h"
 #include "ui_kb.h"
+#include "ui_lock.h"
 #include "ui_nav.h"
 #include "ui_overlay.h"
 #include "ui_theme.h"
@@ -47,6 +52,9 @@ static const char *TAG = "UI";
 #define DRAG_START   6       /* pixels a finger moves before a press becomes a scroll */
 #define FLASH_MS     700     /* the new-message arrow: on this long, off this long */
 #define ARROW_SIZE   36
+#define TALK_H       40
+#define TALK_GRACE_MS  150   /* a finger that leaves the bar this briefly is still holding it */
+#define TALK_NOTE_MS   4000  /* how long the reason a talk stopped stays on the bar */
 
 #define MARK_WAIT      "\xF0\x9F\x95\x93"   /* U+1F553 clock: this handheld still holds it */
 
@@ -72,6 +80,9 @@ static struct {
     lg_rect_t  confirm_no;
     lg_rect_t  back;
     lg_rect_t  arrow;
+    lg_rect_t  talk;             /* the push-to-talk bar; zero height when there is none */
+    int16_t    title_left;       /* the title starts here, after the house that goes home (D62) */
+    int16_t    title_right;      /* the title ends here: the talking slot, battery and padlock follow */
     bool       keyboard;
     bubble_t   bubbles[HH_MESSAGES];
     uint8_t    n_bubbles;
@@ -86,6 +97,11 @@ static struct {
     bool       urgent;           /* this message goes as an urgent broadcast */
     bool       urgent_locked;    /* urgent is all this handheld may send here */
     bool       confirming;       /* the "send to everyone as urgent?" panel is up */
+    bool       talk_held;        /* the finger is on the talk bar and we are talking */
+    uint32_t   talk_up_ms;       /* when the finger left the bar, 0 while it is on it */
+    hh_voice_state_t voice;      /* as last drawn */
+    char       talk_note[HH_PROBLEM_MAX];   /* why the last talk stopped, shown for a while */
+    uint32_t   talk_note_ms;
     char       input[HH_TEXT_MAX + 1];
     size_t     input_len;
     bool       was_down;
@@ -526,8 +542,15 @@ static void place(bool keyboard)
 {
     s.keyboard = keyboard;
     int16_t kb_h = keyboard ? (int16_t)(ui_kb_height() + GAP) : 0;
-    int16_t input_y = (int16_t)(s.h - kb_h - INPUT_H - GAP);
+    hh_voice_state(&s.voice);
+    bool talk = !keyboard && s.voice.can_talk && (s.scope == LG_SCOPE_DIRECT || s.scope == LG_SCOPE_GROUP);
+    int16_t talk_h = talk ? (int16_t)(TALK_H + GAP) : 0;
+    int16_t input_y = (int16_t)(s.h - kb_h - talk_h - INPUT_H - GAP);
+    s.talk = talk ? (lg_rect_t){ PAD, (int16_t)(input_y + INPUT_H + GAP), (int16_t)(s.w - 2 * PAD), TALK_H }
+                  : (lg_rect_t){ 0, 0, 0, 0 };
     s.back = (lg_rect_t){ (int16_t)(s.w - 40), 0, 40, HEAD_H };
+    s.title_right = ui_bar_place(s.back.x, 0, HEAD_H);   /* ui_main puts the badge and padlock there */
+    s.title_left = ui_bar_home(0, HEAD_H);                /* and the house at the left */
     s.list = (lg_rect_t){ 0, HEAD_H, (int16_t)s.w, (int16_t)(input_y - HEAD_H - GAP) };
     s.arrow = (lg_rect_t){ (int16_t)((s.w - ARROW_SIZE) / 2), (int16_t)(s.list.y + (s.list.h - ARROW_SIZE) / 2),
                            ARROW_SIZE, ARROW_SIZE };
@@ -547,28 +570,104 @@ static void place(bool keyboard)
     lg_draw_scroll_area(s.list.y, s.list.h);
 }
 
-static void draw_all(void)
+/* ---- push-to-talk ---- */
+
+static bool hearing_here(const hh_voice_state_t *vs)
+{
+    return vs->heard != 0 && vs->heard_scope == s.scope && vs->heard_target == s.target;
+}
+
+static void paint_talk(const lg_canvas_t *c, void *ctx)
+{
+    (void)ctx;
+    const lg_rect_t *r = &s.talk;
+    const char *text = "Hold to talk";
+    char line[HH_PROBLEM_MAX + HH_NAME_MAX];
+    lg_color_t fill = C_SURFACE;
+    lg_color_t edge = C_ACCENT;
+    lg_color_t ink = C_ACCENT;
+    if (s.voice.talking) {
+        text = "Talking... let go to finish";
+        fill = edge = C_ERROR;
+        ink = C_ACCENT_INK;
+    } else if (s.voice.heard != 0) {
+        snprintf(line, sizeof(line), "%s is talking", author_name(s.voice.heard));
+        text = line;
+        edge = ink = C_MUTED;
+    } else if (s.talk_note[0] != '\0') {
+        text = s.talk_note;
+        edge = ink = C_WARNING;
+    }
+    lg_paint_panel(c, r, r, fill, C_BG, edge, 2, 6);
+    const lg_font_t *f = F_BODY;
+    if (lg_draw_text_width(f, NULL, text) > r->w - 2 * PAD) {
+        f = F_SMALL;   /* a long reason still fits the bar */
+    }
+    int16_t tw = lg_draw_text_width(f, NULL, text);
+    lg_paint_text(c, r, (int16_t)(r->x + (r->w - tw) / 2), (int16_t)(r->y + (r->h - f->line_height) / 2), f, NULL, ink,
+                  text, strlen(text));
+}
+
+static void draw_talk(void)
+{
+    if (s.talk.h > 0) {
+        lg_draw_region(&s.talk, paint_talk, NULL);
+    }
+}
+
+static void draw_title(void)
 {
     lg_box_t title;
     memset(&title, 0, sizeof(title));
-    title.rect = (lg_rect_t){ 0, 0, (int16_t)s.w, HEAD_H };
+    title.rect = (lg_rect_t){ s.title_left, 0, (int16_t)(s.title_right - s.title_left), HEAD_H };
     title.bg = title.outside = C_BG;
     title.font = &lg_font_montserrat_14;
     title.fallback = &lg_font_emoji_14;
     title.fg = C_ACCENT;
-    title.pad = PAD;
-    snprintf(title.text, sizeof(title.text), "%s", s.title);
+    title.pad = 2;   /* the house before it already leaves the margin */
+    if (hearing_here(&s.voice)) {
+        /* Who is talking, where everyone looks first, on boards that cannot talk back too. */
+        title.fg = C_WARNING;
+        snprintf(title.text, sizeof(title.text), "%s is talking", author_name(s.voice.heard));
+    } else {
+        snprintf(title.text, sizeof(title.text), "%s", s.title);
+    }
     lg_draw_box(&title);
+    lg_rect_t spare = ui_bar_spare_rect();   /* the talking mark's slot; ui_main paints the mark */
+    if (spare.w > 0) {
+        lg_draw_fill(&spare, C_BG);
+    }
     lg_box_t back = title;
     back.rect = s.back;
     back.font = &lg_font_montserrat_16;
     back.align = LG_ALIGN_CENTER;
     snprintf(back.text, sizeof(back.text), "%s", LG_SYMBOL_LEFT);
     lg_draw_box(&back);
+}
+
+static void draw_all(void)
+{
+    draw_title();
     draw_list();
     lg_rect_t gap = { 0, (int16_t)(s.list.y + s.list.h), (int16_t)s.w, GAP };
     lg_draw_fill(&gap, C_BG);
     draw_field();
+    draw_talk();
+    /* Between the field and the keyboard (or the bottom edge): nothing else paints this strip, so
+     * whatever an alert left there stayed on screen when the alert was dismissed. */
+    int16_t below = (int16_t)(s.talk.h > 0 ? s.talk.y + s.talk.h : s.field.y + s.field.h);
+    lg_rect_t tail = { 0, below, (int16_t)s.w, (int16_t)(s.h - below - (s.keyboard ? ui_kb_height() : 0)) };
+    if (tail.h > 0) {
+        lg_draw_fill(&tail, C_BG);
+    }
+    if (s.talk.h > 0) {
+        lg_rect_t between = { 0, (int16_t)(s.field.y + s.field.h), (int16_t)s.w, GAP };
+        lg_rect_t left = { 0, s.talk.y, PAD, s.talk.h };
+        lg_rect_t right = { (int16_t)(s.talk.x + s.talk.w), s.talk.y, PAD, s.talk.h };
+        lg_draw_fill(&between, C_BG);
+        lg_draw_fill(&left, C_BG);
+        lg_draw_fill(&right, C_BG);
+    }
     if (s.keyboard) {
         ui_kb_draw();
     }
@@ -631,8 +730,46 @@ void ui_chat_refresh(const hh_status_t *st)
     }
 }
 
+static void talk_release(void)
+{
+    s.talk_held = false;
+    s.talk_up_ms = 0;
+    hh_voice_ptt_stop();
+    ESP_LOGI(TAG, "[UI] Talk bar released");
+}
+
+/* Follows the voice module: who is talking, whether we are, and why a talk stopped. */
+static void talk_tick(uint32_t now_ms)
+{
+    if (s.talk_held && s.talk_up_ms != 0 && now_ms - s.talk_up_ms >= TALK_GRACE_MS) {
+        talk_release();
+    }
+    hh_voice_state_t vs;
+    hh_voice_state(&vs);
+    bool note_expired = s.talk_note[0] != '\0' && now_ms - s.talk_note_ms >= TALK_NOTE_MS;
+    if (vs.version == s.voice.version && !note_expired) {
+        return;
+    }
+    bool title_changed = hearing_here(&vs) != hearing_here(&s.voice) || vs.heard != s.voice.heard;
+    if (vs.problem[0] != '\0' && strcmp(vs.problem, s.voice.problem) != 0) {
+        snprintf(s.talk_note, sizeof(s.talk_note), "%s", vs.problem);
+        s.talk_note_ms = now_ms;
+    } else if (note_expired) {
+        s.talk_note[0] = '\0';
+    }
+    if (!vs.talking && s.talk_held && s.talk_up_ms == 0 && vs.problem[0] != '\0') {
+        s.talk_held = false;   /* the talk was stopped for us (refused, or a minute is up) */
+    }
+    s.voice = vs;
+    if (title_changed) {
+        draw_title();
+    }
+    draw_talk();
+}
+
 void ui_chat_tick(uint32_t now_ms)
 {
+    talk_tick(now_ms);
     if (!s.new_below || now_ms - s.flash_ms < FLASH_MS) {
         return;
     }
@@ -699,6 +836,29 @@ bool ui_chat_touch(int16_t x, int16_t y, bool down)
             keyboard_event(kev);
             return false;
         }
+    }
+    if (s.talk_held) {   /* the bar owns the finger until it lets go */
+        if (down) {
+            s.talk_up_ms = 0;
+        } else if (s.talk_up_ms == 0) {
+            s.talk_up_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        }
+        s.was_down = down;
+        return false;
+    }
+    if (down && !s.was_down && s.talk.h > 0 && lg_rect_hit(&s.talk, x, y)) {
+        s.was_down = true;
+        s.dragging = true;   /* the lift that follows is not a tap on anything */
+        esp_err_t err = hh_voice_ptt_start(s.scope, s.target);
+        if (err == ESP_OK) {
+            s.talk_held = true;
+            s.talk_up_ms = 0;
+            s.talk_note[0] = '\0';
+            hh_voice_state(&s.voice);
+            draw_talk();
+        }
+        ESP_LOGI(TAG, "[UI] Talk bar pressed: %s", err == ESP_OK ? "talking" : esp_err_to_name(err));
+        return false;
     }
     if (down && !s.was_down) {
         s.was_down = true;

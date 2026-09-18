@@ -1,4 +1,5 @@
 idf_component_register(SRCS "node_main.c"
+                            "../../common/lg_timekeep.c"
                             "backbone.c"
                             "sessions.c"
                             "ble_adv.c"
