@@ -103,6 +103,7 @@ typedef struct {
     lg_node_io_t        io;
     lg_presence_entry_t presence[LG_MAX_DEVICES];
     lg_name_t           names[LG_MAX_DEVICES];              /* indexed by roster user index; version 0 = none */
+    lg_position_t       positions[LG_POS_SLOTS];            /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
     uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
     bool                has_broadcast[LG_MAX_DEVICES];
     lg_dedup_entry_t    dedup_slots[LG_NODE_DEDUP_SLOTS];
@@ -180,6 +181,27 @@ void lg_node_announce_names(lg_node_t *n);
 
 /* The newest name held for device, or NULL when it has none. */
 const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device);
+
+/*
+ * Positions (D65). A handheld sends its own POSITION; the AP keeps the newest fix per handheld and
+ * per AP in RAM (never flash), floods a newer one to every AP, and pushes it to its other handhelds.
+ * An older or equal fix is dropped and not passed on. Every position held is sent to a handheld
+ * when it registers and flooded when a neighbour link comes up. A handheld POSITION with
+ * LG_POS_LIVE gives an AP that has no grid time a clock, through io.on_client_time as REGISTER's
+ * client_time does. Stored copies have LG_POS_LIVE cleared.
+ */
+
+/* This AP's own fix (subject LG_NODE_ID_BASE | self). Taken, flooded, and pushed to the attached
+ * handhelds only if newer. Returns LG_OK, LG_ERR_ARG (out of range, or self >= LG_MAX_NODES),
+ * or LG_ERR_ID when it is no newer than the one held. */
+int lg_node_set_own_position(lg_node_t *n, int32_t lat_u, int32_t lon_u, uint32_t fix_time, uint8_t sats);
+
+/* The newest position held for subject (device, or LG_NODE_ID_BASE | node), or NULL. */
+const lg_position_t *lg_node_position(const lg_node_t *n, uint32_t subject);
+
+/* Copies up to max held positions into out, handhelds by roster order then APs by index.
+ * Returns how many were written. */
+size_t lg_node_positions(const lg_node_t *n, lg_position_t *out, size_t max);
 
 #ifdef __cplusplus
 }

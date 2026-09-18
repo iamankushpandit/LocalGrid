@@ -94,6 +94,7 @@ typedef enum {
     LG_CEV_GROUP_REFUSED,    /* value: lg_ack_status_t the AP refused our last group edit with */
     LG_CEV_NAME,             /* value: device whose name changed, this handheld's own included */
     LG_CEV_VOICE_REFUSED,    /* value: lg_ack_status_t an AP refused our voice with (D61) */
+    LG_CEV_POSITION,         /* value: subject whose position is newer (device, or LG_NODE_ID_BASE | node) (D65) */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -154,6 +155,7 @@ typedef struct {
     uint32_t           last_pong_ms;       /* now_ms when the node last answered a PING, 0 never */
     uint32_t           voice_seq;          /* our voice counter, without LG_VOICE_SEQ_BIT (D61) */
     lg_voice_seen_t    voice_seen[LG_MAX_DEVICES];   /* newest voice per author, by roster user index */
+    lg_position_t      positions[LG_POS_SLOTS];      /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
@@ -227,6 +229,23 @@ bool lg_client_restore_name(lg_client_t *c, const lg_name_t *name);
 
 /* The newest name known for device, or NULL when none was chosen (the roster name applies). */
 const lg_name_t *lg_client_name(const lg_client_t *c, uint32_t device);
+
+/*
+ * Positions (D65), kept in RAM only, never flash. The AP sends every position it holds on
+ * registration and each newer one after; a newer fix replaces the one held and emits
+ * LG_CEV_POSITION with its subject.
+ *
+ * lg_client_send_position stores the fix as this handheld's own entry (if not older than the one
+ * held), then sends it once with no retry: the caller resends periodically. flags is LG_POS_*;
+ * set LG_POS_LIVE only when fix_time is the GPS clock now (fix under 2 s old).
+ * Returns LG_OK, LG_ERR_ARG (coordinates out of range or fix_time below LG_POS_TIME_MIN),
+ * LG_ERR_SHORT (not registered, or the transport did not take the frame; the entry is still kept).
+ */
+int lg_client_send_position(lg_client_t *c, int32_t lat_u, int32_t lon_u, uint32_t fix_time,
+                            uint8_t sats, uint8_t flags);
+
+/* The newest position known for subject (device, or LG_NODE_ID_BASE | node), or NULL. */
+const lg_position_t *lg_client_position(const lg_client_t *c, uint32_t subject);
 
 #ifdef __cplusplus
 }

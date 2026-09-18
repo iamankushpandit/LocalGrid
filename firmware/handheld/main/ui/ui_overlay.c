@@ -8,6 +8,9 @@
  *   flashing after four cycles, and stays until Read is tapped (D41, revised).
  * - An urgent broadcast: the error colour, flashing and sounding every 4 s (even at volume off)
  *   until Read is tapped.
+ * - Either alert says where its sender is when that is known (D65): "240 m NE of you" with this
+ *   handheld's own fix, "240 m NE of MAIN" without one, else the coordinates, and how old the
+ *   position is past two minutes. It is looked at again each second and repainted only on change.
  * - After a minute untouched, if the setting is on, green characters fall down the panel. The
  *   first touch only dismisses it; the screen underneath is redrawn.
  * - While the handheld is locked (D62), alerts still take the screen and are read as usual, and
@@ -28,6 +31,7 @@
 #include "lg_bsp_audio.h"
 #include "lg_bsp_settings.h"
 #include "lg_envelope.h"
+#include "ui_geo.h"
 #include "ui_lock.h"
 #include "ui_nav.h"
 #include "ui_theme.h"
@@ -47,6 +51,26 @@ static const char *TAG = "UI";
 #define RAIN_COLS_MAX     30
 #define RAIN_TRAIL        12
 #define CONVS_TRACKED     (LG_MAX_DEVICES + LG_MAX_GROUPS + 1)
+#define ALERT_TEXT_LINES  8
+#define ALERT_WHERE_MS    1000   /* how often the sender's location line is looked at again */
+#define ALERT_STALE_S     120    /* an older position says how old it is */
+#define WHERE_MAX         48
+
+/*
+ * Where everything on an alert goes, worked out in one place (alert_layout) and used by the
+ * painter and by touch alike, so the words, the location lines, and Read can never overlap.
+ */
+typedef struct {
+    int16_t   margin;       /* clear of the flashing border */
+    int16_t   kind_y;
+    int16_t   who_y;
+    int16_t   text_y;
+    uint8_t   text_lines;   /* lines of the message that fit above the location */
+    uint16_t  starts[ALERT_TEXT_LINES + 1];
+    uint8_t   where_lines;  /* 0, 1, or 2 */
+    lg_rect_t where;        /* the location lines, empty when the sender's position is not known */
+    lg_rect_t read;         /* the Read button */
+} alert_layout_t;
 
 typedef struct {
     bool     used;
@@ -80,9 +104,12 @@ static struct {
     uint32_t  flash_ms;
     uint32_t  repeat_ms;
     uint32_t  alert_id;   /* the message the alert is showing, reported read when Read is tapped */
+    uint32_t  alert_author;
     char      alert_who[HH_NAME_MAX];
     char      alert_text[HH_TEXT_MAX + 1];
-    lg_rect_t read_button;
+    char      alert_where[2][WHERE_MAX];   /* "240 m NE of you", "position 5 min old" */
+    uint32_t  where_ms;
+    alert_layout_t lay;
     bool      swallow;         /* a dismissing touch: ignore it until the finger lifts */
     /* rain */
     uint8_t   cols;
@@ -189,40 +216,117 @@ void ui_overlay_screen_painted(void)
  * bus, for as long as an emergency is up, and it made the rest of the UI crawl. The border is
  * about a fifth of the pixels and reads the same from across a tent.
  */
+/*
+ * Where the sender is (D65), in up to two lines: from this handheld when it has its own fix, else
+ * from MAIN when MAIN's position is known, else the coordinates; and how old the position is when
+ * it is more than two minutes old. Returns the lines written; 0 when the sender's position is not
+ * known.
+ */
+static uint8_t alert_where(uint32_t author, char out[2][WHERE_MAX])
+{
+    out[0][0] = out[1][0] = '\0';
+    hh_position_t them;
+    if (!hh_service_position(author, &them) || !them.valid) {
+        return 0;
+    }
+    hh_position_t from;
+    char where[32];
+    if (hh_service_own_position(&from) && from.valid) {
+        ui_geo_where_text(from.lat_u, from.lon_u, them.lat_u, them.lon_u, where, sizeof(where));
+        snprintf(out[0], WHERE_MAX, "%s of you", where);
+    } else if (hh_service_position(HH_SUBJECT_MAIN, &from) && from.valid) {
+        ui_geo_where_text(from.lat_u, from.lon_u, them.lat_u, them.lon_u, where, sizeof(where));
+        snprintf(out[0], WHERE_MAX, "%s of MAIN", where);
+    } else {
+        ui_geo_coord_text(them.lat_u, them.lon_u, out[0], WHERE_MAX);
+    }
+    if (them.age_s <= ALERT_STALE_S) {
+        return 1;
+    }
+    char age[16];
+    ui_geo_age_text(them.age_s, age, sizeof(age));
+    snprintf(out[1], WHERE_MAX, "position %s old", age);
+    return 2;
+}
+
+/*
+ * The alert's layout, top to bottom: the kind and sender, the message, the location lines, and
+ * Read across the bottom, all inside the flashing border. Read and the location are placed from
+ * the bottom up; the message gets the lines that are left (never fewer than it needs to overlap
+ * nothing), and the heading and message are centred in the space above the location.
+ */
+static void alert_layout(uint8_t where_lines)
+{
+    alert_layout_t *L = &s.lay;
+    int16_t w = (int16_t)s.w;
+    int16_t h = (int16_t)s.h;
+    L->margin = (int16_t)(ALERT_FRAME + UI_PAD);
+    int16_t inner_w = (int16_t)(w - 2 * L->margin);
+    int16_t bw = (int16_t)(w / 2);
+    int16_t bh = (int16_t)(F_TITLE->line_height + 20);
+    L->read = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - L->margin - bh), bw, bh };
+    int16_t bottom = (int16_t)(L->read.y - 2 * UI_GAP);
+    L->where_lines = where_lines;
+    if (where_lines > 0) {
+        int16_t wh = (int16_t)(where_lines * F_BODY->line_height);
+        L->where = (lg_rect_t){ L->margin, (int16_t)(bottom - wh), inner_w, wh };
+        bottom = (int16_t)(L->where.y - 2 * UI_GAP);
+    } else {
+        L->where = (lg_rect_t){ 0, 0, 0, 0 };
+    }
+    int16_t top = (int16_t)(L->margin + UI_GAP);
+    int16_t head = (int16_t)(F_TITLE->line_height + 6 + F_SMALL->line_height + 10);
+    int16_t room = (int16_t)(bottom - top - head);
+    int16_t fit = room > 0 ? (int16_t)(room / F_TITLE->line_height) : 0;
+    uint8_t max_lines = (uint8_t)(fit > ALERT_TEXT_LINES ? ALERT_TEXT_LINES : fit);
+    L->text_lines = max_lines > 0 ? lg_text_wrap(F_TITLE, F_EMOJI, s.alert_text, inner_w, L->starts, max_lines) : 0;
+    int16_t used = (int16_t)(head + L->text_lines * F_TITLE->line_height);
+    int16_t y = (int16_t)(top + (bottom - top - used) / 2);
+    L->kind_y = y < top ? top : y;
+    L->who_y = (int16_t)(L->kind_y + F_TITLE->line_height + 6);
+    L->text_y = (int16_t)(L->who_y + F_SMALL->line_height + 10);
+}
+
+static void centred(const lg_canvas_t *c, const lg_rect_t *clip, int16_t y, const lg_font_t *font,
+                    const lg_font_t *fallback, lg_color_t ink, const char *text, size_t n)
+{
+    char line[HH_TEXT_MAX + 1];
+    n = n < sizeof(line) ? n : sizeof(line) - 1u;
+    memcpy(line, text, n);
+    line[n] = '\0';
+    lg_paint_text(c, clip, (int16_t)((s.w - lg_draw_text_width(font, fallback, line)) / 2), y, font, fallback, ink,
+                  line, n);
+}
+
+static void draw_alert_frame(void);
+
 static void paint_alert(const lg_canvas_t *c, void *ctx)
 {
     (void)ctx;
+    const alert_layout_t *L = &s.lay;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_color_t tone = s.emergency ? C_ERROR : C_WARNING;
     lg_color_t ground = tone;
     lg_color_t ink = C_BG;
     lg_paint_panel(c, &all, &all, ground, ground, ground, 0, 0);
-    int16_t y = (int16_t)(s.h / 4);
     const char *kind = s.emergency ? "URGENT" : "ANNOUNCEMENT";
-    lg_paint_text(c, &all, (int16_t)((s.w - lg_draw_text_width(F_TITLE, NULL, kind)) / 2), y, F_TITLE, NULL, ink, kind,
-                  strlen(kind));
-    y = (int16_t)(y + F_TITLE->line_height + 6);
-    lg_paint_text(c, &all, (int16_t)((s.w - lg_draw_text_width(F_SMALL, F_EMOJI, s.alert_who)) / 2), y, F_SMALL,
-                  F_EMOJI, ink, s.alert_who, strlen(s.alert_who));
-    y = (int16_t)(y + F_SMALL->line_height + 10);
-    uint16_t starts[9];
-    uint8_t lines = lg_text_wrap(F_TITLE, F_EMOJI, s.alert_text, (int16_t)(s.w - 24), starts, 8);
-    for (uint8_t l = 0; l < lines; l++) {
-        char line[HH_TEXT_MAX + 1];
-        size_t n = (size_t)(starts[l + 1] - starts[l]);
-        memcpy(line, s.alert_text + starts[l], n);
-        line[n] = '\0';
-        lg_paint_text(c, &all, (int16_t)((s.w - lg_draw_text_width(F_TITLE, F_EMOJI, line)) / 2),
-                      (int16_t)(y + l * F_TITLE->line_height), F_TITLE, F_EMOJI, ink, line, n);
+    centred(c, &all, L->kind_y, F_TITLE, NULL, ink, kind, strlen(kind));
+    centred(c, &all, L->who_y, F_SMALL, F_EMOJI, ink, s.alert_who, strlen(s.alert_who));
+    for (uint8_t l = 0; l < L->text_lines; l++) {
+        centred(c, &all, (int16_t)(L->text_y + l * F_TITLE->line_height), F_TITLE, F_EMOJI, ink,
+                s.alert_text + L->starts[l], (size_t)(L->starts[l + 1] - L->starts[l]));
+    }
+    for (uint8_t l = 0; l < L->where_lines; l++) {
+        centred(c, &L->where, (int16_t)(L->where.y + l * F_BODY->line_height), F_BODY, NULL, ink, s.alert_where[l],
+                strlen(s.alert_where[l]));
     }
     /* "Read" dismisses it: a named button says what the tap means, where the X in the corner
      * was both easy to miss and easy to hit by accident (owner, 2026-09-17). */
-    lg_paint_panel(c, &all, &s.read_button, ink, ground, ink, 2, 6);
+    lg_paint_panel(c, &all, &L->read, ink, ground, ink, 2, 6);
     const char *word = "Read";
-    lg_paint_text(c, &s.read_button, (int16_t)(s.read_button.x + (s.read_button.w -
-                  lg_draw_text_width(F_TITLE, NULL, word)) / 2),
-                  (int16_t)(s.read_button.y + (s.read_button.h - F_TITLE->line_height) / 2), F_TITLE, NULL, ground,
-                  word, strlen(word));
+    lg_paint_text(c, &L->read, (int16_t)(L->read.x + (L->read.w - lg_draw_text_width(F_TITLE, NULL, word)) / 2),
+                  (int16_t)(L->read.y + (L->read.h - F_TITLE->line_height) / 2), F_TITLE, NULL, ground, word,
+                  strlen(word));
 }
 
 static void draw_alert(void)
@@ -230,6 +334,33 @@ static void draw_alert(void)
     lg_draw_scroll_area(0, 0);   /* a full-screen cover is drawn unscrolled; the screen is redrawn after */
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_region(&all, paint_alert, NULL);
+}
+
+/*
+ * The sender's location is looked at again once a second while the alert is up. Only when its
+ * words change is anything painted: the location lines alone when their number is the same, or
+ * the whole alert (then the border) when a line came or went and the layout moved.
+ */
+static void alert_where_tick(uint32_t now)
+{
+    if (now - s.where_ms < ALERT_WHERE_MS) {
+        return;
+    }
+    s.where_ms = now;
+    char fresh[2][WHERE_MAX];
+    uint8_t lines = alert_where(s.alert_author, fresh);
+    if (lines == s.lay.where_lines && strcmp(fresh[0], s.alert_where[0]) == 0 &&
+        strcmp(fresh[1], s.alert_where[1]) == 0) {
+        return;
+    }
+    memcpy(s.alert_where, fresh, sizeof(fresh));
+    if (lines == s.lay.where_lines) {
+        lg_draw_region(&s.lay.where, paint_alert, NULL);
+        return;
+    }
+    alert_layout(lines);
+    draw_alert();
+    draw_alert_frame();
 }
 
 /* One flash: four bars around the edge, and nothing else touched. */
@@ -250,7 +381,7 @@ static void draw_alert_frame(void)
     }
 }
 
-static void show_alert(bool emergency, const char *who, const char *text, uint32_t id, uint32_t now)
+static void show_alert(bool emergency, const char *who, const char *text, uint32_t id, uint32_t author, uint32_t now)
 {
     if (s.cover == OV_ALERT && s.emergency && !emergency) {
         return;   /* an announcement never buries an emergency nobody has acknowledged */
@@ -263,12 +394,19 @@ static void show_alert(bool emergency, const char *who, const char *text, uint32
     s.flash_ms = now;
     s.repeat_ms = now;
     s.alert_id = id;
+    s.alert_author = author;
+    s.where_ms = now;
     snprintf(s.alert_who, sizeof(s.alert_who), "%s", who);
     snprintf(s.alert_text, sizeof(s.alert_text), "%s", text);
+    alert_layout(alert_where(author, s.alert_where));
     draw_alert();
     draw_alert_frame();
     (void)lg_bsp_audio_cue(emergency ? LG_CUE_URGENT : LG_CUE_ANNOUNCE);
     ESP_LOGI(TAG, "[UI] %s alert: %s", emergency ? "Emergency" : "Announcement", text);
+    if (s.lay.where_lines > 0) {
+        ESP_LOGI(TAG, "[UI] Alert sender is %s%s%s", s.alert_where[0], s.lay.where_lines > 1 ? "; " : "",
+                 s.alert_where[1]);
+    }
 }
 
 /* ---- screen saver ---- */
@@ -397,7 +535,7 @@ static void watch(uint32_t now)
         ui_redraw_current();
     }
     if (n_scope == LG_SCOPE_BROADCAST) {
-        show_alert(newest.urgent, who, newest.text, newest.id, now);
+        show_alert(newest.urgent, who, newest.text, newest.id, newest.author, now);
         return;
     }
     s.pending_scope = n_scope;
@@ -439,9 +577,7 @@ void ui_overlay_start(uint16_t w, uint16_t h)
     s.col_w = (int16_t)(lg_draw_text_width(F_SMALL, NULL, "W") > 0 ? lg_draw_text_width(F_SMALL, NULL, "W") : 8);
     s.cols = (uint8_t)(w / s.col_w > RAIN_COLS_MAX ? RAIN_COLS_MAX : w / s.col_w);
     s.col_w = (int16_t)(w / s.cols);
-    int16_t bw = (int16_t)(w / 2);
-    int16_t bh = (int16_t)(F_TITLE->line_height + 20);
-    s.read_button = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - ALERT_FRAME - 10 - bh), bw, bh };
+    alert_layout(0);   /* Read's place is known before any alert; each alert lays itself out again */
 }
 
 bool ui_overlay_saver_now(uint32_t now_ms)
@@ -485,6 +621,7 @@ void ui_overlay_tick(uint32_t now, uint32_t last_touch_ms)
             s.repeat_ms = now;
             (void)lg_bsp_audio_cue(LG_CUE_URGENT);   /* plays even at volume off (D40) */
         }
+        alert_where_tick(now);
         break;
     case OV_SAVER:
         if (now - s.rain_ms >= RAIN_STEP_MS) {
@@ -521,7 +658,7 @@ bool ui_overlay_touch(int16_t x, int16_t y, bool down)
         }
         return true;
     case OV_ALERT:
-        if (!down && lg_rect_hit(&s.read_button, x, y)) {
+        if (!down && lg_rect_hit(&s.lay.read, x, y)) {
             s.cover = OV_NONE;   /* only Read closes an alert (D41, revised) */
             hh_service_mark_read(s.alert_id);   /* Read means read: the sender sees it (D58) */
             ESP_LOGI(TAG, "[UI] Alert closed");

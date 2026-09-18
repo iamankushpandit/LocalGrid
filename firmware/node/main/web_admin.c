@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,6 +76,7 @@ typedef struct {
     uint32_t        time_set_unix;
     uint16_t        time_set_on;
     uint32_t        time_generation;
+    bool            time_by_gps;
     uint16_t        time_from;
 } snapshot_t;
 
@@ -85,56 +87,114 @@ typedef struct {
     uint32_t last_ms;
 } admin_session_t;
 
+/* Positions held on this AP (D65), with the name to show: a handheld's chosen or roster name, an
+ * AP's announced name ("" when unknown; the page says "AP n"). RAM only, like the core's table.
+ * Positions and names are separate arrays so lg_node_positions() writes straight into p. */
+typedef struct {
+    size_t        n;
+    lg_position_t p[LG_POS_SLOTS];
+    char          name[LG_POS_SLOTS][LG_NAME_MAX];
+} pos_snapshot_t;
+
+/*
+ * Two copies of the snapshot and no more (MAIN has no PSRAM, and each copy is about 3.8 KB):
+ * the one the core task publishes, and the web task's own. The core task fills the published one
+ * in place under the lock (a few hundred microseconds, once a second); a handler copies it out
+ * under the lock and then works from its copy, so no handler holds the lock while it sends.
+ * httpd runs one handler at a time, so every handler shares the one view and the one cfg.
+ */
 static struct {
     SemaphoreHandle_t lock;
     snapshot_t        snap;
+    pos_snapshot_t    pos;
+    snapshot_t        view;       /* web task only */
+    pos_snapshot_t    view_pos;   /* web task only */
+    node_settings_t   cfg;        /* web task only */
     admin_session_t   sessions[ADMIN_SESSIONS];
     uint32_t          login_failures;
     uint32_t          locked_until_ms;
 } w;
 
+/* Web task: copies the published snapshot into w.view and w.view_pos. */
+static void take_view(bool with_positions)
+{
+    xSemaphoreTake(w.lock, portMAX_DELAY);
+    w.view = w.snap;
+    if (with_positions) {
+        w.view_pos = w.pos;
+    }
+    xSemaphoreGive(w.lock);
+}
+
 void web_admin_publish_snapshot(void)
 {
-    static snapshot_t s;   /* built outside the lock, copied in */
-    memset(&s, 0, sizeof(s));
+    /* Filled in place under the lock: the web task only ever holds it for a copy. */
+    xSemaphoreTake(w.lock, portMAX_DELAY);
+    snapshot_t *s = &w.snap;
+    memset(s, 0, sizeof(*s));
     uint32_t now = app_now_ms();
-    s.node = g_app.index;
-    strncpy(s.node_name, g_app.name, sizeof(s.node_name) - 1);
-    s.boot = g_app.boot;
-    s.uptime_s = now / 1000u;
-    s.grid_time = app_grid_time();
-    s.time_quality = g_app.time_quality;
-    s.heap_free = esp_get_free_heap_size();
-    s.heap_min = esp_get_minimum_free_heap_size();
-    s.handhelds = sess_registered_count();
-    s.n_links = lgbb_links(s.links, LG_MAX_NODES, now);
+    s->node = g_app.index;
+    strncpy(s->node_name, g_app.name, sizeof(s->node_name) - 1);
+    s->boot = g_app.boot;
+    s->uptime_s = now / 1000u;
+    s->grid_time = app_grid_time();
+    s->time_quality = g_app.time_quality;
+    s->heap_free = esp_get_free_heap_size();
+    s->heap_min = esp_get_minimum_free_heap_size();
+    s->handhelds = sess_registered_count();
+    s->n_links = lgbb_links(s->links, LG_MAX_NODES, now);
     /* Only handhelds the grid has actually seen: never list roster entries that never connected. */
     const lg_roster_t *r = g_app.core.roster;
-    for (size_t i = 0; i < r->n_users && s.n_devices < LG_MAX_DEVICES; i++) {
+    for (size_t i = 0; i < r->n_users && s->n_devices < LG_MAX_DEVICES; i++) {
         const lg_presence_entry_t *p = lg_node_presence(&g_app.core, r->users[i].device);
         if (p == NULL) {
             continue;
         }
-        size_t k = s.n_devices++;
-        s.devices[k].device = r->users[i].device;
-        strncpy(s.devices[k].name, r->users[i].name, sizeof(s.devices[k].name) - 1);
-        s.devices[k].known = 1;
-        s.devices[k].state = p->state;
-        s.devices[k].node = p->node;
+        size_t k = s->n_devices++;
+        s->devices[k].device = r->users[i].device;
+        strncpy(s->devices[k].name, r->users[i].name, sizeof(s->devices[k].name) - 1);
+        s->devices[k].known = 1;
+        s->devices[k].state = p->state;
+        s->devices[k].node = p->node;
     }
-    s.roster = *r;
+    s->roster = *r;
     for (uint16_t ap = 0; ap < LG_MAX_NODES; ap++) {
-        if (grid_state_ap(ap, &s.aps[s.n_aps])) {
-            grid_state_avail(ap, s.avail[s.n_aps]);
-            s.n_aps++;
+        if (grid_state_ap(ap, &s->aps[s->n_aps])) {
+            grid_state_avail(ap, s->avail[s->n_aps]);
+            s->n_aps++;
         }
     }
-    s.n_incidents = grid_state_incidents(s.incidents, GRID_INCIDENTS);
-    grid_state_time_info(&s.time_set_unix, &s.time_set_on, &s.time_generation);
-    s.time_from = grid_state_sync_source();
-    s.avail_newest_min = grid_state_avail_newest_minute();
-    xSemaphoreTake(w.lock, portMAX_DELAY);
-    w.snap = s;
+    s->n_incidents = grid_state_incidents(s->incidents, GRID_INCIDENTS);
+    grid_state_time_info(&s->time_set_unix, &s->time_set_on, &s->time_generation, &s->time_by_gps);
+    s->time_from = grid_state_sync_source();
+    s->avail_newest_min = grid_state_avail_newest_minute();
+
+    pos_snapshot_t *ps = &w.pos;
+    memset(ps, 0, sizeof(*ps));
+    ps->n = lg_node_positions(&g_app.core, ps->p, LG_POS_SLOTS);
+    for (size_t i = 0; i < ps->n; i++) {
+        char *name = ps->name[i];
+        uint32_t subj = ps->p[i].subject;
+        if ((subj & LG_NODE_ID_BASE) != 0) {
+            uint16_t ap = (uint16_t)(subj & ~LG_NODE_ID_BASE);
+            if (ap == g_app.index) {
+                strncpy(name, g_app.name, LG_NAME_MAX - 1);
+            }
+            for (size_t k = 0; k < s->n_aps && name[0] == 0; k++) {
+                if (s->aps[k].ap == ap) {
+                    strncpy(name, s->aps[k].name, LG_NAME_MAX - 1);
+                }
+            }
+        } else {
+            const lg_name_t *chosen = lg_node_name(&g_app.core, subj);
+            const lg_user_t *u = lg_roster_user(r, subj);
+            if (chosen != NULL) {
+                memcpy(name, chosen->text, chosen->len);   /* len < LG_NAME_MAX, NUL from the memset */
+            } else if (u != NULL && u->name != NULL) {
+                strncpy(name, u->name, LG_NAME_MAX - 1);
+            }
+        }
+    }
     xSemaphoreGive(w.lock);
 }
 
@@ -452,25 +512,25 @@ static esp_err_t h_icon(httpd_req_t *req)
 static esp_err_t h_state(httpd_req_t *req)
 {
     admin_session_t *s = session_from_request(req);
-    static node_settings_t cfg;   /* httpd runs one handler at a time */
-    grid_state_settings(&cfg);
+    node_settings_t *cfg = &w.cfg;   /* httpd runs one handler at a time */
+    grid_state_settings(cfg);
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
-    json_escape(cfg.grid_name, name, sizeof(name));
+    json_escape(cfg->grid_name, name, sizeof(name));
     char ap[2 * 16 + 8];
     json_escape(g_app.name, ap, sizeof(ap));
     char body[320];
     snprintf(body, sizeof(body),
              "{\"configured\":%s,\"logged_in\":%s,\"csrf\":\"%s\",\"grid_name\":\"%s\",\"ap\":%u,\"ap_name\":\"%s\"}",
-             cfg.configured ? "true" : "false", s != NULL ? "true" : "false",
-             s != NULL ? s->csrf : "", cfg.configured ? name : "", g_app.index, ap);
+             cfg->configured ? "true" : "false", s != NULL ? "true" : "false",
+             s != NULL ? s->csrf : "", cfg->configured ? name : "", g_app.index, ap);
     return send_json(req, "200 OK", body);
 }
 
 static esp_err_t h_setup(httpd_req_t *req)
 {
-    static node_settings_t cfg;
-    grid_state_settings(&cfg);
-    if (cfg.configured) {
+    node_settings_t *cfg = &w.cfg;
+    grid_state_settings(cfg);
+    if (cfg->configured) {
         return send_error(req, "409 Conflict", "LocalGrid is already set up. Log in instead.");
     }
     if (!grid_state_setup_allowed()) {
@@ -518,9 +578,9 @@ static esp_err_t h_setup(httpd_req_t *req)
 
 static esp_err_t h_login(httpd_req_t *req)
 {
-    static node_settings_t cfg;
-    grid_state_settings(&cfg);
-    if (!cfg.configured) {
+    node_settings_t *cfg = &w.cfg;
+    grid_state_settings(cfg);
+    if (!cfg->configured) {
         return send_error(req, "409 Conflict", "LocalGrid is not set up yet.");
     }
     uint32_t wait_s = 0;
@@ -535,7 +595,7 @@ static esp_err_t h_login(httpd_req_t *req)
         return send_error(req, "400 Bad Request", "Password is required.");
     }
     lg_secure_zero(body, sizeof(body));
-    bool ok = password_matches(&cfg, password);
+    bool ok = password_matches(cfg, password);
     lg_secure_zero(password, sizeof(password));
     if (!ok) {
         login_failed();
@@ -558,95 +618,149 @@ static esp_err_t h_logout(httpd_req_t *req)
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+/*
+ * A JSON response sent in chunks as it is written, so no handler holds the whole body: pieces
+ * gather in a small buffer that goes out whenever the next piece would not fit. After a send
+ * fails, everything else is skipped and the handler returns ESP_FAIL, which closes the socket.
+ */
+#define JOUT_BUF 1024u
+
+typedef struct {
+    httpd_req_t *req;
+    size_t       n;
+    bool         failed;
+    char         buf[JOUT_BUF];
+} jout_t;
+
+static jout_t s_jo;   /* httpd runs one handler at a time; /api/history borrows the buffer too */
+
+static void jout_flush(jout_t *o)
+{
+    if (!o->failed && o->n > 0 && httpd_resp_send_chunk(o->req, o->buf, (ssize_t)o->n) != ESP_OK) {
+        o->failed = true;
+    }
+    o->n = 0;
+}
+
+static void __attribute__((format(printf, 2, 3))) jout(jout_t *o, const char *fmt, ...)
+{
+    for (int attempt = 0; attempt < 2 && !o->failed; attempt++) {
+        va_list ap;
+        va_start(ap, fmt);
+        int len = vsnprintf(o->buf + o->n, sizeof(o->buf) - o->n, fmt, ap);
+        va_end(ap);
+        if (len < 0) {
+            o->failed = true;
+        } else if ((size_t)len < sizeof(o->buf) - o->n) {
+            o->n += (size_t)len;
+            return;
+        } else if (o->n == 0) {
+            o->failed = true;   /* one piece larger than the buffer: never happens with these fields */
+        } else {
+            jout_flush(o);      /* send what is there, then write the piece into the empty buffer */
+        }
+    }
+}
+
+static esp_err_t jout_end(jout_t *o)
+{
+    jout_flush(o);
+    if (o->failed) {
+        return ESP_FAIL;
+    }
+    return httpd_resp_send_chunk(o->req, NULL, 0);
+}
+
 static esp_err_t h_status(httpd_req_t *req)
 {
     if (session_from_request(req) == NULL) {
         return send_error(req, "401 Unauthorized", "Log in to see grid status.");
     }
-    static snapshot_t s;
-    xSemaphoreTake(w.lock, portMAX_DELAY);
-    s = w.snap;
-    xSemaphoreGive(w.lock);
+    take_view(true);
+    const snapshot_t *s = &w.view;
+    const pos_snapshot_t *ps = &w.view_pos;
 
     gps_state_t gps;
     gps_state(&gps);
-    static char out[4096];   /* small fields and the group table; AP history goes out as bytes (/api/history, D49) */
-    static node_settings_t cfg;
-    grid_state_settings(&cfg);
+    grid_state_settings(&w.cfg);
+    /* Small fields, the group table, and positions (D65); AP history goes out as bytes (/api/history, D49). */
+    jout_t *o = &s_jo;
+    o->req = req;
+    o->n = 0;
+    o->failed = false;
+    ptrace_event(PTRACE_WEB);
+    httpd_resp_set_status(req, "200 OK");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
-    json_escape(cfg.grid_name, name, sizeof(name));
-    int n = snprintf(out, sizeof(out),
-                     "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
-                     ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
-                     ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,\"gps\":{\"started\":%s,\"heard\":%s,"
-                     "\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32 ",\"lon_u\":%" PRId32 "},\"links\":[",
-                     name, cfg.timezone, s.node, s.node_name, s.boot, s.uptime_s, s.grid_time, s.time_quality,
-                     s.heap_free, s.heap_min, s.handhelds, gps.started ? "true" : "false", gps.heard ? "true" : "false",
-                     gps_has_fix() ? "true" : "false", gps.sats, gps.has_pos ? "true" : "false",
-                     gps.has_pos ? gps.lat_u : 0, gps.has_pos ? gps.lon_u : 0);
-    for (size_t i = 0; i < s.n_links && n > 0 && (size_t)n < sizeof(out); i++) {
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"node\":%u,\"up\":%s,\"rssi\":%d,\"age_ms\":%" PRIu32 "}",
-                      i ? "," : "", s.links[i].node, s.links[i].up ? "true" : "false", s.links[i].rssi,
-                      s.links[i].age_ms);
+    json_escape(w.cfg.grid_name, name, sizeof(name));
+    jout(o, "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
+             ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
+             ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,",
+         name, w.cfg.timezone, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
+         s->heap_free, s->heap_min, s->handhelds);
+    jout(o, "\"gps\":{\"started\":%s,\"heard\":%s,\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32
+             ",\"lon_u\":%" PRId32 "},\"links\":[",
+         gps.started ? "true" : "false", gps.heard ? "true" : "false", gps_has_fix() ? "true" : "false", gps.sats,
+         gps.has_pos ? "true" : "false", gps.has_pos ? gps.lat_u : 0, gps.has_pos ? gps.lon_u : 0);
+    for (size_t i = 0; i < s->n_links; i++) {
+        jout(o, "%s{\"node\":%u,\"up\":%s,\"rssi\":%d,\"age_ms\":%" PRIu32 "}", i ? "," : "", s->links[i].node,
+             s->links[i].up ? "true" : "false", s->links[i].rssi, s->links[i].age_ms);
     }
-    if (n > 0 && (size_t)n < sizeof(out)) {
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"devices\":[");
-    }
-    for (size_t i = 0; i < s.n_devices && n > 0 && (size_t)n < sizeof(out); i++) {
-        const char *state = !s.devices[i].known ? "UNKNOWN" : s.devices[i].state ? "ONLINE" : "OFFLINE";
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\",\"state\":\"%s\",\"node\":%d}",
-                      i ? "," : "", s.devices[i].device, s.devices[i].name, state,
-                      s.devices[i].node == LG_NODE_NONE ? -1 : (int)s.devices[i].node);
+    jout(o, "],\"devices\":[");
+    for (size_t i = 0; i < s->n_devices; i++) {
+        const char *state = !s->devices[i].known ? "UNKNOWN" : s->devices[i].state ? "ONLINE" : "OFFLINE";
+        jout(o, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\",\"state\":\"%s\",\"node\":%d}", i ? "," : "",
+             s->devices[i].device, s->devices[i].name, state,
+             s->devices[i].node == LG_NODE_NONE ? -1 : (int)s->devices[i].node);
     }
     /* Handhelds the grid has seen, the same list as the Handhelds card: roster places nobody has
      * taken are not offered as group members. Then the groups, members named by device (D52). */
-    const lg_roster_t *r = &s.roster;
-    if (n > 0 && (size_t)n < sizeof(out)) {
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"users\":[");
+    const lg_roster_t *r = &s->roster;
+    jout(o, "],\"users\":[");
+    for (size_t i = 0; i < s->n_devices; i++) {
+        char un[2 * sizeof(s->devices[i].name) + 8];
+        json_escape(s->devices[i].name, un, sizeof(un));
+        jout(o, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\"}", i ? "," : "", s->devices[i].device, un);
     }
-    for (size_t i = 0; i < s.n_devices && n > 0 && (size_t)n < sizeof(out); i++) {
-        char un[2 * sizeof(s.devices[i].name) + 8];
-        json_escape(s.devices[i].name, un, sizeof(un));
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\"}", i ? "," : "",
-                      s.devices[i].device, un);
-    }
-    if (n > 0 && (size_t)n < sizeof(out)) {
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"announce_all\":%s,\"announcers\":[",
-                      r->groups.announcers == LG_ANNOUNCE_EVERYONE ? "true" : "false");
-    }
-    for (size_t u = 0, first = 1; u < r->n_users && u < 32u && n > 0 && (size_t)n < sizeof(out); u++) {
+    jout(o, "],\"announce_all\":%s,\"announcers\":[",
+         r->groups.announcers == LG_ANNOUNCE_EVERYONE ? "true" : "false");
+    for (size_t u = 0, first = 1; u < r->n_users && u < 32u; u++) {
         if (r->groups.announcers & (1u << u)) {
-            n += snprintf(out + n, sizeof(out) - (size_t)n, "%s%" PRIu32, first ? "" : ",", r->users[u].device);
+            jout(o, "%s%" PRIu32, first ? "" : ",", r->users[u].device);
             first = 0;
         }
     }
-    if (n > 0 && (size_t)n < sizeof(out)) {
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "],\"groups_version\":%" PRIu32 ",\"groups\":[", r->groups.seq);
-    }
-    for (size_t i = 0; i < r->groups.count && n > 0 && (size_t)n < sizeof(out); i++) {
+    jout(o, "],\"groups_version\":%" PRIu32 ",\"groups\":[", r->groups.seq);
+    for (size_t i = 0; i < r->groups.count; i++) {
         const lg_group_t *g = &r->groups.groups[i];
         char gn[2 * (LG_GROUP_NAME_MAX + 1u) + 8];
         json_escape(g->name, gn, sizeof(gn));
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"id\":%u,\"name\":\"%s\",\"members\":[", i ? "," : "",
-                      g->id, gn);
+        jout(o, "%s{\"id\":%u,\"name\":\"%s\",\"members\":[", i ? "," : "", g->id, gn);
         bool first = true;
-        for (size_t u = 0; u < r->n_users && u < 32u && n > 0 && (size_t)n < sizeof(out); u++) {
+        for (size_t u = 0; u < r->n_users && u < 32u; u++) {
             if (g->members & (1u << u)) {
-                n += snprintf(out + n, sizeof(out) - (size_t)n, "%s%" PRIu32, first ? "" : ",", r->users[u].device);
+                jout(o, "%s%" PRIu32, first ? "" : ",", r->users[u].device);
                 first = false;
             }
         }
-        if (n > 0 && (size_t)n < sizeof(out)) {
-            n += snprintf(out + n, sizeof(out) - (size_t)n, "]}");
-        }
+        jout(o, "]}");
     }
-    if (n > 0 && (size_t)n < sizeof(out)) {
-        n += snprintf(out + n, sizeof(out) - (size_t)n, "]}");
+    /* Positions held here (D65): handhelds and APs, RAM only, shown behind the login alone. */
+    jout(o, "],\"positions\":[");
+    for (size_t i = 0; i < ps->n; i++) {
+        const lg_position_t *p = &ps->p[i];
+        char pn[2 * LG_NAME_MAX + 8];
+        json_escape(ps->name[i], pn, sizeof(pn));
+        bool is_ap = (p->subject & LG_NODE_ID_BASE) != 0;
+        jout(o, "%s{\"subject\":%" PRIu32 ",\"name\":\"%s\",\"ap\":%s,\"lat_u\":%" PRId32 ",\"lon_u\":%" PRId32
+                 ",\"fix_time\":%" PRIu32 ",\"sats\":%u}",
+             i ? "," : "", is_ap ? (p->subject & ~LG_NODE_ID_BASE) : p->subject, pn, is_ap ? "true" : "false",
+             p->lat_u, p->lon_u, p->fix_time, p->sats);
     }
-    if (n <= 0 || (size_t)n >= sizeof(out)) {
-        return send_error(req, "500 Internal Server Error", "Status too large.");
-    }
-    return send_json(req, "200 OK", out);
+    jout(o, "]}");
+    return jout_end(o);
 }
 
 /*
@@ -672,24 +786,25 @@ static esp_err_t h_history(httpd_req_t *req)
     if (session_from_request(req) == NULL) {
         return send_error(req, "401 Unauthorized", "Log in to see grid status.");
     }
-    static snapshot_t sn;
-    xSemaphoreTake(w.lock, portMAX_DELAY);
-    sn = w.snap;
-    xSemaphoreGive(w.lock);
+    take_view(false);
+    const snapshot_t *sn = &w.view;
 
-    static uint8_t out[HIST_HEADER + LG_MAX_NODES * HIST_AP + GRID_INCIDENTS * sizeof(grid_incident_t)];
-    memset(out, 0, sizeof(out));
+    _Static_assert(HIST_HEADER + LG_MAX_NODES * HIST_AP + GRID_INCIDENTS * sizeof(grid_incident_t) <= JOUT_BUF,
+                   "history no longer fits the response buffer");
+    uint8_t *out = (uint8_t *)s_jo.buf;
+    memset(out, 0, JOUT_BUF);
     out[0] = 1u;
-    out[1] = (uint8_t)sn.node;
-    out[2] = (uint8_t)sn.n_aps;
-    out[3] = (uint8_t)sn.n_incidents;
-    lg_wr32(out + 4, sn.time_set_unix);
-    out[8] = sn.time_set_on == GRID_NO_AP ? 255u : (uint8_t)sn.time_set_on;
-    out[9] = sn.time_from == GRID_NO_AP ? 255u : (uint8_t)sn.time_from;
-    lg_wr32(out + 12, sn.avail_newest_min);
+    out[1] = (uint8_t)sn->node;
+    out[2] = (uint8_t)sn->n_aps;
+    out[3] = (uint8_t)sn->n_incidents;
+    lg_wr32(out + 4, sn->time_set_unix);
+    out[8] = sn->time_set_on == GRID_NO_AP ? 255u : (uint8_t)sn->time_set_on;
+    out[9] = sn->time_from == GRID_NO_AP ? 255u : (uint8_t)sn->time_from;
+    out[10] = sn->time_by_gps ? 1u : 0u;   /* D63: set by that AP's GPS, not by an admin */
+    lg_wr32(out + 12, sn->avail_newest_min);
     size_t n = HIST_HEADER;
-    for (size_t i = 0; i < sn.n_aps; i++, n += HIST_AP) {
-        const grid_ap_info_t *a = &sn.aps[i];
+    for (size_t i = 0; i < sn->n_aps; i++, n += HIST_AP) {
+        const grid_ap_info_t *a = &sn->aps[i];
         uint8_t *e = out + n;
         e[0] = (uint8_t)a->ap;
         e[1] = a->self ? 1u : 0u;
@@ -704,10 +819,10 @@ static esp_err_t h_history(httpd_req_t *req)
         lg_wr32(e + 20, a->boot);
         lg_wr32(e + 24, a->prev_run_s);
         memcpy(e + 28, a->name, GRID_AP_NAME_MAX + 1u);
-        memcpy(e + 44, sn.avail[i], GRID_AVAIL_BYTES);
+        memcpy(e + 44, sn->avail[i], GRID_AVAIL_BYTES);
     }
-    memcpy(out + n, sn.incidents, sn.n_incidents * sizeof(grid_incident_t));
-    n += sn.n_incidents * sizeof(grid_incident_t);
+    memcpy(out + n, sn->incidents, sn->n_incidents * sizeof(grid_incident_t));
+    n += sn->n_incidents * sizeof(grid_incident_t);
     ptrace_event(PTRACE_WEB);
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -733,12 +848,12 @@ static esp_err_t h_time(httpd_req_t *req)
         return send_error(req, "409 Conflict",
                           "Grid time comes from the GPS on this AP while it has a fix, so it cannot be set by hand.");
     }
-    static node_settings_t cfg;
-    grid_state_settings(&cfg);
-    if (json_string(body, "timezone", tz, sizeof(tz)) && valid_timezone(tz) && strcmp(tz, cfg.timezone) != 0) {
-        memset(cfg.timezone, 0, sizeof(cfg.timezone));
-        strncpy(cfg.timezone, tz, SETTINGS_TZ_MAX);
-        (void)grid_state_commit(&cfg);
+    node_settings_t *cfg = &w.cfg;
+    grid_state_settings(cfg);
+    if (json_string(body, "timezone", tz, sizeof(tz)) && valid_timezone(tz) && strcmp(tz, cfg->timezone) != 0) {
+        memset(cfg->timezone, 0, sizeof(cfg->timezone));
+        strncpy(cfg->timezone, tz, SETTINGS_TZ_MAX);
+        (void)grid_state_commit(cfg);
     }
     if (!post_time(unix_ms)) {
         return send_error(req, "503 Service Unavailable", "The AP is busy. Try again.");
@@ -795,10 +910,8 @@ static esp_err_t h_groups(httpd_req_t *req)
 
     /* Try the edit on a copy of the published table first, so the page hears why it would be
      * refused; the core task then applies it to the real one. */
-    static snapshot_t snap;
-    xSemaphoreTake(w.lock, portMAX_DELAY);
-    snap = w.snap;
-    xSemaphoreGive(w.lock);
+    take_view(false);
+    snapshot_t *snap = &w.view;   /* the web task's own copy: the trial edit may change it */
     node_cmd_t cmd = { .type = NODE_CMD_GROUP_EDIT };
     lg_group_edit_t *e = &cmd.group;
     if (strcmp(op, "create") == 0) {
@@ -812,7 +925,7 @@ static esp_err_t h_groups(httpd_req_t *req)
         e->op = LG_GROUP_ANNOUNCERS;
         if (strcmp(devices, "all") == 0) {
             e->members = LG_ANNOUNCE_EVERYONE;
-        } else if (!parse_members(&snap.roster, devices, &e->members)) {
+        } else if (!parse_members(&snap->roster, devices, &e->members)) {
             return send_error(req, "400 Bad Request", "Pick handhelds from the list.");
         }
     } else {
@@ -824,17 +937,17 @@ static esp_err_t h_groups(httpd_req_t *req)
             return send_error(req, "400 Bad Request", "A group name is 1 to 15 bytes (fewer with accents or emoji).");
         }
         memcpy(e->name, name, strlen(name));
-        if (!parse_members(&snap.roster, devices, &e->members)) {
+        if (!parse_members(&snap->roster, devices, &e->members)) {
             return send_error(req, "400 Bad Request", "Pick handhelds from the list.");
         }
     }
-    switch (lg_groups_apply_edit(&snap.roster, 0, e, g_app.index)) {
+    switch (lg_groups_apply_edit(&snap->roster, 0, e, g_app.index)) {
     case 0:
         break;
     case LG_ACK_REJ_UNKNOWN_TARGET:
         return send_error(req, "404 Not Found", "That group no longer exists. Reload the page.");
     default:
-        if (e->op == LG_GROUP_CREATE && snap.roster.groups.count >= LG_MAX_GROUPS) {
+        if (e->op == LG_GROUP_CREATE && snap->roster.groups.count >= LG_MAX_GROUPS) {
             return send_error(req, "409 Conflict", "There are already 8 groups. Remove one first.");
         }
         return send_error(req, "400 Bad Request", "Check the name, and pick at least one handheld.");
@@ -857,7 +970,9 @@ esp_err_t web_admin_start(void)
         return ESP_ERR_NO_MEM;
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 8192;
+    /* Measured high-water mark 2.6 KB with the page polling (/api/status streams from a static
+     * buffer, so no handler keeps a large body on the stack); 6 KB leaves room for login's PBKDF2. */
+    config.stack_size = 6144;
     config.max_uri_handlers = 12;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
@@ -882,7 +997,7 @@ esp_err_t web_admin_start(void)
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         httpd_register_uri_handler(server, &routes[i]);
     }
-    static node_settings_t cfg;
+    node_settings_t cfg;   /* the main task: w.cfg belongs to the handlers, which may already run */
     grid_state_settings(&cfg);
     uint8_t ip[4];
     lg_proto_node_ip(g_app.index, ip);

@@ -405,6 +405,7 @@ Four layers, each independently versioned:
 | 0x21 | PRESENCE_REQUEST | SYSTEM | client → node, node → node |
 | 0x22 | PRESENCE_DIGEST | SYSTEM | node → nodes (every 30 s) |
 | 0x23 | NAME | SYSTEM | client → node, node → nodes (flood), node → clients. A handheld's chosen name, versioned, newest wins (D50). Body: u32 device, u32 version, u8 length, 1..23 bytes of UTF-8 |
+| 0x24 | POSITION | SYSTEM | client → node, node → nodes (flood), node → clients. A handheld's or AP's GPS fix, newest fix_time wins, RAM only (D65). Body, 18 bytes: u32 subject (device, or 0x80000000 \| AP), i32 lat µdeg, i32 lon µdeg, u32 fix_time (≥ 1700000000), u8 sats, u8 flags (0x01 LIVE: fix_time is the sender's GPS clock now; an AP with no time takes it as carried) |
 | 0x30 | TEXT_MESSAGE | DIRECT / GROUP / BROADCAST | any |
 | 0x31 | MESSAGE_ACK | DIRECT | any |
 | 0x40 | CONFIG_ANNOUNCE | SYSTEM | master → nodes |

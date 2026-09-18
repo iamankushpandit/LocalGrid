@@ -11,7 +11,7 @@
 
 #include "lg_draw.h"
 
-#define SLIST_ROWS       28
+#define SLIST_ROWS       32   /* Status with a GPS fitted is the longest list */
 #define SLIST_LABEL_MAX  32
 #define SLIST_VALUE_MAX  112
 

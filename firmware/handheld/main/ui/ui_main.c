@@ -1,9 +1,8 @@
 /*
- * The handheld UI (D55): the UI task, the launcher and the Status screen, and navigation, drawn
- * with lg_draw.
+ * The handheld UI (D55): the UI task, the launcher, and navigation, drawn with lg_draw. Status is
+ * a list screen (ui_screens.c), so it scrolls to hold the location rows (D65).
  *
- * Every piece of text is its own box, and a box is redrawn only when its text changes, so the
- * Status screen's once-a-second clock repaints about 100 by 22 pixels, not the panel. Touch is
+ * Every piece of text is its own box, and a box is redrawn only when its text changes. Touch is
  * polled on this task, hit-tested against the tiles, and a pressed tile repaints itself.
  *
  * Every 10 s it logs how many boxes it drew, how many pixels it sent, and how long that took,
@@ -29,7 +28,6 @@
 #include "lg_draw.h"
 #include "lg_emoji.h"
 #include "lg_envelope.h"
-#include "lg_selftest.h"
 #include "ui_chat.h"
 #include "ui_nav.h"
 #include "ui_list.h"
@@ -67,8 +65,6 @@ typedef struct {
     lg_box_t detail;
 } tile_t;
 
-#define STATUS_ROWS 11
-
 static struct {
     uint16_t    w;
     uint16_t    h;
@@ -76,11 +72,8 @@ static struct {
     lg_box_t    heading;
     lg_box_t    subline;
     tile_t      tiles[TILE_COUNT];
-    lg_box_t    labels[STATUS_ROWS];
-    lg_box_t    values[STATUS_ROWS];
     int         pressed;          /* launcher tile, -1 none */
     hh_status_t st;
-    bool        marked_status;
     /* A screen change asked for by a screen, done after its touch or refresh returns. */
     bool        nav_pending;
     ui_nav_t nav_to;
@@ -189,51 +182,6 @@ static void show_launcher(void)
     }
 }
 
-static const char *ROW_NAMES[STATUS_ROWS] = {
-    "Name", "Link", "AP", "Signal", "Address", "Grid time", "People", "Groups", "Free memory", "Lowest", "Self test",
-};
-
-static void build_status(void)
-{
-    for (int i = 0; i < STATUS_ROWS; i++) {
-        int16_t y = (int16_t)(44 + i * 24);
-        s.labels[i] = text_box(PAD, y, 100, 22, &lg_font_montserrat_12, C_MUTED, C_BG, LG_ALIGN_LEFT, ROW_NAMES[i]);
-        s.values[i] = text_box(108, y, (int16_t)(s.w - 108 - PAD), 22, &lg_font_montserrat_14, C_TEXT, C_BG,
-                               LG_ALIGN_RIGHT, "");
-    }
-}
-
-static void show_status(void)
-{
-    lg_draw_scroll_area(0, 0);
-    s.screen = SCREEN_STATUS;
-    lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
-    lg_draw_fill(&all, C_BG);
-    /* Home is the house at the left, as on every screen but the launcher (D62). */
-    int16_t title_right = ui_bar_place((int16_t)(s.w - PAD), PAD, 28);
-    int16_t title_left = ui_bar_home(PAD, 28);
-    lg_box_t title = text_box(title_left, PAD, (int16_t)(title_right - title_left), 28, &lg_font_montserrat_20,
-                              C_ACCENT, C_BG, LG_ALIGN_LEFT, "Status");
-    title.pad = 2;
-    lg_draw_box(&title);
-    ui_bar_draw();
-    for (int i = 0; i < STATUS_ROWS; i++) {
-        s.values[i].text[0] = '\0';   /* force every value to draw once */
-        lg_draw_box(&s.labels[i]);
-    }
-}
-
-static const char *link_word(hh_link_t link)
-{
-    switch (link) {
-    case HH_LINK_SEARCHING:   return "searching";
-    case HH_LINK_CONNECTING:  return "connecting";
-    case HH_LINK_REGISTERING: return "registering";
-    case HH_LINK_ONLINE:      return "online";
-    default:                  return "stopped";
-    }
-}
-
 /*
  * While someone is being played, a mark in the header's spare slot (left of the battery) says so on
  * every screen, so a talk from another conversation is not a voice from nowhere (D61). The chat for
@@ -278,6 +226,7 @@ static void refresh(void)
     case SCREEN_GROUP_EDIT: ui_group_edit_refresh(now); return;
     case SCREEN_SETTINGS:   ui_settings_refresh(); return;
     case SCREEN_WHICH_AP:   ui_which_ap_refresh(); return;
+    case SCREEN_STATUS:     ui_status_refresh(); return;
     case SCREEN_RENAME:     return;
     default:                break;
     }
@@ -307,40 +256,6 @@ static void refresh(void)
         snprintf(text, sizeof(text), "%u APs, %" PRIu32 " KB", st->n_nodes, esp_get_free_heap_size() / 1024u);
         lg_draw_set_text(&s.tiles[TILE_STATUS].detail, text);
         lg_draw_set_text(&s.tiles[TILE_SETTINGS].detail, st->preferred_node < 0 ? "auto AP" : "fixed AP");
-        return;
-    }
-    const char *v[STATUS_ROWS];
-    char b[STATUS_ROWS][LG_BOX_TEXT_MAX];
-    snprintf(b[0], sizeof(b[0]), "%s", st->name);
-    snprintf(b[1], sizeof(b[1]), "%s", link_word(st->link));
-    snprintf(b[2], sizeof(b[2]), "%s", st->node >= 0 ? st->node_ssid : "--");
-    snprintf(b[3], sizeof(b[3]), "%d dBm", st->rssi);
-    snprintf(b[4], sizeof(b[4]), "%u.%u.%u.%u", st->ip[0], st->ip[1], st->ip[2], st->ip[3]);
-    if (st->grid_time == 0) {
-        snprintf(b[5], sizeof(b[5]), "not set");
-    } else {
-        snprintf(b[5], sizeof(b[5]), "%02u:%02u:%02u", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u),
-                 (unsigned)(day % 60u));
-    }
-    snprintf(b[6], sizeof(b[6]), "%u", st->n_people);
-    snprintf(b[7], sizeof(b[7]), "%u", st->n_groups);
-    snprintf(b[8], sizeof(b[8]), "%" PRIu32 " KB", esp_get_free_heap_size() / 1024u);
-    snprintf(b[9], sizeof(b[9]), "%" PRIu32 " KB", esp_get_minimum_free_heap_size() / 1024u);
-    const lg_selftest_result_t *test = lg_selftest_last();   /* run at boot (D24) */
-    if (test->failures == 0) {
-        snprintf(b[10], sizeof(b[10]), "%u checks passed", test->checks);
-        s.values[10].fg = C_TEXT;
-    } else {
-        snprintf(b[10], sizeof(b[10]), "%u of %u failed", test->failures, test->checks);
-        s.values[10].fg = C_ERROR;
-    }
-    for (int i = 0; i < STATUS_ROWS; i++) {
-        v[i] = b[i];
-        lg_draw_set_text(&s.values[i], v[i]);
-    }
-    if (!s.marked_status) {
-        s.marked_status = true;
-        hh_mem_mark("Status screen drawn");
     }
 }
 
@@ -374,11 +289,10 @@ void ui_redraw_current(void)
     }
     switch (s.screen) {
     case SCREEN_LAUNCHER:   show_launcher(); refresh(); break;
-    case SCREEN_STATUS:     show_status(); refresh(); break;
     case SCREEN_CHAT:       ui_chat_redraw(); chat_bar(); break;
     case SCREEN_GROUP_EDIT: ui_group_edit_redraw(); break;
     case SCREEN_RENAME:     ui_rename_redraw(); break;
-    default:                slist_redraw(); break;   /* conversations, groups, settings, which AP */
+    default:                slist_redraw(); break;   /* status, conversations, groups, settings, which AP */
     }
 }
 
@@ -400,8 +314,8 @@ static void apply_nav(void)
         refresh();
         break;
     case NAV_STATUS:
-        show_status();
-        refresh();
+        s.screen = SCREEN_STATUS;
+        ui_status_open(s.w, s.h);
         break;
     case NAV_CONVERSATIONS:
         s.screen = SCREEN_CONVS;
@@ -450,6 +364,7 @@ static void on_tap(int16_t x, int16_t y, bool down)
     case SCREEN_GROUP_EDIT: ui_group_edit_touch(x, y, down); return;
     case SCREEN_SETTINGS:   ui_settings_touch(x, y, down); return;
     case SCREEN_WHICH_AP:   ui_which_ap_touch(x, y, down); return;
+    case SCREEN_STATUS:     ui_status_touch(x, y, down); return;
     case SCREEN_RENAME:     ui_rename_touch(x, y, down); return;
     default:                break;
     }
@@ -479,7 +394,6 @@ static void on_tap(int16_t x, int16_t y, bool down)
             ui_go(NAV_CONVERSATIONS, 0, 0, NULL);
         }
     }
-    /* Status has nothing to tap but the bar's house, which ui_bar_touch took above. */
 }
 
 static QueueHandle_t s_requests;
@@ -641,7 +555,6 @@ esp_err_t ui_start(const lg_board_t *board)
     }
     s.nav_pending = false;   /* calibration asks for Settings; at boot the launcher comes first */
     build_launcher();
-    build_status();
     ui_overlay_start(s.w, s.h);
     ui_lock_start(s.w, s.h);
     show_launcher();

@@ -6,6 +6,7 @@
  * Node index and name come from the identity partition (decisions D20, D21).
  */
 #include <inttypes.h>
+#include <math.h>
 #include <string.h>
 #include <time.h>
 
@@ -783,7 +784,7 @@ static void handle_command(const node_cmd_t *cmd)
         }
         s_gps_owns = false;
         set_grid_time_ms((uint64_t)cmd->value * 1000u + cmd->millis, LG_TIME_AUTHORITATIVE, 0);
-        grid_state_time_set_here(cmd->value);
+        grid_state_time_set_here(cmd->value, false);
         grid_state_announce();   /* the new generation goes first, so other APs stop defending theirs */
         lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
         printf("Grid time set to %" PRIu32 " and announced\n", cmd->value);
@@ -802,12 +803,55 @@ static void handle_command(const node_cmd_t *cmd)
  * MAIN, and the next fix takes the grid back: the GPS wins.
  */
 
+/*
+ * This AP's own position on the grid (D65): shared with every AP and handheld, in RAM only, so the
+ * handhelds can show distance and direction to MAIN and every admin page can draw it. Sent at most
+ * every POS_EVERY_MS, or at once when the fix moved more than POS_MOVE_M.
+ */
+#define POS_EVERY_MS 30000u
+#define POS_MOVE_M   20.0f
+
+static void gps_position(uint32_t fix_unix)
+{
+    static bool     s_sent;
+    static uint32_t s_sent_ms;
+    static int32_t  s_lat, s_lon;
+    gps_state_t st;
+    gps_state(&st);
+    if (!st.fix || !st.has_pos) {
+        return;
+    }
+    uint32_t now = app_now_ms();
+    bool moved = false;
+    if (s_sent) {
+        /* Equirectangular: exact enough over tens of metres. 1 microdegree of latitude = 0.111 m. */
+        float dy = (float)(st.lat_u - s_lat) * 0.111f;
+        float dx = (float)(st.lon_u - s_lon) * 0.111f * cosf((float)st.lat_u * 1.745329e-8f);
+        moved = dx * dx + dy * dy > POS_MOVE_M * POS_MOVE_M;
+        if (!moved && now - s_sent_ms < POS_EVERY_MS) {
+            return;
+        }
+    }
+    int rc = lg_node_set_own_position(&g_app.core, st.lat_u, st.lon_u, fix_unix, st.sats);
+    if (rc != LG_OK) {
+        return;   /* no newer than the fix already shared */
+    }
+    if (!s_sent || moved) {
+        ESP_LOGI(TAG, "[GRID] Shared this AP's GPS position (%u satellites)%s", st.sats, s_sent ? ": it moved" : "");
+    }
+    s_sent = true;
+    s_sent_ms = now;
+    s_lat = st.lat_u;
+    s_lon = st.lon_u;
+}
+
 static void gps_time(const node_cmd_t *cmd)
 {
+    gps_position(cmd->value);
     uint64_t gps_ms = (uint64_t)cmd->value * 1000u + cmd->millis + (app_now_ms() - cmd->at_ms);
     if (!s_gps_owns || g_app.time_quality != LG_TIME_AUTHORITATIVE) {
         set_grid_time_ms(gps_ms, LG_TIME_AUTHORITATIVE, 0);
-        grid_state_time_set_here(cmd->value);
+        grid_state_time_set_here(cmd->value, true);
         grid_state_announce();   /* the new generation first, so other APs stop defending theirs */
         lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
         s_gps_owns = true;

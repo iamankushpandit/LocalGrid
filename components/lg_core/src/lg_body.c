@@ -153,6 +153,54 @@ bool lg_name_dec(const uint8_t *in, size_t len, lg_name_t *v)
     return true;
 }
 
+bool lg_position_valid(int32_t lat_u, int32_t lon_u, uint32_t fix_time)
+{
+    return lat_u >= -LG_POS_LAT_MAX && lat_u <= LG_POS_LAT_MAX &&
+           lon_u >= -LG_POS_LON_MAX && lon_u <= LG_POS_LON_MAX &&
+           fix_time >= LG_POS_TIME_MIN;
+}
+
+size_t lg_position_enc(const lg_position_t *p, uint8_t *out)
+{
+    lg_wr32(out, p->subject);
+    lg_wr32(out + 4, (uint32_t)p->lat_u);
+    lg_wr32(out + 8, (uint32_t)p->lon_u);
+    lg_wr32(out + 12, p->fix_time);
+    out[16] = p->sats;
+    out[17] = p->flags;
+    return LG_POSITION_LEN;
+}
+
+bool lg_position_dec(const uint8_t *body, size_t len, lg_position_t *out)
+{
+    if (body == NULL || out == NULL || len != LG_POSITION_LEN) {
+        return false;
+    }
+    lg_position_t p = {
+        .subject  = lg_rd32(body),
+        .lat_u    = (int32_t)lg_rd32(body + 4),
+        .lon_u    = (int32_t)lg_rd32(body + 8),
+        .fix_time = lg_rd32(body + 12),
+        .sats     = body[16],
+        .flags    = body[17],
+    };
+    if (p.subject == 0 || !lg_position_valid(p.lat_u, p.lon_u, p.fix_time)) {
+        return false;
+    }
+    *out = p;
+    return true;
+}
+
+int lg_position_slot(const lg_roster_t *r, uint32_t subject)
+{
+    if ((subject & LG_NODE_ID_BASE) != 0) {
+        uint32_t node = subject & ~LG_NODE_ID_BASE;
+        return node < LG_MAX_NODES ? (int)(LG_MAX_DEVICES + node) : -1;
+    }
+    int ui = lg_roster_user_index(r, subject);
+    return ui >= 0 && ui < (int)LG_MAX_DEVICES ? ui : -1;
+}
+
 size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out)
 {
     lg_wr32(out, v->grid_time);

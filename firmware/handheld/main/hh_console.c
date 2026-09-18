@@ -856,6 +856,75 @@ static esp_err_t mic_register(void)
 }
 /* ------------------------------------------------------------------------- end of mic */
 
+/* ---------------------------------------------------------------------------------------- *
+ * gps: this handheld's GPS (D65), as MAIN's `gps` (D63).
+ *
+ *   gps        heard, fix, satellites, sentences, bad checksums, where the clock came from, and
+ *              this handheld's own position: the only place it is ever printed
+ *   gps raw    the next 600 bytes as they arrive (about two seconds at 9600 baud), garbage as <hex>
+ * ---------------------------------------------------------------------------------------- */
+#include "hh_gps.h"
+
+/* Microdegrees as signed decimal degrees, without floating point. */
+static void gps_print_deg(int32_t u)
+{
+    uint32_t a = u < 0 ? (uint32_t)(-(int64_t)u) : (uint32_t)u;
+    printf("%s%" PRIu32 ".%06" PRIu32, u < 0 ? "-" : "", a / 1000000u, a % 1000000u);
+}
+
+static int cmd_gps(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "raw") == 0) {
+        hh_gps_state_t st;
+        hh_gps_state(&st);
+        if (!st.started) {
+            printf("GPS: this board has no GPS pin in its profile\n");
+            return 1;
+        }
+        printf("GPS: %" PRIu32 " bytes received since boot; printing the next 600\n", hh_gps_bytes());
+        hh_gps_dump(600);
+        return 0;
+    }
+    if (argc >= 2) {
+        printf("usage: gps [raw]\n");
+        return 1;
+    }
+    hh_gps_state_t st;
+    hh_gps_state(&st);
+    if (!st.started) {
+        printf("GPS: none (this board's profile has no GPS pin)\n");
+    } else {
+        char none[64];
+        snprintf(none, sizeof(none), "none heard (not fitted, or check module TXD to GPIO%d)", st.rx_gpio);
+        printf("GPS: %s, %u satellites, %" PRIu32 " sentences, %" PRIu32 " bad checksums\n",
+               !st.heard ? none : !st.talking ? "silent now (was heard)" : st.fix ? "FIX" : "no fix yet",
+               st.sats, st.sentences, st.bad);
+        if (st.last_unix != 0) {
+            printf("GPS: last fix %" PRIu32 ", %" PRIu32 " ms ago", st.last_unix, st.fix_age_ms);
+            if (st.has_pos) {
+                printf(", at ");
+                gps_print_deg(st.lat_u);
+                printf(", ");
+                gps_print_deg(st.lon_u);
+            }
+            printf("\n");
+        }
+    }
+    printf("Clock: from %s\n", hh_service_clock_source());
+    return 0;
+}
+
+static esp_err_t gps_register(void)
+{
+    const esp_console_cmd_t cmd = {
+        .command = "gps",
+        .help = "gps [raw]: this handheld's GPS, heard, fix, satellites, clock source (D65); raw dumps what arrives",
+        .func = cmd_gps,
+    };
+    return esp_console_cmd_register(&cmd);
+}
+/* ------------------------------------------------------------------------- end of gps */
+
 esp_err_t hh_console_start(const lg_identity_t *identity)
 {
     s_identity = identity;
@@ -906,6 +975,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         }
     }
     (void)mic_register();                /* mic level | loop | gain, push-to-talk audio */
+    (void)gps_register();                /* gps [raw], D65 */
     (void)lg_power_register_command();   /* power [-m s [-i ms] [-q]], shared with the APs */
     esp_console_register_help_command();
     return esp_console_start_repl(repl);

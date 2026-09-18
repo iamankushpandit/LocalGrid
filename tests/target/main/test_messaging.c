@@ -785,6 +785,225 @@ static void test_names(void)
     sim_destroy(s);
 }
 
+/* ---- positions (D65) ------------------------------------------------------ */
+
+#define LAT0  51507400    /* microdegrees */
+#define LON0  (-127800)
+
+/* Sends a POSITION frame on a client's session, as a handheld would, with any body and scope. */
+static void send_position_frame(sim_t *s, int client, const lg_position_t *p, size_t body_len,
+                                uint8_t scope, uint32_t seq)
+{
+    uint8_t body[LG_POSITION_LEN + 4];
+    memset(body, 0, sizeof(body));
+    (void)lg_position_enc(p, body);
+    lg_env_t e = {
+        .type = LG_T_POSITION, .scope = scope, .target = p->subject,
+        .origin_id = s->clients[client].client.device, .origin_boot = 1, .origin_seq = seq,
+    };
+    uint8_t frame[LG_FRAME_MAX];
+    int len = lg_frame_build(&e, body, body_len, frame, sizeof(frame));
+    CHECK(len > 0);
+    int node = s->clients[client].node;
+    lg_node_on_session_frame(&s->nodes[node].node, &s->clients[client].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+}
+
+static bool pos_is(const lg_position_t *p, uint32_t subject, int32_t lat, int32_t lon, uint32_t fix)
+{
+    return p != NULL && p->subject == subject && p->lat_u == lat && p->lon_u == lon && p->fix_time == fix;
+}
+
+/* Wire format: exact length, ranges, a real subject and fix time; the table slot of each subject. */
+static void test_position_body(void)
+{
+    lg_position_t p = {
+        .subject = LG_PROTO_EMMA, .lat_u = -33868800, .lon_u = -151209300,
+        .fix_time = T0, .sats = 9, .flags = LG_POS_LIVE,
+    };
+    uint8_t wire[LG_POSITION_LEN + 1];
+    lg_position_t back;
+    CHECK_EQ(lg_position_enc(&p, wire), LG_POSITION_LEN);
+    CHECK(lg_position_dec(wire, LG_POSITION_LEN, &back));
+    CHECK(pos_is(&back, LG_PROTO_EMMA, -33868800, -151209300, T0));
+    CHECK_EQ(back.sats, 9);
+    CHECK_EQ(back.flags, LG_POS_LIVE);
+    CHECK_EQ(wire[4], 0x00);   /* -33868800 = 0xFDFB3400, little-endian */
+    CHECK_EQ(wire[5], 0x34);
+    CHECK_EQ(wire[7], 0xFD);
+    CHECK(!lg_position_dec(wire, LG_POSITION_LEN - 1, &back));
+    CHECK(!lg_position_dec(wire, LG_POSITION_LEN + 1, &back));
+
+    lg_position_t bad = p;
+    bad.lat_u = 90000001;
+    (void)lg_position_enc(&bad, wire);
+    CHECK(!lg_position_dec(wire, LG_POSITION_LEN, &back));
+    bad = p;
+    bad.lon_u = -180000001;
+    (void)lg_position_enc(&bad, wire);
+    CHECK(!lg_position_dec(wire, LG_POSITION_LEN, &back));
+    bad = p;
+    bad.fix_time = LG_POS_TIME_MIN - 1u;
+    (void)lg_position_enc(&bad, wire);
+    CHECK(!lg_position_dec(wire, LG_POSITION_LEN, &back));
+    bad = p;
+    bad.subject = 0;
+    (void)lg_position_enc(&bad, wire);
+    CHECK(!lg_position_dec(wire, LG_POSITION_LEN, &back));
+    bad = p;
+    bad.lat_u = -90000000;
+    bad.lon_u = 180000000;
+    (void)lg_position_enc(&bad, wire);
+    CHECK(lg_position_dec(wire, LG_POSITION_LEN, &back));   /* the edges are in range */
+
+    lg_roster_t r;
+    lg_roster_init_prototype(&r);
+    CHECK_EQ(lg_position_slot(&r, LG_PROTO_DAD), 0);
+    CHECK_EQ(lg_position_slot(&r, LG_NODE_ID_BASE | 2u), (int)LG_MAX_DEVICES + 2);
+    CHECK_EQ(lg_position_slot(&r, LG_NODE_ID_BASE | LG_MAX_NODES), -1);
+    CHECK_EQ(lg_position_slot(&r, 999u), -1);
+}
+
+/* D65: a handheld's position reaches every AP and every other handheld; newest fix wins. */
+static void test_positions(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+
+    /* Arguments are checked before anything is kept. */
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), 90000001, 0, T0, 5, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), 0, 180000001, T0, 5, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), LAT0, LON0, 12345u, 5, 0), LG_ERR_ARG);
+    CHECK(lg_client_position(cl(s, DAD), LG_PROTO_DAD) == NULL);
+
+    /* Dad on A; Ranger beside him, Alex on B, Emma on C two hops away, and every AP get it. */
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), LAT0, LON0, T0, 8, LG_POS_LIVE), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(pos_is(lg_client_position(cl(s, DAD), LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0));
+    CHECK_EQ(s->clients[DAD].position_events, 0u);   /* its own: kept, not echoed back */
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_position_t *held = lg_node_position(&s->nodes[i].node, LG_PROTO_DAD);
+        CHECK(pos_is(held, LG_PROTO_DAD, LAT0, LON0, T0));
+        CHECK(held != NULL && held->sats == 8 && held->flags == 0);   /* a kept copy is no clock */
+    }
+    for (int i = 1; i < SIM_CLIENTS; i++) {
+        CHECK(pos_is(lg_client_position(cl(s, i), LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0));
+        CHECK_EQ(s->clients[i].position_events, 1u);
+        CHECK_EQ(s->clients[i].last_position, LG_PROTO_DAD);
+    }
+    lg_position_t list[LG_POS_SLOTS];
+    CHECK_EQ(lg_node_positions(&s->nodes[2].node, list, LG_POS_SLOTS), 1u);
+    CHECK_EQ(lg_node_positions(&s->nodes[2].node, list, 0), 0u);
+
+    /* An older or equal fix goes nowhere and changes nothing. */
+    uint32_t fwd = s->nodes[0].node.stats.forwarded;
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), LAT0 + 1000, LON0, T0 - 10u, 8, 0), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), LAT0 + 2000, LON0, T0, 8, 0), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.forwarded, fwd);
+    CHECK(pos_is(lg_node_position(&s->nodes[2].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0));
+    CHECK_EQ(s->clients[EMMA].position_events, 1u);
+
+    /* A newer fix replaces it everywhere, once, even with every backbone frame delivered twice. */
+    s->duplicate_backbone = true;
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), LAT0 + 3000, LON0 - 50, T0 + 30u, 9, 0), LG_OK);
+    CHECK(sim_pump(s));
+    s->duplicate_backbone = false;
+    CHECK(pos_is(lg_client_position(cl(s, EMMA), LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 3000, LON0 - 50, T0 + 30u));
+    CHECK(pos_is(lg_node_position(&s->nodes[2].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 3000, LON0 - 50, T0 + 30u));
+    CHECK_EQ(s->clients[EMMA].position_events, 2u);
+    CHECK_EQ(s->clients[ALEX].position_events, 2u);
+
+    /* Refusals: placing another handheld, a body of the wrong length, a scope other than system. */
+    uint32_t rejected = s->nodes[0].node.stats.rejected;
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    lg_position_t spoof = { .subject = LG_PROTO_EMMA, .lat_u = 1, .lon_u = 1, .fix_time = T0 + 999u };
+    send_position_frame(s, DAD, &spoof, LG_POSITION_LEN, LG_SCOPE_SYSTEM, 9101);
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected + 1);
+    CHECK(lg_node_position(&s->nodes[0].node, LG_PROTO_EMMA) == NULL);
+    CHECK(lg_client_position(cl(s, RANGER), LG_PROTO_EMMA) == NULL);
+    lg_position_t mine = { .subject = LG_PROTO_DAD, .lat_u = 1, .lon_u = 1, .fix_time = T0 + 999u };
+    send_position_frame(s, DAD, &mine, LG_POSITION_LEN + 1, LG_SCOPE_SYSTEM, 9102);
+    send_position_frame(s, DAD, &mine, LG_POSITION_LEN, LG_SCOPE_DIRECT, 9103);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 2);
+    CHECK(pos_is(lg_node_position(&s->nodes[0].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 3000, LON0 - 50, T0 + 30u));
+
+    /* An AP's own fix reaches every handheld and AP; an older one is refused. */
+    CHECK_EQ(lg_node_set_own_position(&s->nodes[0].node, 91000000, 0, T0, 7), LG_ERR_ARG);
+    CHECK_EQ(lg_node_set_own_position(&s->nodes[0].node, LAT0 - 500, LON0 + 500, T0 + 40u, 7), LG_OK);
+    CHECK(sim_pump(s));
+    uint32_t ap_a = LG_NODE_ID_BASE | 0u;
+    CHECK(pos_is(lg_node_position(&s->nodes[2].node, ap_a), ap_a, LAT0 - 500, LON0 + 500, T0 + 40u));
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        CHECK(pos_is(lg_client_position(cl(s, i), ap_a), ap_a, LAT0 - 500, LON0 + 500, T0 + 40u));
+    }
+    CHECK_EQ(s->clients[EMMA].last_position, ap_a);
+    CHECK_EQ(lg_node_set_own_position(&s->nodes[0].node, LAT0, LON0, T0 + 40u, 7), LG_ERR_ID);
+    CHECK_EQ(lg_node_positions(&s->nodes[1].node, list, LG_POS_SLOTS), 2u);
+    CHECK_EQ(list[1].subject, ap_a);   /* handhelds first, then APs */
+
+    /* A handheld that was away gets every position held when it registers. */
+    sim_detach(s, EMMA);
+    memset(cl(s, EMMA)->positions, 0, sizeof(cl(s, EMMA)->positions));   /* as if Emma had restarted */
+    sim_attach(s, EMMA, 2);
+    CHECK(pos_is(lg_client_position(cl(s, EMMA), LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 3000, LON0 - 50, T0 + 30u));
+    CHECK(pos_is(lg_client_position(cl(s, EMMA), ap_a), ap_a, LAT0 - 500, LON0 + 500, T0 + 40u));
+
+    /* Not registered: kept as our own, not sent. */
+    sim_detach(s, ALEX);
+    CHECK_EQ(lg_client_send_position(cl(s, ALEX), LAT0, LON0 + 7, T0 + 50u, 4, 0), LG_ERR_SHORT);
+    CHECK(pos_is(lg_client_position(cl(s, ALEX), LG_PROTO_ALEX), LG_PROTO_ALEX, LAT0, LON0 + 7, T0 + 50u));
+    CHECK(lg_node_position(&s->nodes[1].node, LG_PROTO_ALEX) == NULL);
+    sim_attach(s, ALEX, 1);
+
+    /* A split grid: a fix on one side reaches the other when the link comes back. */
+    sim_link(s, 1, 2, false);
+    CHECK_EQ(lg_client_send_position(cl(s, ALEX), LAT0, LON0 + 9, T0 + 60u, 4, 0), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_position(&s->nodes[2].node, LG_PROTO_ALEX) == NULL);
+    sim_link(s, 1, 2, true);
+    CHECK(pos_is(lg_node_position(&s->nodes[2].node, LG_PROTO_ALEX), LG_PROTO_ALEX, LAT0, LON0 + 9, T0 + 60u));
+    CHECK(pos_is(lg_client_position(cl(s, EMMA), LG_PROTO_ALEX), LG_PROTO_ALEX, LAT0, LON0 + 9, T0 + 60u));
+    sim_destroy(s);
+}
+
+/* D65: a handheld reading GPS now gives time to an AP that has none, and never overrides one set. */
+static void test_position_time(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    s->grid_time = 0;
+    for (int i = 0; i < SIM_NODES; i++) {
+        s->nodes[i].time = 0;
+    }
+    /* Not live: a stored fix is no clock. */
+    CHECK_EQ(lg_client_send_position(cl(s, ALEX), LAT0, LON0, T0 + 5u, 6, 0), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].client_time_count, 0u);
+    CHECK_EQ(s->nodes[1].time, 0u);
+
+    /* Live, on an AP with no clock: taken as carried time. */
+    CHECK_EQ(lg_client_send_position(cl(s, EMMA), LAT0, LON0, T0 + 7u, 6, LG_POS_LIVE), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[2].client_time_count, 1u);
+    CHECK_EQ(s->nodes[2].time, T0 + 7u);
+    CHECK_EQ(s->nodes[2].time_stratum, LG_STRATUM_UNKNOWN);
+    CHECK_EQ(s->nodes[1].client_time_count, 0u);   /* only the AP it was sent to; copies carry no flag */
+
+    /* Live, on an AP whose clock is set: never overridden. */
+    s->nodes[0].time = T0;
+    CHECK_EQ(lg_client_send_position(cl(s, DAD), LAT0, LON0, T0 + 100u, 6, LG_POS_LIVE), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].client_time_count, 0u);
+    CHECK_EQ(s->nodes[0].time, T0);
+    sim_destroy(s);
+}
+
 static void test_ping_pong(void)
 {
     sim_t *s = make_chain();
@@ -1363,6 +1582,9 @@ void test_messaging(void)
     test_ping_pong();
     test_read_receipt();
     test_names();
+    test_position_body();
+    test_positions();
+    test_position_time();
     test_voice_body();
     test_voice_group();
     test_voice_direct();

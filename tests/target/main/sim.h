@@ -77,6 +77,8 @@ typedef struct {
     uint8_t     voice_last[64];   /* its first bytes of payload */
     uint32_t    voice_refusals;   /* LG_CEV_VOICE_REFUSED */
     uint8_t     last_voice_refusal;
+    uint32_t    position_events;  /* LG_CEV_POSITION (D65) */
+    uint32_t    last_position;    /* its subject */
     lg_e2e_t    e2e;
     lg_client_t client;
 } sim_client_t;

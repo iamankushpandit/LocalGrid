@@ -176,6 +176,9 @@ static void c_event(void *ctx, const lg_client_event_t *ev)
     } else if (ev->type == LG_CEV_VOICE_REFUSED) {
         c->voice_refusals++;
         c->last_voice_refusal = (uint8_t)ev->value;
+    } else if (ev->type == LG_CEV_POSITION) {
+        c->position_events++;
+        c->last_position = ev->value;
     }
 }
 

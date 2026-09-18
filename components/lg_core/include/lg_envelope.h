@@ -41,6 +41,7 @@ typedef enum {
     LG_T_PONG            = 0x13,
     LG_T_PRESENCE_UPDATE = 0x20,
     LG_T_NAME            = 0x23,   /* a handheld's chosen name, versioned; newest wins everywhere */
+    LG_T_POSITION        = 0x24,   /* a handheld's or AP's GPS position, newest fix wins; RAM only (D65) */
     LG_T_TEXT            = 0x30,
     LG_T_MSG_ACK         = 0x31,
     LG_T_VOICE           = 0x40,   /* live push-to-talk frame, 1:1 or group; never stored or retried (D61) */

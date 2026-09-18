@@ -94,6 +94,11 @@ typedef struct {
      * thousandths (2000 = 2:1). The vendor's ratio, checked against a meter only where noted. */
     int8_t             supply_sense;
     uint16_t           supply_divider_milli;
+    /* A GPS module's UART (D65): gps_rx takes the module's TXD, gps_tx goes to its RXD. LG_PIN_NONE
+     * on a board with nowhere to wire one. Every profile sets both: a missing field would read as
+     * GPIO0, the boot button. A pin here is a connector, not a promise that a module is fitted. */
+    int8_t             gps_rx;
+    int8_t             gps_tx;
 } lg_board_t;
 
 /* Returns the profile for a board code (e.g. "HY3"), or NULL if unknown. */

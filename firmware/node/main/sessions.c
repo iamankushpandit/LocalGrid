@@ -11,6 +11,7 @@
 #include "lwip/sockets.h"
 #include "node_app.h"
 #include "power_trace.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "NET";
 
@@ -32,6 +33,25 @@ typedef struct {
 static sess_t s_sess[SESS_MAX];
 static int s_listen_fd = -1;
 static uint32_t s_voice_dropped;   /* talk frames a listener could not take at once (D61) */
+
+/*
+ * Frames for the handheld whose own frame is being handled are gathered here and go out as one
+ * write when the handling ends. ESP-IDF builds lwIP with LWIP_NETIF_TX_SINGLE_PBUF, so every
+ * send() takes a whole MSS-sized buffer (1512 B of heap) however short the frame, and keeps it
+ * until the handheld ACKs. Registering sends ten or so small frames (ack, groups, presence, names,
+ * positions): 11 to 17 KB each on MAIN, stacking to a 17 KB minimum when three handhelds came
+ * back together. Gathered, they take one or two buffers. The bytes on the wire are unchanged.
+ * Core task only, like everything else here.
+ */
+#define GATHER_MAX CONFIG_LWIP_TCP_MSS
+
+static struct {
+    sess_t  *x;      /* the session being handled; NULL when not gathering */
+    uint16_t n;
+    uint8_t  buf[GATHER_MAX];
+} s_gather;
+
+static void gather_flush(bool stop);
 
 static void close_quiet(sess_t *x)
 {
@@ -159,7 +179,10 @@ static void read_session(sess_t *x, uint32_t now)
             break;
         }
         uint32_t before = x->device;
+        s_gather.x = x;
+        s_gather.n = 0;
         lg_node_on_session_frame(&g_app.core, &x->device, x->buf + 2, flen);
+        gather_flush(true);
         if (x->fd < 0) {
             return;   /* closed by a send failure during handling */
         }
@@ -219,6 +242,58 @@ void sess_poll(int timeout_ms)
     }
 }
 
+/*
+ * Writes bytes that hold whole frames to x, or closes x.
+ * This runs on the core task, which serves every session and the backbone, so it must not
+ * wait long for one slow handheld. It used to wait up to SESS_IDLE_MS: a listener that fell
+ * behind during push-to-talk froze the AP, the talker's socket filled, and every handheld on
+ * the AP dropped within seconds (D61). A talk frame that cannot go out at once is dropped
+ * for that listener -- a tenth of a second of their audio -- and anything else waits at most
+ * SEND_WAIT_MS. Bytes already partly sent must finish or the session closes, because the
+ * stream would be out of step.
+ */
+static void write_frames(sess_t *x, const uint8_t *out, size_t total, bool voice)
+{
+    size_t sent = 0;
+    uint32_t started = app_now_ms();
+    while (sent < total) {
+        int n = send(x->fd, out + sent, total - sent, 0);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (voice && sent == 0) {
+                s_voice_dropped++;
+                return;
+            }
+            if (app_now_ms() - started > SEND_WAIT_MS) {
+                break;
+            }
+            vTaskDelay(1);
+            continue;
+        }
+        break;
+    }
+    if (sent < total) {
+        sess_close(x, "send failed");
+    }
+}
+
+/* Sends what is gathered for s_gather.x; gathering stays on unless stop. */
+static void gather_flush(bool stop)
+{
+    sess_t *x = s_gather.x;
+    uint16_t n = s_gather.n;
+    s_gather.n = 0;
+    if (stop) {
+        s_gather.x = NULL;
+    }
+    if (x != NULL && n > 0 && x->fd >= 0) {
+        write_frames(x, s_gather.buf, n, false);   /* a close here only sends to other handhelds */
+    }
+}
+
 void sess_send(uint32_t device, const uint8_t *frame, size_t len)
 {
     if (len > LG_FRAME_MAX) {
@@ -233,48 +308,33 @@ void sess_send(uint32_t device, const uint8_t *frame, size_t len)
             newest = c;
         }
     }
-    if (newest != NULL) {
-        sess_t *x = newest;
-        uint8_t out[2 + LG_FRAME_MAX];
-        lg_wr16(out, (uint16_t)len);
-        memcpy(out + 2, frame, len);
-        size_t total = 2 + len;
-        size_t sent = 0;
-        /*
-         * This runs on the core task, which serves every session and the backbone, so it must not
-         * wait long for one slow handheld. It used to wait up to SESS_IDLE_MS: a listener that fell
-         * behind during push-to-talk froze the AP, the talker's socket filled, and every handheld on
-         * the AP dropped within seconds (D61). A talk frame that cannot go out at once is dropped
-         * for that listener -- a tenth of a second of their audio -- and anything else waits at most
-         * SEND_WAIT_MS. A frame already partly sent must finish or the session closes, because the
-         * stream would be out of step.
-         */
-        bool voice = len > 1 && frame[1] == LG_T_VOICE;
-        uint32_t started = app_now_ms();
-        while (sent < total) {
-            int n = send(x->fd, out + sent, total - sent, 0);
-            if (n > 0) {
-                sent += (size_t)n;
-                continue;
-            }
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                if (voice && sent == 0) {
-                    s_voice_dropped++;
-                    return;
-                }
-                if (app_now_ms() - started > SEND_WAIT_MS) {
-                    break;
-                }
-                vTaskDelay(1);
-                continue;
-            }
-            break;
-        }
-        if (sent < total) {
-            sess_close(x, "send failed");
-        }
+    if (newest == NULL) {
         return;
     }
+    sess_t *x = newest;
+    bool voice = len > 1 && frame[1] == LG_T_VOICE;
+    if (x == s_gather.x) {
+        if (!voice && s_gather.n + 2u + len <= sizeof(s_gather.buf)) {
+            lg_wr16(s_gather.buf + s_gather.n, (uint16_t)len);
+            memcpy(s_gather.buf + s_gather.n + 2, frame, len);
+            s_gather.n = (uint16_t)(s_gather.n + 2u + len);
+            return;
+        }
+        gather_flush(false);   /* keep the order: what is gathered goes first */
+        if (x->fd < 0) {
+            return;
+        }
+        if (!voice && 2u + len <= sizeof(s_gather.buf)) {
+            lg_wr16(s_gather.buf, (uint16_t)len);
+            memcpy(s_gather.buf + 2, frame, len);
+            s_gather.n = (uint16_t)(2u + len);
+            return;
+        }
+    }
+    uint8_t out[2 + LG_FRAME_MAX];   /* one write: a header sent apart would take its own buffer */
+    lg_wr16(out, (uint16_t)len);
+    memcpy(out + 2, frame, len);
+    write_frames(x, out, 2 + len, voice);
 }
 
 uint8_t sess_registered_count(void)

@@ -19,6 +19,8 @@ static const lg_board_t BOARDS[] = {
         .touch = { .kind = LG_TOUCH_NONE },
         .boot_button = 0,
         .supply_sense = LG_PIN_NONE,   /* no divider on this dev board; wire one to an ADC1 pin to measure */
+        .gps_rx = LG_PIN_NONE,
+        .gps_tx = LG_PIN_NONE,
     },
     {
         /* LCDWIKI E32R32P, sold as Hosyond 3.2in. ST7789P3, BGR (measured: red and blue
@@ -55,6 +57,8 @@ static const lg_board_t BOARDS[] = {
          * no battery fitted it reads the charger output, which follows USB. */
         .supply_sense = 34,
         .supply_divider_milli = 2000,
+        .gps_rx = LG_PIN_NONE,   /* UART0 is this board's console, and no free connector carries a UART */
+        .gps_tx = LG_PIN_NONE,
     },
     {
         /* Freenove FNK0104B. ILI9341 with TFT_eSPI's ILI9341_2 sequence, BGR, inversion
@@ -98,6 +102,11 @@ static const lg_board_t BOARDS[] = {
          * 4.09-4.16 V here on USB with no pack fitted. */
         .supply_sense = 9,
         .supply_divider_milli = 2000,
+        /* D65: the 4-pin "UART" connector (RXD, TXD, GND, 5V). The console is USB-Serial-JTAG, so
+         * these are free: board RXD is GPIO44 (the GPS module's TXD goes here), board TXD GPIO43.
+         * The owner wired a GT-U7 here on device 1. */
+        .gps_rx = 44,
+        .gps_tx = 43,
     },
 };
 

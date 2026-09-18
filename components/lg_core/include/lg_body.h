@@ -92,6 +92,45 @@ typedef struct {
 } lg_name_t;
 
 /*
+ * POSITION (D65): handheld -> its AP, AP -> APs (flooded), AP -> handhelds. SYSTEM scope.
+ *     0  u32  subject    device index, or LG_NODE_ID_BASE | node for an AP's own position
+ *     4  i32  lat_u      microdegrees, north positive, |lat_u| <= 90e6
+ *     8  i32  lon_u      microdegrees, east positive, |lon_u| <= 180e6
+ *    12  u32  fix_time   Unix seconds of the fix, >= LG_POS_TIME_MIN: the version, newer wins
+ *    16  u8   sats
+ *    17  u8   flags      LG_POS_*
+ * Exactly 18 bytes. Only a handheld sets its own position, and only an AP its own. Positions live
+ * in RAM on every device and are never written to flash: a deliberate exception to D48.
+ * LG_POS_LIVE says fix_time was the sender's GPS clock when it sent it; an AP with no grid time
+ * may take it as carried time. Copies an AP keeps and passes on have the flag cleared.
+ */
+#define LG_POSITION_LEN  18u
+#define LG_POS_LIVE      0x01u        /* fix_time is the sender's current GPS UTC (fix under 2 s old): usable as a clock */
+#define LG_POS_TIME_MIN  1700000000u  /* no real fix is older than this */
+#define LG_POS_LAT_MAX   90000000
+#define LG_POS_LON_MAX   180000000
+/* Slots in a position table: one per roster user (by user index), then one per AP (by node). */
+#define LG_POS_SLOTS     (LG_MAX_DEVICES + LG_MAX_NODES)
+typedef struct {
+    uint32_t subject;    /* device index, or LG_NODE_ID_BASE | node for an AP's own position */
+    int32_t  lat_u;      /* microdegrees, north positive; |lat_u| <= 90e6 */
+    int32_t  lon_u;      /* microdegrees, east positive; |lon_u| <= 180e6 */
+    uint32_t fix_time;   /* Unix seconds of the fix: the version, newer wins; 0 in an empty slot */
+    uint8_t  sats;
+    uint8_t  flags;      /* LG_POS_* */
+} lg_position_t;
+
+/* Writes LG_POSITION_LEN bytes and returns that length. */
+size_t lg_position_enc(const lg_position_t *p, uint8_t *out);
+/* Exact length, coordinate ranges, subject not 0, fix_time >= LG_POS_TIME_MIN. */
+bool   lg_position_dec(const uint8_t *body, size_t len, lg_position_t *out);
+/* True if the coordinates and fix time are in range. */
+bool   lg_position_valid(int32_t lat_u, int32_t lon_u, uint32_t fix_time);
+/* The table slot for subject: its roster user index, or LG_MAX_DEVICES + node for an AP.
+ * -1 for an unknown device or a node index at or above LG_MAX_NODES. */
+int    lg_position_slot(const lg_roster_t *r, uint32_t subject);
+
+/*
  * TIME_SYNC: AP -> APs (flooded), AP -> its handhelds.
  *   u32 grid time, Unix seconds | u16 milliseconds into that second (0..999) |
  *   u8 quality | u8 stratum

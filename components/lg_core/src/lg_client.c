@@ -178,6 +178,62 @@ const lg_name_t *lg_client_name(const lg_client_t *c, uint32_t device)
     return &c->names[ui];
 }
 
+/* ---- positions (D65) ------------------------------------------------------ */
+
+int lg_client_send_position(lg_client_t *c, int32_t lat_u, int32_t lon_u, uint32_t fix_time,
+                            uint8_t sats, uint8_t flags)
+{
+    if (c == NULL || !lg_position_valid(lat_u, lon_u, fix_time)) {
+        return LG_ERR_ARG;
+    }
+    int slot = lg_position_slot(c->roster, c->device);
+    if (slot < 0) {
+        return LG_ERR_ARG;
+    }
+    lg_position_t pos = {
+        .subject  = c->device,
+        .lat_u    = lat_u,
+        .lon_u    = lon_u,
+        .fix_time = fix_time,
+        .sats     = sats,
+        .flags    = flags,
+    };
+    if (fix_time >= c->positions[slot].fix_time) {
+        c->positions[slot] = pos;
+    }
+    if (!c->registered) {
+        return LG_ERR_SHORT;
+    }
+    uint8_t body[LG_POSITION_LEN];
+    size_t blen = lg_position_enc(&pos, body);
+    lg_env_t e;
+    base_env(c, &e, LG_T_POSITION, LG_SCOPE_SYSTEM, c->device);
+    return send_frame(c, &e, body, blen) ? LG_OK : LG_ERR_SHORT;
+}
+
+const lg_position_t *lg_client_position(const lg_client_t *c, uint32_t subject)
+{
+    int slot = lg_position_slot(c->roster, subject);
+    if (slot < 0 || c->positions[slot].fix_time == 0) {
+        return NULL;
+    }
+    return &c->positions[slot];
+}
+
+static void handle_position(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
+{
+    lg_position_t pos;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_position_dec(body, e->body_len, &pos)) {
+        return;
+    }
+    int slot = lg_position_slot(c->roster, pos.subject);
+    if (slot < 0 || pos.fix_time <= c->positions[slot].fix_time) {
+        return;   /* an older or equal fix changes nothing */
+    }
+    c->positions[slot] = pos;
+    emit(c, LG_CEV_POSITION, pos.subject);
+}
+
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
                     lg_roster_t *roster, const lg_client_io_t *io)
 {
@@ -813,6 +869,9 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         break;
     case LG_T_GROUPS:
         handle_groups(c, &e, body);
+        break;
+    case LG_T_POSITION:
+        handle_position(c, &e, body);
         break;
     default:
         break;

@@ -9,8 +9,9 @@
  *
  * Precision is NMEA's: about a second, well inside D6's 120 s tolerance. The PPS pin is not used.
  *
- * Position (D64): the fix's latitude and longitude are kept in RAM here, for MAIN's own admin page
- * only. Never written to flash, never put on the backbone or sent to a handheld.
+ * Position (D64, D65): the fix's latitude and longitude are kept in RAM here. The core task shares
+ * them with the grid as this AP's POSITION (every 30 s, or at once when it moves), so handhelds
+ * can point to MAIN and every admin page can map it. Never written to flash.
  */
 #pragma once
 

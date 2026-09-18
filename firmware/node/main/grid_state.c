@@ -446,10 +446,18 @@ bool grid_state_setup_allowed(void)
     return s.heard_other || lgbb_link_count() == 0;
 }
 
-void grid_state_time_set_here(uint32_t unix_s)
+/*
+ * Who set the time rides in the top bit of the author field (D63): the AP's number in the low bits,
+ * TIME_BY_GPS when its GPS set it rather than an admin. The field was always a small AP number, so
+ * no layout change is needed, and an AP on older firmware sees an author that is not itself and
+ * follows it, which is right.
+ */
+#define TIME_BY_GPS 0x8000u
+
+void grid_state_time_set_here(uint32_t unix_s, bool by_gps)
 {
     k.time_gen++;
-    k.time_author = s.self;
+    k.time_author = (uint16_t)(s.self | (by_gps ? TIME_BY_GPS : 0u));
     k.time_set_unix = unix_s;
     s.sync_from = s.self;
     s.sync_ms = app_now_ms();
@@ -641,11 +649,12 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
         k.time_author = time_author;
         k.time_set_unix = time_set_unix;
         s.save_due = true;
-        if (time_author != s.self) {
+        if ((time_author & ~TIME_BY_GPS) != s.self) {
             app_time_follow_new_generation();   /* any stratum held was measured from the old setting */
             if (g_app.time_quality == LG_TIME_AUTHORITATIVE) {
                 g_app.time_quality = LG_TIME_CARRIED;
-                ESP_LOGI("TIME", "[TIME] Time was set more recently on AP %u; following it", time_author);
+                ESP_LOGI("TIME", "[TIME] Time was set more recently on AP %u%s; following it",
+                         (unsigned)(time_author & ~TIME_BY_GPS), (time_author & TIME_BY_GPS) ? " by its GPS" : "");
             }
         }
     }
@@ -689,11 +698,12 @@ bool grid_state_ap(uint16_t ap, grid_ap_info_t *out)
     return true;
 }
 
-void grid_state_time_info(uint32_t *set_unix, uint16_t *set_on_ap, uint32_t *generation)
+void grid_state_time_info(uint32_t *set_unix, uint16_t *set_on_ap, uint32_t *generation, bool *by_gps)
 {
     *set_unix = k.time_set_unix;
-    *set_on_ap = k.time_gen == 0 ? GRID_NO_AP : k.time_author;
+    *set_on_ap = k.time_gen == 0 ? GRID_NO_AP : (uint16_t)(k.time_author & ~TIME_BY_GPS);
     *generation = k.time_gen;
+    *by_gps = k.time_gen != 0 && (k.time_author & TIME_BY_GPS) != 0;
 }
 
 void grid_state_avail(uint16_t ap, uint8_t out[GRID_AVAIL_BYTES])
@@ -817,8 +827,9 @@ void grid_state_print(void)
 {
     node_settings_t c;
     grid_state_settings(&c);
-    printf("Settings version %" PRIu32 " (made on AP %u), %s; time generation %" PRIu32 " (set on AP %u)\n", c.seq,
-           c.author, c.configured ? "set up" : "not set up", k.time_gen, k.time_author);
+    printf("Settings version %" PRIu32 " (made on AP %u), %s; time generation %" PRIu32 " (set on AP %u%s)\n", c.seq,
+           c.author, c.configured ? "set up" : "not set up", k.time_gen, (unsigned)(k.time_author & ~TIME_BY_GPS),
+           (k.time_author & TIME_BY_GPS) ? " by its GPS" : "");
     for (uint16_t ap = 0; ap < LG_MAX_NODES; ap++) {
         grid_ap_info_t a;
         if (!grid_state_ap(ap, &a)) {

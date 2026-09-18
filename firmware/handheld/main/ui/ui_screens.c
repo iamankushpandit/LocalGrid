@@ -1,5 +1,5 @@
 /*
- * The list screens: the conversation list, Groups and the group editor, and Settings
+ * The list screens: the conversation list, Groups and the group editor, Status, and Settings
  * with Which AP, the rename screen, and touch calibration. Each rebuilds its rows from the status
  * snapshot and repaints only when what it shows changed, so a refresh never costs a repaint and a
  * tap is never lost to one.
@@ -13,12 +13,15 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hh_mem.h"
 #include "hh_service.h"
 #include "hh_voice.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_settings.h"
 #include "lg_bsp_touch.h"
 #include "lg_envelope.h"
+#include "lg_selftest.h"
+#include "ui_geo.h"
 #include "ui_kb.h"
 #include "ui_list.h"
 #include "ui_nav.h"
@@ -637,6 +640,281 @@ void ui_settings_touch(int16_t x, int16_t y, bool down)
     default:
         break;
     }
+}
+
+/* ---- status ----
+ *
+ * The facts, then where things are (D65): this handheld's GPS and position, MAIN from here, and
+ * the other handhelds whose positions are known, nearest in time first. It scrolls like any list.
+ *
+ * Status changes every second (the clock), so it is not rebuilt and repainted whole: the rows are
+ * made again and compared with the ones shown. When every row keeps its kind and label, only the
+ * rows whose value changed are repainted; a row coming, going, or moving lays the list out again.
+ */
+
+#define STATUS_NEARBY_MAX  8
+#define STATUS_STALE_S     120   /* an older position says how old it is */
+
+static struct {
+    bool     building;   /* making the rows afresh, rather than comparing with those shown */
+    bool     same;       /* comparing: every row so far has the kind and label shown */
+    uint8_t  index;
+    uint32_t dirty;      /* comparing: rows whose value changed, one bit each */
+} s_stat;
+
+_Static_assert(SLIST_ROWS <= 32, "the Status screen keeps a bit per row");
+
+static void stat_put(slist_kind_t kind, const char *label, const char *value, bool warn)
+{
+    label = label != NULL ? label : "";
+    value = value != NULL ? value : "";
+    if (s_stat.building) {
+        slist_add(kind, label, value, -1, 0)->warn = warn;
+        return;
+    }
+    slist_row_t *r = slist_row(s_stat.index);
+    uint8_t i = s_stat.index++;
+    if (!s_stat.same || r == NULL || r->kind != (uint8_t)kind || strcmp(r->label, label) != 0) {
+        s_stat.same = false;
+        return;
+    }
+    if (strncmp(r->value, value, SLIST_VALUE_MAX - 1u) == 0 && r->warn == warn) {
+        return;
+    }
+    if (kind == ROW_NOTE) {
+        s_stat.same = false;   /* a note's height follows its text */
+        return;
+    }
+    snprintf(r->value, sizeof(r->value), "%s", value);
+    r->warn = warn;
+    s_stat.dirty |= 1u << i;
+}
+
+static const char *link_word(hh_link_t link)
+{
+    switch (link) {
+    case HH_LINK_SEARCHING:   return "searching";
+    case HH_LINK_CONNECTING:  return "connecting";
+    case HH_LINK_REGISTERING: return "registering";
+    case HH_LINK_ONLINE:      return "online";
+    default:                  return "stopped";
+    }
+}
+
+typedef struct {
+    uint8_t       person;   /* index in the status snapshot's people */
+    hh_position_t pos;
+} nearby_t;
+
+/* How good a dilution of precision is, in the words GPS people use. */
+static const char *dop_word(uint16_t dop_c)
+{
+    return dop_c <= 100u ? "excellent" : dop_c <= 200u ? "good" : dop_c <= 500u ? "moderate" : "poor";
+}
+
+/*
+ * Everything this handheld's GPS says (D65), only on a board with one fitted: first whether it has
+ * a lock, in words, then the numbers behind it. Eight rows, so Status stays inside SLIST_ROWS with
+ * the Nearby list full.
+ */
+static void stat_gps(void)
+{
+    hh_gps_info_t g;
+    if (!hh_service_gps_info(&g)) {
+        return;   /* no GPS on this handheld: nothing to say */
+    }
+    char value[SLIST_VALUE_MAX];
+    stat_put(ROW_SECTION, "GPS", NULL, false);
+    if (!g.talking) {
+        stat_put(ROW_FACT, "Lock", "no data from the GPS: check its wiring", true);
+        return;
+    }
+    if (g.fix) {
+        snprintf(value, sizeof(value), "yes, %s%s", g.fix_type == 2u ? "2D" : "3D", g.corrected ? " + WAAS" : "");
+    } else {
+        snprintf(value, sizeof(value), "no, looking for satellites");
+    }
+    stat_put(ROW_FACT, "Lock", value, !g.fix);
+    snprintf(value, sizeof(value), "%u used, %u in view, best %u dB", g.used, g.in_view, g.best_snr);
+    stat_put(ROW_FACT, "Satellites", value, !g.fix);
+    if (g.fix && g.hdop_c != HH_GPS_UNKNOWN) {
+        snprintf(value, sizeof(value), "HDOP %u.%02u, %s", g.hdop_c / 100u, g.hdop_c % 100u, dop_word(g.hdop_c));
+        stat_put(ROW_FACT, "Accuracy", value, g.hdop_c > 500u);
+    }
+    if (g.has_pos) {
+        ui_geo_coord_text(g.lat_u, g.lon_u, value, sizeof(value));
+        stat_put(ROW_FACT, "Position", value, false);
+    }
+    if (g.fix) {
+        char alt[16] = "?";
+        if (g.has_alt) {
+            snprintf(alt, sizeof(alt), "%ld m", (long)((g.alt_dm + (g.alt_dm < 0 ? -5 : 5)) / 10));
+        }
+        uint32_t kmh10 = g.speed_cms == HH_GPS_UNKNOWN ? 0u : (uint32_t)g.speed_cms * 36u / 100u;   /* 0.1 km/h */
+        if (g.speed_cms != HH_GPS_UNKNOWN && kmh10 >= 20u && g.course_cd != HH_GPS_UNKNOWN) {
+            snprintf(value, sizeof(value), "%s, %lu km/h %s", alt, (unsigned long)(kmh10 / 10u),
+                     ui_geo_compass((uint16_t)(g.course_cd / 100u)));
+        } else {
+            snprintf(value, sizeof(value), "%s, not moving", alt);   /* under 2 km/h is GPS drift */
+        }
+        stat_put(ROW_FACT, "Altitude", value, false);
+    }
+    if (g.utc != 0) {
+        uint32_t day = g.utc % 86400u;
+        char age[16];
+        ui_geo_age_text(g.fix_age_ms == UINT32_MAX ? 0u : g.fix_age_ms / 1000u, age, sizeof(age));
+        snprintf(value, sizeof(value), "%02lu:%02lu:%02lu UTC, %s ago", (unsigned long)(day / 3600u),
+                 (unsigned long)(day / 60u % 60u), (unsigned long)(day % 60u), age);
+        stat_put(ROW_FACT, "Last fix", value, !g.fix);
+    }
+    snprintf(value, sizeof(value), "%lu sentences, %lu bad", (unsigned long)g.sentences, (unsigned long)g.bad);
+    stat_put(ROW_FACT, "Data", value, g.bad > g.sentences / 20u);
+}
+
+static void stat_location(const hh_status_t *st)
+{
+    char value[SLIST_VALUE_MAX];
+    char where[32];
+    stat_gps();
+    stat_put(ROW_SECTION, "Location", NULL, false);
+    hh_position_t own;
+    bool have_own = hh_service_own_position(&own) && own.valid;
+    hh_position_t main_pos;
+    if (hh_service_position(HH_SUBJECT_MAIN, &main_pos) && main_pos.valid) {
+        if (have_own) {
+            ui_geo_where_text(own.lat_u, own.lon_u, main_pos.lat_u, main_pos.lon_u, value, sizeof(value));
+        } else {
+            ui_geo_coord_text(main_pos.lat_u, main_pos.lon_u, value, sizeof(value));
+        }
+        stat_put(ROW_FACT, "MAIN", value, false);
+    } else {
+        stat_put(ROW_FACT, "MAIN", "not known", true);
+    }
+    if (!have_own) {
+        return;   /* distances need this handheld's own fix */
+    }
+    /* Other handhelds with known positions, freshest first, at most STATUS_NEARBY_MAX. */
+    nearby_t near[STATUS_NEARBY_MAX];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < st->n_people; i++) {
+        hh_position_t p;
+        if (st->people[i].device == st->device || !hh_service_position(st->people[i].device, &p) || !p.valid) {
+            continue;
+        }
+        uint8_t at = n;   /* insertion sort by age, dropping the oldest when full */
+        while (at > 0 && near[at - 1u].pos.age_s > p.age_s) {
+            at--;
+        }
+        if (at >= STATUS_NEARBY_MAX) {
+            continue;
+        }
+        uint8_t last = n < STATUS_NEARBY_MAX ? n : (uint8_t)(STATUS_NEARBY_MAX - 1u);
+        for (uint8_t k = last; k > at; k--) {
+            near[k] = near[k - 1u];
+        }
+        near[at] = (nearby_t){ i, p };
+        if (n < STATUS_NEARBY_MAX) {
+            n++;
+        }
+    }
+    if (n == 0) {
+        return;
+    }
+    stat_put(ROW_SECTION, "Nearby", NULL, false);
+    for (uint8_t k = 0; k < n; k++) {
+        const hh_position_t *p = &near[k].pos;
+        ui_geo_where_text(own.lat_u, own.lon_u, p->lat_u, p->lon_u, where, sizeof(where));
+        if (p->age_s > STATUS_STALE_S) {
+            char age[16];
+            ui_geo_age_text(p->age_s, age, sizeof(age));
+            snprintf(value, sizeof(value), "%s, %s ago", where, age);
+        } else {
+            snprintf(value, sizeof(value), "%s", where);
+        }
+        stat_put(ROW_FACT, st->people[near[k].person].name, value, p->age_s > STATUS_STALE_S);
+    }
+}
+
+static void stat_rows(void)
+{
+    const hh_status_t *st = ui_status();
+    char value[SLIST_VALUE_MAX];
+    stat_put(ROW_FACT, "Name", st->name, false);
+    stat_put(ROW_FACT, "Link", link_word(st->link), st->link != HH_LINK_ONLINE);
+    stat_put(ROW_FACT, "AP", st->node >= 0 ? st->node_ssid : "--", false);
+    snprintf(value, sizeof(value), "%d dBm", st->rssi);
+    stat_put(ROW_FACT, "Signal", value, false);
+    snprintf(value, sizeof(value), "%u.%u.%u.%u", st->ip[0], st->ip[1], st->ip[2], st->ip[3]);
+    stat_put(ROW_FACT, "Address", value, false);
+    if (st->grid_time == 0) {
+        snprintf(value, sizeof(value), "not set");
+    } else {
+        uint32_t day = st->grid_time % 86400u;
+        snprintf(value, sizeof(value), "%02u:%02u:%02u", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u),
+                 (unsigned)(day % 60u));
+    }
+    stat_put(ROW_FACT, "Grid time", value, st->grid_time == 0);
+    snprintf(value, sizeof(value), "%u", st->n_people);
+    stat_put(ROW_FACT, "People", value, false);
+    snprintf(value, sizeof(value), "%u", st->n_groups);
+    stat_put(ROW_FACT, "Groups", value, false);
+    stat_location(st);
+    snprintf(value, sizeof(value), "%" PRIu32 " KB", esp_get_free_heap_size() / 1024u);
+    stat_put(ROW_FACT, "Free memory", value, false);
+    snprintf(value, sizeof(value), "%" PRIu32 " KB", esp_get_minimum_free_heap_size() / 1024u);
+    stat_put(ROW_FACT, "Lowest", value, false);
+    const lg_selftest_result_t *test = lg_selftest_last();   /* run at boot (D24) */
+    if (test->failures == 0) {
+        snprintf(value, sizeof(value), "%u checks passed", test->checks);
+    } else {
+        snprintf(value, sizeof(value), "%u of %u failed", test->failures, test->checks);
+    }
+    stat_put(ROW_FACT, "Self test", value, test->failures != 0);
+}
+
+static void stat_build(void)
+{
+    slist_begin("Status", false, false);
+    s_stat.building = true;
+    stat_rows();
+    s_stat.building = false;
+}
+
+void ui_status_open(uint16_t w, uint16_t h)
+{
+    s_w = w;
+    s_h = h;
+    stat_build();
+    slist_show(w, h, 0, false);
+    static bool marked;
+    if (!marked) {
+        marked = true;
+        hh_mem_mark("Status screen drawn");
+    }
+}
+
+void ui_status_refresh(void)
+{
+    s_stat.same = true;
+    s_stat.index = 0;
+    s_stat.dirty = 0;
+    stat_rows();
+    if (!s_stat.same || s_stat.index != slist_count()) {
+        stat_build();
+        slist_update();
+        return;
+    }
+    for (uint8_t i = 0; s_stat.dirty != 0u && i < slist_count(); i++) {
+        if (s_stat.dirty & (1u << i)) {
+            slist_repaint_row(i);
+        }
+    }
+}
+
+void ui_status_touch(int16_t x, int16_t y, bool down)
+{
+    slist_event_t ev;
+    slist_touch(x, y, down, &ev);   /* nothing to tap: the rows only scroll, and the house goes home */
 }
 
 /* ---- which AP ---- */

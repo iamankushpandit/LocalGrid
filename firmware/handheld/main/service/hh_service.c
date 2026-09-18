@@ -13,14 +13,17 @@
  * BSSIDs stay in memory and are never logged (D21).
  */
 #include "hh_battery.h"
+#include "hh_gps.h"
 #include "hh_mem.h"
 #include "hh_service.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -117,6 +120,7 @@ typedef enum {
     EV_MARK_READ,
     EV_GROUP_EDIT,
     EV_RENAME,
+    EV_GPS,          /* D65: the GPS task has a new fix, or lost one; read hh_gps_state */
 } ev_type_t;
 
 typedef struct {
@@ -454,6 +458,164 @@ static void io_groups_removed(void *ctx, const uint16_t *removed, size_t n)
     }
 }
 
+/* ---- GPS and positions (D65) ----
+ *
+ * The GPS task (hh_gps.c) only posts EV_GPS; everything below runs on the service task, which owns
+ * lg_client and the clock. While the GPS has a fix it is this handheld's clock, the one REGISTER's
+ * client_time carries back to an AP (D53) and the one LG_POS_LIVE positions carry. Grid time rules
+ * (D6) are untouched: lg_client_time_restricted still asks whether the AP holds grid time.
+ *
+ * Positions are never logged here, this handheld's or anyone else's; `gps` prints our own on request.
+ */
+#define POS_PERIOD_MS     30000    /* resend while fixed, so a restarted AP or handheld soon has it again */
+#define POS_MOVE_M        25.0f    /* ... or at once after moving this far */
+#define POS_LIVE_MS       2000u    /* a fix younger than this is sent as LG_POS_LIVE */
+#define GPS_CLOCK_STEP_S  2u       /* the GPS re-sets the clock only when they disagree by this much */
+#define GRID_WARN_MS      60000u   /* at most one "the grid's time differs from the GPS" line a minute */
+#define POS_SLOTS         (LG_MAX_DEVICES + 1)   /* handhelds 1..LG_MAX_DEVICES, then MAIN */
+
+typedef enum { CLOCK_NONE = 0, CLOCK_KEPT, CLOCK_GRID, CLOCK_GPS } clock_source_t;
+
+static struct {
+    int           rx, tx;             /* the board's GPS pins, -1 none */
+    bool          owns_clock;         /* a fresh fix set the clock; the grid may not move it meanwhile */
+    volatile uint8_t source;          /* clock_source_t, read by the console */
+    bool          fix;                /* the last state the service saw, to tell a change */
+    bool          has_pos;
+    uint8_t       sats;
+    int32_t       lat_u, lon_u;
+    bool          pos_due;            /* send at the next chance: set at registration */
+    bool          sent_any;
+    uint32_t      sent_ms;            /* last attempt, successful or not */
+    int32_t       sent_lat, sent_lon;
+    uint32_t      grid_warn_ms;
+    uint32_t      version;            /* positions_version; guarded by s.lock */
+    lg_position_t pos[POS_SLOTS];     /* guarded by s.lock: the service's copy for other tasks */
+} gp = { .rx = -1, .tx = -1 };
+
+static int pos_slot(uint32_t subject)
+{
+    if (subject >= 1u && subject <= LG_MAX_DEVICES) {
+        return (int)subject - 1;
+    }
+    return subject == HH_SUBJECT_MAIN ? LG_MAX_DEVICES : -1;
+}
+
+/* GPS task: copy nothing, just wake the service task. A full queue drops one second; the next comes. */
+static void gps_notify(void)
+{
+    ev_t ev = { .type = EV_GPS };
+    (void)xQueueSend(s.queue, &ev, 0);
+}
+
+static float moved_m(int32_t lat_a, int32_t lon_a, int32_t lat_b, int32_t lon_b)
+{
+    const float m_per_microdeg = 0.111195f;   /* one microdegree of latitude, in metres */
+    float dy = (float)((int64_t)lat_a - lat_b) * m_per_microdeg;
+    float dx = (float)((int64_t)lon_a - lon_b) * m_per_microdeg * cosf((float)lat_a * 1.7453293e-8f);
+    return sqrtf(dx * dx + dy * dy);
+}
+
+/* Sends this handheld's position if online and fixed; true when lg_client took it. */
+static bool send_own_position(uint32_t now)
+{
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (s.link != HH_LINK_ONLINE || !g.fix || !g.has_pos) {
+        return false;
+    }
+    uint8_t flags = g.fix_age_ms < POS_LIVE_MS ? LG_POS_LIVE : 0u;
+    int rc = lg_client_send_position(&s.client, g.lat_u, g.lon_u, g.last_unix, g.sats, flags);
+    gp.sent_any = true;
+    gp.sent_ms = now;
+    gp.sent_lat = g.lat_u;
+    gp.sent_lon = g.lon_u;
+    gp.pos_due = false;
+    if (rc < 0) {
+        ESP_LOGW("TIME", "[GPS] Position not sent: %s", lg_err_str(rc));
+        return false;
+    }
+    return true;
+}
+
+/* Online and fixed: at registration, every POS_PERIOD_MS, or after moving POS_MOVE_M. */
+static void position_step(uint32_t now)
+{
+    if (s.link != HH_LINK_ONLINE || gp.rx < 0) {
+        return;
+    }
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (!g.fix || !g.has_pos) {
+        return;
+    }
+    if (gp.pos_due || !gp.sent_any || now - gp.sent_ms >= POS_PERIOD_MS ||
+        moved_m(g.lat_u, g.lon_u, gp.sent_lat, gp.sent_lon) > POS_MOVE_M) {
+        (void)send_own_position(now);
+    }
+}
+
+/* EV_GPS: the clock follows a fresh fix, and the screens hear about a change. */
+static void gps_update(void)
+{
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (g.fix != gp.fix || g.sats != gp.sats || g.has_pos != gp.has_pos || g.lat_u != gp.lat_u ||
+        g.lon_u != gp.lon_u) {
+        gp.fix = g.fix;
+        gp.sats = g.sats;
+        gp.has_pos = g.has_pos;
+        gp.lat_u = g.lat_u;
+        gp.lon_u = g.lon_u;
+        xSemaphoreTake(s.lock, portMAX_DELAY);
+        gp.version++;
+        xSemaphoreGive(s.lock);
+        s.dirty = true;
+    }
+    if (!g.fix) {
+        gp.owns_clock = false;   /* the clock carries on from the last fix; the grid may correct it again */
+        return;
+    }
+    /* The time the fix stood for, plus how long ago its sentence began to arrive. */
+    uint64_t gps_ms = (uint64_t)g.last_unix * 1000u + g.last_millis + g.fix_age_ms;
+    uint32_t gps_s = (uint32_t)(gps_ms / 1000u);
+    uint32_t mine = s.time_set ? (uint32_t)(mono_s() + s.time_offset_s) : 0;
+    uint32_t diff = mine > gps_s ? mine - gps_s : gps_s - mine;
+    if (gp.owns_clock && mine != 0 && diff < GPS_CLOCK_STEP_S) {
+        return;
+    }
+    s.time_offset_s = (int64_t)gps_s - mono_s();
+    s.time_set = true;
+    lg_timekeep_save(gps_s);   /* kept across a restart (D60), as a time from the grid is */
+    if (!gp.owns_clock) {
+        ESP_LOGI("TIME", "[TIME] Clock set from the GPS: %" PRIu32 " (%u satellites)%s", gps_s, g.sats,
+                 mine != 0 && diff >= GPS_CLOCK_STEP_S ? "; it was off" : "");
+    } else {
+        ESP_LOGW("TIME", "[TIME] Clock stepped to the GPS: %" PRIu32 ", was %" PRIu32, gps_s, mine);
+    }
+    gp.owns_clock = true;
+    gp.source = CLOCK_GPS;
+}
+
+/* LG_CEV_POSITION: copy lg_client's record where other tasks can read it. Never logged. */
+static void position_mirror(uint32_t subject)
+{
+    int slot = pos_slot(subject);
+    if (slot < 0) {
+        return;
+    }
+    const lg_position_t *p = lg_client_position(&s.client, subject);
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    if (p != NULL) {
+        gp.pos[slot] = *p;
+        gp.pos[slot].subject = subject;
+    } else {
+        memset(&gp.pos[slot], 0, sizeof(gp.pos[slot]));
+    }
+    gp.version++;
+    xSemaphoreGive(s.lock);
+}
+
 /* ---- lg_client io (service task only) ---- */
 
 static bool io_send(void *ctx, const uint8_t *frame, size_t len)
@@ -498,6 +660,19 @@ static uint32_t io_local_time(void *ctx)
 static void io_set_time(void *ctx, uint32_t unix_s)
 {
     (void)ctx;
+    if (gp.owns_clock) {
+        /* D65: while the GPS has a fix it is the clock. The grid's rules (D6) are unchanged; only
+         * this handheld's own clock stays on the GPS. Said at most once a minute. */
+        uint32_t now = now_ms();
+        if (gp.grid_warn_ms == 0 || now - gp.grid_warn_ms >= GRID_WARN_MS) {
+            gp.grid_warn_ms = now == 0 ? 1 : now;
+            uint32_t mine = (uint32_t)(mono_s() + s.time_offset_s);
+            ESP_LOGW("TIME", "[TIME] Grid time %" PRIu32 " differs from this handheld's GPS clock %" PRIu32
+                     "; keeping the GPS", unix_s, mine);
+        }
+        return;
+    }
+    gp.source = CLOCK_GRID;
     s.time_offset_s = (int64_t)unix_s - mono_s();
     s.time_set = true;
     lg_timekeep_save(unix_s);   /* so this handheld can carry it back after its own restart (D60) */
@@ -518,6 +693,7 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         s.last_ping_ms = s.online_since_ms;
         s.last_node = (int)ev->value;
         s.backoff_ms = 0;
+        gp.pos_due = true;   /* D65: our position at registration, from the service loop */
         set_problem("");
         ESP_LOGI("GRID", "[GRID] Registered with node %" PRIu32 " as device %" PRIu32 " (%s)", ev->value, s.device,
                  roster_name(s.device));
@@ -600,6 +776,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         if (s.voice_io != NULL && s.voice_io->on_refused != NULL) {
             s.voice_io->on_refused((int)ev->value);
         }
+        break;
+    case LG_CEV_POSITION:
+        position_mirror(ev->value);   /* D65; never logged */
         break;
     case LG_CEV_GROUP_REFUSED:
         snprintf(s.group_problem, sizeof(s.group_problem), "%s",
@@ -1106,6 +1285,9 @@ static void handle_event(const ev_t *ev, uint32_t now)
                  ev->id[0], ev->id[1], ev->id[2], told ? "sent" : "refused");
         break;
     }
+    case EV_GPS:
+        gps_update();
+        break;
     case EV_RENAME: {
         size_t len = strlen(ev->new_name);   /* hh_service_set_name copied at most LG_NAME_MAX - 1 bytes */
         if (lg_client_set_name(&s.client, (const uint8_t *)ev->new_name, len) != LG_OK) {
@@ -1160,6 +1342,9 @@ static void drain_send_queue(void)
 {
     static send_req_t req;
     while (s.send_queue != NULL && xQueueReceive(s.send_queue, &req, 0) == pdTRUE) {
+        if (req.urgent && req.scope == LG_SCOPE_BROADCAST) {
+            (void)send_own_position(now_ms());   /* D65: where the emergency is, just ahead of it */
+        }
         uint16_t flags = LG_FLAG_ACK_REQUESTED | (req.urgent ? LG_FLAG_URGENT : 0);
         int rc = lg_client_send_text(&s.client, req.scope, req.target, flags, (const uint8_t *)req.text, req.len);
         hh_message_t *m = ring_add();
@@ -1322,6 +1507,7 @@ static void step(uint32_t now)
         s.last_tick_ms = now;
         lg_client_tick(&s.client);
     }
+    position_step(now);
 }
 
 static void publish(void)
@@ -1419,6 +1605,7 @@ static void publish(void)
     st->psram_total = (uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
     st->psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     st->psram_min_free = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    st->positions_version = gp.version;
     xSemaphoreGive(s.lock);
     s.dirty = false;
     s.last_publish_ms = now;
@@ -1573,6 +1760,7 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     if (kept != 0) {
         s.time_offset_s = (int64_t)kept - mono_s();
         s.time_set = true;
+        gp.source = CLOCK_KEPT;
         ESP_LOGI("TIME", "[TIME] Clock %" PRIu32 " kept across the restart", kept);
     }
     xSemaphoreTake(s.lock, portMAX_DELAY);
@@ -1611,6 +1799,9 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, &s.roster, &io);
     load_names();
     snprintf(s.status.name, sizeof(s.status.name), "%s", roster_name(s.device));
+    if (gp.rx >= 0 && hh_gps_start(gp.rx, gp.tx, gps_notify) != ESP_OK) {
+        ESP_LOGW("TIME", "[GPS] No GPS reader; this handheld runs as one without a GPS");
+    }
     if (xTaskCreate(service_task, "hh_net", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, "Network task did not start");
     }
@@ -1851,4 +2042,118 @@ esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *f
     req.len = (uint16_t)len;
     memcpy(req.frame, frame, len);
     return xQueueSend(s.voice_queue, &req, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+/* ---- GPS and positions (D65): readers on any task ---- */
+
+void hh_service_set_gps_pins(int rx_gpio, int tx_gpio)
+{
+    gp.rx = rx_gpio;
+    gp.tx = tx_gpio;
+}
+
+const char *hh_service_clock_source(void)
+{
+    switch (gp.source) {
+    case CLOCK_GPS:  return "the GPS";
+    case CLOCK_GRID: return "the grid";
+    case CLOCK_KEPT: return "kept across a restart";
+    default:         return "not set";
+    }
+}
+
+/* Seconds since fix_time by this handheld's clock, 0 when either is unknown. The system clock is
+ * read, not the service's offset: lg_timekeep_save keeps it equal, and it is safe from any task. */
+static uint32_t age_of(uint32_t fix_time)
+{
+    time_t now = time(NULL);
+    if (fix_time == 0 || now < (time_t)LG_POS_TIME_MIN || (uint64_t)now < fix_time) {
+        return 0;
+    }
+    return (uint32_t)((uint64_t)now - fix_time);
+}
+
+bool hh_service_own_position(hh_position_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (!g.started || !g.fix || !g.has_pos) {
+        return false;
+    }
+    out->valid = true;
+    out->lat_u = g.lat_u;
+    out->lon_u = g.lon_u;
+    out->fix_time = g.last_unix;
+    out->sats = g.sats;
+    out->age_s = g.fix_age_ms / 1000u;
+    return true;
+}
+
+bool hh_service_position(uint32_t subject, hh_position_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    int slot = pos_slot(subject);
+    if (slot < 0 || s.lock == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    lg_position_t p = gp.pos[slot];
+    xSemaphoreGive(s.lock);
+    if (p.fix_time == 0) {
+        return false;
+    }
+    out->valid = true;
+    out->lat_u = p.lat_u;
+    out->lon_u = p.lon_u;
+    out->fix_time = p.fix_time;
+    out->sats = p.sats;
+    out->age_s = age_of(p.fix_time);
+    return true;
+}
+
+bool hh_service_gps(uint8_t *sats, bool *fix)
+{
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (sats != NULL) {
+        *sats = g.sats;
+    }
+    if (fix != NULL) {
+        *fix = g.fix;
+    }
+    return g.started && g.talking;
+}
+
+bool hh_service_gps_info(hh_gps_info_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (!g.started || !g.heard) {
+        return false;
+    }
+    out->fitted = true;
+    out->talking = g.talking;
+    out->fix = g.fix;
+    out->fix_type = g.fix_type >= 2u && g.fix_type <= 3u ? g.fix_type : 0u;
+    out->corrected = g.quality == 2u;
+    out->used = g.sats;
+    out->in_view = g.in_view;
+    out->tracked = g.tracked;
+    out->best_snr = g.best_snr;
+    out->hdop_c = g.hdop_c == 0u ? HH_GPS_UNKNOWN : g.hdop_c;
+    out->pdop_c = g.pdop_c == 0u ? HH_GPS_UNKNOWN : g.pdop_c;
+    out->has_pos = g.has_pos && g.fix;
+    out->lat_u = g.lat_u;
+    out->lon_u = g.lon_u;
+    out->has_alt = g.has_alt && g.fix;
+    out->alt_dm = g.alt_dm;
+    out->speed_cms = g.fix ? g.speed_cms : HH_GPS_UNKNOWN;
+    out->course_cd = g.fix ? g.course_cd : HH_GPS_UNKNOWN;
+    out->utc = g.last_unix;
+    out->fix_age_ms = g.fix_age_ms;
+    out->sentences = g.sentences;
+    out->bad = g.bad;
+    return true;
 }

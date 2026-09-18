@@ -136,6 +136,7 @@ typedef struct {
     uint32_t       psram_total;              /* 0 on a board without PSRAM */
     uint32_t       psram_free;
     uint32_t       psram_min_free;
+    uint32_t       positions_version;        /* D65: changes when any position, or this handheld's GPS, changes */
 } hh_status_t;
 
 /* Starts the service task. On failure the snapshot carries the problem for the screen. */
@@ -241,3 +242,68 @@ void hh_service_set_voice_io(const hh_voice_io_t *io);
 /* Queues one frame for the AP. ESP_ERR_NO_MEM when the queue is full (the frame is dropped),
  * ESP_ERR_INVALID_ARG for a bad scope or length. */
 esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len);
+
+/* ---- GPS and positions (D65) ----
+ *
+ * A handheld with a GPS fitted takes its clock from it while it has a fix, and sends its own
+ * position to the grid: at registration, every 30 s, at once after moving more than 25 m, and
+ * just before an urgent broadcast. Positions are kept in RAM only. Every call here copies under
+ * the service lock, so screens may call them from their own task on every refresh.
+ */
+#define HH_SUBJECT_MAIN (LG_NODE_ID_BASE | 0u)   /* MAIN's own position */
+
+typedef struct {
+    bool     valid;
+    int32_t  lat_u;          /* microdegrees */
+    int32_t  lon_u;
+    uint32_t fix_time;       /* Unix s of the fix */
+    uint8_t  sats;
+    uint32_t age_s;          /* now - fix_time by this handheld's clock; 0 if unknown */
+} hh_position_t;
+
+/* This handheld's own GPS: false when no GPS is fitted or it has no fix. */
+bool hh_service_own_position(hh_position_t *out);
+
+/* Last known position of a device (handheld index) or HH_SUBJECT_MAIN; false if unknown. */
+bool hh_service_position(uint32_t subject, hh_position_t *out);
+
+/* A GPS is fitted and talking (for the Status screen: "GPS: 7 satellites" / "no fix"). */
+bool hh_service_gps(uint8_t *sats, bool *fix);
+
+/* Everything this handheld's GPS reports, for Status. Unknown numbers are HH_GPS_UNKNOWN. */
+#define HH_GPS_UNKNOWN 0xFFFFu
+typedef struct {
+    bool     fitted;        /* a GPS has been heard on this board since boot */
+    bool     talking;       /* ...and within the last 5 s */
+    bool     fix;           /* a lock: the module reports a valid position now */
+    uint8_t  fix_type;      /* 2 2D, 3 3D, 0 unknown */
+    bool     corrected;     /* differential (SBAS/WAAS) */
+    uint8_t  used;          /* satellites in use */
+    uint8_t  in_view;
+    uint8_t  tracked;       /* in view with a signal */
+    uint8_t  best_snr;      /* dB-Hz */
+    uint16_t hdop_c;        /* x100 */
+    uint16_t pdop_c;
+    bool     has_pos;
+    int32_t  lat_u;
+    int32_t  lon_u;
+    bool     has_alt;
+    int32_t  alt_dm;
+    uint16_t speed_cms;
+    uint16_t course_cd;     /* centidegrees true */
+    uint32_t utc;           /* the last fix's UTC, 0 never */
+    uint32_t fix_age_ms;    /* UINT32_MAX never */
+    uint32_t sentences;
+    uint32_t bad;
+} hh_gps_info_t;
+
+/* false (and out->fitted false) on a board with no GPS pin or none heard. Any task. */
+bool hh_service_gps_info(hh_gps_info_t *out);
+
+/* Before hh_service_start: the board profile's GPS UART pins, LG_PIN_NONE (-1) for none. With no
+ * rx pin, or none of this called, nothing about a GPS runs. */
+void hh_service_set_gps_pins(int rx_gpio, int tx_gpio);
+
+/* Where this handheld's clock came from, for the console: "the GPS", "the grid", "kept across a
+ * restart", or "not set". */
+const char *hh_service_clock_source(void);

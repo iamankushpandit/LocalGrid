@@ -332,6 +332,77 @@ static void handle_client_name(lg_node_t *n, uint32_t session_device, const lg_e
     }
 }
 
+/* ---- positions (D65) ------------------------------------------------------ */
+
+/* Keeps pos if its fix is newer than the one held. Returns the slot taken, or NULL. */
+static const lg_position_t *position_take(lg_node_t *n, const lg_position_t *pos)
+{
+    int slot = lg_position_slot(n->roster, pos->subject);
+    if (slot < 0 || pos->fix_time <= n->positions[slot].fix_time) {
+        return NULL;
+    }
+    n->positions[slot] = *pos;
+    n->positions[slot].flags &= (uint8_t)~LG_POS_LIVE;   /* a kept copy is never a clock */
+    return &n->positions[slot];
+}
+
+static void send_position_to_client(lg_node_t *n, uint32_t device, const lg_position_t *pos)
+{
+    uint8_t body[LG_POSITION_LEN];
+    size_t blen = lg_position_enc(pos, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_POSITION, LG_SCOPE_SYSTEM, pos->subject);
+    send_client(n, device, &e, body, blen);
+}
+
+static void push_position_to_local_clients(lg_node_t *n, const lg_position_t *pos, uint32_t except_device)
+{
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *q = &n->presence[i];
+        if (q->in_use && is_local_online(n, q) && q->device != except_device) {
+            send_position_to_client(n, q->device, pos);
+        }
+    }
+}
+
+static void flood_position(lg_node_t *n, const lg_position_t *pos)
+{
+    uint8_t body[LG_POSITION_LEN];
+    size_t blen = lg_position_enc(pos, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_POSITION, LG_SCOPE_SYSTEM, pos->subject);
+    e.ttl = LG_TTL_DEFAULT;
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, buf, sizeof(buf));
+    if (flen < 0) {
+        return;
+    }
+    (void)lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq);
+    flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+}
+
+static void handle_client_position(lg_node_t *n, uint32_t session_device, const lg_env_t *e, const uint8_t *body)
+{
+    lg_position_t pos;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_position_dec(body, e->body_len, &pos)) {
+        n->stats.malformed++;
+        return;
+    }
+    if (pos.subject != session_device || lg_roster_user(n->roster, pos.subject) == NULL) {
+        n->stats.rejected++;   /* a handheld places only itself */
+        return;
+    }
+    /* Time is sticky (D53): a handheld reading GPS now is a clock for an AP that has none. */
+    if ((pos.flags & LG_POS_LIVE) != 0 && node_grid_time(n) == 0 && n->io.on_client_time != NULL) {
+        n->io.on_client_time(n->io.ctx, session_device, pos.fix_time);
+    }
+    const lg_position_t *held = position_take(n, &pos);
+    if (held != NULL) {
+        flood_position(n, held);
+        push_position_to_local_clients(n, held, session_device);
+    }
+}
+
 /* ---- delivery ----------------------------------------------------------- */
 
 static void deliver_direct(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
@@ -737,6 +808,11 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
                 send_name_to_client(n, reg.device, &n->names[i]);
             }
         }
+        for (size_t i = 0; i < LG_POS_SLOTS; i++) {
+            if (n->positions[i].fix_time != 0) {
+                send_position_to_client(n, reg.device, &n->positions[i]);
+            }
+        }
         flood_presence(n, p);
         notify_local_clients(n, p, reg.device);
         return;
@@ -769,6 +845,9 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         break;
     case LG_T_NAME:
         handle_client_name(n, *session_device, &e, body);
+        break;
+    case LG_T_POSITION:
+        handle_client_position(n, *session_device, &e, body);
         break;
     default:
         break;  /* unknown or not client-originated: ignored */
@@ -866,6 +945,20 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         }
         break;
     }
+    case LG_T_POSITION: {
+        lg_position_t pos;
+        if (e.scope != LG_SCOPE_SYSTEM || !lg_position_dec(body, e.body_len, &pos)) {
+            n->stats.malformed++;
+            break;
+        }
+        /* As for names: only a newer fix goes further. An AP never takes its own from others. */
+        const lg_position_t *held = pos.subject == lg_node_origin_id(n->self) ? NULL : position_take(n, &pos);
+        if (held != NULL) {
+            push_position_to_local_clients(n, held, 0);
+            forward(n, &e, body, from_node);
+        }
+        break;
+    }
     case LG_T_TIME_SYNC: {
         lg_time_sync_t t;
         if (!lg_time_sync_dec(body, e.body_len, &t)) {
@@ -930,6 +1023,11 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor)
         }
     }
     lg_node_announce_names(n);
+    for (size_t i = 0; i < LG_POS_SLOTS; i++) {
+        if (n->positions[i].fix_time != 0) {
+            flood_position(n, &n->positions[i]);
+        }
+    }
 }
 
 void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality)
@@ -1005,4 +1103,46 @@ const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device)
         return NULL;
     }
     return &n->names[ui];
+}
+
+int lg_node_set_own_position(lg_node_t *n, int32_t lat_u, int32_t lon_u, uint32_t fix_time, uint8_t sats)
+{
+    if (n == NULL || n->self >= LG_MAX_NODES || !lg_position_valid(lat_u, lon_u, fix_time)) {
+        return LG_ERR_ARG;
+    }
+    lg_position_t pos = {
+        .subject  = lg_node_origin_id(n->self),
+        .lat_u    = lat_u,
+        .lon_u    = lon_u,
+        .fix_time = fix_time,
+        .sats     = sats,
+        .flags    = 0,
+    };
+    const lg_position_t *held = position_take(n, &pos);
+    if (held == NULL) {
+        return LG_ERR_ID;
+    }
+    flood_position(n, held);
+    push_position_to_local_clients(n, held, 0);
+    return LG_OK;
+}
+
+const lg_position_t *lg_node_position(const lg_node_t *n, uint32_t subject)
+{
+    int slot = lg_position_slot(n->roster, subject);
+    if (slot < 0 || n->positions[slot].fix_time == 0) {
+        return NULL;
+    }
+    return &n->positions[slot];
+}
+
+size_t lg_node_positions(const lg_node_t *n, lg_position_t *out, size_t max)
+{
+    size_t k = 0;
+    for (size_t i = 0; i < LG_POS_SLOTS && k < max; i++) {
+        if (n->positions[i].fix_time != 0) {
+            out[k++] = n->positions[i];
+        }
+    }
+    return k;
 }

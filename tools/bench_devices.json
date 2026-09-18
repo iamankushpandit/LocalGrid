@@ -76,7 +76,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM23",
+      "port": "COM24",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -88,7 +88,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM19",
+      "port": "COM23",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -100,7 +100,7 @@
     },
     {
       "name": "hosyond",
-      "port": "COM13",
+      "port": "COM10",
       "role": "H",
       "board": "HY3",
       "firmware": "handheld",

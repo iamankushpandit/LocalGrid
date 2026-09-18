@@ -42,6 +42,10 @@ void ui_settings_open(uint16_t w, uint16_t h, uint8_t tab);
 void ui_settings_touch(int16_t x, int16_t y, bool down);
 void ui_settings_refresh(void);
 
+void ui_status_open(uint16_t w, uint16_t h);
+void ui_status_touch(int16_t x, int16_t y, bool down);
+void ui_status_refresh(void);
+
 void ui_which_ap_open(uint16_t w, uint16_t h);
 void ui_which_ap_touch(int16_t x, int16_t y, bool down);
 void ui_which_ap_refresh(void);

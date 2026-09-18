@@ -28,10 +28,15 @@
              border-radius: var(--radius); background: var(--bg); }
   .loc-tiles { position: absolute; inset: 0; }
   .loc-tiles img { position: absolute; width: 256px; height: 256px; }
-  .loc-pin { position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%;
+  .loc-pins { position: absolute; inset: 0; }
+  .loc-pin { position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%;
              background: var(--danger); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--danger); }
-  .loc-offline { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px;
-                 text-align: center; color: var(--muted); background: var(--bg); }
+  .loc-pin.hh { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-width: 2px; background: var(--accent);
+                box-shadow: 0 0 0 2px var(--accent-ink); }
+  .loc-label { position: absolute; transform: translate(-50%, 10px); padding: 0 5px; border-radius: 4px; white-space: nowrap;
+               font-size: 12px; font-weight: 600; color: var(--text); background: var(--surface); border: 1px solid var(--line); }
+  .loc-offline { position: absolute; left: 0; right: 0; top: 0; padding: 8px 12px; font-size: 13px;
+                 text-align: center; color: var(--muted); background: var(--surface); border-bottom: 1px solid var(--line); }
   .loc-credit { position: absolute; right: 0; bottom: 0; padding: 1px 6px; font-size: 0.7rem; color: #333;
                 background: rgba(255, 255, 255, 0.8); }
   .loc-credit a { color: #333; }
@@ -146,11 +151,12 @@
   </section>
 
   <section id="location-card" hidden>
-    <h2>Where this AP is</h2>
-    <div class="row"><span class="loc-coords" id="loc-coords">--</span>
+    <h2>Map</h2>
+    <p class="hint" id="loc-ref" style="margin-top:0"></p>
+    <div class="row" id="loc-coords-row"><span class="loc-coords" id="loc-coords">--</span>
       <button class="ghost" id="loc-copy">Copy</button></div>
     <p class="hint" id="loc-detail"></p>
-    <div class="row loc-links">
+    <div class="row loc-links" id="loc-links">
       <a id="loc-geo" href="#">Open in Maps</a>
       <a id="loc-google" href="#" target="_blank" rel="noopener">Google Maps</a>
       <a id="loc-apple" href="#" target="_blank" rel="noopener">Apple Maps</a>
@@ -158,11 +164,18 @@
     </div>
     <div class="loc-map" id="loc-map">
       <div class="loc-tiles" id="loc-tiles"></div>
-      <div class="loc-pin" aria-hidden="true"></div>
-      <div class="loc-offline" id="loc-offline">The map needs Internet on this device (the grid has none). The coordinates and links above work without it.</div>
+      <div class="loc-offline" id="loc-offline">Map tiles need Internet on this device (the grid has none). The pins still show where everyone is from each other; the coordinates and links work without it.</div>
+      <div class="loc-pins" id="loc-pins"></div>
       <div class="loc-credit">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
     </div>
     <div class="msg" id="loc-msg"></div>
+    <div class="table">
+      <table>
+        <thead><tr><th>Name</th><th>Coordinates</th><th>From MAIN</th><th>Fix</th></tr></thead>
+        <tbody id="loc-body"></tbody>
+      </table>
+    </div>
+    <p class="hint">Positions stay in memory on the APs and handhelds, never in flash, and are shown only here, behind the login.</p>
   </section>
 
   <section id="grid-card" hidden>
@@ -284,7 +297,7 @@
     if (!ids.includes("time-card")) $("location-card").hidden = true;   /* shown by renderLocation when logged in */
   }
 
-  /* ---- Where this AP is (D64): from MAIN's GPS fix, in RAM on the AP only ---- */
+  /* ---- Map (D64, D65): MAIN's GPS and every handheld's, in RAM on the APs only ---- */
   let mapKey = "";
 
   function dms(v, pos, neg) {
@@ -292,44 +305,125 @@
     return `${d}° ${m}' ${sec}" ${v >= 0 ? pos : neg}`;
   }
 
+  /* Web Mercator: world pixels at zoom z (256 px tiles). */
+  function worldPx(lat, lon, z) {
+    const n = 256 * 2 ** z, r = lat * Math.PI / 180;
+    return { x: (lon + 180) / 360 * n, y: (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n };
+  }
+
+  /* Great-circle distance in metres and initial bearing in degrees from a to b. */
+  function distBearing(a, b) {
+    const R = 6371000, rad = Math.PI / 180;
+    const f1 = a.lat * rad, f2 = b.lat * rad, df = (b.lat - a.lat) * rad, dl = (b.lon - a.lon) * rad;
+    const h = Math.sin(df / 2) ** 2 + Math.cos(f1) * Math.cos(f2) * Math.sin(dl / 2) ** 2;
+    const d = 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+    const brg = Math.atan2(Math.sin(dl) * Math.cos(f2), Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl));
+    return { d, brg: (brg / rad + 360) % 360 };
+  }
+  const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  const fmtDist = (m) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10000 ? 2 : 1)} km`;
+  const fmtAge = (sec) => sec < 0 ? "--" : sec < 60 ? "just now" : sec < 3600 ? `${Math.floor(sec / 60)} min ago`
+    : sec < 86400 ? `${Math.floor(sec / 3600)} h ago` : `${Math.floor(sec / 86400)} d ago`;
+
   /* Map tiles come from OpenStreetMap to this browser, never through the AP: with no Internet on
-   * this device they fail, and the note over the map says why. */
-  function drawMap(lat, lon) {
-    const z = 16, n = 2 ** z, r = lat * Math.PI / 180;
-    const x = (lon + 180) / 360 * n, y = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n;
-    const tx = Math.floor(x), ty = Math.floor(y), px = (x - tx) * 256, py = (y - ty) * 256;
-    const box = $("loc-tiles"), w = box.clientWidth || 320, h = box.clientHeight || 260;
+   * this device they fail, and the note over the map says why. The pins are drawn either way.
+   * The zoom is the closest (17 at most, 10 at least) that fits every pin, centred on them all. */
+  function drawMap(pins) {
+    const box = $("loc-tiles"), layer = $("loc-pins");
+    const w = box.clientWidth || 320, h = box.clientHeight || 260, margin = 40;
+    let z = 17, lo, hi;
+    for (; z >= 10; z--) {
+      const pts = pins.map((p) => worldPx(p.lat, p.lon, z));
+      lo = { x: Math.min(...pts.map((p) => p.x)), y: Math.min(...pts.map((p) => p.y)) };
+      hi = { x: Math.max(...pts.map((p) => p.x)), y: Math.max(...pts.map((p) => p.y)) };
+      if (hi.x - lo.x <= w - 2 * margin && hi.y - lo.y <= h - 2 * margin) break;
+    }
+    if (z < 10) z = 10;
+    const cx = (lo.x + hi.x) / 2, cy = (lo.y + hi.y) / 2, n = 2 ** z;
+    const left = cx - w / 2, top = cy - h / 2;
     box.textContent = "";
     $("loc-offline").hidden = false;
     let loaded = 0;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
+    for (let ty = Math.floor(top / 256); ty <= Math.floor((top + h) / 256); ty++) {
+      if (ty < 0 || ty >= n) continue;
+      for (let tx = Math.floor(left / 256); tx <= Math.floor((left + w) / 256); tx++) {
         const img = new Image();
         img.alt = "";
-        img.style.left = `${Math.round(w / 2 - px + dx * 256)}px`;
-        img.style.top = `${Math.round(h / 2 - py + dy * 256)}px`;
+        img.style.left = `${Math.round(tx * 256 - left)}px`;
+        img.style.top = `${Math.round(ty * 256 - top)}px`;
         img.onload = () => { if (++loaded === 1) $("loc-offline").hidden = true; };
-        img.src = `https://tile.openstreetmap.org/${z}/${(tx + dx + n) % n}/${ty + dy}.png`;
+        img.src = `https://tile.openstreetmap.org/${z}/${((tx % n) + n) % n}/${ty}.png`;
         box.appendChild(img);
       }
     }
+    layer.textContent = "";
+    for (const p of [...pins].sort((a, b) => a.ap - b.ap)) {   /* APs last, so they sit on top */
+      const q = worldPx(p.lat, p.lon, z), x = `${Math.round(q.x - left)}px`, y = `${Math.round(q.y - top)}px`;
+      const dot = document.createElement("div");
+      dot.className = p.ap ? "loc-pin" : "loc-pin hh";
+      dot.style.left = x; dot.style.top = y;
+      dot.title = p.name;
+      const label = document.createElement("div");
+      label.className = "loc-label";
+      label.style.left = x; label.style.top = y;
+      label.textContent = p.name;
+      layer.append(dot, label);
+    }
   }
 
-  function renderLocation(g) {
-    const card = $("location-card");
-    if (!g || !g.pos) { card.hidden = true; mapKey = ""; return; }
+  /* Every position this AP holds, and this AP's own GPS as it is now. MAIN is the reference. */
+  function renderLocation(s) {
+    const card = $("location-card"), g = s.gps || {};
+    const pins = (s.positions || []).map((p) => ({
+      ap: !!p.ap, id: p.subject, lat: p.lat_u / 1e6, lon: p.lon_u / 1e6, fix_time: p.fix_time, sats: p.sats,
+      name: p.name || (p.ap ? nodeName(p.subject) : `Handheld ${p.subject}`),
+    }));
+    if (g.pos) {
+      const own = pins.find((p) => p.ap && p.id === s.node);
+      const live = { ap: true, id: s.node, lat: g.lat_u / 1e6, lon: g.lon_u / 1e6, sats: g.sats, name: s.node_name,
+                     fix_time: g.fix ? 0 : (own ? own.fix_time : -1), live: g.fix };
+      if (own) Object.assign(own, live); else pins.push(live);
+    }
+    if (!pins.length) { card.hidden = true; mapKey = ""; return; }
     card.hidden = false;
-    const lat = g.lat_u / 1e6, lon = g.lon_u / 1e6;
-    const la = lat.toFixed(6), lo = lon.toFixed(6);
-    $("loc-coords").textContent = `${la}, ${lo}`;
-    $("loc-detail").textContent = `${dms(lat, "N", "S")}, ${dms(lon, "E", "W")} · ` +
-      (g.fix ? `GPS fix, ${g.sats} satellites` : "last known position; the GPS has no fix now");
-    $("loc-geo").href = `geo:${la},${lo}?q=${la},${lo}(LocalGrid AP)`;
-    $("loc-google").href = `https://www.google.com/maps/search/?api=1&query=${la},${lo}`;
-    $("loc-apple").href = `https://maps.apple.com/?ll=${la},${lo}&q=LocalGrid%20AP`;
-    $("loc-osm").href = `https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=17/${la}/${lo}`;
-    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;   /* about 10 m: GPS jitter does not reload the map */
-    if (key !== mapKey) { mapKey = key; drawMap(lat, lon); }
+
+    const now = gridTime ? gridTime + (performance.now() - lastStatusAt) / 1000 : Date.now() / 1000;
+    const main = pins.find((p) => p.ap && p.id === 0);
+    $("loc-coords-row").hidden = $("loc-links").hidden = !main;
+    $("loc-detail").hidden = !main;
+    if (main) {
+      const la = main.lat.toFixed(6), lo = main.lon.toFixed(6);
+      $("loc-ref").textContent = `${main.name}${s.node === 0 ? " (this AP)" : ""}:`;
+      $("loc-coords").textContent = `${la}, ${lo}`;
+      $("loc-detail").textContent = `${dms(main.lat, "N", "S")}, ${dms(main.lon, "E", "W")} · ` +
+        (s.node === 0 ? (g.fix ? `GPS fix, ${g.sats} satellites` : "last known position; the GPS has no fix now")
+                      : `fix ${fmtAge(Math.round(now - main.fix_time))}, ${main.sats} satellites`);
+      $("loc-geo").href = `geo:${la},${lo}?q=${la},${lo}(LocalGrid MAIN)`;
+      $("loc-google").href = `https://www.google.com/maps/search/?api=1&query=${la},${lo}`;
+      $("loc-apple").href = `https://maps.apple.com/?ll=${la},${lo}&q=LocalGrid%20MAIN`;
+      $("loc-osm").href = `https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=17/${la}/${lo}`;
+    } else {
+      $("loc-ref").textContent = "Where MAIN is is not known: it has no GPS fix, or this AP has not heard it yet.";
+    }
+
+    /* About 10 m: GPS jitter does not reload the map. */
+    const box = $("loc-tiles");
+    const key = `${box.clientWidth}x${box.clientHeight};` + pins.map((p) => `${p.ap ? "a" : "h"}${p.id}@${p.lat.toFixed(4)},${p.lon.toFixed(4)}:${p.name}`).sort().join(";");
+    if (key !== mapKey) { mapKey = key; drawMap(pins); }
+
+    const rows = [...pins].sort((a, b) => (b.ap - a.ap) || (a.id - b.id)).map((p) => {
+      let from = "--";
+      if (main && p !== main) {
+        const db = distBearing(main, p);
+        from = db.d < 5 ? "here" : `${fmtDist(db.d)} ${COMPASS[Math.round(db.brg / 45) % 8]}`;
+      } else if (p === main) {
+        from = '<span class="dim">MAIN</span>';
+      }
+      const age = p.live ? "live" : fmtAge(p.fix_time > 0 ? Math.round(now - p.fix_time) : -1);
+      return `<tr><td>${escHtml(p.name)}${p.ap ? ' <span class="dim">AP</span>' : ""}</td>` +
+        `<td style="font-family:var(--mono)">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td><td>${from}</td><td>${age}</td></tr>`;
+    });
+    $("loc-body").innerHTML = rows.join("");
   }
 
   $("loc-copy").addEventListener("click", async () => {
@@ -382,7 +476,7 @@
     const nAps = v.getUint8(2), nInc = v.getUint8(3);
     const out = {
       self: v.getUint8(1),
-      time_set: { unix: v.getUint32(4, true), on: v.getUint8(8) === 255 ? -1 : v.getUint8(8), from: v.getUint8(9) === 255 ? -1 : v.getUint8(9) },
+      time_set: { unix: v.getUint32(4, true), on: v.getUint8(8) === 255 ? -1 : v.getUint8(8), from: v.getUint8(9) === 255 ? -1 : v.getUint8(9), gps: v.getUint8(10) === 1 },
       newest_min: v.getUint32(12, true),
       aps: [], incidents: [],
     };
@@ -706,15 +800,14 @@
         : Math.abs(drift) > 120 ? `This device's clock differs from the grid by ${drift} s.` : "";
       $("time-card").classList.remove("banner");
     }
-    renderLocation(s.gps);
+    apNames = {};
+    for (const a of (s.aps || [])) apNames[a.ap] = a.name;
+    renderLocation(s);
     $("subtitle").textContent = `LocalMesh Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
     $("s-node").textContent = s.node_name;
     $("s-uptime").textContent = fmtDur(s.uptime_s);
     $("s-handhelds").textContent = s.handhelds;
     $("s-heap").textContent = `${Math.round(s.heap_free / 1024)} KB`;
-
-    apNames = {};
-    for (const a of (s.aps || [])) apNames[a.ap] = a.name;
 
     // Where the time on this page came from: carried from which AP, and where and when an admin set it.
     const ts = s.time_set || {};
@@ -725,14 +818,15 @@
     } else {
       const parts = [];
       if (me.sync_from === s.node && me.stratum === 0) {
-        parts.push(`Set by the admin on this AP (${esc(s.node_name)})`);
+        parts.push(ts.gps ? `Set by this AP's GPS (${esc(s.node_name)})` : `Set by the admin on this AP (${esc(s.node_name)})`);
       } else if (me.sync_from >= 0) {
         parts.push(`Carried here from ${esc(nodeName(me.sync_from))}, last synced ${fmtDur(me.sync_age_s)} ago` +
           (me.sync_drift_ms ? ` (${me.sync_drift_ms > 0 ? "+" : ""}${me.sync_drift_ms} ms)` : "") +
           (me.stratum < 255 ? `, ${me.stratum} hop${me.stratum === 1 ? "" : "s"} from where it was set` : ""));
       }
       if (ts.on >= 0 && !(me.sync_from === s.node && me.stratum === 0)) {
-        parts.push(`originally set by the admin on ${esc(nodeName(ts.on))}` + (ts.unix ? ` at ${fmtGridTime(ts.unix)}` : ""));
+        parts.push((ts.gps ? `set by the GPS on ${esc(nodeName(ts.on))}` : `originally set by the admin on ${esc(nodeName(ts.on))}`) +
+          (ts.unix ? ` at ${fmtGridTime(ts.unix)}` : ""));
       } else if (ts.on < 0) {
         parts.push("where and when it was originally set is not known: every AP that saw it being set has restarted since");
       }

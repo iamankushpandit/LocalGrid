@@ -118,7 +118,8 @@ esp_err_t grid_state_commit(const node_settings_t *in);
 bool grid_state_setup_allowed(void);
 
 /* The admin set time on this AP: start a new time generation. Core task. */
-void grid_state_time_set_here(uint32_t unix_s);
+/* Time set on this AP: by an admin (by_gps false) or by its GPS (D63). */
+void grid_state_time_set_here(uint32_t unix_s, bool by_gps);
 
 /* This AP took or confirmed grid time from another AP; correction_ms is how far off it was. */
 void grid_state_note_sync(uint16_t from_ap, int32_t correction_ms);
@@ -130,7 +131,8 @@ uint16_t grid_state_sync_source(void);
 bool grid_state_ap(uint16_t ap, grid_ap_info_t *out);
 
 /* When and where grid time was last set by an admin. set_on_ap is GRID_NO_AP when unknown. */
-void grid_state_time_info(uint32_t *set_unix, uint16_t *set_on_ap, uint32_t *generation);
+/* by_gps: the time was set by that AP's GPS (D63), not by an admin. */
+void grid_state_time_info(uint32_t *set_unix, uint16_t *set_on_ap, uint32_t *generation, bool *by_gps);
 
 /* Core task, once a second: which APs are reachable now (this AP counts as up). */
 void grid_state_avail_second(const bool up[LG_MAX_NODES]);

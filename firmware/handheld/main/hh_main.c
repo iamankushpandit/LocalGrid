@@ -73,6 +73,7 @@ void app_main(void)
     /* NVS is started earlier now, above, because settings are read before this point. */
 
     /* The service first, so the launcher's first paint already says what is happening. */
+    hh_service_set_gps_pins(board != NULL ? board->gps_rx : LG_PIN_NONE, board != NULL ? board->gps_tx : LG_PIN_NONE);
     esp_err_t err = hh_service_start(&identity);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[NET] Network service not started: %s", esp_err_to_name(err));
