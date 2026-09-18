@@ -8,6 +8,7 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "lg_power.h"
+#include "gps.h"
 #include "node_app.h"
 #include "sdkconfig.h"
 
@@ -94,6 +95,15 @@ static int cmd_time(int argc, char **argv)
     return 1;
 }
 
+static int cmd_gps(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "raw") == 0) {
+        gps_dump(600);   /* about two seconds of NMEA at 9600 baud */
+        return 0;
+    }
+    return post(NODE_CMD_GPS, 0, NULL);
+}
+
 static int cmd_groups(int argc, char **argv)
 {
     (void)argc;
@@ -118,6 +128,7 @@ void console_start(void)
         { .command = "config",  .help = "Grid name, time zone, LocalMesh Access Point network, admin state (read-only)", .func = cmd_config },
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
+        { .command = "gps",     .help = "The GPS on MAIN: heard, fix, satellites (D63); gps raw dumps what arrives", .func = cmd_gps },
         { .command = "groups",  .help = "Groups, their members, and the table's version (D52)", .func = cmd_groups },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {

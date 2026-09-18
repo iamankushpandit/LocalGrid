@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/semphr.h"
+#include "gps.h"
 #include "grid_state.h"
 #include "lg_body.h"
 #include "lg_crypto.h"
@@ -567,6 +568,8 @@ static esp_err_t h_status(httpd_req_t *req)
     s = w.snap;
     xSemaphoreGive(w.lock);
 
+    gps_state_t gps;
+    gps_state(&gps);
     static char out[4096];   /* small fields and the group table; AP history goes out as bytes (/api/history, D49) */
     static node_settings_t cfg;
     grid_state_settings(&cfg);
@@ -575,9 +578,12 @@ static esp_err_t h_status(httpd_req_t *req)
     int n = snprintf(out, sizeof(out),
                      "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
                      ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
-                     ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,\"links\":[",
+                     ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,\"gps\":{\"started\":%s,\"heard\":%s,"
+                     "\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32 ",\"lon_u\":%" PRId32 "},\"links\":[",
                      name, cfg.timezone, s.node, s.node_name, s.boot, s.uptime_s, s.grid_time, s.time_quality,
-                     s.heap_free, s.heap_min, s.handhelds);
+                     s.heap_free, s.heap_min, s.handhelds, gps.started ? "true" : "false", gps.heard ? "true" : "false",
+                     gps_has_fix() ? "true" : "false", gps.sats, gps.has_pos ? "true" : "false",
+                     gps.has_pos ? gps.lat_u : 0, gps.has_pos ? gps.lon_u : 0);
     for (size_t i = 0; i < s.n_links && n > 0 && (size_t)n < sizeof(out); i++) {
         n += snprintf(out + n, sizeof(out) - (size_t)n, "%s{\"node\":%u,\"up\":%s,\"rssi\":%d,\"age_ms\":%" PRIu32 "}",
                       i ? "," : "", s.links[i].node, s.links[i].up ? "true" : "false", s.links[i].rssi,
@@ -722,6 +728,10 @@ static esp_err_t h_time(httpd_req_t *req)
     uint64_t unix_ms = 0;
     if (!read_body(req, body, sizeof(body)) || !json_uint64(body, "unix_ms", &unix_ms) || unix_ms < 1700000000000ull) {
         return send_error(req, "400 Bad Request", "A valid time is required.");
+    }
+    if (gps_has_fix()) {
+        return send_error(req, "409 Conflict",
+                          "Grid time comes from the GPS on this AP while it has a fix, so it cannot be set by hand.");
     }
     static node_settings_t cfg;
     grid_state_settings(&cfg);

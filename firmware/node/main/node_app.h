@@ -38,12 +38,15 @@ typedef enum {
     NODE_CMD_GRID_ANNOUNCE,   /* settings changed on this AP: flood grid state now */
     NODE_CMD_GROUP_EDIT,      /* the admin page changed a group (D52) */
     NODE_CMD_GROUPS,          /* console: print the group table */
+    NODE_CMD_GPS_TIME,        /* the GPS reader: a fixed RMC (D63); value, millis, at_ms */
+    NODE_CMD_GPS,             /* console: print the GPS state */
 } node_cmd_type_t;
 
 typedef struct {
     node_cmd_type_t type;
     uint32_t        value;
-    uint16_t        millis;        /* NODE_CMD_TIME_SET: milliseconds into value's second */
+    uint16_t        millis;        /* NODE_CMD_TIME_SET, _GPS_TIME: milliseconds into value's second */
+    uint32_t        at_ms;         /* NODE_CMD_GPS_TIME: app_now_ms when the sentence arrived */
     char            text[LG_TEXT_MAX + 1];
     lg_group_edit_t group;
 } node_cmd_t;

@@ -27,6 +27,7 @@
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
 #include "lg_timekeep.h"
+#include "gps.h"
 #include "lg_secrets.h"
 #include "node_app.h"
 #include "nvs_flash.h"
@@ -699,6 +700,11 @@ static void print_devices(void)
     sess_print();
 }
 
+/* GPS (D63), defined below the command handler. */
+static bool s_gps_owns;   /* this AP's authority came from the GPS, not from a hand */
+static void gps_time(const node_cmd_t *cmd);
+static void print_gps(void);
+
 static void handle_command(const node_cmd_t *cmd)
 {
     switch (cmd->type) {
@@ -763,13 +769,80 @@ static void handle_command(const node_cmd_t *cmd)
     case NODE_CMD_TIME_SHOW:
         printf("Grid time %" PRIu32 " (%s)\n", app_grid_time(), quality_name(g_app.time_quality));
         break;
+    case NODE_CMD_GPS_TIME:
+        gps_time(cmd);
+        break;
+    case NODE_CMD_GPS:
+        print_gps();
+        break;
     case NODE_CMD_TIME_SET:
+        if (gps_has_fix()) {
+            /* D63: the GPS wins while it has a fix. The admin page refuses first; this is the console. */
+            printf("Not set: grid time comes from the GPS while it has a fix\n");
+            break;
+        }
+        s_gps_owns = false;
         set_grid_time_ms((uint64_t)cmd->value * 1000u + cmd->millis, LG_TIME_AUTHORITATIVE, 0);
         grid_state_time_set_here(cmd->value);
         grid_state_announce();   /* the new generation goes first, so other APs stop defending theirs */
         lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
         printf("Grid time set to %" PRIu32 " and announced\n", cmd->value);
         break;
+    }
+}
+
+/* ---- GPS (D63) ---- */
+
+/*
+ * Grid time from MAIN's GPS. The first fix, or a fix after the grid followed a time set elsewhere,
+ * makes this AP the source exactly as setting it on the admin page does: AUTHORITATIVE at stratum
+ * 0, a new time generation, announced. After that each second's fix only corrects the clock:
+ * slewed when within a second, stepped and announced beyond it. The other APs follow as they do
+ * for a hand-set time. If someone sets the time on another AP's page, that generation demotes
+ * MAIN, and the next fix takes the grid back: the GPS wins.
+ */
+
+static void gps_time(const node_cmd_t *cmd)
+{
+    uint64_t gps_ms = (uint64_t)cmd->value * 1000u + cmd->millis + (app_now_ms() - cmd->at_ms);
+    if (!s_gps_owns || g_app.time_quality != LG_TIME_AUTHORITATIVE) {
+        set_grid_time_ms(gps_ms, LG_TIME_AUTHORITATIVE, 0);
+        grid_state_time_set_here(cmd->value);
+        grid_state_announce();   /* the new generation first, so other APs stop defending theirs */
+        lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
+        s_gps_owns = true;
+        gps_state_t st;
+        gps_state(&st);
+        ESP_LOGI("TIME", "[TIME] Grid time %" PRIu32 " from GPS (%u satellites); announced", cmd->value, st.sats);
+        return;
+    }
+    int64_t diff = (int64_t)gps_ms - (int64_t)app_grid_time_ms();
+    if (diff > -TIME_DEADBAND_MS && diff < TIME_DEADBAND_MS) {
+        return;
+    }
+    if (diff >= TIME_STEP_MS || diff <= -TIME_STEP_MS) {
+        set_grid_time_ms(gps_ms, LG_TIME_AUTHORITATIVE, 0);
+        lg_node_announce_time(&g_app.core, LG_TIME_AUTHORITATIVE);
+        ESP_LOGW("TIME", "[TIME] Stepped grid time by %+" PRId64 " ms to the GPS", diff);
+    } else {
+        g_app.time_slew_ms = (int32_t)diff;
+    }
+}
+
+static void print_gps(void)
+{
+    gps_state_t st;
+    gps_state(&st);
+    if (!st.started) {
+        printf("GPS: not listening (only MAIN reads one; pin CONFIG_LG_NODE_GPS_RX_GPIO)\n");
+        return;
+    }
+    printf("GPS: %s, %u satellites, %" PRIu32 " sentences, %" PRIu32 " bad checksums\n",
+           !st.heard ? "none heard (not fitted, or check module TXD to GPIO16)" : st.fix ? "FIX" : "no fix yet",
+           st.sats, st.sentences, st.bad);
+    if (st.last_unix != 0) {
+        printf("GPS: last fix %" PRIu32 ", %" PRIu32 " ms ago; grid time %s\n", st.last_unix, st.fix_age_ms,
+               s_gps_owns && g_app.time_quality == LG_TIME_AUTHORITATIVE ? "comes from it" : "does not come from it");
     }
 }
 
@@ -916,5 +989,8 @@ void app_main(void)
 #endif
 
     xTaskCreate(core_task, "lg_core", 8192, NULL, 5, NULL);
+    if (g_app.index == 0 && CONFIG_LG_NODE_GPS_RX_GPIO >= 0) {
+        (void)gps_start(CONFIG_LG_NODE_GPS_RX_GPIO);   /* D63: MAIN only */
+    }
     console_start();
 }

@@ -50,4 +50,13 @@ menu "LocalGrid AP"
         help
             Supply voltage divided by the voltage at the pin, times 1000. 2000 for equal resistors.
 
+    config LG_NODE_GPS_RX_GPIO
+        int "GPS data pin on MAIN (the module's TX), -1 for none"
+        default 16
+        range -1 39
+        help
+            MAIN (node 0) listens for NMEA from a GPS module on this pin, UART2 at 9600 baud, and
+            once the module has a fix grid time comes from it (D63). GPIO16 is free on the Elegoo
+            boards. Other APs never start the reader.
+
 endmenu

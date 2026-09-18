@@ -22,6 +22,19 @@
   header h1 { font-size: 22px; margin: 0; letter-spacing: .02em; }
   header .sub { color: var(--muted); font-size: 14px; }
   header .spacer { flex: 1; }
+  .loc-coords { font-family: var(--mono); font-size: 1.05rem; }
+  .loc-links a { color: var(--accent); margin-right: 14px; }
+  .loc-map { position: relative; height: 260px; margin-top: 10px; overflow: hidden; border: 1px solid var(--line);
+             border-radius: var(--radius); background: var(--bg); }
+  .loc-tiles { position: absolute; inset: 0; }
+  .loc-tiles img { position: absolute; width: 256px; height: 256px; }
+  .loc-pin { position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%;
+             background: var(--danger); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--danger); }
+  .loc-offline { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px;
+                 text-align: center; color: var(--muted); background: var(--bg); }
+  .loc-credit { position: absolute; right: 0; bottom: 0; padding: 1px 6px; font-size: 0.7rem; color: #333;
+                background: rgba(255, 255, 255, 0.8); }
+  .loc-credit a { color: #333; }
   section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0 0 10px; }
   label { display: block; font-size: 14px; color: var(--muted); margin: 10px 0 4px; }
@@ -130,6 +143,26 @@
       <button class="ghost" id="set-manual">Set</button>
     </div>
     <div class="msg" id="time-msg"></div>
+  </section>
+
+  <section id="location-card" hidden>
+    <h2>Where this AP is</h2>
+    <div class="row"><span class="loc-coords" id="loc-coords">--</span>
+      <button class="ghost" id="loc-copy">Copy</button></div>
+    <p class="hint" id="loc-detail"></p>
+    <div class="row loc-links">
+      <a id="loc-geo" href="#">Open in Maps</a>
+      <a id="loc-google" href="#" target="_blank" rel="noopener">Google Maps</a>
+      <a id="loc-apple" href="#" target="_blank" rel="noopener">Apple Maps</a>
+      <a id="loc-osm" href="#" target="_blank" rel="noopener">OpenStreetMap</a>
+    </div>
+    <div class="loc-map" id="loc-map">
+      <div class="loc-tiles" id="loc-tiles"></div>
+      <div class="loc-pin" aria-hidden="true"></div>
+      <div class="loc-offline" id="loc-offline">The map needs Internet on this device (the grid has none). The coordinates and links above work without it.</div>
+      <div class="loc-credit">&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
+    </div>
+    <div class="msg" id="loc-msg"></div>
   </section>
 
   <section id="grid-card" hidden>
@@ -248,7 +281,70 @@
       $(id).hidden = !ids.includes(id);
     }
     $("logout").hidden = !ids.includes("time-card");
+    if (!ids.includes("time-card")) $("location-card").hidden = true;   /* shown by renderLocation when logged in */
   }
+
+  /* ---- Where this AP is (D64): from MAIN's GPS fix, in RAM on the AP only ---- */
+  let mapKey = "";
+
+  function dms(v, pos, neg) {
+    const a = Math.abs(v), d = Math.floor(a), mf = (a - d) * 60, m = Math.floor(mf), sec = ((mf - m) * 60).toFixed(1);
+    return `${d}° ${m}' ${sec}" ${v >= 0 ? pos : neg}`;
+  }
+
+  /* Map tiles come from OpenStreetMap to this browser, never through the AP: with no Internet on
+   * this device they fail, and the note over the map says why. */
+  function drawMap(lat, lon) {
+    const z = 16, n = 2 ** z, r = lat * Math.PI / 180;
+    const x = (lon + 180) / 360 * n, y = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n;
+    const tx = Math.floor(x), ty = Math.floor(y), px = (x - tx) * 256, py = (y - ty) * 256;
+    const box = $("loc-tiles"), w = box.clientWidth || 320, h = box.clientHeight || 260;
+    box.textContent = "";
+    $("loc-offline").hidden = false;
+    let loaded = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const img = new Image();
+        img.alt = "";
+        img.style.left = `${Math.round(w / 2 - px + dx * 256)}px`;
+        img.style.top = `${Math.round(h / 2 - py + dy * 256)}px`;
+        img.onload = () => { if (++loaded === 1) $("loc-offline").hidden = true; };
+        img.src = `https://tile.openstreetmap.org/${z}/${(tx + dx + n) % n}/${ty + dy}.png`;
+        box.appendChild(img);
+      }
+    }
+  }
+
+  function renderLocation(g) {
+    const card = $("location-card");
+    if (!g || !g.pos) { card.hidden = true; mapKey = ""; return; }
+    card.hidden = false;
+    const lat = g.lat_u / 1e6, lon = g.lon_u / 1e6;
+    const la = lat.toFixed(6), lo = lon.toFixed(6);
+    $("loc-coords").textContent = `${la}, ${lo}`;
+    $("loc-detail").textContent = `${dms(lat, "N", "S")}, ${dms(lon, "E", "W")} · ` +
+      (g.fix ? `GPS fix, ${g.sats} satellites` : "last known position; the GPS has no fix now");
+    $("loc-geo").href = `geo:${la},${lo}?q=${la},${lo}(LocalGrid AP)`;
+    $("loc-google").href = `https://www.google.com/maps/search/?api=1&query=${la},${lo}`;
+    $("loc-apple").href = `https://maps.apple.com/?ll=${la},${lo}&q=LocalGrid%20AP`;
+    $("loc-osm").href = `https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=17/${la}/${lo}`;
+    const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;   /* about 10 m: GPS jitter does not reload the map */
+    if (key !== mapKey) { mapKey = key; drawMap(lat, lon); }
+  }
+
+  $("loc-copy").addEventListener("click", async () => {
+    const text = $("loc-coords").textContent;
+    try {
+      await navigator.clipboard.writeText(text);   /* not offered on plain http by some browsers */
+    } catch (e) {
+      const t = document.createElement("textarea");
+      t.value = text; document.body.appendChild(t); t.select();
+      try { document.execCommand("copy"); } catch (e2) { /* the text stays selectable on the page */ }
+      t.remove();
+    }
+    say("loc-msg", "Coordinates copied.", true);
+    setTimeout(() => say("loc-msg", ""), 2000);
+  });
 
   function say(id, text, ok) {
     const el = $(id);
@@ -600,12 +696,17 @@
       $("time-card").classList.add("banner");
     } else {
       const drift = Math.round(s.grid_time - Date.now() / 1000);
-      pill.textContent = s.time_quality === 2 ? "SET ON THIS AP" : "CARRIED";
+      /* D63: a GPS is optional. None fitted says nothing; one fitted says what it is doing. */
+      const fromGps = s.gps && s.gps.fix && s.time_quality === 2;
+      pill.textContent = fromGps ? `FROM GPS (${s.gps.sats} satellites)` : s.time_quality === 2 ? "SET ON THIS AP" : "CARRIED";
       pill.className = "pill good";
-      $("time-hint").textContent = Math.abs(drift) > 120
-        ? `This device's clock differs from the grid by ${drift} s.` : "";
+      $("time-hint").textContent = fromGps
+        ? "The GPS keeps grid time; it cannot be set by hand while the GPS has a fix."
+        : s.gps && s.gps.heard && !s.gps.fix ? "GPS connected, looking for satellites. Until it has a fix, set the time here as usual."
+        : Math.abs(drift) > 120 ? `This device's clock differs from the grid by ${drift} s.` : "";
       $("time-card").classList.remove("banner");
     }
+    renderLocation(s.gps);
     $("subtitle").textContent = `LocalMesh Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
     $("s-node").textContent = s.node_name;
     $("s-uptime").textContent = fmtDur(s.uptime_s);
