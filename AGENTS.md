@@ -10,6 +10,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 |---|---|
 | `docs/DESIGN_REVIEW.md` | Architecture: 47 numbered answers. Cite answers by number. |
 | `docs/DECISIONS.md` | Standing owner decisions. Read before changing behavior. |
+| `docs/BOARDS.md` | Supported boards, the board profile fields, how to add a board, and the bring-up checklist. |
 | `CHANGELOG.md` | Every change, newest first. |
 | `components/lg_core` | Portable C11 protocol core: envelope, IDs, dedup, routing, handheld logic. |
 | `components/lg_crypto` | The only crypto interface (PSA Crypto backend). |
@@ -34,6 +35,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 - `.claude/skills/power/SKILL.md` — supply voltage on one or all boards, now or monitored with min, average, and max.
 - `.claude/skills/wifi/SKILL.md` — count the APs broadcasting the grid SSID from this laptop's radio.
 - `.claude/skills/protocol-change/SKILL.md` — add or change a message type or `lg_core` behavior.
+- `.claude/skills/new-board/SKILL.md` — add a board: profile, code, any new driver, build, bring-up checklist, evidence.
 
 ## Rules
 

@@ -756,6 +756,21 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             ESP_LOGI("MSG", "[MSG] Read by the other handheld: outbox slot %" PRIu32, ev->value);
         } else if (was == HH_MSG_DELIVERED) {
             ESP_LOGI("MSG", "[MSG] Delivered to the other handheld: outbox slot %" PRIu32, ev->value);
+        } else if (was == HH_MSG_REJECTED) {
+            /* An AP's refusal used to leave no trace here, so the chaos run counted refusals as losses
+             * (2026-09-18). Named by boot and seq, like every 1:1 line: never its text. */
+            const lg_out_msg_t *o = &s.client.outbox[ev->value];
+            uint8_t r = o->reject_reason;
+            ESP_LOGW("MSG", "[MSG] Refused by the AP (%s): %s to %" PRIu32 " boot %" PRIu32 " seq %" PRIu32,
+                     r == LG_ACK_REJ_OFFLINE          ? "offline"
+                     : r == LG_ACK_REJ_NOT_MEMBER     ? "not a member"
+                     : r == LG_ACK_REJ_RATE           ? "rate"
+                     : r == LG_ACK_REJ_TIME           ? "time"
+                     : r == LG_ACK_REJ_UNKNOWN_TARGET ? "unknown target"
+                     : r == LG_ACK_REJ_NOT_ALLOWED    ? "not allowed"
+                                                      : "invalid",
+                     o->scope == LG_SCOPE_DIRECT ? "1:1" : o->scope == LG_SCOPE_GROUP ? "group" : "everyone", o->target,
+                     o->boot, o->seq);
         }
         break;
     }

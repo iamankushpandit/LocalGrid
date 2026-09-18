@@ -40,6 +40,7 @@ import pathlib
 import queue
 import random
 import re
+import secrets
 import signal
 import statistics
 import sys
@@ -94,6 +95,7 @@ RX = {
     # 1:1 text is never logged (AGENTS.md), so direct probes are matched by (author, boot, seq) instead of token.
     "sent_direct": re.compile(r"\[MSG\] Sent(?: URGENT)? to device (\d+): 1:1 boot (\d+) seq (\d+)"),
     "not_sent_direct": re.compile(r"\[MSG\] Not sent \(([^)]*)\): 1:1 to device (\d+)"),
+    "ap_refused_direct": re.compile(r"\[MSG\] Refused by the AP \(([^)]*)\): 1:1 to (\d+) boot (\d+) seq (\d+)"),
     "received_direct": re.compile(r"\[MSG\] From (\d+) .*: 1:1 boot (\d+) seq (\d+)"),
     "volume": re.compile(r"Volume: (\w+)"),
     "time": re.compile(r"\[TIME\] (.+)"),
@@ -101,6 +103,19 @@ RX = {
 # USB vendor IDs of serial bridges that stay enumerated while the ESP32 behind them is held in reset.
 SEPARATE_BRIDGES = {0x10C4: "CP210x", 0x1A86: "CH34x", 0x0403: "FTDI"}
 NATIVE_USB = {0x303A: "Espressif native USB"}
+def time_source(text, board):
+    """Where an AP's [TIME] line says its grid time came from, when that is outside the grid: its GPS
+    (D63), a handheld's clock or live GPS fix (D53, D60, D65), or the PC. None for a time carried from
+    another AP, which says nothing about how the grid as a whole got it back."""
+    if re.search(r"Grid time \d+ from GPS", text):
+        return f"the GPS on {board}"
+    if m := re.search(r"Took grid time \d+ from handheld (\d+)", text):
+        return f"handheld {m.group(1)}'s clock"
+    if re.search(r"Grid time set to \d+", text):
+        return "the PC"
+    return None
+
+
 IDENTITY = re.compile(r"LGID: (\S+) role=(\w+) board=(\w+)(?: node=(\d+) (\S+))?(?: device=(\d+))?")
 GROUP_ROW = re.compile(r"^\s*(\d+)\s+(\S+)\s+(member|not a member)\s*$")
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")   # D21: never write a hardware address
@@ -233,6 +248,7 @@ class Chaos:
         self.next_query = time.monotonic() + QUERY_EVERY_S
         self.next_summary = time.monotonic() + SUMMARY_EVERY_S
         self.time_set = False
+        self.time_source = None   # where the grid last got its time from outside itself; see time_source()
         self.link_saves = 0
         self.known_ports = set()
         self.probing = False
@@ -462,6 +478,14 @@ class Chaos:
             if p := self.unsent_direct(b, int(m.group(2))):
                 del self.pending[p["token"]]
                 self.resolve(p, "refused", reason=m.group(1))
+        elif m := RX["ap_refused_direct"].search(line):
+            # The AP refused it (for example offline: it has never heard of the receiver). A refusal while both
+            # ends are registered is still a finding, but it is not a message lost on the way (2026-09-18).
+            token = self.direct_ids.get((b.index, int(m.group(3)), int(m.group(4))))
+            p = self.pending.get(token)
+            if p:
+                del self.pending[token]
+                self.resolve(p, "refused by the AP", reason=m.group(1))
         elif m := RX["received_direct"].search(line):
             key = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
             token = self.direct_ids.get(key)
@@ -483,6 +507,9 @@ class Chaos:
                 b.volume = m.group(1)
         elif m := RX["time"].search(line):
             self.event("time", board=b.name, text=m.group(1))
+            source = time_source(m.group(1), b.name)
+            if source is not None and self.time_source is None:
+                self.time_source = source   # the first source to give the grid time since it was cleared
 
     def on_down(self, b):
         """The board lost its state: a restart, a hold, or a lost port."""
@@ -609,7 +636,12 @@ class Chaos:
             return
         sender = self.rng.choice(senders)
         receiver = self.rng.choice([h for h in self.hhs if h is not sender])
-        kinds = ["broadcast", "direct"] + (["group"] if self.group else [])
+        # --no-alerts (a night run): announcements and urgent broadcasts take over every handheld's screen,
+        # and urgent ones sound even with the volume off (D40), so only 1:1 and group messages are sent, and
+        # none at all while grid time is unset (then urgent is all a handheld may send, D6).
+        if self.args.no_alerts and not self.time_set:
+            return
+        kinds = (["direct"] if self.args.no_alerts else ["broadcast", "direct"]) + (["group"] if self.group else [])
         kind = self.rng.choice(kinds) if self.time_set else "urgent"
         target = {"broadcast": "all", "direct": str(receiver.index), "group": self.group,
                   "urgent": "urgent"}[kind]
@@ -755,6 +787,14 @@ class Chaos:
         def time_seen():
             return any(a.status and a.status["time"] != "UNSET" for a in self.aps if self.present(a))
 
+        # A GPS on MAIN (D63) or a handheld's clock usually gives the grid time within seconds; the PC
+        # typing `time set` then only fights it (MAIN refuses while its GPS has a fix, another AP
+        # would accept and hand-set time until MAIN's next fix took it back).
+        if self.wait(STATUS_EVERY_S + 30, until=time_seen):
+            self.time_set = True
+            self.event("time_from_grid", source=self.time_source or "unknown")
+            self.say(f"grid time came from {self.time_source or 'the grid'}; the PC did not set it")
+            return
         for attempt in range(1, 5):
             ap = next((a for a in self.aps if self.present(a)), None)
             if ap is None:
@@ -804,6 +844,8 @@ class Chaos:
                  + (f" for {e['outage_s']} s" if e["kind"] == "hold" else ""))
         self.event("fault", **{k: v for k, v in e.items() if k != "at_s"})
         blackout = bool(self.aps) and all(a in victims for a in self.aps)
+        if blackout:
+            self.time_source = None   # every AP loses its time: watch where the grid gets it back
         exp["unconfirmed"] = []
         try:
             for v in victims:
@@ -842,13 +884,13 @@ class Chaos:
             # records which of the two put the grid back in business.
             self.wait(90, until=self.backbone_whole)
             carried = self.wait(self.args.time_recovery, until=self.grid_has_time)
-            self.event("time_after_blackout", carried=bool(carried),
+            self.event("time_after_blackout", carried=bool(carried), source=self.time_source,
                        waited_s=round(self.args.time_recovery if not carried else 0, 1))
             if carried:
-                self.say("grid time came back from a handheld (D53)")
+                self.say(f"grid time came back from {self.time_source or 'the grid'} (D53, D63, D65)")
             else:
-                self.finding("grid time did not come back from a handheld after every AP restarted (D53); "
-                             "the PC set it instead")
+                self.finding("grid time did not come back after every AP restarted: no GPS fix and no handheld "
+                             "clock (D53, D63, D65); the PC set it instead")
                 if self.args.set_time:
                     self.set_time()
         linked = self.wait(self.args.recovery_timeout, until=self.backbone_whole)
@@ -984,6 +1026,8 @@ SAMPLES = [
     ("sent_direct", "I (5000) MSG: [MSG] Sent URGENT to device 1: 1:1 boot 3 seq 19, 12 bytes", ("1", "3", "19")),
     ("not_sent_direct", "W (5000) MSG: [MSG] Not sent (outbox full): 1:1 to device 2, 12 bytes",
      ("outbox full", "2")),
+    ("ap_refused_direct", "W (5000) MSG: [MSG] Refused by the AP (offline): 1:1 to 2 boot 44 seq 7",
+     ("offline", "2", "44", "7")),
     ("received_direct", "I (5000) MSG: [MSG] From 1 (Handheld 1): 1:1 boot 44 seq 7, 12 bytes", ("1", "44", "7")),
     ("received_direct", "I (5000) MSG: [MSG] From 2 (Handheld 2) URGENT: 1:1 boot 9 seq 1, 3 bytes", ("2", "9", "1")),
     ("volume", "Volume: medium", ("medium",)),
@@ -1071,6 +1115,8 @@ def main():
     ap.add_argument("--probe-interval", type=float, default=45, help="seconds between handheld messages")
     ap.add_argument("--no-set-time", dest="set_time", action="store_false",
                     help="do not set grid time from the PC clock at the start (1:1 and group need it, D6)")
+    ap.add_argument("--no-alerts", action="store_true",
+                    help="never send announcements or urgent broadcasts (they wake every handheld); for night runs")
     ap.add_argument("--quiet-handhelds", action="store_true",
                     help="set handheld volume off for the run and restore it at the end")
     args = ap.parse_args()
@@ -1080,7 +1126,7 @@ def main():
     if args.self_check:
         return self_check()
     if args.seed is None:
-        args.seed = int(time.time()) % 100000
+        args.seed = secrets.randbelow(1 << 31)   # the OS's randomness: every night a new schedule; printed for replay
     if not args.live:
         print_schedule(make_schedule(random.Random(args.seed), args.aps, args.handhelds, args), args)
         print(f"\nSchedule only, assuming {args.aps} APs and {args.handhelds} handhelds. Nothing was opened. "

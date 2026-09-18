@@ -179,6 +179,16 @@ bool lg_node_restore_name(lg_node_t *n, const lg_name_t *name);
 /* Floods every name held, for the periodic announcement D48 asks for. */
 void lg_node_announce_names(lg_node_t *n);
 
+/*
+ * Floods the presence of every handheld registered here, again (D48). Presence was sent only when a
+ * handheld registered and when a link came up, so an AP that missed that one flood (a restart whose link
+ * the peer confirmed first, a full backbone queue) refused 1:1 messages to handhelds it had never heard
+ * of until something else made the peer send again: the chaos run of 2026-09-18 lost 20 messages this
+ * way. Receivers pass on only changes. Call every LG_PRESENCE_ANNOUNCE_MS.
+ */
+#define LG_PRESENCE_ANNOUNCE_MS 60000u
+void lg_node_announce_presence(lg_node_t *n);
+
 /* The newest name held for device, or NULL when it has none. */
 const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device);
 

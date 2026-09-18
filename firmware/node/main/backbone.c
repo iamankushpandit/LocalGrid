@@ -443,7 +443,24 @@ static void handle_rx(const lgbb_rx_t *r, uint32_t now)
         return;
     }
     if (!lgbb_is_neighbor(src)) {
-        return;   /* data only over confirmed links */
+        /*
+         * A peer sends data only over a link it has confirmed, which it does once our HELLO lists its
+         * current boot, so we have heard it. An authenticated data frame from the boot we already know
+         * therefore proves the link works both ways: take it as our confirmation too. Dropping it lost
+         * the presence flood a peer sends the moment its side comes up, which the chaos run of
+         * 2026-09-18 traced every 1:1 refusal to: the restarted AP never learned where those handhelds
+         * were. A frame from a boot we have not heard stays dropped.
+         */
+        lgbb_link_t *l = link_find(src);
+        if (l == NULL || l->boot != boot || l->hellos == 0) {
+            return;   /* data only over confirmed links */
+        }
+        l->usable = true;
+        s.stats[src].ups++;
+        ESP_LOGI(TAG, "[BB] Link up to node %u (confirmed by its data), RSSI %d", src, l->rssi);
+        if (s.on_link != NULL) {
+            s.on_link(src, true);
+        }
     }
     if (s.on_frame != NULL) {
         s.on_frame(src, inner, (size_t)n);

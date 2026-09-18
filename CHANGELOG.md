@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (contributor kit: prepared, not open)
+- `docs/BOARDS.md`, the hardware guide: supported boards, every `lg_board_t` field and where its value comes from, how board codes in device IDs select a profile, the six steps to add a board, and a bring-up checklist with the command and evidence for each item. A draft `CONTRIBUTING.md`, a new-board issue template, a pull request template, the `new-board` skill, and a CI workflow (`.github/workflows/build.yml`) that builds every firmware type and target with ESP-IDF v6.1 and throwaway secrets and checks layering (D27).
+- LocalGrid has no licence yet (owner: "prepare, but keep it closed for now"), so every one of these says outside contributions cannot be accepted, with TODOs for the licence and a contributor sign-off. The workflow has not been run.
+
+### Fixed (1:1 messages refused after an AP restart: the night chaos run)
+- The 10-hour chaos run of 2026-09-18 recorded 20 "lost" 1:1 messages between registered handhelds on different APs, in clusters after an AP restart. None was lost in transit: the sender's AP had never heard of the receiver and refused it as offline. Presence was flooded only when a handheld registered and when a link came up, and a restarted AP dropped that one flood because the peer confirmed the link first and data was accepted only over links confirmed on this side. Found from the logs alone by a parallel agent; every cluster matched.
+- `backbone.c`: an authenticated data frame from a peer's known boot now confirms the link on this side too (a peer sends data only over links it has confirmed), instead of being dropped.
+- `lg_node_announce_presence()` re-floods every handheld registered on an AP every 60 s (D48: announced on link up and periodically), and receiving APs pass a presence update on to their handhelds only when it changed. New test `test_presence_announced_again`.
+- A handheld now logs an AP's refusal (`[MSG] Refused by the AP (offline): 1:1 to D boot B seq S`), and `tools/chaos.py` reports it as "refused by the AP" rather than lost; still a finding while both ends are registered.
+- The same run found no unplanned restarts: all 62 boots were injected (no brownouts, panics or watchdogs), 45 faults and 2 full blackouts all recovered, and grid time came back from MAIN's GPS after each blackout.
+
+### Changed (chaos runs with GPS on the grid)
+- `tools/chaos.py` no longer sets grid time from the PC when the grid already has it: at the start of a run, and after a blackout, it waits for the grid's own sources first. MAIN refuses `time set` while its GPS has a fix (D63), and another AP would have accepted it and hand-set time until MAIN's next fix took it back.
+- After a blackout the report says where time came back from, read from the APs' own `[TIME]` lines: the GPS on an AP (D63), a handheld's clock or live fix (D53, D60, D65), or the PC; a blackout with none of them is a finding.
+- Checked on the bench before the night: with MAIN's GPS unplugged and NORTH and SOUTH holding time, a restarted MAIN took grid time back within a second of its links coming up ("AP 0 has no grid time; sent ours"), so the 11 s gap seen earlier came from every AP having been reset at once, not from a fault.
+
 ### Fixed (MAIN's free heap back from 11 KB to 29 KB)
 - The admin page kept five copies of its status snapshot, three of the positions list and a 6 KB reply buffer (24.6 KB of static RAM). It now keeps one published copy and one for the web task, and sends `/api/status` in chunks from a 1 KB buffer (15.5 KB freed; httpd stack 8 to 6 KB).
 - ESP-IDF's lwIP holds a full 1.5 KB buffer for every `send()` until it is acknowledged, so a handheld registering (7 to 11 small frames) took 11 to 17 KB, and handhelds reconnecting together stacked it. An AP now sends the frames going back to a handheld in one write when it finishes handling that handheld's frame; the bytes are unchanged and talk frames are not held. Measured on MAIN with three handhelds re-registering at once: minimum free heap 29 KB (17 KB after the first fix, 11 KB before).

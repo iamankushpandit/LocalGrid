@@ -313,6 +313,51 @@ static void test_offline_and_roam(void)
     sim_destroy(s);
 }
 
+/*
+ * An AP that missed a presence flood (the chaos run of 2026-09-18: it restarted, and the peer's one flood
+ * arrived before the link was up on its side) refused 1:1 messages to a handheld it had never heard of.
+ * The periodic re-announcement (D48) must heal it.
+ */
+static void test_presence_announced_again(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_node_t *a = &s->nodes[0].node;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (a->presence[i].in_use && a->presence[i].device == LG_PROTO_EMMA) {
+            memset(&a->presence[i], 0, sizeof(a->presence[i]));   /* node A never heard of Emma */
+        }
+    }
+    CHECK(lg_node_presence(a, LG_PROTO_EMMA) == NULL);
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Missed you"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_REJECTED);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].reject_reason, LG_ACK_REJ_OFFLINE);
+
+    lg_node_announce_presence(&s->nodes[2].node);   /* Emma's AP, on its timer */
+    CHECK(sim_pump(s));
+    const lg_presence_entry_t *p = lg_node_presence(a, LG_PROTO_EMMA);
+    CHECK(p != NULL && p->state == LG_PRES_ONLINE && p->node == 2);
+
+    int again = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Found you"));
+    CHECK(again >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "Found you"));
+    CHECK_EQ(cl(s, DAD)->outbox[again].state, LG_OUT_DELIVERED);
+
+    /* Announcing again with nothing changed moves nothing, and an AP only announces its own handhelds:
+     * node B has none of Emma's to repeat, so node A's view stays exactly as it is. */
+    lg_node_announce_presence(&s->nodes[2].node);
+    lg_node_announce_presence(&s->nodes[1].node);
+    CHECK(sim_pump(s));
+    p = lg_node_presence(a, LG_PROTO_EMMA);
+    CHECK(p != NULL && p->state == LG_PRES_ONLINE && p->node == 2);
+    sim_destroy(s);
+}
+
 static void test_time_rule(void)
 {
     sim_t *s = make_chain();
@@ -1575,6 +1620,7 @@ void test_messaging(void)
     test_announce_permission();
     test_duplicates_and_retransmit();
     test_offline_and_roam();
+    test_presence_announced_again();
     test_time_rule();
     test_time_from_handheld();
     test_node_refuses_unsafe_frames();

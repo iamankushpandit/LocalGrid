@@ -932,6 +932,11 @@ static void core_task(void *arg)
             grid_state_announce();
             (void)lg_node_announce_groups(&g_app.core);   /* an AP that missed a change catches up */
         }
+        static uint32_t last_presence;
+        if (now - last_presence >= LG_PRESENCE_ANNOUNCE_MS) {
+            last_presence = now;
+            lg_node_announce_presence(&g_app.core);   /* D48: a missed presence flood heals within a minute */
+        }
         static uint32_t last_names;
         if (now - last_names >= NAMES_ANNOUNCE_MS) {
             last_names = now;

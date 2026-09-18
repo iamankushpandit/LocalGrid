@@ -874,11 +874,17 @@ static void apply_presence(lg_node_t *n, const lg_presence_t *pr)
         return;
     }
     if (pr->epoch > p->epoch || (pr->epoch == p->epoch && pr->node == p->node)) {
+        /* Presence is announced again every LG_PRESENCE_ANNOUNCE_MS (D48), so most updates repeat what this
+         * AP already holds; only a change is worth a frame to each local handheld. */
+        bool changed = pr->epoch != p->epoch || pr->node != p->node || pr->state != p->state ||
+                       memcmp(p->pubkey, pr->pubkey, LG_PUBKEY_LEN) != 0;
         p->epoch = pr->epoch;
         p->node  = pr->node;
         p->state = pr->state;
         memcpy(p->pubkey, pr->pubkey, LG_PUBKEY_LEN);
-        notify_local_clients(n, p, 0);
+        if (changed) {
+            notify_local_clients(n, p, 0);
+        }
     }
 }
 
@@ -1085,6 +1091,16 @@ bool lg_node_restore_name(lg_node_t *n, const lg_name_t *name)
     lg_name_t copy = *name;
     copy.text[copy.len] = 0;
     return name_take(n, &copy);
+}
+
+void lg_node_announce_presence(lg_node_t *n)
+{
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *p = &n->presence[i];
+        if (p->in_use && p->node == n->self && p->state == LG_PRES_ONLINE) {
+            flood_presence(n, p);
+        }
+    }
 }
 
 void lg_node_announce_names(lg_node_t *n)

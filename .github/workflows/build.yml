@@ -1,0 +1,48 @@
+# Builds every firmware type for every target in tools/bench_devices.json with ESP-IDF v6.1,
+# warnings refused, and checks layering (D27). Needs no repository secrets: prototype keys are
+# generated fresh for each run and thrown away with the container.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Layer check (D27)
+        run: python3 tools/check_layers.py
+
+      - name: Throwaway prototype secrets
+        run: python3 tools/gen_secrets.py
+
+      - name: Build every firmware type and target
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh" > /dev/null
+          python tools/build.py
+
+      - name: Keep build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            firmware/*/build-*.log
+            tests/target/build-*.log
+          if-no-files-found: ignore
