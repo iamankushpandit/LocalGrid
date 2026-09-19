@@ -148,7 +148,70 @@ static void test_bodies(void)
         CHECK_EQ(t2.stratum, LG_STRATUM_UNKNOWN);
         lg_wr16(tb + 4, 1000u);
         CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));     /* milliseconds past the second */
-        CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN - 1u, &t2));
+        CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN_V2 - 1u, &t2));
+    }
+
+    /* D67: the 9-byte form carries flags; the 8-byte form (APs to APs, older APs) decodes as none. */
+    {
+        uint8_t tb[LG_TIME_SYNC_LEN + 1u];
+        lg_time_sync_t t = { .grid_time = 1789590000u, .millis = 5, .quality = LG_TIME_AUTHORITATIVE, .stratum = 0,
+                             .flags = LG_TIME_FROM_GPS };
+        CHECK_EQ(LG_TIME_SYNC_LEN, 9u);
+        CHECK_EQ(lg_time_sync_enc(&t, tb), LG_TIME_SYNC_LEN);
+        lg_time_sync_t t2;
+        memset(&t2, 0xAA, sizeof(t2));
+        CHECK(lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));
+        CHECK_EQ(t2.grid_time, 1789590000u);
+        CHECK_EQ(t2.millis, 5);
+        CHECK_EQ(t2.quality, LG_TIME_AUTHORITATIVE);
+        CHECK_EQ(t2.stratum, 0);
+        CHECK_EQ(t2.flags, LG_TIME_FROM_GPS);
+        t.flags = 0;
+        CHECK_EQ(lg_time_sync_enc(&t, tb), LG_TIME_SYNC_LEN);
+        CHECK(lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));
+        CHECK_EQ(t2.flags, 0);
+        t.flags = LG_TIME_FROM_GPS;
+        CHECK_EQ(lg_time_sync_enc_v2(&t, tb), LG_TIME_SYNC_LEN_V2);   /* the flags are not written */
+        memset(&t2, 0xAA, sizeof(t2));
+        CHECK(lg_time_sync_dec(tb, LG_TIME_SYNC_LEN_V2, &t2));
+        CHECK_EQ(t2.grid_time, 1789590000u);
+        CHECK_EQ(t2.millis, 5);
+        CHECK_EQ(t2.flags, 0);
+        uint8_t v1[LG_TIME_SYNC_LEN_V1];
+        lg_wr32(v1, 1789590000u);
+        v1[4] = LG_TIME_CARRIED;
+        memset(&t2, 0xAA, sizeof(t2));
+        CHECK(lg_time_sync_dec(v1, LG_TIME_SYNC_LEN_V1, &t2));
+        CHECK_EQ(t2.flags, 0);
+        /* A flag bit this firmware does not know is ignored, not refused. */
+        (void)lg_time_sync_enc(&t, tb);
+        tb[8] = 0x81u;
+        CHECK(lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));
+        CHECK((t2.flags & LG_TIME_FROM_GPS) != 0);
+        CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN + 1u, &t2));   /* any other length */
+        CHECK(!lg_time_sync_dec(tb, 6u, &t2));
+        tb[6] = 3;   /* quality out of range in the new form too */
+        CHECK(!lg_time_sync_dec(tb, LG_TIME_SYNC_LEN, &t2));
+    }
+
+    /* D67: POSIX TZ strings as the admin page makes them. */
+    {
+        static const char *const good[] = { "CST6CDT,M3.2.0,M11.1.0", "UTC0", "IST-5:30", "<+0530>-5:30",
+                                            "<-03>3<-02>,M3.5.0/-2,M10.5.0/-1", "AEST-10AEDT,M10.1.0,M4.1.0/3" };
+        for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+            CHECK(lg_tz_valid((const uint8_t *)good[i], strlen(good[i])));
+        }
+        static const char *const bad[] = { "", "5CST", "CST 6", "America/Chicago\"", "CST6;rm", "CST6\n" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            CHECK(!lg_tz_valid((const uint8_t *)bad[i], strlen(bad[i])));
+        }
+        char longest[LG_TZ_MAX + 2];
+        memset(longest, 'A', sizeof(longest));
+        CHECK(lg_tz_valid((const uint8_t *)longest, LG_TZ_MAX));
+        CHECK(!lg_tz_valid((const uint8_t *)longest, LG_TZ_MAX + 1u));
+        const uint8_t with_nul[] = { 'U', 'T', 'C', 0, '0' };
+        CHECK(!lg_tz_valid(with_nul, sizeof(with_nul)));
+        CHECK(!lg_tz_valid(NULL, 3));
     }
 
     uint8_t buf[64];

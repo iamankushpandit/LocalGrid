@@ -21,6 +21,9 @@ Every reply ends with `POWER: this boot started after: <cause>`; on APs it also 
 |---|---|---|
 | Hosyond (HY3) | GPIO34, 2:1 | With no battery fitted this is the charger output, which follows USB. |
 | FNK0104B (F4B) | GPIO9, 2:1 | Braino read 4.09–4.16 V on USB with no pack. |
+| E32R28T-1 (E28) | GPIO34, 2:1 | Vendor manual's divider. Cannot tell a missing pack from a present one. |
+| E32R40T (E40) | GPIO34, 2:1 | Inherited from the E32R28T-1, not measured: check against a meter before trusting it. |
+| CYD (CYD) | none | Replies `not measurable`. GPIO34 on a CYD is the light sensor, not a battery. |
 | Elegoo AP (ELG) | none | Replies `not measurable`; read the brownout count instead. Wire a divider to an ADC1 pin and set `CONFIG_LG_NODE_SUPPLY_SENSE_GPIO` to measure. |
 
 Pins and ratios are the vendor's (from Braino's measured board profiles), not a meter's. Compare one reading against a multimeter before quoting tenths of a volt.

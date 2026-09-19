@@ -629,6 +629,158 @@ static void test_time_announce(void)
     sim_destroy(s);
 }
 
+/* The backbone TIME_SYNC frames captured since capture_count was last reset, and their lengths. */
+static size_t captured_time_syncs(const sim_t *s, size_t *bad_len)
+{
+    size_t n = 0;
+    *bad_len = 0;
+    for (size_t i = 0; i < s->capture_count; i++) {
+        const sim_ev_t *ev = &s->capture[i];
+        if (ev->len > LG_ENV_SIZE && ev->data[1] == LG_T_TIME_SYNC) {
+            n++;
+            if (ev->len != LG_ENV_SIZE + LG_TIME_SYNC_LEN_V2) {
+                (*bad_len)++;
+            }
+        }
+    }
+    return n;
+}
+
+/*
+ * D67: where grid time came from, and the grid's time zone. Each AP says from its own knowledge
+ * whether a GPS set the time, in the flags byte only handhelds get (the backbone keeps the 8-byte
+ * form so APs before D67 still take it). The zone reaches every handheld at registration and when
+ * it changes, is sent once per change, and an AP without one never clears a handheld's.
+ */
+static void test_time_source_and_zone(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    CHECK(!lg_client_time_from_gps(cl(s, DAD)));   /* no flags from anyone yet */
+    CHECK_EQ(lg_client_time_zone(cl(s, DAD))[0], '\0');
+
+    /* Node A's GPS set the time; node C does not know that yet. */
+    s->nodes[0].time_flags = LG_TIME_FROM_GPS;
+    s->capture_count = 0;
+    lg_node_announce_time(&s->nodes[0].node, LG_TIME_AUTHORITATIVE);
+    CHECK(sim_pump(s));
+    size_t bad_len = 0;
+    CHECK(captured_time_syncs(s, &bad_len) > 0);
+    CHECK_EQ(bad_len, 0);                          /* APs to APs: 8 bytes, no flags */
+    CHECK(lg_client_time_from_gps(cl(s, DAD)));    /* from node A itself */
+    CHECK(lg_client_time_from_gps(cl(s, RANGER)));
+    CHECK(!lg_client_time_from_gps(cl(s, EMMA)));  /* node C pushed its own view: not by GPS */
+    CHECK(!lg_client_time_restricted(cl(s, EMMA)));
+
+    /* Node C learns it (the grid state, in firmware) and says so at its next push. */
+    s->nodes[2].time_flags = LG_TIME_FROM_GPS;
+    lg_node_send_time(&s->nodes[2].node, LG_PROTO_EMMA, LG_TIME_CARRIED);
+    CHECK(sim_pump(s));
+    CHECK(lg_client_time_from_gps(cl(s, EMMA)));
+
+    /* Registering gets the flags at once, not only at the next announcement. */
+    s->nodes[1].time_flags = 0;
+    sim_detach(s, EMMA);
+    sim_attach(s, EMMA, 1);
+    CHECK(cl(s, EMMA)->registered);
+    CHECK(!lg_client_time_from_gps(cl(s, EMMA)));
+    s->nodes[1].time_flags = LG_TIME_FROM_GPS;
+    sim_detach(s, EMMA);
+    sim_attach(s, EMMA, 1);
+    CHECK(lg_client_time_from_gps(cl(s, EMMA)));
+
+    /* A node with no time at all: the flag goes with the time. */
+    sim_detach(s, EMMA);
+    s->grid_time = 0;
+    s->nodes[1].time = 0;
+    s->clients[EMMA].clock = 0;
+    sim_attach(s, EMMA, 1);
+    CHECK(lg_client_time_restricted(cl(s, EMMA)));
+    CHECK(!lg_client_time_from_gps(cl(s, EMMA)));
+    s->grid_time = T0;
+
+    /* The zone: node A has it, sends it to its handhelds now, and only once. */
+    const char *zone = "CST6CDT,M3.2.0,M11.1.0";
+    CHECK_EQ(lg_node_set_time_zone(&s->nodes[0].node, zone), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(strcmp(lg_client_time_zone(cl(s, DAD)), zone) == 0);
+    CHECK(strcmp(lg_client_time_zone(cl(s, RANGER)), zone) == 0);
+    CHECK_EQ(s->clients[DAD].tz_events, 1);
+    CHECK_EQ(lg_client_time_zone(cl(s, ALEX))[0], '\0');   /* node B has none: nothing sent */
+    CHECK_EQ(lg_node_set_time_zone(&s->nodes[0].node, zone), LG_OK);   /* the same again */
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].tz_events, 1);
+
+    /* Refused zones leave the one held. */
+    CHECK_EQ(lg_node_set_time_zone(&s->nodes[0].node, "CST 6"), LG_ERR_ARG);
+    char too_long[LG_TZ_MAX + 2];
+    memset(too_long, 'A', sizeof(too_long) - 1u);
+    too_long[sizeof(too_long) - 1u] = '\0';
+    CHECK_EQ(lg_node_set_time_zone(&s->nodes[0].node, too_long), LG_ERR_ARG);
+    CHECK(strcmp(s->nodes[0].node.tz, zone) == 0);
+
+    /* Registration brings it; an AP without one leaves a handheld's zone alone. */
+    sim_detach(s, EMMA);
+    sim_attach(s, EMMA, 0);
+    CHECK(strcmp(lg_client_time_zone(cl(s, EMMA)), zone) == 0);
+    CHECK_EQ(s->clients[EMMA].tz_events, 1);
+    sim_detach(s, EMMA);
+    sim_attach(s, EMMA, 2);
+    CHECK(strcmp(lg_client_time_zone(cl(s, EMMA)), zone) == 0);
+    CHECK_EQ(s->clients[EMMA].tz_events, 1);
+
+    /* A change reaches everyone attached; forgetting sends nothing. */
+    const char *india = "<+0530>-5:30";
+    CHECK_EQ(lg_node_set_time_zone(&s->nodes[0].node, india), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(strcmp(lg_client_time_zone(cl(s, DAD)), india) == 0);
+    CHECK_EQ(s->clients[DAD].tz_events, 2);
+    CHECK_EQ(lg_node_set_time_zone(&s->nodes[0].node, ""), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(strcmp(lg_client_time_zone(cl(s, DAD)), india) == 0);
+    CHECK_EQ(s->clients[DAD].tz_events, 2);
+
+    /* The client takes only a well-formed SYSTEM zone. */
+    uint8_t frame[LG_ENV_SIZE + LG_TZ_MAX + 1u];
+    lg_env_t e = {
+        .major = LG_PROTO_MAJOR, .minor = LG_PROTO_MINOR, .type = LG_T_TIME_ZONE, .scope = LG_SCOPE_DIRECT,
+        .ttl = 1, .origin_id = LG_NODE_ID_BASE | 0u, .origin_boot = 1, .origin_seq = 900, .target = LG_PROTO_DAD,
+    };
+    int flen = lg_frame_build(&e, (const uint8_t *)"UTC0", 4, frame, sizeof(frame));
+    CHECK(flen > 0);
+    lg_client_on_frame(cl(s, DAD), frame, (size_t)flen);   /* not SYSTEM */
+    CHECK(strcmp(lg_client_time_zone(cl(s, DAD)), india) == 0);
+    e.scope = LG_SCOPE_SYSTEM;
+    e.origin_seq++;
+    flen = lg_frame_build(&e, (const uint8_t *)"UTC 0", 5, frame, sizeof(frame));
+    CHECK(flen > 0);
+    lg_client_on_frame(cl(s, DAD), frame, (size_t)flen);   /* not a POSIX TZ */
+    CHECK(strcmp(lg_client_time_zone(cl(s, DAD)), india) == 0);
+    e.origin_seq++;
+    flen = lg_frame_build(&e, (const uint8_t *)"UTC0", 4, frame, sizeof(frame));
+    CHECK(flen > 0);
+    lg_client_on_frame(cl(s, DAD), frame, (size_t)flen);
+    CHECK(strcmp(lg_client_time_zone(cl(s, DAD)), "UTC0") == 0);
+    CHECK_EQ(s->clients[DAD].tz_events, 3);
+    lg_client_on_frame(cl(s, DAD), frame, (size_t)flen);   /* delivered twice: one change */
+    CHECK_EQ(s->clients[DAD].tz_events, 3);
+
+    /* A node ignores a zone sent up by a handheld. */
+    uint32_t rejected = s->nodes[0].node.stats.rejected;
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    e.origin_id = LG_PROTO_DAD;
+    e.target = 0;
+    flen = lg_frame_build(&e, (const uint8_t *)"UTC0", 4, frame, sizeof(frame));
+    CHECK(flen > 0);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)flen);
+    CHECK(strcmp(s->nodes[0].node.tz, "") == 0);
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed);
+    sim_destroy(s);
+}
+
 /* Keepalive: a handheld's PING is answered by its own node, and only to that session. */
 /*
  * A read report travels the same path as a delivery report: recipient -> node -> author, with
@@ -1611,6 +1763,7 @@ void test_messaging(void)
     test_diag_echo();
     test_grid_state();
     test_time_announce();
+    test_time_source_and_zone();
     test_registration_and_presence();
     test_direct_two_hops_encrypted();
     test_direct_same_node();

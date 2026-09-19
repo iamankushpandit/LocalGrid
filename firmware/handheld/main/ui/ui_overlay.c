@@ -70,6 +70,7 @@ typedef struct {
     uint8_t   where_lines;  /* 0, 1, or 2 */
     lg_rect_t where;        /* the location lines, empty when the sender's position is not known */
     lg_rect_t read;         /* the Read button */
+    lg_rect_t hint;         /* how to read it without touch (alert unit, D66); empty when none */
 } alert_layout_t;
 
 typedef struct {
@@ -99,6 +100,7 @@ static struct {
     /* alert */
     cover_t   cover;
     bool      emergency;
+    bool      all_clear;   /* the alert is an all clear (D66): calm colour, no flashing */
     bool      lit;
     uint8_t   flashes_left;
     uint32_t  flash_ms;
@@ -111,6 +113,9 @@ static struct {
     uint32_t  where_ms;
     alert_layout_t lay;
     bool      swallow;         /* a dismissing touch: ignore it until the finger lifts */
+    /* the alert unit (D66): alerts only, no banner or saver, and a line saying how to read */
+    bool      alerts_only;
+    char      read_hint[40];
     /* rain */
     uint8_t   cols;
     int16_t   col_w;
@@ -264,7 +269,9 @@ static void alert_layout(uint8_t where_lines)
     int16_t inner_w = (int16_t)(w - 2 * L->margin);
     int16_t bw = (int16_t)(w / 2);
     int16_t bh = (int16_t)(F_TITLE->line_height + 20);
-    L->read = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - L->margin - bh), bw, bh };
+    int16_t hint_h = s.read_hint[0] ? (int16_t)(F_SMALL->line_height + UI_GAP) : 0;
+    L->hint = (lg_rect_t){ L->margin, (int16_t)(h - L->margin - hint_h), inner_w, hint_h };
+    L->read = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - L->margin - hint_h - bh), bw, bh };
     int16_t bottom = (int16_t)(L->read.y - 2 * UI_GAP);
     L->where_lines = where_lines;
     if (where_lines > 0) {
@@ -305,12 +312,14 @@ static void paint_alert(const lg_canvas_t *c, void *ctx)
     (void)ctx;
     const alert_layout_t *L = &s.lay;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
-    lg_color_t tone = s.emergency ? C_ERROR : C_WARNING;
+    lg_color_t tone = s.all_clear ? C_ACCENT : s.emergency ? C_ERROR : C_WARNING;
     lg_color_t ground = tone;
     lg_color_t ink = C_BG;
     lg_paint_panel(c, &all, &all, ground, ground, ground, 0, 0);
-    const char *kind = s.emergency ? "URGENT" : "ANNOUNCEMENT";
-    centred(c, &all, L->kind_y, F_TITLE, NULL, ink, kind, strlen(kind));
+    const char *kind = s.all_clear ? "ALL CLEAR" : s.emergency ? "URGENT" : "ANNOUNCEMENT";
+    /* A narrow panel (172 px) cannot hold ANNOUNCEMENT at the title size inside the border. */
+    const lg_font_t *kind_font = lg_draw_text_width(F_TITLE, NULL, kind) <= s.w - 2 * L->margin ? F_TITLE : F_BODY;
+    centred(c, &all, L->kind_y, kind_font, NULL, ink, kind, strlen(kind));
     centred(c, &all, L->who_y, F_SMALL, F_EMOJI, ink, s.alert_who, strlen(s.alert_who));
     for (uint8_t l = 0; l < L->text_lines; l++) {
         centred(c, &all, (int16_t)(L->text_y + l * F_TITLE->line_height), F_TITLE, F_EMOJI, ink,
@@ -327,6 +336,9 @@ static void paint_alert(const lg_canvas_t *c, void *ctx)
     lg_paint_text(c, &L->read, (int16_t)(L->read.x + (L->read.w - lg_draw_text_width(F_TITLE, NULL, word)) / 2),
                   (int16_t)(L->read.y + (L->read.h - F_TITLE->line_height) / 2), F_TITLE, NULL, ground, word,
                   strlen(word));
+    if (L->hint.h > 0) {
+        centred(c, &L->hint, (int16_t)(L->hint.y + UI_GAP), F_SMALL, NULL, ink, s.read_hint, strlen(s.read_hint));
+    }
 }
 
 static void draw_alert(void)
@@ -366,7 +378,7 @@ static void alert_where_tick(uint32_t now)
 /* One flash: four bars around the edge, and nothing else touched. */
 static void draw_alert_frame(void)
 {
-    lg_color_t tone = s.emergency ? C_ERROR : C_WARNING;
+    lg_color_t tone = s.all_clear ? C_ACCENT : s.emergency ? C_ERROR : C_WARNING;
     lg_color_t edge = s.lit ? C_BG : tone;
     int16_t w = (int16_t)s.w;
     int16_t h = (int16_t)s.h;
@@ -386,6 +398,7 @@ static void show_alert(bool emergency, const char *who, const char *text, uint32
     if (s.cover == OV_ALERT && s.emergency && !emergency) {
         return;   /* an announcement never buries an emergency nobody has acknowledged */
     }
+    s.all_clear = false;
     s.banner = false;
     s.cover = OV_ALERT;
     s.emergency = emergency;
@@ -407,6 +420,37 @@ static void show_alert(bool emergency, const char *who, const char *text, uint32
         ESP_LOGI(TAG, "[UI] Alert sender is %s%s%s", s.alert_where[0], s.lay.where_lines > 1 ? "; " : "",
                  s.alert_where[1]);
     }
+}
+
+/*
+ * "<name> is safe" (D66): an urgent broadcast marked all clear. It stands the author's SOS down: if
+ * that SOS is the alert on screen it is replaced, without reporting the SOS read (nobody read it),
+ * by a calm alert -- the accent colour, no flashing, the ordinary chime. An emergency from anyone
+ * else stays up; the all clear is still in the message list.
+ */
+static void show_all_clear(const char *who, const char *text, uint32_t id, uint32_t author, uint32_t now)
+{
+    if (s.cover == OV_ALERT && s.emergency && s.alert_author != author) {
+        return;
+    }
+    s.banner = false;
+    s.cover = OV_ALERT;
+    s.emergency = false;
+    s.all_clear = true;
+    s.lit = true;
+    s.flashes_left = 0;   /* never flashes */
+    s.flash_ms = now;
+    s.repeat_ms = now;
+    s.alert_id = id;
+    s.alert_author = author;
+    s.where_ms = now;
+    snprintf(s.alert_who, sizeof(s.alert_who), "%s", who);
+    snprintf(s.alert_text, sizeof(s.alert_text), "%s", text);
+    alert_layout(alert_where(author, s.alert_where));
+    draw_alert();
+    draw_alert_frame();
+    (void)lg_bsp_audio_cue(LG_CUE_RECEIVED);
+    ESP_LOGI(TAG, "[UI] All clear: %s", text);
 }
 
 /* ---- screen saver ---- */
@@ -528,6 +572,9 @@ static void watch(uint32_t now)
     if (!found) {
         return;
     }
+    if (s.alerts_only && n_scope != LG_SCOPE_BROADCAST) {
+        return;   /* an alert unit has no chats to open: only broadcasts reach its screen */
+    }
     const char *who = sender_name(st, newest.author);
     bool locked = ui_lock_active();
     if (s.cover == OV_SAVER && (n_scope == LG_SCOPE_BROADCAST || !locked)) {
@@ -535,7 +582,11 @@ static void watch(uint32_t now)
         ui_redraw_current();
     }
     if (n_scope == LG_SCOPE_BROADCAST) {
-        show_alert(newest.urgent, who, newest.text, newest.id, newest.author, now);
+        if (newest.all_clear) {
+            show_all_clear(who, newest.text, newest.id, newest.author, now);
+        } else {
+            show_alert(newest.urgent, who, newest.text, newest.id, newest.author, now);
+        }
         return;
     }
     s.pending_scope = n_scope;
@@ -580,9 +631,38 @@ void ui_overlay_start(uint16_t w, uint16_t h)
     alert_layout(0);   /* Read's place is known before any alert; each alert lays itself out again */
 }
 
+void ui_overlay_set_alert_unit(const char *read_hint)
+{
+    s.alerts_only = true;
+    snprintf(s.read_hint, sizeof(s.read_hint), "%s", read_hint != NULL ? read_hint : "");
+    alert_layout(0);
+}
+
+bool ui_overlay_alert_showing(void)
+{
+    return s.cover == OV_ALERT;
+}
+
+static void close_alert_as_read(void)
+{
+    s.cover = OV_NONE;   /* only Read closes an alert (D41, revised) */
+    hh_service_mark_read(s.alert_id);   /* Read means read: the sender sees it (D58) */
+    ESP_LOGI(TAG, "[UI] Alert closed");
+    ui_redraw_current();
+}
+
+bool ui_overlay_ack(void)
+{
+    if (s.cover != OV_ALERT) {
+        return false;
+    }
+    close_alert_as_read();
+    return true;
+}
+
 bool ui_overlay_saver_now(uint32_t now_ms)
 {
-    if (s.cover != OV_NONE || !lg_bsp_setting_get_bool("saver", true)) {
+    if (s.cover != OV_NONE || s.alerts_only || !lg_bsp_setting_get_bool("saver", true)) {
         return false;
     }
     show_saver(now_ms);
@@ -633,7 +713,7 @@ void ui_overlay_tick(uint32_t now, uint32_t last_touch_ms)
         if (s.banner && now - s.banner_since >= BANNER_MS) {
             hide_banner();
         }
-        if (now - last_touch_ms >= SAVER_IDLE_MS && lg_bsp_setting_get_bool("saver", true)) {
+        if (!s.alerts_only && now - last_touch_ms >= SAVER_IDLE_MS && lg_bsp_setting_get_bool("saver", true)) {
             show_saver(now);
         }
         break;
@@ -659,10 +739,7 @@ bool ui_overlay_touch(int16_t x, int16_t y, bool down)
         return true;
     case OV_ALERT:
         if (!down && lg_rect_hit(&s.lay.read, x, y)) {
-            s.cover = OV_NONE;   /* only Read closes an alert (D41, revised) */
-            hh_service_mark_read(s.alert_id);   /* Read means read: the sender sees it (D58) */
-            ESP_LOGI(TAG, "[UI] Alert closed");
-            ui_redraw_current();
+            close_alert_as_read();
         }
         return true;   /* the rest of the cover takes every touch and does nothing with it */
     default:

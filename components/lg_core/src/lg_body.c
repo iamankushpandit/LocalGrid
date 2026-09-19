@@ -201,12 +201,19 @@ int lg_position_slot(const lg_roster_t *r, uint32_t subject)
     return ui >= 0 && ui < (int)LG_MAX_DEVICES ? ui : -1;
 }
 
-size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out)
+size_t lg_time_sync_enc_v2(const lg_time_sync_t *v, uint8_t *out)
 {
     lg_wr32(out, v->grid_time);
     lg_wr16(out + 4, v->millis);
     out[6] = v->quality;
     out[7] = v->stratum;
+    return LG_TIME_SYNC_LEN_V2;
+}
+
+size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out)
+{
+    (void)lg_time_sync_enc_v2(v, out);
+    out[8] = v->flags;
     return LG_TIME_SYNC_LEN;
 }
 
@@ -217,16 +224,34 @@ bool lg_time_sync_dec(const uint8_t *in, size_t len, lg_time_sync_t *v)
         v->millis    = 0;
         v->quality   = in[4];
         v->stratum   = LG_STRATUM_UNKNOWN;
+        v->flags     = 0;
         return v->quality <= LG_TIME_AUTHORITATIVE;
     }
-    if (len != LG_TIME_SYNC_LEN) {
+    if (len != LG_TIME_SYNC_LEN_V2 && len != LG_TIME_SYNC_LEN) {
         return false;
     }
     v->grid_time = lg_rd32(in);
     v->millis    = lg_rd16(in + 4);
     v->quality   = in[6];
     v->stratum   = in[7];
+    v->flags     = len == LG_TIME_SYNC_LEN ? in[8] : 0u;   /* unknown bits are ignored, not refused */
     return v->quality <= LG_TIME_AUTHORITATIVE && v->millis < 1000u;
+}
+
+bool lg_tz_valid(const uint8_t *s, size_t n)
+{
+    if (s == NULL || n == 0 || n > LG_TZ_MAX || !((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '<')) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        uint8_t ch = s[i];
+        bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '<' ||
+                  ch == '>' || ch == '+' || ch == '-' || ch == ',' || ch == '.' || ch == ':' || ch == '/';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
 }
 
 size_t lg_hello_enc(const lg_hello_t *v, uint8_t *out)

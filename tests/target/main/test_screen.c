@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lg_board.h"
+#include "lg_bsp_board.h"
 #include "lg_bsp_touch.h"
 #include "lg_draw.h"
 
@@ -95,7 +96,8 @@ static void draw_results(void)
 
 void test_screen_start(const lg_identity_t *identity)
 {
-    const lg_board_t *board = identity->present ? lg_board_find(identity->board) : NULL;
+    /* D66: the Waveshare 1.47in C6 comes in two wirings under one name; drive whichever it is. */
+    const lg_board_t *board = lg_bsp_board_resolve(identity->present ? lg_board_find(identity->board) : NULL);
     if (!lg_board_has_display(board)) {
         return;
     }

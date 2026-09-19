@@ -95,6 +95,7 @@ typedef enum {
     LG_CEV_NAME,             /* value: device whose name changed, this handheld's own included */
     LG_CEV_VOICE_REFUSED,    /* value: lg_ack_status_t an AP refused our voice with (D61) */
     LG_CEV_POSITION,         /* value: subject whose position is newer (device, or LG_NODE_ID_BASE | node) (D65) */
+    LG_CEV_TIME_ZONE,        /* value: length of the new zone; lg_client_time_zone has it (D67) */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -142,6 +143,7 @@ typedef struct {
     bool               connected;
     bool               registered;
     bool               grid_time_known;
+    bool               time_from_gps;      /* D67: the last TIME_SYNC said a GPS set grid time */
     uint16_t           node;
     lg_out_msg_t       outbox[LG_OUTBOX_SIZE];
     lg_in_msg_t        inbox[LG_INBOX_SIZE];
@@ -156,6 +158,7 @@ typedef struct {
     uint32_t           voice_seq;          /* our voice counter, without LG_VOICE_SEQ_BIT (D61) */
     lg_voice_seen_t    voice_seen[LG_MAX_DEVICES];   /* newest voice per author, by roster user index */
     lg_position_t      positions[LG_POS_SLOTS];      /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
+    char               tz[LG_TZ_MAX + 1];            /* D67: the grid's POSIX TZ from the AP; "" none yet */
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
@@ -203,6 +206,16 @@ void lg_client_tick(lg_client_t *c);
 
 /* True while grid time is unset or unknown: only receiving and URGENT broadcasts work. */
 bool lg_client_time_restricted(const lg_client_t *c);
+
+/*
+ * D67. True when grid time is known and the AP's last TIME_SYNC said a GPS set it (LG_TIME_FROM_GPS).
+ * An AP before D67 sends no flags, so this stays false there.
+ */
+bool lg_client_time_from_gps(const lg_client_t *c);
+
+/* D67. The grid's time zone as a POSIX TZ string, as the AP last sent it; "" until one arrives.
+ * A new one emits LG_CEV_TIME_ZONE. The client keeps none across a restart: the glue does. */
+const char *lg_client_time_zone(const lg_client_t *c);
 
 const lg_in_msg_t *lg_client_inbox(const lg_client_t *c, size_t newest_index);
 

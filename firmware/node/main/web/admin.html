@@ -22,6 +22,11 @@
   header h1 { font-size: 22px; margin: 0; letter-spacing: .02em; }
   header .sub { color: var(--muted); font-size: 14px; }
   header .spacer { flex: 1; }
+  .tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); scrollbar-width: none; }
+  .tabs button { flex: 0 0 auto; background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+                 color: var(--muted); font: inherit; font-size: 15px; padding: 8px 12px; margin-bottom: -1px; cursor: pointer; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
   .loc-coords { font-family: var(--mono); font-size: 1.05rem; }
   .loc-links a { color: var(--accent); margin-right: 14px; }
   .loc-map { position: relative; height: 260px; margin-top: 10px; overflow: hidden; border: 1px solid var(--line);
@@ -96,11 +101,24 @@
     <img src="/favicon.svg" alt="">
     <div>
       <h1 id="title">LocalGrid</h1>
-      <div class="sub" id="subtitle">LocalMesh Access Point</div>
+      <div class="sub" id="subtitle">LocalGrid Access Point</div>
     </div>
     <div class="spacer"></div>
     <button class="ghost" id="logout" hidden>Log out</button>
   </header>
+
+  <nav class="tabs" id="tabs" role="tablist" hidden>
+    <button role="tab" data-tab="overview">Overview</button>
+    <button role="tab" data-tab="map">Map</button>
+    <button role="tab" data-tab="network">Network</button>
+    <button role="tab" data-tab="handhelds">Handhelds</button>
+    <button role="tab" data-tab="settings">Settings</button>
+  </nav>
+
+  <section id="map-empty" data-tab="map" hidden>
+    <h2>Map</h2>
+    <p class="dim">No positions yet. MAIN appears here once its GPS has a fix, and a handheld once its own GPS does.</p>
+  </section>
 
   <section id="loading"><p class="dim">Connecting to this AP…</p></section>
 
@@ -109,7 +127,7 @@
     <h2>Set up LocalGrid</h2>
     <form id="setup-form">
       <label for="setup-name">Network name</label>
-      <input id="setup-name" maxlength="32" required placeholder="Smith Family Camping" autocomplete="off">
+      <input id="setup-name" maxlength="32" required placeholder="Lakeside Trip" autocomplete="off">
       <label for="setup-password">Admin password</label>
       <input id="setup-password" type="password" minlength="12" maxlength="64" required autocomplete="new-password">
       <p class="hint">At least 12 characters. It protects this page; handhelds never need it.</p>
@@ -133,12 +151,13 @@
   </section>
 
   <!-- Dashboard -->
-  <section id="time-card" hidden>
+  <section id="time-card" data-tab="overview" hidden>
     <h2>Grid time</h2>
     <div class="clock" id="grid-clock">--:--:--</div>
     <div class="row"><span class="pill" id="time-pill">--</span><span class="dim" id="grid-date"></span></div>
     <p class="hint" id="time-hint"></p>
     <p class="hint" id="time-source"></p>
+    <p class="hint" id="zone-hint"></p>
     <div class="row">
       <button id="use-device-time">Use this device's time</button>
     </div>
@@ -150,7 +169,7 @@
     <div class="msg" id="time-msg"></div>
   </section>
 
-  <section id="location-card" hidden>
+  <section id="location-card" data-tab="map" hidden>
     <h2>Map</h2>
     <p class="hint" id="loc-ref" style="margin-top:0"></p>
     <div class="row" id="loc-coords-row"><span class="loc-coords" id="loc-coords">--</span>
@@ -178,7 +197,22 @@
     <p class="hint">Positions stay in memory on the APs and handhelds, never in flash, and are shown only here, behind the login.</p>
   </section>
 
-  <section id="grid-card" hidden>
+  <section id="security-card" data-tab="settings" hidden>
+    <h2>Admin password</h2>
+    <form id="password-form">
+      <label for="pw-current">Current password</label>
+      <input id="pw-current" type="password" required autocomplete="current-password">
+      <label for="pw-new">New password (12 to 64 characters)</label>
+      <input id="pw-new" type="password" required minlength="12" maxlength="64" autocomplete="new-password">
+      <label for="pw-again">New password again</label>
+      <input id="pw-again" type="password" required minlength="12" maxlength="64" autocomplete="new-password">
+      <div class="row"><button type="submit">Change password</button></div>
+      <p class="hint">Every AP takes the new password within a few seconds. Anyone else logged in to this AP is logged out.</p>
+      <div class="msg" id="pw-msg"></div>
+    </form>
+  </section>
+
+  <section id="grid-card" data-tab="overview" hidden>
     <h2>This AP</h2>
     <div class="stats">
       <div class="stat"><div class="k">AP</div><div class="v" id="s-node">--</div></div>
@@ -188,7 +222,7 @@
     </div>
   </section>
 
-  <section id="nodes-card" hidden>
+  <section id="nodes-card" data-tab="network" hidden>
     <h2>APs</h2>
     <div class="table"><table>
       <thead><tr><th>AP</th><th>Status</th><th>Up for</th><th>Grid time</th><th>Last time sync</th><th>Last restart</th><th>Signal</th></tr></thead>
@@ -196,7 +230,7 @@
     </table></div>
   </section>
 
-  <section id="groups-card" hidden>
+  <section id="groups-card" data-tab="handhelds" hidden>
     <h2>Groups</h2>
     <p class="hint" style="margin:0 0 10px">Groups are shared by every AP and handheld. Removing a group deletes its messages on every handheld. People can also make and change groups they belong to on their handhelds.</p>
     <p class="dim" id="groups-empty" hidden>No groups yet.</p>
@@ -218,7 +252,7 @@
   </section>
 
 
-  <section id="announce-card" hidden>
+  <section id="announce-card" data-tab="handhelds" hidden>
     <h2>Announcements</h2>
     <p class="hint" style="margin:0 0 10px">An announcement goes to every handheld and takes over its screen, so choose who may send one. Urgent messages are never limited: anyone can always raise an emergency.</p>
     <form id="announce-form">
@@ -231,7 +265,7 @@
     </form>
   </section>
 
-  <section id="avail-card" hidden>
+  <section id="avail-card" data-tab="network" hidden>
     <h2>Availability, last 2 hours</h2>
     <div class="avail" id="avail"></div>
     <div class="legend">
@@ -243,7 +277,7 @@
     <p class="hint" id="avail-hint"></p>
   </section>
 
-  <section id="incidents-card" hidden>
+  <section id="incidents-card" data-tab="network" hidden>
     <h2>What happened to the APs</h2>
     <div class="chips" id="incidents-filter" role="group" aria-label="Show outages for"></div>
     <p class="dim" id="incidents-empty">No AP outage on record. The log survives restarts and is shared between APs.</p>
@@ -253,7 +287,7 @@
     </table></div>
   </section>
 
-  <section id="devices-card" hidden>
+  <section id="devices-card" data-tab="handhelds" hidden>
     <h2>Handhelds</h2>
     <p class="dim" id="devices-empty" hidden>No handhelds have connected yet.</p>
     <div class="table" id="devices-table"><table>
@@ -274,6 +308,99 @@
 
   const tz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; } };
   const pad = (n) => String(n).padStart(2, "0");
+
+  /*
+   * D67: this browser's zone as a POSIX TZ string ("CST6CDT,M3.2.0,M11.1.0"), which handhelds apply
+   * with no zone database. Made from the browser's own zone data: the UTC offsets and the moments
+   * they change this year, found with Intl, written as "month.week.weekday/time" rules, the one that
+   * also fits the next eight years chosen. A zone without DST gives a fixed offset ("<+0530>-5:30"); one whose
+   * changes cannot be written as a rule gives its offset now, so handhelds are right until the next
+   * change and saving the time again brings them back.
+   */
+  const posixTz = (zone) => {
+    const DAY = 86400000;
+    let fmt;
+    try {
+      fmt = new Intl.DateTimeFormat("en-US", { timeZone: zone || undefined, hourCycle: "h23", year: "numeric",
+        month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" });
+    } catch (e) { return ""; }
+    const offsetAt = (ms) => {   // minutes east of UTC at the instant ms
+      const p = {};
+      for (const x of fmt.formatToParts(new Date(ms))) p[x.type] = x.value;
+      const wall = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+      return Math.round((wall - Math.floor(ms / 1000) * 1000) / 60000);
+    };
+    const changes = (year) => {   // [{at, before, after}] within the year, to the second
+      const out = [];
+      let t = Date.UTC(year, 0, 1);
+      const end = Date.UTC(year + 1, 0, 1);
+      let prev = offsetAt(t);
+      for (; t < end; t += DAY) {
+        const next = offsetAt(t + DAY);
+        if (next === prev) continue;
+        let lo = t, hi = t + DAY;   // offsetAt(lo) === prev, offsetAt(hi) !== prev
+        while (hi - lo > 1000) {
+          const mid = lo + Math.floor((hi - lo) / 2000) * 1000;
+          if (offsetAt(mid) === prev) lo = mid; else hi = mid;
+        }
+        out.push({ at: hi, before: prev, after: offsetAt(hi) });
+        prev = offsetAt(hi);
+      }
+      return out;
+    };
+    const name = (ms, off) => {   // letters when the browser has them, else "<+0530>"
+      try {
+        const n = new Intl.DateTimeFormat("en-US", { timeZone: zone || undefined, timeZoneName: "short" })
+          .formatToParts(new Date(ms)).find((x) => x.type === "timeZoneName");
+        if (n && /^[A-Za-z]{3,6}$/.test(n.value) && (!/^(GMT|UTC)$/.test(n.value) || off === 0)) return n.value;
+      } catch (e) { /* the numeric form below */ }
+      const a = Math.abs(off);
+      return `<${off < 0 ? "-" : "+"}${pad(Math.floor(a / 60))}${a % 60 ? pad(a % 60) : ""}>`;
+    };
+    const offText = (off) => {   // POSIX counts hours west: UTC-6 is "6", UTC+5:30 is "-5:30"
+      const a = Math.abs(off);
+      return `${off > 0 ? "-" : ""}${Math.floor(a / 60)}${a % 60 ? ":" + pad(a % 60) : ""}`;
+    };
+    const hms = (s) => `${Math.floor(s / 3600)}${s % 3600 ? ":" + pad(Math.floor(s % 3600 / 60)) : ""}${s % 60 ? ":" + pad(s % 60) : ""}`;
+    const daysIn = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();   // m is 1..12
+    // A change as rules, as the wall clock before it reads: the plain one, and the day before at 24:00+.
+    const rules = (c) => {
+      const wall = new Date(c.at + c.before * 60000);
+      const y = wall.getUTCFullYear(), m = wall.getUTCMonth() + 1, d = wall.getUTCDate(), wd = wall.getUTCDay();
+      const secs = wall.getUTCHours() * 3600 + wall.getUTCMinutes() * 60 + wall.getUTCSeconds();
+      const out = [{ m, w: d + 7 > daysIn(y, m) ? 5 : Math.ceil(d / 7), wd, secs }];
+      if (d > 1) out.push({ m, w: d - 1 + 7 > daysIn(y, m) ? 5 : Math.ceil((d - 1) / 7), wd: (wd + 6) % 7, secs: secs + 86400 });
+      return out;
+    };
+    const ruleAt = (r, year, before) => {   // the instant rule r names in year, before = offset in force
+      const first = new Date(Date.UTC(year, r.m - 1, 1)).getUTCDay();
+      let day = 1 + ((r.wd - first + 7) % 7) + 7 * (r.w - 1);
+      if (r.w === 5) while (day > daysIn(year, r.m)) day -= 7;
+      return Date.UTC(year, r.m - 1, day) + r.secs * 1000 - before * 60000;
+    };
+    const ruleText = (r) => `M${r.m}.${r.w}.${r.wd}${r.secs === 7200 ? "" : "/" + hms(r.secs)}`;
+    try {
+      const now = Date.now();
+      const year = new Date(now).getUTCFullYear();
+      const off = offsetAt(now);
+      const fixed = `${name(now, off)}${offText(off)}`;
+      const seen = changes(year);
+      if (seen.length !== 2 || seen[0].after !== seen[1].before || seen[1].after !== seen[0].before) return fixed;
+      const into = seen[0].after > seen[0].before ? seen[0] : seen[1];   // into daylight time: the larger offset
+      const back = into === seen[0] ? seen[1] : seen[0];
+      const std = into.before, dst = into.after;
+      // Eight years ahead meet every weekday a month can start on, so a rule that fits them all is the rule.
+      const later = [1, 2, 3, 4, 5, 6, 7, 8].map((k) => ({ year: year + k, cs: changes(year + k) }));
+      const fits = (r, which) => later.filter(({ year: y, cs }) =>
+        cs.some((c) => c.before === which.before && c.after === which.after && ruleAt(r, y, which.before) === c.at)).length;
+      const pick = (c) => rules(c).reduce((best, r) => (fits(r, c) > fits(best, c) ? r : best));
+      const full = `${name(into.at - DAY * 30, std)}${offText(std)}${name(into.at + DAY, dst)}${dst - std === 60 ? "" : offText(dst)}` +
+        `,${ruleText(pick(into))},${ruleText(pick(back))}`;
+      return full.length <= 47 ? full : fixed;   // LG_TZ_MAX on the devices
+    } catch (e) {
+      try { const o = -new Date().getTimezoneOffset(); return `${name(Date.now(), o)}${offText(o)}`; } catch (e2) { return ""; }
+    }
+  };
   const fmtClock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   let apNames = {};
   const nodeName = (n) => n < 0 ? "--" : (apNames[n] || NODE_NAMES[n] || `AP ${n}`);
@@ -289,12 +416,46 @@
   const quality = (q) => q === 2 ? '<span class="pill good">SET HERE</span>' : q === 1 ? '<span class="pill good">CARRIED</span>' : '<span class="pill bad">NOT SET</span>';
   const fmtGridTime = (t) => t ? new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "time not set then";
 
-  function show(ids) {
-    for (const id of ["loading", "setup", "login", "time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "groups-card", "announce-card", "devices-card"]) {
-      $(id).hidden = !ids.includes(id);
+  /* ---- Tabs: which cards the page wants (show) and which tab is open (the address's #hash) ---- */
+  const TABS = ["overview", "map", "network", "handhelds", "settings"];
+  let wanted = new Set(["loading"]);
+  let hasPins = false;   /* renderLocation: the map has something to show */
+  let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+
+  function applyTabs() {
+    const dash = wanted.has("time-card");   /* logged in: the dashboard's cards, one tab at a time */
+    $("tabs").hidden = !dash;
+    for (const b of $("tabs").querySelectorAll("button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+    for (const sec of document.querySelectorAll("main > section")) {
+      const t = sec.dataset.tab;
+      let on = t ? dash && t === tab : wanted.has(sec.id);
+      if (sec.id === "location-card") on = on && hasPins;
+      else if (sec.id === "map-empty") on = on && !hasPins;
+      else if (t) on = on && wanted.has(sec.id);
+      sec.hidden = !on;
     }
-    $("logout").hidden = !ids.includes("time-card");
-    if (!ids.includes("time-card")) $("location-card").hidden = true;   /* shown by renderLocation when logged in */
+  }
+
+  function openTab(name) {
+    if (!TABS.includes(name)) name = "overview";
+    tab = name;
+    applyTabs();
+    try {
+      if (location.hash.slice(1) !== name) history.replaceState(null, "", "#" + name);   /* reloads land here */
+    } catch (e) { /* some pages (a saved copy) have no address to keep it in; the tab still opens */ }
+    if (name === "map") { mapKey = ""; refresh(); }   /* a hidden map had no size to draw at */
+  }
+
+  $("tabs").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-tab]");
+    if (b) openTab(b.dataset.tab);
+  });
+  window.addEventListener("hashchange", () => openTab(location.hash.slice(1)));
+
+  function show(ids) {
+    wanted = new Set(ids);
+    $("logout").hidden = !wanted.has("time-card");
+    applyTabs();
   }
 
   /* ---- Map (D64, D65): MAIN's GPS and every handheld's, in RAM on the APs only ---- */
@@ -384,8 +545,8 @@
                      fix_time: g.fix ? 0 : (own ? own.fix_time : -1), live: g.fix };
       if (own) Object.assign(own, live); else pins.push(live);
     }
-    if (!pins.length) { card.hidden = true; mapKey = ""; return; }
-    card.hidden = false;
+    if (!pins.length) { hasPins = false; mapKey = ""; applyTabs(); return; }
+    if (!hasPins) { hasPins = true; applyTabs(); }
 
     const now = gridTime ? gridTime + (performance.now() - lastStatusAt) / 1000 : Date.now() / 1000;
     const main = pins.find((p) => p.ap && p.id === 0);
@@ -510,13 +671,13 @@
     try {
       const st = await api("/api/state");
       csrf = st.csrf || "";
-      if (st.ap_name) { $("subtitle").textContent = `LocalMesh Access Point, served by AP ${st.ap_name}`; }
+      if (st.ap_name) { $("subtitle").textContent = `LocalGrid Access Point, served by AP ${st.ap_name}`; }
       if (st.grid_name) { $("title").textContent = st.grid_name; document.title = st.grid_name + " · LocalGrid"; }
       if (!st.configured) { beginSetup(); }
       else if (!st.logged_in) { show(["login"]); $("login-password").focus(); }
       else { beginDashboard(); }
     } catch (e) {
-      $("loading").innerHTML = '<p class="bad">Cannot reach this AP. Make sure this device is connected to the LocalMesh Access Point network, then reload. Every AP answers at http://192.168.4.1/.</p>';
+      $("loading").innerHTML = '<p class="bad">Cannot reach this AP. Make sure this device is connected to the LocalGrid Access Point network, then reload. Every AP answers at http://192.168.4.1/.</p>';
     }
   }
 
@@ -538,6 +699,7 @@
         password: $("setup-password").value,
         unix_ms: Date.now(),
         timezone: tz(),
+        posix_tz: posixTz(tz()),
       });
       csrf = r.csrf;
       $("setup-password").value = "";
@@ -554,6 +716,7 @@
     ev.preventDefault();
     say("login-msg", "Checking…", true);
     try {
+      say("login-msg", "Checking…", true);   /* the AP takes about two seconds to check a password */
       const r = await api("/api/login", { password: $("login-password").value });
       csrf = r.csrf;
       $("login-password").value = "";
@@ -561,6 +724,22 @@
       beginDashboard();
     } catch (e) {
       say("login-msg", e.message, false);
+    }
+  });
+
+  $("password-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const next = $("pw-new").value;
+    if (next !== $("pw-again").value) { say("pw-msg", "The two new passwords are different.", false); return; }
+    if (next.length < 12 || next.length > 64) { say("pw-msg", "The new password must be 12 to 64 characters.", false); return; }
+    say("pw-msg", "Changing…", true);
+    try {
+      await api("/api/password", { current: $("pw-current").value, password: next });
+      say("pw-msg", "Password changed. Use the new one from now on, on every AP.", true);
+    } catch (e) {
+      say("pw-msg", e.message, false);
+    } finally {
+      for (const id of ["pw-current", "pw-new", "pw-again"]) $(id).value = "";
     }
   });
 
@@ -572,7 +751,7 @@
   async function setTime(unixMs, label) {
     say("time-msg", "Setting time…", true);
     try {
-      await api("/api/time", { unix_ms: unixMs, timezone: tz() });
+      await api("/api/time", { unix_ms: unixMs, timezone: tz(), posix_tz: posixTz(tz()) });
       say("time-msg", `Grid time set from ${label}. Handhelds sync automatically.`, true);
       setTimeout(refresh, 800);
     } catch (e) {
@@ -714,7 +893,8 @@
   });
 
   function beginDashboard() {
-    show(["time-card", "grid-card", "nodes-card", "avail-card", "incidents-card", "groups-card", "announce-card", "devices-card"]);
+    show(["time-card", "grid-card", "location-card", "nodes-card", "avail-card", "incidents-card", "groups-card",
+          "announce-card", "devices-card", "security-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);
@@ -795,7 +975,7 @@
       pill.textContent = fromGps ? `FROM GPS (${s.gps.sats} satellites)` : s.time_quality === 2 ? "SET ON THIS AP" : "CARRIED";
       pill.className = "pill good";
       $("time-hint").textContent = fromGps
-        ? "The GPS keeps grid time; it cannot be set by hand while the GPS has a fix."
+        ? "The GPS keeps grid time; it cannot be set by hand while the GPS has a fix. \"Use this device's time\" still saves this device's time zone."
         : s.gps && s.gps.heard && !s.gps.fix ? "GPS connected, looking for satellites. Until it has a fix, set the time here as usual."
         : Math.abs(drift) > 120 ? `This device's clock differs from the grid by ${drift} s.` : "";
       $("time-card").classList.remove("banner");
@@ -803,7 +983,11 @@
     apNames = {};
     for (const a of (s.aps || [])) apNames[a.ap] = a.name;
     renderLocation(s);
-    $("subtitle").textContent = `LocalMesh Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
+    $("subtitle").textContent = `LocalGrid Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
+    /* D67: handhelds show local time in the zone saved here, UTC until one is. */
+    $("zone-hint").textContent = s.posix_tz
+      ? `Handhelds show local time${s.timezone ? ` for ${s.timezone}` : ""} (${s.posix_tz}).`
+      : "Handhelds show UTC until a time zone is saved: press \"Use this device's time\" once.";
     $("s-node").textContent = s.node_name;
     $("s-uptime").textContent = fmtDur(s.uptime_s);
     $("s-handhelds").textContent = s.handhelds;

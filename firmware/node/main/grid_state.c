@@ -20,7 +20,7 @@ static const char *TAG = "GRID";
 /*
  * GRID_STATE bodies. The first byte says which kind:
  *
- * GS_LAYOUT (4): settings and this AP's health, exactly GS_LEN bytes, little-endian:
+ * GS_LAYOUT (5): settings and this AP's health, exactly GS_LEN bytes, little-endian:
  *     0  u8    layout
  *     1  u32   settings seq            5  u16  settings author       7  u8  configured
  *     8  33 B  grid name              41  48 B time zone             89 16 B PBKDF2 salt
@@ -31,12 +31,16 @@ static const char *TAG = "GRID";
  *   178  i16   correction at that sync, ms
  *   180  u32   boot counter          184  u8   reset reason          185 u32 previous run s
  *   189  u8    time stratum
+ *   190  48 B  POSIX time zone (D67), NUL-padded, "" when none
+ * Layout 4 (GS_LEN_V4 bytes, APs before D67) is the same without the POSIX zone and still read.
  * AV_KIND (0x80): u32 grid minute of the newest entry, u8 count, then count x (u8 ap, 30 B packed)
  * INC_KIND (0x81): u8 count, then count x grid_incident_t (16 B each, as stored)
  * Every frame travels sealed under the backbone key, like every backbone frame.
  */
-#define GS_LAYOUT          4u
-#define GS_LEN             190u
+#define GS_LAYOUT          5u
+#define GS_LEN             238u
+#define GS_LAYOUT_V4       4u
+#define GS_LEN_V4          190u
 #define AV_KIND            0x80u
 #define INC_KIND           0x81u
 #define CAUSE_WAIT_MS      60000u    /* after an AP is back, how long to wait for its reason */
@@ -47,7 +51,8 @@ static const char *TAG = "GRID";
 #define GS_ITERATIONS_MAX  200000u
 
 _Static_assert(GS_LEN <= LG_GRID_STATE_MAX, "grid state body exceeds the core's limit");
-_Static_assert(SETTINGS_GRID_NAME_MAX + 1 == 33 && SETTINGS_TZ_MAX + 1 == 48, "grid state layout needs updating");
+_Static_assert(SETTINGS_GRID_NAME_MAX + 1 == 33 && SETTINGS_TZ_MAX + 1 == 48 && SETTINGS_POSIX_TZ_MAX + 1 == 48 &&
+                   GS_LEN == GS_LEN_V4 + SETTINGS_POSIX_TZ_MAX + 1, "grid state layout needs updating");
 
 /* ---- sticky records (D48), packed (D49) ---- */
 
@@ -414,6 +419,13 @@ void grid_state_init(uint16_t self)
              s.settings.configured ? "set up" : "not set up");
 }
 
+void grid_state_posix_tz(char *out, size_t cap)
+{
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    snprintf(out, cap, "%s", s.settings.posix_tz);
+    xSemaphoreGive(s.lock);
+}
+
 void grid_state_settings(node_settings_t *out)
 {
     xSemaphoreTake(s.lock, portMAX_DELAY);
@@ -496,6 +508,7 @@ static void encode(uint8_t out[GS_LEN])
     memcpy(out + 89, c->salt, SETTINGS_SALT_LEN);
     lg_wr32(out + 105, c->iterations);
     memcpy(out + 109, c->hash, SETTINGS_HASH_LEN);
+    memcpy(out + 190, c->posix_tz, SETTINGS_POSIX_TZ_MAX + 1);
     xSemaphoreGive(s.lock);
     lg_wr32(out + 141, k.time_gen);
     lg_wr16(out + 145, k.time_author);
@@ -599,7 +612,8 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
         incidents_on_frame(body, len);
         return;
     }
-    if (len != GS_LEN || body[0] != GS_LAYOUT) {
+    bool v4 = len == GS_LEN_V4 && body[0] == GS_LAYOUT_V4;   /* an AP before D67: no POSIX zone */
+    if (!v4 && (len != GS_LEN || body[0] != GS_LAYOUT)) {
         ESP_LOGW(TAG, "[GRID] Grid state from AP %u ignored: length %u or layout %u not understood", origin_node,
                  (unsigned)len, len > 0 ? body[0] : 0u);
         return;
@@ -616,6 +630,9 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
     memcpy(in.salt, body + 89, SETTINGS_SALT_LEN);
     in.iterations = lg_rd32(body + 105);
     memcpy(in.hash, body + 109, SETTINGS_HASH_LEN);
+    if (!v4) {
+        memcpy(in.posix_tz, body + 190, SETTINGS_POSIX_TZ_MAX + 1);
+    }
     uint32_t time_gen = lg_rd32(body + 141);
     uint16_t time_author = lg_rd16(body + 145);
     uint32_t time_set_unix = lg_rd32(body + 147);
@@ -625,12 +642,18 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
     }
 
     bool well_formed = body[7] <= 1u && in.grid_name[SETTINGS_GRID_NAME_MAX] == '\0' &&
-                       in.timezone[SETTINGS_TZ_MAX] == '\0' &&
+                       in.timezone[SETTINGS_TZ_MAX] == '\0' && in.posix_tz[SETTINGS_POSIX_TZ_MAX] == '\0' &&
+                       (in.posix_tz[0] == '\0' || lg_tz_valid((const uint8_t *)in.posix_tz, strlen(in.posix_tz))) &&
                        (!in.configured || (in.iterations >= GS_ITERATIONS_MIN && in.iterations <= GS_ITERATIONS_MAX));
 
     xSemaphoreTake(s.lock, portMAX_DELAY);
     bool take = well_formed && newer(in.seq, in.author, s.settings.seq, s.settings.author);
     esp_err_t err = ESP_OK;
+    if (take && v4 && strcmp(in.timezone, s.settings.timezone) == 0) {
+        /* A newer version made on an AP before D67 (a new password, say) carries no POSIX zone: keep
+         * ours while the zone it names is the same one. */
+        memcpy(in.posix_tz, s.settings.posix_tz, sizeof(in.posix_tz));
+    }
     if (take) {
         ptrace_event(PTRACE_NVS_WRITE);
         err = settings_save(&in);

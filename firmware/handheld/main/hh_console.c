@@ -68,9 +68,14 @@ static void print_time(const hh_status_t *st)
         printf("  grid time: not set (receiving and urgent broadcasts only, decision D6)\n");
     } else {
         uint32_t day = st->grid_time % 86400u;
-        printf("  grid time: %02u:%02u:%02u UTC (%" PRIu32 ")\n", (unsigned)(day / 3600u),
-               (unsigned)(day / 60u % 60u), (unsigned)(day % 60u), st->grid_time);
+        struct tm lt;
+        hh_local_time(st->grid_time, &lt);
+        printf("  grid time: %02u:%02u:%02u UTC (%" PRIu32 "), local %04d-%02d-%02d %02d:%02d:%02d%s\n",
+               (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u), (unsigned)(day % 60u), st->grid_time,
+               lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec,
+               st->time_from_gps ? ", kept by a GPS" : "");
     }
+    printf("  time zone: %s\n", st->time_zone[0] != '\0' ? st->time_zone : "none yet (clocks show UTC)");
 }
 
 static int cmd_tone(int argc, char **argv)
@@ -561,8 +566,13 @@ static int cmd_ui(int argc, char **argv)
         int page = strcmp(argv[2], "numbers") == 0 ? 1 : strcmp(argv[2], "emoji") == 0 ? 2
                  : strcmp(argv[2], "shift") == 0 ? 3 : 0;
         ui_request_cmd(UI_PAGE, page, NULL);
+    } else if (argc == 4 && strcmp(argv[1], "button") == 0) {
+        /* D66: a board button pressed or held, as if by hand (the alert unit's SOS, Cancel, Read) */
+        long id = strtol(argv[2], NULL, 10);
+        ui_request_cmd(UI_BUTTON, (int)((id << 1) | (strcmp(argv[3], "hold") == 0 ? 1 : 0)), NULL);
     } else {
-        printf("usage: ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | log\n");
+        printf("usage: ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | "
+               "button <n> <press|hold> | log\n");
         return 1;
     }
     return 0;
@@ -957,7 +967,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
         { .command = "screen",    .help = "screen <home|status|messages|groups|settings>: open that screen", .func = cmd_screen },
         { .command = "touch",     .help = "touch [seconds]: what the panel reports and where it lands", .func = cmd_touch },
-        { .command = "ui",        .help = "ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <p> | log", .func = cmd_ui },
+        { .command = "ui",        .help = "ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <p> | button <n> <press|hold> | log", .func = cmd_ui },
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },
         { .command = "tone",      .help = "tone [hz] [ms]: play one tone on the speaker",           .func = cmd_tone },
         { .command = "cue",       .help = "cue <sent|received|urgent>: play a notification sound",  .func = cmd_cue },

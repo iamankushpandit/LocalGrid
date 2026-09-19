@@ -10,6 +10,9 @@ static const lg_user_t proto_users[] = {
     { 2, "Handheld 2" },
     { 3, "Handheld 3" },
     { 4, "Handheld 4" },
+    { 5, "Handheld 5" },   /* appended: a user's index is its bit in group and announcer masks */
+    { 6, "Handheld 6" },
+    { 7, "Handheld 7" },   /* the alert and distress unit (D66); urgent broadcasts need a roster index */
 };
 
 void lg_roster_init_prototype(lg_roster_t *r)
@@ -19,7 +22,7 @@ void lg_roster_init_prototype(lg_roster_t *r)
     r->n_users = sizeof(proto_users) / sizeof(proto_users[0]);
     r->groups.next_id = 1;
     r->groups.announcers = LG_ANNOUNCE_EVERYONE;   /* everyone announces until the admin narrows it (D56) */
-    r->version = 2;
+    r->version = 4;   /* 3: Handheld 5 and 6 added; 4: Handheld 7 */
 }
 
 int lg_roster_user_index(const lg_roster_t *r, uint32_t device)

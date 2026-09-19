@@ -132,6 +132,34 @@ static void io_time_now(void *ctx, lg_time_sync_t *out)
     out->grid_time = (uint32_t)(ms / 1000u);
     out->millis = (uint16_t)(ms % 1000u);
     out->stratum = g_app.time_quality == LG_TIME_UNSET ? LG_STRATUM_UNKNOWN : g_app.time_stratum;
+    /* D67: every AP tells its handhelds whether a GPS set the time the grid now keeps, from the
+     * replicated time generation (D63), not only MAIN. */
+    uint32_t set_unix, generation;
+    uint16_t set_on;
+    bool by_gps = false;
+    grid_state_time_info(&set_unix, &set_on, &generation, &by_gps);
+    out->flags = g_app.time_quality != LG_TIME_UNSET && by_gps ? LG_TIME_FROM_GPS : 0u;
+}
+
+/*
+ * D67: the grid's POSIX time zone, from the replicated settings, into the core, which sends it to
+ * the handhelds here now and to each one that registers. Settings change on the admin page's task
+ * or from another AP's grid state; this runs on the core task once a second and sends only a change.
+ */
+static void sync_time_zone(void)
+{
+    static char s_refused[SETTINGS_POSIX_TZ_MAX + 1];   /* said once, not every second */
+    char tz[SETTINGS_POSIX_TZ_MAX + 1];
+    grid_state_posix_tz(tz, sizeof(tz));
+    if (strcmp(tz, g_app.core.tz) == 0 || (s_refused[0] != '\0' && strcmp(tz, s_refused) == 0)) {
+        return;
+    }
+    if (lg_node_set_time_zone(&g_app.core, tz) == LG_OK) {
+        ESP_LOGI("TIME", "[TIME] Time zone for handhelds: %s", tz[0] != '\0' ? tz : "none");
+    } else {
+        snprintf(s_refused, sizeof(s_refused), "%s", tz);
+        ESP_LOGW("TIME", "[TIME] Time zone \"%s\" in the settings is not a POSIX TZ; not sent", tz);
+    }
 }
 
 /* ---- lg_core io ---- */
@@ -673,7 +701,8 @@ static void print_config(void)
            NODE_PMF_CAPABLE ? "capable" : "off (A/B build)");
     if (cfg.configured) {
         printf("  grid name: %s\n", cfg.grid_name);
-        printf("  time zone: %s (display only)\n", cfg.timezone[0] ? cfg.timezone : "not set");
+        printf("  time zone: %s, for handhelds %s\n", cfg.timezone[0] ? cfg.timezone : "not set",
+               cfg.posix_tz[0] ? cfg.posix_tz : "not set (save the time or zone on the admin page once)");
         printf("  admin password: set, %" PRIu32 " PBKDF2 iterations\n", cfg.iterations);
     } else {
         printf("  admin setup: not done; any AP serves the setup page\n");
@@ -924,6 +953,7 @@ static void core_task(void *arg)
             note_uptime();
             ptrace_second(now / 1000u, lgbb_tx_frame_count(), lgbb_link_count(), quality_name(g_app.time_quality));
             record_availability(now);
+            sync_time_zone();
             refresh_discovery();
             web_admin_publish_snapshot();
         }

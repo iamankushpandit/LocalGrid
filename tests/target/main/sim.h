@@ -42,6 +42,7 @@ typedef struct {
     uint32_t  time;          /* this node's grid time; 0 falls back to sim->grid_time */
     uint16_t  time_millis;   /* milliseconds and stratum of the last TIME_SYNC heard */
     uint8_t   time_stratum;
+    uint8_t   time_flags;    /* what this node's io.time_now reports (LG_TIME_FROM_GPS, D67) */
     uint32_t  diag_count;    /* diagnostic echoes reported to this node */
     uint8_t   diag_hops;     /* hops of the last echo */
     uint32_t  grid_state_count;    /* grid state bodies reported to this node */
@@ -79,6 +80,7 @@ typedef struct {
     uint8_t     last_voice_refusal;
     uint32_t    position_events;  /* LG_CEV_POSITION (D65) */
     uint32_t    last_position;    /* its subject */
+    uint32_t    tz_events;        /* LG_CEV_TIME_ZONE (D67) */
     lg_e2e_t    e2e;
     lg_client_t client;
 } sim_client_t;

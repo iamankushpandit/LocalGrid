@@ -39,7 +39,7 @@ REPLY_MAX_S = 15.0
 
 
 def choose(data, key):
-    devices = data["devices"]
+    devices = [d for d in data["devices"] if d["port"]]   # a board with no port yet is not plugged in
     if key == "all":
         return list(devices)
     if key in ("N", "H"):

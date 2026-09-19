@@ -19,7 +19,7 @@ Before this existed, every answer came from the first two, and neither is an ins
 
 ## The grid's APs
 
-Since D46 every AP broadcasts one SSID, **`LocalMesh Access Point`**, and every AP answers at `192.168.4.1`, like a home mesh router. Since D45 there is no master: any AP serves the admin page and holds the settings, so one AP missing reduces coverage but blocks nothing by itself.
+Since D46 (renamed 2026-09-18) every AP broadcasts one SSID, **`LocalGrid Access Point`**, and every AP answers at `192.168.4.1`, like a home mesh router. Since D45 there is no master: any AP serves the admin page and holds the settings, so one AP missing reduces coverage but blocks nothing by itself.
 
 A Wi-Fi scan therefore counts APs rather than naming them: each AP is one radio answering on that SSID. The AP's name travels in a vendor element that Windows does not show, so **which** AP is missing comes from an AP's `nodes` output or a handheld's Status screen. An `LG-MAIN`-style SSID in the list means that board still runs firmware from before D46.
 

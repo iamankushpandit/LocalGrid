@@ -25,7 +25,9 @@
 
 static const char *TAG = "WEB";
 
-#define ADMIN_PBKDF2_ITERATIONS   4000u     /* measured 228 ms per 1000 on classic ESP32: ~0.9 s per login */
+/* Measured 228 ms per 1000 on classic ESP32: about 1.8 s per login. Raised from 4000 on 2026-09-18 so each
+ * guess against a copied hash costs twice as much; a hash made with fewer is upgraded at the next login. */
+#define ADMIN_PBKDF2_ITERATIONS   8000u
 #define ADMIN_PASSWORD_MIN        12u
 #define ADMIN_PASSWORD_MAX        64u
 #define ADMIN_SESSIONS            2u
@@ -59,7 +61,7 @@ typedef struct {
     size_t   n_devices;
     struct {
         uint32_t device;
-        char     name[16];
+        char     name[LG_NAME_MAX];   /* the name it chose (D50), else its roster name */
         uint8_t  known;
         uint8_t  state;
         uint16_t node;
@@ -152,7 +154,14 @@ void web_admin_publish_snapshot(void)
         }
         size_t k = s->n_devices++;
         s->devices[k].device = r->users[i].device;
-        strncpy(s->devices[k].name, r->users[i].name, sizeof(s->devices[k].name) - 1);
+        /* The name the handheld chose (D50) wherever the page shows it; the roster's "Handheld N"
+         * only until it has chosen one. */
+        const lg_name_t *chosen = lg_node_name(&g_app.core, r->users[i].device);
+        if (chosen != NULL) {
+            memcpy(s->devices[k].name, chosen->text, chosen->len);   /* len < LG_NAME_MAX; NUL from the memset */
+        } else {
+            strncpy(s->devices[k].name, r->users[i].name, sizeof(s->devices[k].name) - 1);
+        }
         s->devices[k].known = 1;
         s->devices[k].state = p->state;
         s->devices[k].node = p->node;
@@ -430,6 +439,15 @@ static bool password_matches(const node_settings_t *cfg, const char *password)
     return ok;
 }
 
+/* A fresh salt and a hash of password into cfg, at the current work factor. False if either failed. */
+static bool password_set(node_settings_t *cfg, const char *password)
+{
+    cfg->iterations = ADMIN_PBKDF2_ITERATIONS;
+    return lg_crypto_random(cfg->salt, sizeof(cfg->salt)) == 0 &&
+           lg_pbkdf2_sha256((const uint8_t *)password, strlen(password), cfg->salt, sizeof(cfg->salt), cfg->iterations,
+                            cfg->hash, sizeof(cfg->hash)) == 0;
+}
+
 static bool login_locked(uint32_t *wait_s)
 {
     uint32_t now = app_now_ms();
@@ -490,6 +508,13 @@ static bool valid_timezone(const char *tz)
     return true;
 }
 
+/* D67: a POSIX TZ from the admin's browser; "" (an old page, or a browser that could not make one) is allowed. */
+static bool valid_posix_tz(const char *tz)
+{
+    size_t n = strlen(tz);
+    return n == 0 || (n <= SETTINGS_POSIX_TZ_MAX && lg_tz_valid((const uint8_t *)tz, n));
+}
+
 /* ---- handlers ---- */
 
 static esp_err_t h_index(httpd_req_t *req)
@@ -539,12 +564,14 @@ static esp_err_t h_setup(httpd_req_t *req)
     }
     char body[ADMIN_BODY_MAX];
     char name[SETTINGS_GRID_NAME_MAX + 2], password[ADMIN_PASSWORD_MAX + 2], tz[SETTINGS_TZ_MAX + 2] = "";
+    char posix[SETTINGS_POSIX_TZ_MAX + 2] = "";
     uint64_t unix_ms = 0;
     if (!read_body(req, body, sizeof(body)) || !json_string(body, "grid_name", name, sizeof(name)) ||
         !json_string(body, "password", password, sizeof(password)) || !json_uint64(body, "unix_ms", &unix_ms)) {
         return send_error(req, "400 Bad Request", "Grid name, password, and time are required.");
     }
     (void)json_string(body, "timezone", tz, sizeof(tz));
+    (void)json_string(body, "posix_tz", posix, sizeof(posix));
     lg_secure_zero(body, sizeof(body));
     if (!valid_grid_name(name)) {
         return send_error(req, "400 Bad Request", "Grid name must be 1 to 32 characters.");
@@ -553,7 +580,7 @@ static esp_err_t h_setup(httpd_req_t *req)
         lg_secure_zero(password, sizeof(password));
         return send_error(req, "400 Bad Request", "Password must be 12 to 64 characters.");
     }
-    if (unix_ms < 1700000000000ull || !valid_timezone(tz)) {
+    if (unix_ms < 1700000000000ull || !valid_timezone(tz) || !valid_posix_tz(posix)) {
         lg_secure_zero(password, sizeof(password));
         return send_error(req, "400 Bad Request", "The browser time or time zone looks invalid.");
     }
@@ -562,16 +589,15 @@ static esp_err_t h_setup(httpd_req_t *req)
     ns.configured = true;
     strncpy(ns.grid_name, name, SETTINGS_GRID_NAME_MAX);
     strncpy(ns.timezone, tz, SETTINGS_TZ_MAX);
-    ns.iterations = ADMIN_PBKDF2_ITERATIONS;
-    bool ok = lg_crypto_random(ns.salt, sizeof(ns.salt)) == 0 &&
-              lg_pbkdf2_sha256((const uint8_t *)password, strlen(password), ns.salt, sizeof(ns.salt), ns.iterations,
-                               ns.hash, sizeof(ns.hash)) == 0;
+    strncpy(ns.posix_tz, posix, SETTINGS_POSIX_TZ_MAX);
+    bool ok = password_set(&ns, password);
     lg_secure_zero(password, sizeof(password));
     if (!ok || grid_state_commit(&ns) != ESP_OK) {
         return send_error(req, "500 Internal Server Error", "Could not save settings. Try again.");
     }
     (void)post_time(unix_ms);
-    ESP_LOGI(TAG, "[WEB] Setup complete: grid \"%s\", time zone %s", ns.grid_name, ns.timezone);
+    ESP_LOGI(TAG, "[WEB] Setup complete: grid \"%s\", time zone %s (%s)", ns.grid_name, ns.timezone,
+             ns.posix_tz[0] ? ns.posix_tz : "no POSIX zone");
     admin_session_t *s = session_create();
     return s != NULL ? send_session(req, s) : send_error(req, "500 Internal Server Error", "Could not start a session.");
 }
@@ -596,6 +622,14 @@ static esp_err_t h_login(httpd_req_t *req)
     }
     lg_secure_zero(body, sizeof(body));
     bool ok = password_matches(cfg, password);
+    if (ok && cfg->iterations < ADMIN_PBKDF2_ITERATIONS) {
+        /* Made at an older, cheaper work factor: hash it again now, while the password is at hand. The new
+         * settings version reaches every AP like any other change (D45). */
+        node_settings_t up = *cfg;
+        if (password_set(&up, password) && grid_state_commit(&up) == ESP_OK) {
+            ESP_LOGI(TAG, "[WEB] Admin password hash upgraded to %u iterations", (unsigned)ADMIN_PBKDF2_ITERATIONS);
+        }
+    }
     lg_secure_zero(password, sizeof(password));
     if (!ok) {
         login_failed();
@@ -606,6 +640,68 @@ static esp_err_t h_login(httpd_req_t *req)
     ESP_LOGI(TAG, "[WEB] Admin logged in");
     admin_session_t *s = session_create();
     return s != NULL ? send_session(req, s) : send_error(req, "500 Internal Server Error", "Could not start a session.");
+}
+
+/*
+ * Changes the admin password: the current one first, like a login (a wrong one counts towards the
+ * lockout), then the new one under the setup rules. The new hash replaces the old in the grid's
+ * settings and reaches every AP (D45). Every other session on this AP ends; this one stays.
+ */
+static esp_err_t h_password(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to change the password.");
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    uint32_t wait_s = 0;
+    if (login_locked(&wait_s)) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Too many failed attempts. Try again in %" PRIu32 " seconds.", wait_s);
+        return send_error(req, "429 Too Many Requests", msg);
+    }
+    char body[ADMIN_BODY_MAX];
+    char current[ADMIN_PASSWORD_MAX + 2], next[ADMIN_PASSWORD_MAX + 2];
+    bool read = read_body(req, body, sizeof(body)) && json_string(body, "current", current, sizeof(current)) &&
+                json_string(body, "password", next, sizeof(next));
+    lg_secure_zero(body, sizeof(body));
+    if (!read) {
+        return send_error(req, "400 Bad Request", "The current and the new password are required.");
+    }
+    node_settings_t *cfg = &w.cfg;
+    grid_state_settings(cfg);
+    const char *problem = NULL;
+    const char *status = "400 Bad Request";
+    if (!password_matches(cfg, current)) {
+        login_failed();
+        problem = "The current password is wrong.";
+        status = "401 Unauthorized";
+    } else if (strlen(next) < ADMIN_PASSWORD_MIN || strlen(next) > ADMIN_PASSWORD_MAX) {
+        problem = "The new password must be 12 to 64 characters.";
+    } else if (strcmp(next, current) == 0) {
+        problem = "The new password is the same as the current one.";
+    }
+    node_settings_t ns = *cfg;
+    bool ok = problem == NULL && password_set(&ns, next);
+    lg_secure_zero(current, sizeof(current));
+    lg_secure_zero(next, sizeof(next));
+    if (problem != NULL) {
+        return send_error(req, status, problem);
+    }
+    if (!ok || grid_state_commit(&ns) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "Could not save the new password. Try again.");
+    }
+    w.login_failures = 0;
+    w.locked_until_ms = 0;
+    for (size_t i = 0; i < ADMIN_SESSIONS; i++) {
+        if (&w.sessions[i] != s) {
+            memset(&w.sessions[i], 0, sizeof(w.sessions[i]));   /* whoever else was logged in logs in again */
+        }
+    }
+    ESP_LOGI(TAG, "[WEB] Admin password changed; every AP gets it with the next settings version");
+    return send_json(req, "200 OK", "{\"ok\":true}");
 }
 
 static esp_err_t h_logout(httpd_req_t *req)
@@ -695,10 +791,10 @@ static esp_err_t h_status(httpd_req_t *req)
 
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
     json_escape(w.cfg.grid_name, name, sizeof(name));
-    jout(o, "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
+    jout(o, "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"posix_tz\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
              ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
              ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,",
-         name, w.cfg.timezone, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
+         name, w.cfg.timezone, w.cfg.posix_tz, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
          s->heap_free, s->heap_min, s->handhelds);
     jout(o, "\"gps\":{\"started\":%s,\"heard\":%s,\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32
              ",\"lon_u\":%" PRId32 "},\"links\":[",
@@ -711,8 +807,10 @@ static esp_err_t h_status(httpd_req_t *req)
     jout(o, "],\"devices\":[");
     for (size_t i = 0; i < s->n_devices; i++) {
         const char *state = !s->devices[i].known ? "UNKNOWN" : s->devices[i].state ? "ONLINE" : "OFFLINE";
+        char dn[2 * sizeof(s->devices[i].name) + 8];
+        json_escape(s->devices[i].name, dn, sizeof(dn));   /* a chosen name is typed by a person */
         jout(o, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\",\"state\":\"%s\",\"node\":%d}", i ? "," : "",
-             s->devices[i].device, s->devices[i].name, state,
+             s->devices[i].device, dn, state,
              s->devices[i].node == LG_NODE_NONE ? -1 : (int)s->devices[i].node);
     }
     /* Handhelds the grid has seen, the same list as the Handhelds card: roster places nobody has
@@ -840,20 +938,34 @@ static esp_err_t h_time(httpd_req_t *req)
     }
     char body[ADMIN_BODY_MAX];
     char tz[SETTINGS_TZ_MAX + 2] = "";
+    char posix[SETTINGS_POSIX_TZ_MAX + 2] = "";
     uint64_t unix_ms = 0;
     if (!read_body(req, body, sizeof(body)) || !json_uint64(body, "unix_ms", &unix_ms) || unix_ms < 1700000000000ull) {
         return send_error(req, "400 Bad Request", "A valid time is required.");
     }
-    if (gps_has_fix()) {
-        return send_error(req, "409 Conflict",
-                          "Grid time comes from the GPS on this AP while it has a fix, so it cannot be set by hand.");
-    }
+    /* The zone first, GPS or not (D67): a GPS gives the time but not the zone handhelds show it in. */
     node_settings_t *cfg = &w.cfg;
     grid_state_settings(cfg);
+    bool zone_changed = false;
     if (json_string(body, "timezone", tz, sizeof(tz)) && valid_timezone(tz) && strcmp(tz, cfg->timezone) != 0) {
         memset(cfg->timezone, 0, sizeof(cfg->timezone));
         strncpy(cfg->timezone, tz, SETTINGS_TZ_MAX);
-        (void)grid_state_commit(cfg);
+        zone_changed = true;
+    }
+    if (json_string(body, "posix_tz", posix, sizeof(posix)) && posix[0] != '\0' && valid_posix_tz(posix) &&
+        strcmp(posix, cfg->posix_tz) != 0) {
+        memset(cfg->posix_tz, 0, sizeof(cfg->posix_tz));
+        strncpy(cfg->posix_tz, posix, SETTINGS_POSIX_TZ_MAX);
+        zone_changed = true;
+    }
+    if (zone_changed && grid_state_commit(cfg) == ESP_OK) {
+        ESP_LOGI(TAG, "[WEB] Admin set the time zone: %s (%s)", cfg->timezone, cfg->posix_tz[0] ? cfg->posix_tz : "no POSIX zone");
+    }
+    if (gps_has_fix()) {
+        return send_error(req, "409 Conflict",
+                          zone_changed ? "Time zone saved. Grid time comes from the GPS on this AP while it has a fix, so it "
+                                         "cannot be set by hand."
+                                       : "Grid time comes from the GPS on this AP while it has a fix, so it cannot be set by hand.");
     }
     if (!post_time(unix_ms)) {
         return send_error(req, "503 Service Unavailable", "The AP is busy. Try again.");
@@ -989,6 +1101,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/setup",    .method = HTTP_POST, .handler = h_setup },
         { .uri = "/api/login",    .method = HTTP_POST, .handler = h_login },
         { .uri = "/api/logout",   .method = HTTP_POST, .handler = h_logout },
+        { .uri = "/api/password", .method = HTTP_POST, .handler = h_password },
         { .uri = "/api/status",   .method = HTTP_GET,  .handler = h_status },
         { .uri = "/api/history",  .method = HTTP_GET,  .handler = h_history },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },

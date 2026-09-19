@@ -25,8 +25,9 @@ typedef struct {
     uint16_t pressure;
 } lg_bsp_touch_raw_t;
 
-/* Starts the board's touch controller. An XPT2046 joins the display's SPI bus, so
- * lg_bsp_display_start calls this once the bus exists. */
+/* Starts the board's touch controller. An XPT2046 joins the display's SPI bus (spi_host), so
+ * lg_bsp_display_start calls this once the bus exists; one whose profile gives it pins of its
+ * own gets a second SPI host instead. */
 esp_err_t lg_bsp_touch_start(const lg_board_t *board, int spi_host);
 
 bool lg_bsp_touch_present(void);

@@ -133,22 +133,40 @@ int    lg_position_slot(const lg_roster_t *r, uint32_t subject);
 /*
  * TIME_SYNC: AP -> APs (flooded), AP -> its handhelds.
  *   u32 grid time, Unix seconds | u16 milliseconds into that second (0..999) |
- *   u8 quality | u8 stratum
+ *   u8 quality | u8 stratum | u8 flags (LG_TIME_FROM_*)
  * Stratum is the distance from where grid time was set: 0 on the AP an admin set it on, one more
  * on each AP that took it from another, LG_STRATUM_UNKNOWN when the sender does not say. APs take
  * corrections only from a lower stratum, so time flows outward from its source and never loops
- * between APs that carry it. The 5-byte form without milliseconds or stratum still decodes.
+ * between APs that carry it.
+ *
+ * Three lengths decode: 9 bytes (D67, with flags), 8 (no flags: flags 0), and 5 (seconds and
+ * quality only). Flag bits a receiver does not know are ignored. APs send the 9-byte form to
+ * handhelds and the 8-byte form over the backbone, where the flags are not needed (every AP knows
+ * who set the time from the grid state), so APs on firmware before D67 keep their time sync.
  */
-#define LG_TIME_SYNC_LEN        8u
+#define LG_TIME_SYNC_LEN        9u
+#define LG_TIME_SYNC_LEN_V2     8u
 #define LG_TIME_SYNC_LEN_V1     5u
 #define LG_STRATUM_UNKNOWN      255u
+#define LG_TIME_FROM_GPS        0x01u   /* the current grid time was set by a GPS (D63, D65), not by hand */
 typedef enum { LG_TIME_UNSET = 0, LG_TIME_CARRIED = 1, LG_TIME_AUTHORITATIVE = 2 } lg_time_quality_t;
 typedef struct {
     uint32_t grid_time;
     uint16_t millis;
     uint8_t  quality;
     uint8_t  stratum;
+    uint8_t  flags;      /* LG_TIME_FROM_*; 0 from the older forms */
 } lg_time_sync_t;
+
+/*
+ * TIME_ZONE (D67): AP -> handheld, scope SYSTEM. The grid's zone as a POSIX TZ string, for
+ * example "CST6CDT,M3.2.0,M11.1.0" or "<+0530>-5:30": 1..LG_TZ_MAX bytes, no NUL, only the
+ * characters a POSIX TZ uses (letters, digits, < > + - , . : /), starting with a letter or '<'.
+ * The admin's browser makes it from its own zone data; APs keep it with the grid settings and
+ * send it at registration and whenever it changes. Grid time stays UTC everywhere; the zone only
+ * turns it into local time on a screen.
+ */
+bool lg_tz_valid(const uint8_t *s, size_t n);
 
 /* NODE_HELLO: node -> neighbors, every 2 s. */
 #define LG_HELLO_LEN 4u
@@ -235,7 +253,10 @@ size_t lg_msg_ack_enc(const lg_msg_ack_t *v, uint8_t *out);
 bool   lg_msg_ack_dec(const uint8_t *in, size_t len, lg_msg_ack_t *v);
 size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out);
 bool   lg_presence_dec(const uint8_t *in, size_t len, lg_presence_t *v);
+/* Writes LG_TIME_SYNC_LEN bytes (with flags) and returns that length. */
 size_t lg_time_sync_enc(const lg_time_sync_t *v, uint8_t *out);
+/* Writes the 8-byte form without flags, for APs before D67; returns LG_TIME_SYNC_LEN_V2. */
+size_t lg_time_sync_enc_v2(const lg_time_sync_t *v, uint8_t *out);
 bool   lg_time_sync_dec(const uint8_t *in, size_t len, lg_time_sync_t *v);
 size_t lg_name_enc(const lg_name_t *v, uint8_t *out);   /* out holds LG_NAME_LEN_MAX bytes */
 bool   lg_name_dec(const uint8_t *in, size_t len, lg_name_t *v);

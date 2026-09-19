@@ -109,6 +109,9 @@ void grid_state_init(uint16_t self);
 /* Copies the current settings. Any task. */
 void grid_state_settings(node_settings_t *out);
 
+/* Copies only the grid's POSIX time zone (D67), "" when none. Any task. */
+void grid_state_posix_tz(char *out, size_t cap);
+
 /* Stores new settings as the newest version, authored by this AP, and asks the core task to
  * announce them. Any task. */
 esp_err_t grid_state_commit(const node_settings_t *in);

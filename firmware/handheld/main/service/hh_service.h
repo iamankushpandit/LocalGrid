@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "esp_err.h"
 #include "lg_identity.h"
@@ -88,6 +89,7 @@ typedef struct {
     uint8_t  reject;        /* see HH_MSG_REJECTED and HH_MSG_REFUSED */
     bool     mine;
     bool     urgent;
+    bool     all_clear;     /* an urgent broadcast standing down its author's earlier SOS (D66) */
     uint32_t grid_time;     /* 0 when grid time was unset */
     uint32_t seq;           /* sequence number: ours when sending, the author's when receiving */
     uint32_t origin_boot;   /* received messages: the author's boot, to report them read */
@@ -119,6 +121,8 @@ typedef struct {
     uint32_t       joins;                    /* registrations since boot */
     uint32_t       grid_time;                /* Unix seconds, 0 when not set */
     bool           time_restricted;          /* D6: only receiving and URGENT broadcasts */
+    bool           time_from_gps;            /* D67: grid_time set, and a GPS keeps it (the grid's, or this handheld's own) */
+    char           time_zone[LG_TZ_MAX + 1]; /* D67: the grid's POSIX TZ in use; "" none yet, clocks show UTC */
     bool           may_announce;             /* D56: the admin page lets this handheld announce */
     int            preferred_node;           /* -1 automatic */
     uint8_t        n_nodes;
@@ -164,6 +168,10 @@ void hh_service_reconnect(void);
  * long, ESP_ERR_NO_MEM when the queue is full.
  */
 esp_err_t hh_service_send(uint8_t scope, uint32_t target, bool urgent, const char *text);
+
+/* An urgent broadcast marked all clear (D66): "<name> is safe". Receivers take down this handheld's
+ * SOS alert and show it calmly instead of as another emergency. Same results as hh_service_send. */
+esp_err_t hh_service_send_all_clear(const char *text);
 
 /* Copies one message, 0 being the newest; false when there are not that many. For readers that
  * need one at a time and should not hold a copy of the whole list (the console). */
@@ -303,6 +311,13 @@ bool hh_service_gps_info(hh_gps_info_t *out);
 /* Before hh_service_start: the board profile's GPS UART pins, LG_PIN_NONE (-1) for none. With no
  * rx pin, or none of this called, nothing about a GPS runs. */
 void hh_service_set_gps_pins(int rx_gpio, int tx_gpio);
+
+/*
+ * D67: Unix seconds (grid time is UTC) as local wall-clock time in the grid's zone, which the AP
+ * sends and this handheld keeps in flash; UTC until one is known (status time_zone ""). Every clock a
+ * screen or the console shows goes through this. Any task.
+ */
+void hh_local_time(uint32_t unix_s, struct tm *out);
 
 /* Where this handheld's clock came from, for the console: "the GPS", "the grid", "kept across a
  * restart", or "not set". */

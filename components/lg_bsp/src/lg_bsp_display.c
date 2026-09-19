@@ -1,10 +1,12 @@
 /*
  * Display panel driver on esp_lcd.
  *
- * Both panels use ESP-IDF's built-in ST7789 panel object for addressing and pixel
- * transfer. Controller-specific power and gamma registers are sent from the command
- * sequences TFT_eSPI uses for these controllers (TFT_Drivers/ST7789_Init.h and the
- * ILI9341_2 branch of ILI9341_Init.h), which Braino runs on these boards.
+ * Every panel uses ESP-IDF's built-in ST7789 panel object for addressing and pixel
+ * transfer: the ILI9341 and ST7796 share its CASET, RASET, RAMWR, MADCTL, and COLMOD.
+ * Controller-specific power and gamma registers are sent from the command sequences
+ * TFT_eSPI uses for these controllers (TFT_Drivers/ST7789_Init.h, ST7796_Init.h, and the
+ * ILI9341_2 branch of ILI9341_Init.h), which Braino runs on these boards. The JD9853's comes
+ * from Waveshare's factory example for the board that carries it (D66).
  */
 #include "lg_bsp_display.h"
 
@@ -28,7 +30,7 @@ static const char *TAG = "BSP";
 typedef struct {
     uint8_t cmd;
     uint8_t len;
-    uint8_t data[15];
+    uint8_t data[32];   /* the JD9853's gamma register takes 32 bytes; the tables live in flash */
 } panel_cmd_t;
 
 static const panel_cmd_t ILI9341_2_INIT[] = {
@@ -65,6 +67,70 @@ static const panel_cmd_t ST7789_INIT[] = {
     { 0xD0, 2, { 0xA4, 0xA1 } },                   /* power control 1 */
     { 0xE0, 14, { 0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x32, 0x44, 0x42, 0x06, 0x0E, 0x12, 0x14, 0x17 } },
     { 0xE1, 14, { 0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x31, 0x54, 0x47, 0x0E, 0x1C, 0x17, 0x1B, 0x1E } },
+};
+
+/* Sent after esp_lcd's init has done sleep out, MADCTL, and COLMOD, so TFT_eSPI's own reset,
+ * sleep out, MADCTL, COLMOD, and display on are left out. The extension command set is opened
+ * for the power and gamma registers and closed again at the end. TFT_eSPI waits 120 ms after
+ * each of the three parts, and so does lg_bsp_display_start. */
+static const panel_cmd_t ST7796_POWER[] = {
+    { 0xF0, 1, { 0xC3 } },                         /* command set control: open part I */
+    { 0xF0, 1, { 0x96 } },                         /* and part II */
+    { 0xB4, 1, { 0x01 } },                         /* display inversion control: 1-dot */
+    { 0xB6, 3, { 0x80, 0x02, 0x3B } },             /* display function control */
+    { 0xE8, 8, { 0x40, 0x8A, 0x00, 0x00, 0x29, 0x19, 0xA5, 0x33 } },   /* display output adjust */
+    { 0xC1, 1, { 0x06 } },                         /* power control 2 */
+    { 0xC2, 1, { 0xA7 } },                         /* power control 3 */
+    { 0xC5, 1, { 0x18 } },                         /* VCOM */
+};
+
+static const panel_cmd_t ST7796_GAMMA[] = {
+    { 0xE0, 14, { 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B } },
+    { 0xE1, 14, { 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B } },
+};
+
+static const panel_cmd_t ST7796_CLOSE[] = {
+    { 0xF0, 1, { 0x3C } },                         /* command set control: close part I */
+    { 0xF0, 1, { 0x69 } },                         /* and part II */
+};
+
+/*
+ * JD9853 (Waveshare ESP32-C6-Touch-LCD-1.47, D66). The register values are the vendor sequence
+ * in Waveshare's factory example for that board (esp_lcd_jd9853.c, vendor_specific_init_default),
+ * restated as data. Sent after sleep out; its own sleep out, column and row window, and display on
+ * are left out, because lg_bsp_display_start and every draw do those. 0xDF 98 53 opens the vendor
+ * registers (sent twice, as the vendor does) and the 0xDE writes switch register pages.
+ */
+static const panel_cmd_t JD9853_INIT[] = {
+    { 0xDF, 2, { 0x98, 0x53 } },
+    { 0xDF, 2, { 0x98, 0x53 } },
+    { 0xB2, 1, { 0x23 } },
+    { 0xB7, 4, { 0x00, 0x47, 0x00, 0x6F } },
+    { 0xBB, 6, { 0x1C, 0x1A, 0x55, 0x73, 0x63, 0xF0 } },
+    { 0xC0, 2, { 0x44, 0xA4 } },
+    { 0xC1, 1, { 0x16 } },
+    { 0xC3, 8, { 0x7D, 0x07, 0x14, 0x06, 0xCF, 0x71, 0x72, 0x77 } },
+    { 0xC4, 12, { 0x00, 0x00, 0xA0, 0x79, 0x0B, 0x0A, 0x16, 0x79, 0x0B, 0x0A, 0x16, 0x82 } },   /* 60 Hz, 320 lines */
+    { 0xC8, 32, { 0x3F, 0x32, 0x29, 0x29, 0x27, 0x2B, 0x27, 0x28, 0x28, 0x26, 0x25, 0x17, 0x12, 0x0D, 0x04, 0x00,
+                  0x3F, 0x32, 0x29, 0x29, 0x27, 0x2B, 0x27, 0x28, 0x28, 0x26, 0x25, 0x17, 0x12, 0x0D, 0x04, 0x00 } },   /* gamma */
+    { 0xD0, 5, { 0x04, 0x06, 0x6B, 0x0F, 0x00 } },
+    { 0xD7, 2, { 0x00, 0x30 } },
+    { 0xE6, 1, { 0x14 } },
+    { 0xDE, 1, { 0x01 } },
+    { 0xB7, 5, { 0x03, 0x13, 0xEF, 0x35, 0x35 } },
+    { 0xC1, 3, { 0x14, 0x15, 0xC0 } },
+    { 0xC2, 2, { 0x06, 0x3A } },
+    { 0xC4, 2, { 0x72, 0x12 } },
+    { 0xBE, 1, { 0x00 } },
+    { 0xDE, 1, { 0x02 } },
+    { 0xE5, 3, { 0x00, 0x02, 0x00 } },
+    { 0xE5, 3, { 0x01, 0x02, 0x00 } },
+    { 0xDE, 1, { 0x00 } },
+    { 0x35, 1, { 0x00 } },                         /* tearing effect line on */
+    { 0x3A, 1, { 0x05 } },                         /* 16 bits a pixel */
+    { 0xDE, 1, { 0x02 } },
+    { 0xE5, 3, { 0x00, 0x02, 0x00 } },
+    { 0xDE, 1, { 0x00 } },
 };
 
 static const lg_panel_profile_t *s_panel_profile;
@@ -113,10 +179,10 @@ esp_err_t lg_bsp_display_draw(int32_t x1, int32_t y1, int32_t x2, int32_t y2, co
 }
 
 /*
- * Hardware vertical scrolling, the same two commands on the ST7789 and the ILI9341: VSCRDEF
+ * Hardware vertical scrolling, the same two commands on the ST7789, ILI9341, and ST7796: VSCRDEF
  * splits the panel's rows into a fixed top, a scrolling middle, and a fixed bottom, and VSCRSADD
- * says which memory row is shown at the top of the middle. Neither board profile mirrors rows,
- * so memory rows and screen rows run the same way.
+ * says which memory row is shown at the top of the middle. No board profile mirrors rows, so
+ * memory rows and screen rows run the same way.
  */
 esp_err_t lg_bsp_display_scroll_area(uint16_t top_fixed, uint16_t scroll_rows, uint16_t bottom_fixed)
 {
@@ -199,16 +265,37 @@ esp_err_t lg_bsp_display_start(const lg_board_t *board, lg_bsp_flush_done_t flus
 
     esp_lcd_panel_reset(s_panel);
     vTaskDelay(pdMS_TO_TICKS(120));
-    /* Same order as TFT_eSPI: ILI9341 registers go in before sleep out, ST7789 registers after. */
+    /* Same order as TFT_eSPI: ILI9341 registers go in before sleep out, ST7789 and ST7796
+     * registers after. */
     if (p->kind == LG_PANEL_ILI9341) {
         send_table(io, ILI9341_2_INIT, sizeof(ILI9341_2_INIT) / sizeof(ILI9341_2_INIT[0]));
         esp_lcd_panel_init(s_panel);   /* sleep out, memory access control, pixel format */
+    } else if (p->kind == LG_PANEL_ST7796) {
+        /* esp_lcd's ST7789 init also writes 0xB0 (RAMCTRL there); on the ST7796 that register
+         * is interface mode control, and whether or not the panel accepts it before the
+         * extension set is opened, the 0x00 it gets is that register's reset value. */
+        esp_lcd_panel_init(s_panel);
+        send_table(io, ST7796_POWER, sizeof(ST7796_POWER) / sizeof(ST7796_POWER[0]));
+        vTaskDelay(pdMS_TO_TICKS(120));
+        send_table(io, ST7796_GAMMA, sizeof(ST7796_GAMMA) / sizeof(ST7796_GAMMA[0]));
+        vTaskDelay(pdMS_TO_TICKS(120));
+        send_table(io, ST7796_CLOSE, sizeof(ST7796_CLOSE) / sizeof(ST7796_CLOSE[0]));
+        vTaskDelay(pdMS_TO_TICKS(120));
+    } else if (p->kind == LG_PANEL_JD9853) {
+        /* Not esp_lcd's ST7789 init: it writes 0xB0, which on this controller is a vendor
+         * register, before the vendor set is opened. Sleep out and the vendor sequence instead;
+         * MADCTL comes from the mirror call below, as on every panel. */
+        esp_lcd_panel_io_tx_param(io, 0x11, NULL, 0);
+        vTaskDelay(pdMS_TO_TICKS(120));
+        send_table(io, JD9853_INIT, sizeof(JD9853_INIT) / sizeof(JD9853_INIT[0]));
     } else {
         esp_lcd_panel_init(s_panel);
         send_table(io, ST7789_INIT, sizeof(ST7789_INIT) / sizeof(ST7789_INIT[0]));
     }
     esp_lcd_panel_invert_color(s_panel, p->invert);
     esp_lcd_panel_mirror(s_panel, p->mirror_x, p->mirror_y);
+    /* A panel narrower than its controller (172 columns inside 240) starts part-way in. */
+    esp_lcd_panel_set_gap(s_panel, p->x_gap, p->y_gap);
 
     /* Clear to black before the backlight comes on, so no power-on noise is visible. */
     s_buffer_bytes = line_bytes * DRAW_LINES;

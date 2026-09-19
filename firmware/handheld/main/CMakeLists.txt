@@ -17,6 +17,7 @@ idf_component_register(SRCS "hh_main.c"
                             "ui/ui_screens.c"
                             "ui/ui_overlay.c"
                             "ui/ui_geo.c"
+                            "ui/ui_unit.c"
                             "voice/hh_voice.c"
                        INCLUDE_DIRS "." "service" "ui" "voice" "../../common"
                        REQUIRES lg_draw lg_core lg_crypto lg_identity lg_board lg_bsp lg_selftest lg_power

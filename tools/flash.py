@@ -347,6 +347,9 @@ def verify(device, fw, expected_id):
 def identify(data, chosen):
     print(f"{'NAME':<12} {'PORT':<6} {'ANSWERED ID':<24} DEVICE TYPE")
     for d in chosen:
+        if not d["port"]:
+            print(f"{d['name']:<12} {'-':<6} {'-':<24} no port in the device map yet")
+            continue
         got = query_id(d["port"])
         if got and got.startswith("ERROR"):
             desc = got
@@ -366,6 +369,8 @@ def flash_board(data, d, args, built):
     print(f"\n== {d['name']} ({d['port']}, {d['board']} {target}) <- {fw_name}", flush=True)
     if target not in fw["targets"] or d["role"] not in fw["roles"]:
         return False, f"{fw_name} firmware does not support role {d['role']} on {target}"
+    if not d["port"]:
+        return False, "no port in tools/bench_devices.json yet: plug the board in and set its port"
 
     # 1. Recognize the board by its ID, never by hardware address.
     answered = query_id(d["port"])
@@ -386,7 +391,7 @@ def flash_board(data, d, args, built):
         print(f"  recognized existing ID {answered}")
 
     chip, mac = chip_and_mac(d["port"])
-    expected_chip = "ESP32-S3" if target == "esp32s3" else "ESP32"
+    expected_chip = {"esp32s3": "ESP32-S3", "esp32c6": "ESP32-C6"}.get(target, "ESP32")
     if chip != expected_chip:
         return False, f"port {d['port']} has chip {chip or 'unknown'}, board type {d['board']} needs {expected_chip}"
 

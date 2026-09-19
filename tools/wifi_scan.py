@@ -18,7 +18,7 @@ here is a grid participant -- but it is not guaranteed to be passive either.
 Decision D21 stands too: BSSIDs are hardware addresses, so they are never printed. Radios
 are counted and their signals aggregated per SSID instead.
 
-Since D46 every AP broadcasts the same SSID, "LocalMesh Access Point", like a home mesh
+Since D46 (renamed 2026-09-18) every AP broadcasts the same SSID, "LocalGrid Access Point", like a home mesh
 router. A Wi-Fi scan therefore cannot say which AP is which (their names travel in a vendor
 element Windows does not show); it counts how many radios answer on that SSID. Which AP is
 missing comes from the APs' own `nodes` output or a handheld's Status screen.
@@ -43,7 +43,7 @@ import time
 
 # One SSID on every AP (D46), every AP at 192.168.4.1, and no master (D45): any AP serves
 # the admin page, so a missing AP reduces coverage but blocks nothing on its own.
-GRID_SSID = "LocalMesh Access Point"
+GRID_SSID = "LocalGrid Access Point"
 DEFAULT_APS = 3
 ADMIN_URL = "http://192.168.4.1/"
 

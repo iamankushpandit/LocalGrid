@@ -17,6 +17,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -50,6 +51,24 @@ typedef struct {
     uint16_t len;
     uint8_t  frame[HH_VOICE_FRAME_MAX];
 } rx_frame_t;
+
+/*
+ * The tasks' working buffers are allocated with the tasks, not kept as statics, so a board that
+ * can neither talk nor listen (the alert unit, D66) carries none of them: about 8 KB of RAM.
+ */
+typedef struct {
+    int16_t pcm[FRAME_SAMPLES];
+    uint8_t out[HH_VOICE_FRAME_MAX];
+} capture_buf_t;
+
+typedef struct {
+    rx_frame_t f;                            /* the frame being played */
+    rx_frame_t item;                         /* the service task's copy on its way into the queue */
+    int16_t    pcm[FRAME_SAMPLES];
+    int16_t    silence[FRAME_SAMPLES / 2u];  /* 50 ms of zeros: the lead-in, and the fill for a late frame */
+} playback_buf_t;
+
+static playback_buf_t *s_play;
 
 static struct {
     portMUX_TYPE     mux;
@@ -117,17 +136,17 @@ static const char *refusal_text(int reason)
 
 static void on_frame(uint32_t author, uint32_t boot, uint8_t scope, uint32_t target, const uint8_t *frame, size_t len)
 {
-    if (v.rx == NULL || len > HH_VOICE_FRAME_MAX || v.talk_req) {
+    if (v.rx == NULL || s_play == NULL || len > HH_VOICE_FRAME_MAX || v.talk_req) {
         return;   /* half duplex: nothing plays while this handheld talks */
     }
-    static rx_frame_t item;   /* the service task is the only caller */
-    item.author = author;
-    item.boot = boot;
-    item.scope = scope;
-    item.target = target;
-    item.len = (uint16_t)len;
-    memcpy(item.frame, frame, len);
-    if (xQueueSend(v.rx, &item, 0) != pdTRUE) {
+    rx_frame_t *item = &s_play->item;   /* the service task is the only caller */
+    item->author = author;
+    item->boot = boot;
+    item->scope = scope;
+    item->target = target;
+    item->len = (uint16_t)len;
+    memcpy(item->frame, frame, len);
+    if (xQueueSend(v.rx, item, 0) != pdTRUE) {
         v.rx_dropped++;
     }
 }
@@ -228,9 +247,9 @@ static size_t pack(const hh_adpcm_state_t *from, uint16_t talk, uint16_t frame, 
 
 static void capture_task(void *arg)
 {
-    (void)arg;
-    static int16_t pcm[FRAME_SAMPLES];
-    static uint8_t out[HH_VOICE_FRAME_MAX];
+    capture_buf_t *buf = arg;
+    int16_t *pcm = buf->pcm;
+    uint8_t *out = buf->out;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (!v.talk_req) {
@@ -305,7 +324,7 @@ static int32_t s_play_gate = 256;
 
 static void play(const rx_frame_t *f, const lg_voice_hdr_t *h)
 {
-    static int16_t pcm[FRAME_SAMPLES];
+    int16_t *pcm = s_play->pcm;
     size_t data = f->len - LG_VOICE_HDR_LEN;
     if (data == 0) {
         return;
@@ -335,19 +354,18 @@ static void play(const rx_frame_t *f, const lg_voice_hdr_t *h)
 static void playback_task(void *arg)
 {
     (void)arg;
-    static rx_frame_t f;
+    rx_frame_t *f = &s_play->f;
     bool playing = false;
     uint32_t author = 0;
     uint32_t boot = 0;
     uint32_t heard_ms = 0;
     for (;;) {
         TickType_t wait = playing ? pdMS_TO_TICKS(50) : portMAX_DELAY;   /* 50 ms: the silence below fills it */
-        if (xQueueReceive(v.rx, &f, wait) != pdTRUE) {
+        if (xQueueReceive(v.rx, f, wait) != pdTRUE) {
             if (playing && now_ms() - heard_ms < GAP_END_MS) {
                 /* A late frame. Silence keeps the output fed: an empty DMA ring replays its old
                  * buffers, which on the Hosyond was a buzz in bursts and words chopped up. */
-                static int16_t quiet[FRAME_SAMPLES];
-                (void)lg_bsp_audio_voice_write(quiet, FRAME_SAMPLES / 2u, SPEAKER_WAIT_MS);
+                (void)lg_bsp_audio_voice_write(s_play->silence, FRAME_SAMPLES / 2u, SPEAKER_WAIT_MS);
             }
             if (playing && now_ms() - heard_ms >= GAP_END_MS) {
                 lg_bsp_audio_voice_stop();
@@ -358,10 +376,10 @@ static void playback_task(void *arg)
             continue;
         }
         lg_voice_hdr_t h;
-        if (!lg_voice_hdr_dec(f.frame, f.len, &h) || v.talk_req) {
+        if (!lg_voice_hdr_dec(f->frame, f->len, &h) || v.talk_req) {
             continue;
         }
-        if (playing && (f.author != author || f.boot != boot)) {
+        if (playing && (f->author != author || f->boot != boot)) {
             continue;   /* one talker at a time: the second is heard once the first lets go */
         }
         heard_ms = now_ms();
@@ -369,23 +387,22 @@ static void playback_task(void *arg)
             if (h.flags & LG_VOICE_END) {
                 continue;   /* the tail of a talk we never started playing */
             }
-            author = f.author;
-            boot = f.boot;
+            author = f->author;
+            boot = f->boot;
             s_play_gate = 0;   /* the first word fades in from the silence before it */
-            set_heard(author, f.scope, f.target);
+            set_heard(author, f->scope, f->target);
             ESP_LOGI(TAG, "[MSG] Hearing device %" PRIu32 " (%s %" PRIu32 ")", author,
-                     f.scope == LG_SCOPE_GROUP ? "group" : "1:1", f.target);
+                     f->scope == LG_SCOPE_GROUP ? "group" : "1:1", f->target);
             vTaskDelay(pdMS_TO_TICKS(PREBUFFER_MS));   /* the frames behind this one queue up meanwhile */
             if (lg_bsp_audio_voice_start() != ESP_OK) {
                 ESP_LOGW(TAG, "[MSG] The speaker would not open for talk");
             } else {
-                static int16_t lead[FRAME_SAMPLES / 2u];
-                (void)lg_bsp_audio_voice_write(lead, FRAME_SAMPLES / 2u, SPEAKER_WAIT_MS);   /* 50 ms of
+                (void)lg_bsp_audio_voice_write(s_play->silence, FRAME_SAMPLES / 2u, SPEAKER_WAIT_MS);   /* 50 ms of
                      silence first, so the output starts from clean buffers */
             }
             playing = true;
         }
-        play(&f, &h);
+        play(f, &h);
         if (h.flags & LG_VOICE_END) {
             lg_bsp_audio_voice_stop();
             playing = false;
@@ -405,14 +422,22 @@ esp_err_t hh_voice_start(void)
     v.st.version++;
     taskEXIT_CRITICAL(&v.mux);
     if (v.st.can_hear) {
+        s_play = calloc(1, sizeof(*s_play));
+        if (s_play == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
         v.rx = xQueueCreate(RX_QUEUE_LEN, sizeof(rx_frame_t));
         if (v.rx == NULL || xTaskCreate(playback_task, "hh_play", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
             return ESP_ERR_NO_MEM;
         }
     }
-    if (v.st.can_talk &&
-        xTaskCreate(capture_task, "hh_talk", TASK_STACK, NULL, TASK_PRIORITY, &v.capture) != pdPASS) {
-        return ESP_ERR_NO_MEM;
+    if (v.st.can_talk) {
+        capture_buf_t *buf = calloc(1, sizeof(*buf));   /* the capture task's for good: it never ends */
+        if (buf == NULL ||
+            xTaskCreate(capture_task, "hh_talk", TASK_STACK, buf, TASK_PRIORITY, &v.capture) != pdPASS) {
+            free(buf);
+            return ESP_ERR_NO_MEM;
+        }
     }
     hh_service_set_voice_io(&s_io);
     ESP_LOGI(TAG, "[MSG] Push-to-talk: %s", v.st.can_talk ? "talk and listen" : v.st.can_hear ? "listen only" : "off");

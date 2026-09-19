@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -149,6 +150,7 @@ typedef struct {
 typedef struct {
     uint8_t  scope;
     bool     urgent;
+    bool     all_clear;
     uint32_t target;
     uint16_t len;
     char     text[HH_TEXT_MAX + 1];
@@ -413,6 +415,76 @@ static void ring_forget_group(uint16_t id)
     s.dirty = true;
     xSemaphoreGive(s.lock);
     ESP_LOGI("MSG", "[MSG] Group %u was removed; deleted its %u message(s)", id, dropped);
+}
+
+/* ---- the grid's time zone (D67), kept in NVS (D48) ----
+ *
+ * Grid time is UTC everywhere. The AP sends the grid's zone as a POSIX TZ string (made by the admin
+ * page's browser); this handheld applies it to the C library and keeps it, so after a restart with
+ * no AP in range its clocks still show local time. Until one arrives they show UTC. The C library's
+ * zone is process-wide: it is set, and read by hh_local_time, under s.lock only.
+ */
+#define TZ_KEY "tz"
+
+static char s_tz[LG_TZ_MAX + 1];   /* the zone applied; "" none. Service task writes, under s.lock */
+
+static void tz_apply_locked(const char *tz)
+{
+    setenv("TZ", tz[0] != '\0' ? tz : "UTC0", 1);
+    tzset();
+}
+
+static void tz_load(void)
+{
+    char tz[LG_TZ_MAX + 1] = "";
+    size_t len = sizeof(tz);
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_str(h, TZ_KEY, tz, &len) != ESP_OK || !lg_tz_valid((const uint8_t *)tz, strlen(tz))) {
+            tz[0] = '\0';
+        }
+        nvs_close(h);
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    snprintf(s_tz, sizeof(s_tz), "%s", tz);
+    tz_apply_locked(s_tz);
+    xSemaphoreGive(s.lock);
+    ESP_LOGI("TIME", "[TIME] Time zone %s", tz[0] != '\0' ? tz : "not known yet: clocks show UTC");
+}
+
+/* LG_CEV_TIME_ZONE: a new zone from the AP. Applied at once and kept. */
+static void tz_take(const char *tz)
+{
+    if (!lg_tz_valid((const uint8_t *)tz, strlen(tz)) || strcmp(tz, s_tz) == 0) {
+        return;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    snprintf(s_tz, sizeof(s_tz), "%s", tz);
+    tz_apply_locked(s_tz);
+    xSemaphoreGive(s.lock);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, TZ_KEY, tz);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    ESP_LOGI("TIME", "[TIME] Time zone from the grid: %s%s", tz, err == ESP_OK ? "" : "; not saved to flash");
+    s.dirty = true;
+}
+
+void hh_local_time(uint32_t unix_s, struct tm *out)
+{
+    time_t t = (time_t)unix_s;
+    if (s.lock == NULL) {
+        gmtime_r(&t, out);
+        return;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    localtime_r(&t, out);
+    xSemaphoreGive(s.lock);
 }
 
 /* ---- groups in NVS (D48, D52): kept as their GROUPS body ---- */
@@ -714,6 +786,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         save_names();
         s.dirty = true;
         break;
+    case LG_CEV_TIME_ZONE:
+        tz_take(lg_client_time_zone(&s.client));
+        break;
     case LG_CEV_TIME:
         if (ev->value == 0) {
             ESP_LOGW("TIME", "[TIME] Grid time is not set: only receiving and urgent broadcasts (D6)");
@@ -733,6 +808,7 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             m->origin_boot = in->boot;
             m->read_sent = false;
             m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
+            m->all_clear = (in->flags & LG_FLAG_ALL_CLEAR) != 0;
             m->grid_time = in->grid_time;
             ring_set_text(m, (const char *)in->text, in->len);
             if (in->scope == LG_SCOPE_DIRECT) {
@@ -1267,7 +1343,7 @@ static void handle_event(const ev_t *ev, uint32_t now)
         ESP_LOGI(TAG, "[NET] Node choice: %s", ev->value < 0 ? "automatic" : "fixed");
         if (ev->value >= 0 && s.link != HH_LINK_SEARCHING && s.joining != ev->value &&
             !(s.link == HH_LINK_ONLINE && s.client.node == (uint16_t)ev->value)) {
-            drop_link("Switching to the chosen node", true);
+            drop_link("Switching to the chosen AP", true);
         } else if (s.link == HH_LINK_SEARCHING) {
             s.backoff_ms = 0;
             s.next_attempt_ms = now;
@@ -1326,7 +1402,7 @@ static void poll_socket(uint32_t wait_ms)
     }
     int n = recv(s.sock, s.rx + s.rx_fill, sizeof(s.rx) - s.rx_fill, 0);
     if (n == 0) {
-        drop_link("The node closed the session", false);
+        drop_link("The AP closed the session", false);
         return;
     }
     if (n < 0) {
@@ -1339,7 +1415,7 @@ static void poll_socket(uint32_t wait_ms)
     while (s.sock >= 0 && s.rx_fill >= 2) {
         uint16_t flen = lg_rd16(s.rx);
         if (flen < LG_ENV_SIZE || flen > LG_FRAME_MAX) {
-            drop_link("Bad frame from the node", false);
+            drop_link("Bad frame from the AP", false);
             return;
         }
         if (s.rx_fill < 2u + flen) {
@@ -1360,7 +1436,8 @@ static void drain_send_queue(void)
         if (req.urgent && req.scope == LG_SCOPE_BROADCAST) {
             (void)send_own_position(now_ms());   /* D65: where the emergency is, just ahead of it */
         }
-        uint16_t flags = LG_FLAG_ACK_REQUESTED | (req.urgent ? LG_FLAG_URGENT : 0);
+        uint16_t flags = LG_FLAG_ACK_REQUESTED | (req.urgent ? LG_FLAG_URGENT : 0) |
+                         (req.all_clear ? LG_FLAG_ALL_CLEAR : 0);
         int rc = lg_client_send_text(&s.client, req.scope, req.target, flags, (const uint8_t *)req.text, req.len);
         hh_message_t *m = ring_add();
         m->author = s.device;
@@ -1368,6 +1445,7 @@ static void drain_send_queue(void)
         m->scope = req.scope;
         m->mine = true;
         m->urgent = req.urgent;
+        m->all_clear = req.all_clear;
         ring_set_text(m, req.text, req.len);
         if (rc >= 0) {
             const lg_out_msg_t *o = &s.client.outbox[rc];
@@ -1470,17 +1548,17 @@ static void step(uint32_t now)
                 ESP_LOGI(TAG, "[NET] Session open to node %d; registering", s.joining);
                 lg_client_connected(&s.client);
             } else if (++s.tcp_tries >= TCP_TRIES) {
-                drop_link("Could not open a session with the node", false);
+                drop_link("Could not open a session with the AP", false);
             } else {
                 s.next_tcp_ms = now + TCP_RETRY_MS;
             }
         } else if (now - s.state_since_ms > JOIN_TIMEOUT_MS) {
-            drop_link("Joining the node's Wi-Fi timed out", false);
+            drop_link("Joining the AP's Wi-Fi timed out", false);
         }
         break;
     case HH_LINK_REGISTERING:
         if (now - s.state_since_ms > REGISTER_TIMEOUT_MS) {
-            drop_link("The node did not accept this handheld", false);
+            drop_link("The AP did not accept this handheld", false);
         }
         break;
     case HH_LINK_ONLINE: {
@@ -1490,7 +1568,7 @@ static void step(uint32_t now)
         }
         uint32_t heard = MAX_U32(s.client.last_pong_ms, s.online_since_ms);
         if (now - heard > PONG_TIMEOUT_MS) {
-            drop_link("The node stopped answering", false);
+            drop_link("The AP stopped answering", false);
             break;
         }
         if (s.voice_awake) {
@@ -1545,6 +1623,10 @@ static void publish(void)
     st->joins = s.joins;
     st->time_restricted = lg_client_time_restricted(&s.client);
     st->grid_time = st->time_restricted ? 0 : io_local_time(NULL);
+    /* D67: this handheld's own GPS keeps its clock, or the AP says a GPS set grid time. */
+    st->time_from_gps = st->grid_time != 0 && ((gp.owns_clock && gp.source == CLOCK_GPS) ||
+                                               lg_client_time_from_gps(&s.client));
+    snprintf(st->time_zone, sizeof(st->time_zone), "%s", s_tz);
     st->preferred_node = s.preferred;
     snprintf(st->name, sizeof(st->name), "%s", roster_name(s.device));
 
@@ -1760,6 +1842,7 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     }
     s.status.node = -1;
     s.status.preferred_node = -1;
+    tz_load();   /* D67: before any screen shows a clock, and whether or not the network starts */
     if (!identity->present || !identity->has_device) {
         return fail_start(ESP_ERR_INVALID_STATE, "No device index. Provision with tools/flash.py --update-identity");
     }
@@ -2171,4 +2254,19 @@ bool hh_service_gps_info(hh_gps_info_t *out)
     out->sentences = g.sentences;
     out->bad = g.bad;
     return true;
+}
+
+esp_err_t hh_service_send_all_clear(const char *text)
+{
+    if (s.send_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    size_t len = text != NULL ? strlen(text) : 0;
+    if (len == 0 || len > HH_TEXT_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    send_req_t req = { .scope = LG_SCOPE_BROADCAST, .urgent = true, .all_clear = true, .target = LG_TARGET_ALL,
+                       .len = (uint16_t)len };
+    memcpy(req.text, text, len);
+    return xQueueSend(s.send_queue, &req, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }

@@ -849,9 +849,10 @@ static void stat_rows(void)
     if (st->grid_time == 0) {
         snprintf(value, sizeof(value), "not set");
     } else {
-        uint32_t day = st->grid_time % 86400u;
-        snprintf(value, sizeof(value), "%02u:%02u:%02u", (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u),
-                 (unsigned)(day % 60u));
+        struct tm lt;
+        hh_local_time(st->grid_time, &lt);   /* D67: the grid's zone, UTC until one is known */
+        snprintf(value, sizeof(value), "%02d:%02d:%02d%s%s", lt.tm_hour, lt.tm_min, lt.tm_sec,
+                 st->time_zone[0] != '\0' ? "" : " UTC", st->time_from_gps ? " GPS" : "");
     }
     stat_put(ROW_FACT, "Grid time", value, st->grid_time == 0);
     snprintf(value, sizeof(value), "%u", st->n_people);

@@ -13,7 +13,7 @@
 #define LG_PROTO_CHANNEL        6       /* grid-wide Wi-Fi and ESP-NOW channel */
 #define LG_PROTO_TCP_PORT       7300    /* handheld control sessions */
 /* D46: one network. Every AP broadcasts this SSID; handhelds pick an AP by BSSID and the vendor IE. */
-#define LG_PROTO_SSID           "LocalMesh Access Point"
+#define LG_PROTO_SSID           "LocalGrid Access Point"
 #define LG_PROTO_MAX_STATIONS   15      /* ESP32 SoftAP maximum with ESP-NOW encryption disabled */
 #define LG_PROTO_UNKNOWN_NODE   7       /* index used by a node board that was never provisioned */
 

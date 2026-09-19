@@ -412,7 +412,8 @@ Four layers, each independently versioned:
 | 0x41 | CONFIG_REQUEST | SYSTEM | node → node, client → node |
 | 0x42 | CONFIG_CHUNK | SYSTEM | node → node, node → client |
 | 0x43 | CONFIG_ACK | SYSTEM | node → master |
-| 0x50 | TIME_SYNC | SYSTEM | master → nodes, node → clients |
+| 0x50 | TIME_SYNC | SYSTEM | node → nodes (flood), node → clients. Body: u32 grid time (Unix s), u16 ms, u8 quality, u8 stratum, and to clients only u8 flags (0x01 FROM_GPS: a GPS set the current time generation, D67). Receivers decode 9, 8 and 5 bytes; nodes flood the 8-byte form so nodes before D67 still take it. A registering client gets one after REGISTER_ACK |
+| 0x54 | TIME_ZONE | SYSTEM | node → clients, at registration and on change (D67). Body: the grid's POSIX TZ string, 1..47 bytes of `A-Za-z0-9<>+-,.:/`, starting with a letter or `<`, made by the admin's browser and kept in the replicated settings. Grid time stays UTC; clients show local time with it and keep it in flash |
 | 0x60 | PAIRING (SRP messages) | SYSTEM | unprovisioned device ↔ master |
 | 0x7F | ERROR | SYSTEM | any |
 | 0x80–0x8F | reserved: VOICE_START, VOICE_FRAME, VOICE_END, VOICE_CANCEL, TTS capability | | |
@@ -814,6 +815,8 @@ On the master:
 4. Mark time quality `AUTHORITATIVE`, persist UTC to NVS, bump config generation because the timezone is configuration.
 
 Manual entry uses the same endpoint with values typed into date and time fields.
+
+**Prototype (D67):** no zone table on the APs. The admin page's browser derives the POSIX string itself from its own zone data (the offsets and this year's changes found with `Intl`, written as `Mm.w.d/time` rules and chosen to fit the next eight years; a fixed offset for zones without DST or with irregular changes) and sends it as `posix_tz` beside the IANA name. APs keep both in the replicated settings (grid state layout 5) and send the POSIX string to handhelds as `TIME_ZONE` (0x54).
 
 Accuracy is bounded by request latency, tens to hundreds of milliseconds, which is fine for a clock display.
 

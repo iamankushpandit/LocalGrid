@@ -31,6 +31,17 @@ void ui_overlay_drop_banner(void);
 
 void ui_overlay_log(uint32_t now_ms, uint32_t last_touch_ms);
 
+/* The alert and distress unit (D66): only broadcasts are shown (no banner, no chats), there is no
+ * screen saver, and alerts carry read_hint under Read ("Press button to read"), or nothing if NULL. */
+void ui_overlay_set_alert_unit(const char *read_hint);
+
+/* True while an announcement or urgent alert is on screen. */
+bool ui_overlay_alert_showing(void);
+
+/* Reads the alert on screen, as tapping Read does: closes it and reports it read (D58). False when
+ * no alert is showing. For a board's button (D66). */
+bool ui_overlay_ack(void);
+
 uint32_t ui_notify_unread(uint8_t scope, uint32_t target);
 uint32_t ui_notify_unread_total(void);
 void     ui_notify_mark_seen(uint8_t scope, uint32_t target);

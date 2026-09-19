@@ -14,6 +14,7 @@
 
 #define SETTINGS_GRID_NAME_MAX  32
 #define SETTINGS_TZ_MAX         47
+#define SETTINGS_POSIX_TZ_MAX   LG_TZ_MAX   /* 47 */
 #define SETTINGS_SALT_LEN       16
 #define SETTINGS_HASH_LEN       32
 
@@ -27,6 +28,10 @@ typedef struct {
     uint8_t  hash[SETTINGS_HASH_LEN];
     uint32_t seq;       /* 0 = never set anywhere; each change anywhere on the grid adds one */
     uint16_t author;    /* AP index that made this version */
+    /* D67: the same zone as a POSIX TZ string, made by the admin's browser from its own zone data
+     * ("CST6CDT,M3.2.0,M11.1.0"); what handhelds use to show local time. "" until an admin saves
+     * the time or zone on a page that makes one. */
+    char     posix_tz[SETTINGS_POSIX_TZ_MAX + 1];
 } node_settings_t;
 
 /* Loads settings; an absent or incompatible record yields configured == false. */

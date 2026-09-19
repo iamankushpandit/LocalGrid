@@ -13,6 +13,8 @@ How LocalGrid supports a board, which boards it supports today, and how to add o
 | `ELG` | Elegoo ESP32 dev board | ESP32 | AP | none | none | none | none | none | verified |
 | `HY3` | Hosyond 3.2in (LCDWIKI E32R32P) | ESP32 | handheld | ST7789P3 240x320 | XPT2046 resistive | internal DAC, listen-only | GPIO34, 2:1 | none | verified (volume ceiling not set by ear) |
 | `F4B` | Freenove FNK0104B 2.8in | ESP32-S3 | handheld | ILI9341 240x320 | FT6336U capacitive | ES8311 codec, speaker and microphone | GPIO9, 2:1 | GPIO44 RX, GPIO43 TX | verified |
+| `C6L` | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 | alert unit (D66) | ST7789 172x320, 34-column gap | none; BOOT button (GPIO9) | none | none | none | untested |
+| `C6T` | Waveshare ESP32-C6-Touch-LCD-1.47 | ESP32-C6 | alert unit (D66) | JD9853 172x320, 34-column gap | AXS5106L capacitive; BOOT button (GPIO9) | none | GPIO0, 3:1 | none | untested |
 
 **Verified** means the board passed the [bring-up checklist](#bring-up-checklist) on the owner's bench with captured evidence. **Untested** means a profile exists and builds, but nobody has shown the checklist passing. A profile starts untested and becomes verified only with evidence.
 
@@ -28,7 +30,7 @@ Consequences:
 
 - A board code is permanent for the IDs minted with it. Changing a board's code means `python tools/flash.py <board> --erase --new-id`. Never reuse a retired code for different hardware.
 - A code must be three characters from `A-Z` and `0-9` (`tools/flash.py` checks IDs against `[A-Z0-9]{3}`), unique, and the same in `lg_board.c` and in the `boards` table of `tools/bench_devices.json`.
-- The `boards` entry also gives the chip `target` (`esp32`, `esp32s3`). `flash.py` refuses to flash a board whose chip does not match.
+- The `boards` entry also gives the chip `target` (`esp32`, `esp32s3`, `esp32c6`). `flash.py` refuses to flash a board whose chip does not match.
 - AP firmware does not read a profile today. An AP board needs only a `boards` entry with the right target. Its supply sense is set with `CONFIG_LG_NODE_SUPPLY_SENSE_GPIO` (see the `power` skill).
 
 ## What a board profile is
@@ -55,7 +57,10 @@ Two rules apply to every field:
 |---|---|---|
 | `code` | Three-character board code used in device IDs. | You choose it; check it is unused. |
 | `name` | Human name, with the vendor's model number. | The vendor's listing. |
-| `boot_button` | GPIO of the BOOT button. | Schematic. `0` on every ESP32 board so far. |
+| `boot_button` | GPIO of the BOOT button. | Schematic. `0` on the classic ESP32 and S3 boards, `9` on the ESP32-C6. |
+| `role` | `LG_ROLE_HANDHELD` (the default, zero) or `LG_ROLE_ALERT_UNIT`: the same handheld firmware with only alerts, SOS, and status (D66). | The owner's decision for the board. |
+| `n_buttons`, `buttons[]` | Physical buttons, up to `LG_BOARD_BUTTONS_MAX`: `gpio`, `active_low`, `pull_up`, and the `lg_action_t` bits a short press (`on_press`) and a hold (`on_hold`) drive (SOS, I'm safe, Cancel, Read). Rows past `n_buttons` are never read. A builder wires more buttons by adding rows, not code. | Schematic for the board's own keys; any free GPIO for added ones. |
+| `sibling`, `probe` | Two boards sold under one name with different wiring: `sibling` names the other profile, and `probe` gives I2C pins and up to two addresses that only this board answers on. `lg_bsp_board_resolve()` checks at boot and uses the right profile, logging `[BSP] Board probe`. | Schematics of both boards: a part only one of them has. |
 | `supply_sense` | ADC1 pin behind a resistor divider, or `LG_PIN_NONE`. ADC2 is unusable while Wi-Fi runs. | Schematic. |
 | `supply_divider_milli` | Divider ratio in thousandths (`2000` is 2:1). | Resistor values on the schematic, then confirmed: `power` against a multimeter. |
 | `gps_rx`, `gps_tx` | A free UART connector for a GPS module (D65): `gps_rx` takes the module's TXD. `LG_PIN_NONE` if there is nowhere to wire one. A pin here is a connector, not a promise a module is fitted. | Schematic. The pins must not be the serial console's UART. |
@@ -64,7 +69,7 @@ Two rules apply to every field:
 
 | Field | Meaning | Where to find it |
 |---|---|---|
-| `kind` | `LG_PANEL_ILI9341`, `LG_PANEL_ST7789`, or `LG_PANEL_NONE`. A controller not listed needs a driver (step 3 below). | The panel's marking or the vendor's listing; confirm by reading the ID register or by what works. |
+| `kind` | `LG_PANEL_ILI9341`, `LG_PANEL_ST7789`, `LG_PANEL_ST7796`, `LG_PANEL_JD9853`, or `LG_PANEL_NONE`. A controller not listed needs a driver (step 3 below). | The panel's marking or the vendor's listing; confirm by reading the ID register or by what works. |
 | `native_width`, `native_height` | The panel in its native orientation. Portrait on every board so far. | Datasheet. |
 | `mosi`, `miso`, `sclk`, `cs`, `dc`, `rst` | SPI wires. `miso` matters when a resistive touch controller shares the bus. `rst` may be `LG_PIN_NONE` if tied to the chip's reset. | Schematic. |
 | `spi_hz` | SPI clock. `40000000` on both handhelds. | Start at the vendor's example value; lower it if the picture tears or corrupts. |
@@ -73,12 +78,13 @@ Two rules apply to every field:
 | `mirror_x`, `mirror_y` | Mirrors needed for upright portrait. | By eye: text reads backwards or upside down. |
 | `backlight`, `backlight_active_high` | Backlight GPIO and polarity. | Schematic; confirm the screen lights. |
 | `px_per_10mm` | Pixel density, used to size touch targets in millimetres. | Pixel diagonal divided by the diagonal in cm. 240x320 is 400 px diagonal; at 3.2 in (8.13 cm) that is 49. |
+| `x_gap`, `y_gap` | Where the glass starts in the controller's memory: a 172-wide panel on a 240-column controller is 34 columns in. `0` when the panel fills its controller. | Vendor example (its `set_gap` or column offset); a picture shifted sideways with garbage at one edge means it is wrong. |
 
 ### `touch` (`lg_touch_profile_t`)
 
 | Field | Meaning | Where to find it |
 |---|---|---|
-| `kind` | `LG_TOUCH_XPT2046_SPI` (resistive, on the display's SPI bus), `LG_TOUCH_FT6336_I2C` (capacitive), or `LG_TOUCH_NONE`. | Vendor listing, `i2cscan` for an I2C controller. |
+| `kind` | `LG_TOUCH_XPT2046_SPI` (resistive, on the display's SPI bus), `LG_TOUCH_FT6336_I2C` or `LG_TOUCH_AXS5106_I2C` (capacitive), or `LG_TOUCH_NONE`. A controller that does not answer at start leaves the board on its buttons. | Vendor listing, `i2cscan` for an I2C controller. |
 | `cs` | XPT2046 chip select. | Schematic. |
 | `irq`, `irq_usable` | Touch interrupt pin, and whether it can be trusted. Set `irq_usable = false` on a pin with no pull-up (the `HY3`'s GPIO36): pressure alone then decides a press. | Schematic; input-only pins 34 to 39 have no internal pull-ups. |
 | `sda`, `scl`, `rst`, `i2c_addr` | I2C controller wiring and address. The same bus carries an audio codec's control. | Schematic; `i2cscan` confirms the address. |

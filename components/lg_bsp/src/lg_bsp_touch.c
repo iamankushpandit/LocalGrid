@@ -4,6 +4,12 @@
  * Provenance: FT6336U register use, the XPT2046 pressure formula and threshold, and
  * the affine calibration follow Braino (github.com/iamankushpandit/Gume, commit
  * 1e2a11f, src/hal/BoardTouch.cpp), measured on these boards by the owner.
+ *
+ * The AXS5106L (Waveshare ESP32-C6-Touch-LCD-1.47, D66): address 0x63, a reset pulse on its RST
+ * line, then one 14-byte read from register 0x01 whose second byte's low nibble is the number of
+ * points and whose next four bytes are the first point's X and Y, 12 bits each. Restated as facts
+ * from Waveshare's factory example for that board (esp_lcd_touch_axs5106.c, Apache-2.0), as
+ * published at github.com/cpg/ESP32-C6-Touch-LCD-1.47-factory-firmware-example; no code copied.
  */
 #include "lg_bsp_touch.h"
 
@@ -16,6 +22,7 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "soc/soc_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -31,6 +38,12 @@ static const char *TAG = "BSP";
 #define FT_I2C_HZ         400000
 
 #define XPT_SPI_HZ        1000000
+#if SOC_SPI_PERIPH_NUM > 2
+#define XPT_OWN_HOST      SPI3_HOST      /* the display has SPI2; an XPT2046 on pins of its own gets this */
+#endif
+
+#define AXS_REG_POINTS    0x01           /* the point count's byte, then the first point */
+#define AXS_READ_LEN      14
 #define XPT_CMD_X         0xD0
 #define XPT_CMD_Y         0x90
 #define XPT_CMD_Z1        0xB0
@@ -50,6 +63,12 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static spi_device_handle_t     s_xpt;
 static touch_cal_t             s_cal;
 static bool                    s_calibrated;
+
+/* Capacitive controllers on I2C: the FT6336U and the AXS5106L start the same way. */
+static bool is_i2c(lg_touch_kind_t kind)
+{
+    return kind == LG_TOUCH_FT6336_I2C || kind == LG_TOUCH_AXS5106_I2C;
+}
 
 static esp_err_t ft_start(const lg_touch_profile_t *t)
 {
@@ -93,6 +112,27 @@ i2c_master_bus_handle_t lg_bsp_touch_i2c_bus(void)
 
 static esp_err_t xpt_start(const lg_touch_profile_t *t, int spi_host)
 {
+    if (t->own_bus) {
+#ifndef XPT_OWN_HOST
+        return ESP_ERR_NOT_SUPPORTED;   /* one general-purpose SPI host on this chip, and the display has it */
+#else
+        /* Three-byte polled transfers at 1 MHz: no DMA, and any pins through the GPIO matrix.
+         * Braino bit-bangs these pins; a second hardware host does the same job here. */
+        spi_bus_config_t bus = {
+            .mosi_io_num = t->mosi,
+            .miso_io_num = t->miso,
+            .sclk_io_num = t->sclk,
+            .quadwp_io_num = -1,
+            .quadhd_io_num = -1,
+            .max_transfer_sz = 16,
+        };
+        esp_err_t err = spi_bus_initialize(XPT_OWN_HOST, &bus, SPI_DMA_DISABLED);
+        if (err != ESP_OK) {
+            return err;
+        }
+        spi_host = XPT_OWN_HOST;
+#endif
+    }
     spi_device_interface_config_t dev_cfg = {
         .mode = 0,
         .clock_speed_hz = XPT_SPI_HZ,
@@ -136,6 +176,22 @@ static bool read_raw_locked(lg_bsp_touch_raw_t *out)
         out->x = (int16_t)(((buf[1] & 0x0F) << 8) | buf[2]);
         out->y = (int16_t)(((buf[3] & 0x0F) << 8) | buf[4]);
         out->pressure = UINT16_MAX;   /* capacitive contact is binary */
+        out->down = true;
+        return true;
+    }
+    if (t->kind == LG_TOUCH_AXS5106_I2C) {
+        uint8_t reg = AXS_REG_POINTS;
+        uint8_t buf[AXS_READ_LEN];
+        if (i2c_master_transmit_receive(s_ft, &reg, 1, buf, sizeof(buf), 20) != ESP_OK) {
+            return false;
+        }
+        uint8_t points = buf[1] & 0x0F;
+        if (points == 0 || points > 2) {
+            return false;
+        }
+        out->x = (int16_t)(((buf[2] & 0x0F) << 8) | buf[3]);
+        out->y = (int16_t)(((buf[4] & 0x0F) << 8) | buf[5]);
+        out->pressure = UINT16_MAX;
         out->down = true;
         return true;
     }
@@ -236,8 +292,7 @@ esp_err_t lg_bsp_touch_start(const lg_board_t *board, int spi_host)
         return ESP_ERR_NOT_SUPPORTED;
     }
     s_board = board;
-    esp_err_t err = board->touch.kind == LG_TOUCH_FT6336_I2C ? ft_start(&board->touch)
-                                                             : xpt_start(&board->touch, spi_host);
+    esp_err_t err = is_i2c(board->touch.kind) ? ft_start(&board->touch) : xpt_start(&board->touch, spi_host);
     if (err != ESP_OK) {
         s_board = NULL;
         return err;
@@ -250,7 +305,10 @@ esp_err_t lg_bsp_touch_start(const lg_board_t *board, int spi_host)
     if (board->touch.kind == LG_TOUCH_XPT2046_SPI) {
         load_calibration();
     }
-    ESP_LOGI(TAG, "[UI] Touch %s ready%s", board->touch.kind == LG_TOUCH_FT6336_I2C ? "FT6336U" : "XPT2046",
+    ESP_LOGI(TAG, "[UI] Touch %s ready%s",
+             board->touch.kind == LG_TOUCH_FT6336_I2C    ? "FT6336U"
+             : board->touch.kind == LG_TOUCH_AXS5106_I2C ? "AXS5106L"
+                                                         : "XPT2046",
              lg_bsp_touch_needs_calibration() ? ", needs calibration" : "");
     return ESP_OK;
 }

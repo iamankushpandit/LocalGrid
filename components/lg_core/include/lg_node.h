@@ -61,8 +61,9 @@ typedef struct {
      * whatever the glue decided. The sender's distance from the source is unknown.
      */
     void     (*on_client_time)(void *ctx, uint32_t device, uint32_t unix_s);
-    /* Optional. Fills grid time with milliseconds and this node's stratum for TIME_SYNC; the core
-     * sets quality. Without it the core sends whole seconds from grid_time and stratum unknown. */
+    /* Optional. Fills grid time with milliseconds, this node's stratum, and flags (LG_TIME_FROM_GPS,
+     * D67) for TIME_SYNC; the core sets quality. Without it the core sends whole seconds from
+     * grid_time, stratum unknown, and no flags. */
     void     (*time_now)(void *ctx, lg_time_sync_t *out);
     /* Optional. Another node flooded its grid state (D45). The body is opaque to the core:
      * 1..LG_GRID_STATE_MAX bytes whose layout the AP firmware defines and checks. */
@@ -114,6 +115,9 @@ typedef struct {
     lg_voice_seen_t     voice_seen[LG_MAX_DEVICES];
     uint32_t            voice_refused_ms[LG_MAX_DEVICES];
     bool                has_voice_refused[LG_MAX_DEVICES];
+    uint8_t             time_quality;               /* last quality this node announced or sent */
+    uint8_t             tz_len;                     /* D67: 0 = no zone known */
+    char                tz[LG_TZ_MAX + 1];
 } lg_node_t;
 
 void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roster, const lg_node_io_t *io);
@@ -134,8 +138,18 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
 /* A neighbor link became usable: re-announce local presence so partitions reconcile. */
 void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor);
 
-/* Sends TIME_SYNC to one attached device. */
+/* Sends TIME_SYNC to one attached device. A registering device gets one after REGISTER_ACK when
+ * this node has grid time, carrying the quality last announced or sent (CARRIED if none yet). */
 void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality);
+
+/*
+ * The grid's time zone (D67), a POSIX TZ string the glue takes from the grid settings. A zone that
+ * differs from the one held is kept and sent to every locally attached device; each registering
+ * device gets it after REGISTER_ACK. NULL or "" forgets it and sends nothing, so an AP that has not
+ * yet heard the settings never clears a zone a handheld remembers. Returns LG_OK, or LG_ERR_ARG
+ * (not lg_tz_valid; the zone held is kept).
+ */
+int lg_node_set_time_zone(lg_node_t *n, const char *tz);
 
 /*
  * Floods this node's current grid time to every node and pushes it to every

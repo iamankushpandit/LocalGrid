@@ -110,6 +110,7 @@ static void n_time_now(void *ctx, lg_time_sync_t *out)
     out->grid_time = sn->time != 0 ? sn->time : sn->sim->grid_time;
     out->millis = 250;   /* a fixed, recognisable fraction for the tests */
     out->stratum = (uint8_t)sn->index;
+    out->flags = sn->time_flags;
 }
 
 static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
@@ -179,6 +180,8 @@ static void c_event(void *ctx, const lg_client_event_t *ev)
     } else if (ev->type == LG_CEV_POSITION) {
         c->position_events++;
         c->last_position = ev->value;
+    } else if (ev->type == LG_CEV_TIME_ZONE) {
+        c->tz_events++;
     }
 }
 

@@ -1,0 +1,11 @@
+# ESP32-C6: the Waveshare 1.47in boards, the alert and distress unit (D66).
+#
+# Native USB only: the console and the "id" responder use USB-Serial/JTAG, as on the FNK0104B.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Flash stays at the 4 MB layout every handheld uses (../common/partitions_4mb.csv, a 1.5 MB app).
+# Waveshare sells the plain board with 4 MB and the Touch board with 8 MB, and the bench's chip
+# reports 8 MB; a 4 MB image boots on both, so one binary serves either without a second table.
+
+# No PSRAM on this chip: nothing here turns it on, and the base defaults already size Wi-Fi and
+# lwIP for the no-PSRAM Hosyond.

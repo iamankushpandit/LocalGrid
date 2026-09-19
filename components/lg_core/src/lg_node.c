@@ -164,6 +164,17 @@ static void send_time_to_client(lg_node_t *n, uint32_t device, uint8_t quality)
     send_client(n, device, &e, body, blen);
 }
 
+/* D67: the grid's time zone to one attached device, if this node knows one. */
+static void send_tz_to_client(lg_node_t *n, uint32_t device)
+{
+    if (n->tz_len == 0) {
+        return;
+    }
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_TIME_ZONE, LG_SCOPE_SYSTEM, device);
+    send_client(n, device, &e, (const uint8_t *)n->tz, n->tz_len);
+}
+
 static void push_time_to_local_clients(lg_node_t *n, uint8_t quality)
 {
     for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
@@ -796,6 +807,12 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         lg_env_t ae;
         env_from_node(n, &ae, LG_T_REGISTER_ACK, LG_SCOPE_SYSTEM, reg.device);
         send_client(n, reg.device, &ae, abody, alen);
+        /* D67: the time again with its flags (the ack has seconds only), and the zone. */
+        if (ack.grid_time != 0) {
+            uint8_t quality = n->time_quality != LG_TIME_UNSET ? n->time_quality : (uint8_t)LG_TIME_CARRIED;
+            send_time_to_client(n, reg.device, quality);
+        }
+        send_tz_to_client(n, reg.device);
         send_groups_to_client(n, reg.device);
 
         for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
@@ -1038,17 +1055,48 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor)
 
 void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality)
 {
+    n->time_quality = quality;
     send_time_to_client(n, device, quality);
 }
 
 void lg_node_announce_time(lg_node_t *n, uint8_t quality)
 {
+    n->time_quality = quality;
     lg_time_sync_t t;
     time_sync_now(n, quality, &t);
     uint8_t body[LG_TIME_SYNC_LEN];
-    size_t blen = lg_time_sync_enc(&t, body);
+    size_t blen = lg_time_sync_enc_v2(&t, body);   /* APs need no flags; APs before D67 refuse 9 bytes */
     (void)flood_new(n, LG_T_TIME_SYNC, body, blen);
     push_time_to_local_clients(n, quality);
+}
+
+int lg_node_set_time_zone(lg_node_t *n, const char *tz)
+{
+    size_t len = 0;
+    while (tz != NULL && len <= LG_TZ_MAX && tz[len] != '\0') {
+        len++;   /* bounded: a string longer than LG_TZ_MAX stops at LG_TZ_MAX + 1 and is refused */
+    }
+    if (len == 0) {
+        n->tz_len = 0;
+        n->tz[0] = '\0';
+        return LG_OK;
+    }
+    if (!lg_tz_valid((const uint8_t *)tz, len)) {
+        return LG_ERR_ARG;
+    }
+    if (len == n->tz_len && memcmp(n->tz, tz, len) == 0) {
+        return LG_OK;
+    }
+    memcpy(n->tz, tz, len);
+    n->tz[len] = '\0';
+    n->tz_len = (uint8_t)len;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *q = &n->presence[i];
+        if (q->in_use && is_local_online(n, q)) {
+            send_tz_to_client(n, q->device);
+        }
+    }
+    return LG_OK;
 }
 
 int lg_node_send_diag(lg_node_t *n, const uint8_t *text, size_t len)

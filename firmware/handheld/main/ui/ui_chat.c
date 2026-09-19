@@ -309,7 +309,9 @@ static void paint_list_content(const lg_canvas_t *c, bool with_arrow)
             widest = lw > widest ? lw : widest;
         }
         char clock[48];
-        uint32_t day = m.grid_time % 86400u;
+        struct tm lt;
+        hh_local_time(m.grid_time, &lt);   /* D67: the grid's zone */
+        uint32_t day = (uint32_t)(lt.tm_hour * 3600 + lt.tm_min * 60);
         char counts[24];
         count_text(&m, counts, sizeof(counts));
         char readers[96];

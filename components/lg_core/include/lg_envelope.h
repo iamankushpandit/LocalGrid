@@ -49,6 +49,7 @@ typedef enum {
     LG_T_GRID_STATE      = 0x51,   /* AP to AP only: replicated admin settings and time generation (D45) */
     LG_T_GROUPS          = 0x52,   /* AP to AP and AP to handheld: the whole group table and its version (D52) */
     LG_T_GROUP_EDIT      = 0x53,   /* handheld to AP: make, change, or remove one group (D52) */
+    LG_T_TIME_ZONE       = 0x54,   /* AP to handheld: the grid's time zone as a POSIX TZ string (D67) */
     LG_T_DIAG_ECHO       = 0x70,   /* node console test: flooded once, reported by every node */
     LG_T_ERROR           = 0x7F,
 } lg_msg_type_t;
@@ -66,6 +67,7 @@ enum {
     LG_FLAG_E2E_PAYLOAD   = 0x0004,
     LG_FLAG_FRAGMENT      = 0x0008,
     LG_FLAG_RELAYED       = 0x0010,
+    LG_FLAG_ALL_CLEAR     = 0x0020,   /* an urgent broadcast standing down the author's earlier SOS (D66) */
 };
 
 typedef struct {

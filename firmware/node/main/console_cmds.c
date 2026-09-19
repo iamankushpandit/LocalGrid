@@ -125,7 +125,7 @@ void console_start(void)
         { .command = "status",  .help = "AP identity, time, memory, links, sessions", .func = cmd_status },
         { .command = "nodes",   .help = "Backbone links to other APs, loss counters",  .func = cmd_nodes },
         { .command = "devices", .help = "Grid presence table and local sessions",       .func = cmd_devices },
-        { .command = "config",  .help = "Grid name, time zone, LocalMesh Access Point network, admin state (read-only)", .func = cmd_config },
+        { .command = "config",  .help = "Grid name, time zone, LocalGrid Access Point network, admin state (read-only)", .func = cmd_config },
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
         { .command = "gps",     .help = "The GPS on MAIN: heard, fix, satellites (D63); gps raw dumps what arrives", .func = cmd_gps },

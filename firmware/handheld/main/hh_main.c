@@ -14,6 +14,7 @@
 #include "hh_voice.h"
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
+#include "lg_bsp_board.h"
 #include "lg_identity.h"
 #include "lg_power.h"
 #include "lg_selftest.h"
@@ -50,6 +51,8 @@ void app_main(void)
      * board, and a cue command arriving inside that window was being told this board had no
      * speaker when the truth was that audio had not started yet. */
     const lg_board_t *board = identity.present ? lg_board_find(identity.board) : NULL;
+    /* D66: a board sold in two wirings under one name is told apart here, before any pin is claimed. */
+    board = lg_bsp_board_resolve(board);
 
     /*
      * Before the console, so that a cue asked for in the first seconds is played rather than

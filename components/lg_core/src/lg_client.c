@@ -284,6 +284,16 @@ void lg_client_ping(lg_client_t *c)
     (void)send_frame(c, &e, NULL, 0);
 }
 
+bool lg_client_time_from_gps(const lg_client_t *c)
+{
+    return c->grid_time_known && c->time_from_gps;
+}
+
+const char *lg_client_time_zone(const lg_client_t *c)
+{
+    return c->tz;
+}
+
 bool lg_client_time_restricted(const lg_client_t *c)
 {
     return !c->grid_time_known || c_local_time(c) == 0;
@@ -392,7 +402,7 @@ int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t
     memset(m, 0, sizeof(*m));
     m->state     = LG_OUT_PENDING;
     m->scope     = scope;
-    m->flags     = (uint16_t)(flags & (LG_FLAG_URGENT | LG_FLAG_ACK_REQUESTED));
+    m->flags     = (uint16_t)(flags & (LG_FLAG_URGENT | LG_FLAG_ACK_REQUESTED | LG_FLAG_ALL_CLEAR));
     m->target    = target;
     m->boot      = c->boot;
     m->seq       = next_seq(c);
@@ -533,6 +543,7 @@ static void apply_time(lg_client_t *c, uint32_t grid_time)
 {
     if (grid_time == 0) {
         c->grid_time_known = false;
+        c->time_from_gps = false;
         emit(c, LG_CEV_TIME, 0);
         return;
     }
@@ -854,10 +865,20 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
     case LG_T_TIME_SYNC: {
         lg_time_sync_t t;
         if (lg_time_sync_dec(body, e.body_len, &t)) {
+            /* Before apply_time, so its LG_CEV_TIME already sees where the time came from (D67). */
+            c->time_from_gps = t.grid_time != 0 && (t.flags & LG_TIME_FROM_GPS) != 0;
             apply_time(c, t.grid_time);
         }
         break;
     }
+    case LG_T_TIME_ZONE:
+        if (e.scope == LG_SCOPE_SYSTEM && lg_tz_valid(body, e.body_len) &&
+            (strlen(c->tz) != e.body_len || memcmp(c->tz, body, e.body_len) != 0)) {
+            memcpy(c->tz, body, e.body_len);
+            c->tz[e.body_len] = '\0';
+            emit(c, LG_CEV_TIME_ZONE, e.body_len);
+        }
+        break;
     case LG_T_TEXT:
         handle_text(c, &e, body);
         break;

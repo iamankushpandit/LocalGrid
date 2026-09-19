@@ -15,7 +15,7 @@ esp_err_t ui_start(const lg_board_t *board);
 /* From any task: open the Status screen (true) or the launcher (false) on the UI task. */
 void ui_request(bool status);
 
-typedef enum { UI_HOME, UI_STATUS, UI_CHAT, UI_SCROLL, UI_KEYBOARD, UI_TYPE, UI_LOG, UI_PAGE, UI_GO, UI_TAP } ui_cmd_t;
+typedef enum { UI_HOME, UI_STATUS, UI_CHAT, UI_SCROLL, UI_KEYBOARD, UI_TYPE, UI_LOG, UI_PAGE, UI_GO, UI_TAP, UI_BUTTON } ui_cmd_t;
 
 typedef struct {
     ui_cmd_t cmd;
