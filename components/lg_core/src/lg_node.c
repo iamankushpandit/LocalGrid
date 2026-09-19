@@ -525,6 +525,71 @@ static uint8_t validate_text(lg_node_t *n, const lg_env_t *e, const uint8_t *bod
     return 0;
 }
 
+/* ---- BLE status beacon records (D68) ------------------------------------ */
+
+/* An urgent broadcast is being carried for the first time (dedup already passed): the newest. */
+static void note_urgent(lg_node_t *n, const lg_env_t *e)
+{
+    if (e->scope != LG_SCOPE_BROADCAST || (e->flags & LG_FLAG_URGENT) == 0) {
+        return;
+    }
+    int ui = lg_roster_user_index(n->roster, e->origin_id);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
+        return;
+    }
+    uint32_t now = node_now_ms(n);
+    bool clear = (e->flags & LG_FLAG_ALL_CLEAR) != 0;
+    n->urgent.author    = e->origin_id;
+    n->urgent.boot      = e->origin_boot;
+    n->urgent.seq       = e->origin_seq;
+    n->urgent.at_ms     = now;
+    n->urgent.readers   = 0;
+    n->urgent.all_clear = clear;
+    n->urgent_open[ui]    = !clear;   /* an all clear stands down the author's earlier alert */
+    n->urgent_open_ms[ui] = now;
+}
+
+/* A MSG_ACK is passing this node for the first time: count it if it reports the newest urgent read. */
+static void note_read(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
+{
+    lg_msg_ack_t a;
+    if (n->urgent.author == 0 || !lg_msg_ack_dec(body, e->body_len, &a) || a.status != LG_ACK_READ ||
+        a.author != n->urgent.author || a.boot != n->urgent.boot || a.seq != n->urgent.seq) {
+        return;
+    }
+    int ui = lg_roster_user_index(n->roster, e->origin_id);
+    if (ui >= 0 && ui < (int)LG_MAX_DEVICES) {
+        n->urgent.readers |= 1u << ui;   /* by reader, so a report sent twice counts once */
+    }
+}
+
+uint8_t lg_node_battery(const lg_node_t *n, uint32_t device)
+{
+    int ui = lg_roster_user_index(n->roster, device);
+    return ui < 0 || ui >= (int)LG_MAX_DEVICES ? (uint8_t)LG_BATTERY_UNKNOWN : n->battery[ui];
+}
+
+bool lg_node_urgent(const lg_node_t *n, lg_urgent_info_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (n->urgent.author == 0) {
+        return false;
+    }
+    uint32_t now = node_now_ms(n);
+    out->author    = n->urgent.author;
+    out->age_ms    = now - n->urgent.at_ms;
+    out->all_clear = n->urgent.all_clear;
+    for (uint32_t r = n->urgent.readers; r != 0; r &= r - 1u) {
+        out->reads++;
+    }
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        if (n->urgent_open[i] && now - n->urgent_open_ms[i] < LG_URGENT_ACTIVE_MS) {
+            out->active = true;
+        }
+    }
+    return true;
+}
+
 static void handle_client_text(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
 {
     lg_dedup_result_t d = lg_dedup_check(&n->dedup, e->origin_id, e->origin_boot, e->origin_seq);
@@ -552,6 +617,7 @@ static void handle_client_text(lg_node_t *n, const lg_env_t *e, const uint8_t *b
         n->has_broadcast[ui] = true;
     }
     reply_ack(n, e, LG_ACK_ACCEPTED);
+    note_urgent(n, e);
 
     lg_env_t f = *e;
     f.ttl = LG_TTL_DEFAULT;
@@ -707,6 +773,7 @@ static void handle_client_ack(lg_node_t *n, const lg_env_t *e, const uint8_t *bo
         n->stats.duplicates++;
         return;
     }
+    note_read(n, e, body);
     lg_env_t f = *e;
     f.ttl = LG_TTL_DEFAULT;
     f.origin_node = n->self;
@@ -759,6 +826,7 @@ void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roste
     n->boot   = boot;
     n->roster = roster;
     n->io     = *io;
+    memset(n->battery, LG_BATTERY_UNKNOWN, sizeof(n->battery));
     lg_dedup_init(&n->dedup, n->dedup_slots, LG_NODE_DEDUP_SLOTS);
 }
 
@@ -785,6 +853,10 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
             return;
         }
         *session_device = reg.device;
+        int bi = lg_roster_user_index(n->roster, reg.device);
+        if (bi >= 0 && bi < (int)LG_MAX_DEVICES) {
+            n->battery[bi] = LG_BATTERY_UNKNOWN;   /* a new session reports afresh (D68) */
+        }
         p->node  = n->self;
         p->epoch = reg.attach_epoch;
         p->state = LG_PRES_ONLINE;
@@ -843,6 +915,16 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
 
     switch (e.type) {
     case LG_T_PING: {
+        /* D68: the battery, when the handheld sends one. The PONG goes regardless: a keepalive
+         * must never fail on a byte the beacon only shows. */
+        uint8_t battery = LG_BATTERY_UNKNOWN;
+        if (!lg_ping_dec(body, e.body_len, &battery)) {
+            n->stats.malformed++;
+        }
+        int bi = lg_roster_user_index(n->roster, *session_device);
+        if (bi >= 0 && bi < (int)LG_MAX_DEVICES) {
+            n->battery[bi] = battery;
+        }
         lg_env_t pe;
         env_from_node(n, &pe, LG_T_PONG, LG_SCOPE_SYSTEM, *session_device);
         send_client(n, *session_device, &pe, NULL, 0);
@@ -946,10 +1028,12 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
                 n->stats.malformed++;
                 break;
             }
+            note_urgent(n, &e);
             deliver_fanout(n, &e, body, frame, len, from_node);
         }
         break;
     case LG_T_MSG_ACK:
+        note_read(n, &e, body);
         deliver_direct(n, &e, body, frame, len, from_node);
         break;
     case LG_T_NAME: {

@@ -1209,7 +1209,7 @@ static void test_ping_pong(void)
     }
     s->now_ms = 5000;
     CHECK_EQ(cl(s, EMMA)->last_pong_ms, 0u);
-    lg_client_ping(cl(s, EMMA));
+    lg_client_ping(cl(s, EMMA), LG_BATTERY_UNKNOWN);
     sim_pump(s);
     CHECK_EQ(cl(s, EMMA)->last_pong_ms, 5000u);
     CHECK_EQ(cl(s, DAD)->last_pong_ms, 0u);
@@ -1219,9 +1219,228 @@ static void test_ping_pong(void)
     sim_detach(s, EMMA);
     lg_client_disconnected(cl(s, EMMA));
     s->now_ms = 9000;
-    lg_client_ping(cl(s, EMMA));
+    lg_client_ping(cl(s, EMMA), 50);
     sim_pump(s);
     CHECK_EQ(cl(s, EMMA)->last_pong_ms, 5000u);
+    sim_destroy(s);
+}
+
+/* Sends a PING on Dad's session at node A with any body, as a handheld of any age would. */
+static void dad_sends_ping(sim_t *s, const uint8_t *body, size_t body_len, uint32_t seq)
+{
+    lg_env_t e = {
+        .type = LG_T_PING, .scope = LG_SCOPE_SYSTEM, .target = 0,
+        .origin_id = LG_PROTO_DAD, .origin_boot = 1, .origin_seq = seq,
+    };
+    uint8_t frame[LG_FRAME_MAX];
+    int len = lg_frame_build(&e, body, body_len, frame, sizeof(frame));
+    CHECK(len > 0);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+}
+
+/* D68: a handheld's battery rides on its PING to its own AP; a PING without it still keeps the
+ * session alive and reports nothing. */
+static void test_ping_battery(void)
+{
+    uint8_t b = 0;
+    uint8_t body[2] = { 57, 0 };
+    CHECK_EQ(lg_ping_enc(57, body), LG_PING_LEN);
+    CHECK(lg_ping_dec(body, 0, &b) && b == LG_BATTERY_UNKNOWN);   /* before D68 */
+    CHECK(lg_ping_dec(body, 1, &b) && b == 57);
+    body[0] = 100;
+    CHECK(lg_ping_dec(body, 1, &b) && b == 100);
+    body[0] = LG_BATTERY_UNKNOWN;
+    CHECK(lg_ping_dec(body, 1, &b) && b == LG_BATTERY_UNKNOWN);
+    body[0] = 101;
+    CHECK(!lg_ping_dec(body, 1, &b));
+    body[0] = 50;
+    CHECK(!lg_ping_dec(body, 2, &b));
+
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK_EQ(lg_node_battery(&s->nodes[i].node, LG_PROTO_EMMA), LG_BATTERY_UNKNOWN);
+    }
+    /* Emma, on C, reports to C only. */
+    s->now_ms = 5000;
+    lg_client_ping(cl(s, EMMA), 57);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->last_pong_ms, 5000u);
+    CHECK_EQ(lg_node_battery(&s->nodes[2].node, LG_PROTO_EMMA), 57);
+    CHECK_EQ(lg_node_battery(&s->nodes[0].node, LG_PROTO_EMMA), LG_BATTERY_UNKNOWN);
+    CHECK_EQ(lg_node_battery(&s->nodes[1].node, LG_PROTO_EMMA), LG_BATTERY_UNKNOWN);
+    /* Out of range from the client API goes as unknown. */
+    lg_client_ping(cl(s, EMMA), 200);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_node_battery(&s->nodes[2].node, LG_PROTO_EMMA), LG_BATTERY_UNKNOWN);
+    lg_client_ping(cl(s, EMMA), 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_node_battery(&s->nodes[2].node, LG_PROTO_EMMA), 0);
+
+    /* A handheld from before D68: empty PING, answered, battery unknown. */
+    uint8_t one = 80;
+    dad_sends_ping(s, &one, 1, 900);
+    CHECK_EQ(lg_node_battery(&s->nodes[0].node, LG_PROTO_DAD), 80);
+    s->now_ms = 6000;
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    dad_sends_ping(s, NULL, 0, 901);
+    CHECK_EQ(cl(s, DAD)->last_pong_ms, 6000u);
+    CHECK_EQ(lg_node_battery(&s->nodes[0].node, LG_PROTO_DAD), LG_BATTERY_UNKNOWN);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed);
+
+    /* A bad value is counted, forgotten, and still answered: the keepalive never fails on it. */
+    dad_sends_ping(s, &one, 1, 902);
+    s->now_ms = 7000;
+    uint8_t bad[2] = { 150, 0 };
+    dad_sends_ping(s, bad, 1, 903);
+    CHECK_EQ(cl(s, DAD)->last_pong_ms, 7000u);
+    CHECK_EQ(lg_node_battery(&s->nodes[0].node, LG_PROTO_DAD), LG_BATTERY_UNKNOWN);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 1u);
+    s->now_ms = 8000;
+    dad_sends_ping(s, bad, 2, 904);
+    CHECK_EQ(cl(s, DAD)->last_pong_ms, 8000u);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 2u);
+
+    /* Moving to another AP starts afresh there: nothing is reported until its first PING. */
+    lg_client_ping(cl(s, EMMA), 33);
+    CHECK(sim_pump(s));
+    sim_detach(s, EMMA);
+    lg_client_disconnected(cl(s, EMMA));
+    sim_attach(s, EMMA, 1);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_node_battery(&s->nodes[1].node, LG_PROTO_EMMA), LG_BATTERY_UNKNOWN);
+    lg_client_ping(cl(s, EMMA), 34);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_node_battery(&s->nodes[1].node, LG_PROTO_EMMA), 34);
+    /* ... and registering again on the same AP forgets the old reading too. */
+    sim_detach(s, EMMA);
+    lg_client_disconnected(cl(s, EMMA));
+    sim_attach(s, EMMA, 1);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_node_battery(&s->nodes[1].node, LG_PROTO_EMMA), LG_BATTERY_UNKNOWN);
+    CHECK_EQ(lg_node_battery(&s->nodes[1].node, 99), LG_BATTERY_UNKNOWN);   /* not in the roster */
+    sim_destroy(s);
+}
+
+/* D68: every AP keeps the newest urgent broadcast it carried, whether it stands an alert down,
+ * and how many read reports for it passed through. */
+static void test_urgent_record(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_urgent_info_t u;
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(!lg_node_urgent(&s->nodes[i].node, &u));
+        CHECK_EQ(u.author, 0u);
+        CHECK(!u.active);
+    }
+    /* An ordinary announcement is not an alert. */
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, 0, TXT("Dinner at six")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(!lg_node_urgent(&s->nodes[1].node, &u));
+
+    /* Dad on A raises an alert: every AP carried it, from its handheld or the backbone. */
+    s->now_ms += LG_BROADCAST_INTERVAL_MS + 1;
+    int sos = lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS from Dad"));
+    CHECK(sos >= 0);
+    CHECK(sim_pump(s));
+    s->now_ms += 3000;
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(lg_node_urgent(&s->nodes[i].node, &u));
+        CHECK_EQ(u.author, LG_PROTO_DAD);
+        CHECK(u.active);
+        CHECK(!u.all_clear);
+        CHECK_EQ(u.reads, 0);
+        CHECK_EQ(u.age_ms, 3000u);
+    }
+
+    /* Emma on C reads it: her report travels C -> B -> A, and each AP on the way counts it once. */
+    const lg_in_msg_t *in = lg_client_inbox(cl(s, EMMA), 0);
+    CHECK(in != NULL && in->author == LG_PROTO_DAD);
+    uint32_t boot = in->boot, seq = in->seq;
+    CHECK(lg_client_mark_read(cl(s, EMMA), LG_PROTO_DAD, boot, seq));
+    CHECK(sim_pump(s));
+    CHECK(lg_client_mark_read(cl(s, EMMA), LG_PROTO_DAD, boot, seq));   /* reported twice */
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(lg_node_urgent(&s->nodes[i].node, &u));
+        CHECK_EQ(u.reads, 1);
+    }
+    /* Alex on B reads it too: B and A see his report, C does not. */
+    CHECK(lg_client_mark_read(cl(s, ALEX), LG_PROTO_DAD, boot, seq));
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[0].node, &u) && u.reads == 2);
+    CHECK(lg_node_urgent(&s->nodes[1].node, &u) && u.reads == 2);
+    CHECK(lg_node_urgent(&s->nodes[2].node, &u) && u.reads == 1);
+    /* A read report for another message is not counted. */
+    CHECK(lg_client_mark_read(cl(s, RANGER), LG_PROTO_DAD, boot, seq + 100u));
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[0].node, &u) && u.reads == 2);
+
+    /* Ranger raises another: the newest replaces it, its reads start at zero. */
+    s->now_ms += LG_URGENT_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, RANGER), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("Bear at the lake")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[2].node, &u));
+    CHECK_EQ(u.author, LG_PROTO_RANGER);
+    CHECK_EQ(u.reads, 0);
+    CHECK(u.active);
+
+    /* Dad stands his down. The newest is an all clear, but Ranger's alert is still active. */
+    s->now_ms += LG_URGENT_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR,
+                              TXT("Dad is safe")) >= 0);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(lg_node_urgent(&s->nodes[i].node, &u));
+        CHECK_EQ(u.author, LG_PROTO_DAD);
+        CHECK(u.all_clear);
+        CHECK(u.active);
+    }
+    /* Ranger's all clear leaves nothing active. */
+    s->now_ms += LG_URGENT_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, RANGER), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR,
+                              TXT("Bear gone")) >= 0);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(lg_node_urgent(&s->nodes[i].node, &u));
+        CHECK_EQ(u.author, LG_PROTO_RANGER);
+        CHECK(u.all_clear);
+        CHECK(!u.active);
+    }
+
+    /* An alert that nobody stands down stops being active after LG_URGENT_ACTIVE_MS. */
+    s->now_ms += LG_URGENT_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("Lost on the trail")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[0].node, &u) && u.active && u.author == LG_PROTO_EMMA);
+    s->now_ms += LG_URGENT_ACTIVE_MS - 1u;
+    CHECK(lg_node_urgent(&s->nodes[0].node, &u) && u.active);
+    s->now_ms += 1u;
+    CHECK(lg_node_urgent(&s->nodes[0].node, &u) && !u.active);
+    CHECK_EQ(u.age_ms, LG_URGENT_ACTIVE_MS);
+
+    /* Duplicated backbone frames neither renew the alert nor count a read twice. */
+    s->duplicate_backbone = true;
+    s->now_ms += LG_URGENT_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS again")) >= 0);
+    CHECK(sim_pump(s));
+    in = lg_client_inbox(cl(s, EMMA), 0);
+    CHECK(in != NULL && in->author == LG_PROTO_DAD);
+    CHECK(lg_client_mark_read(cl(s, EMMA), LG_PROTO_DAD, in->boot, in->seq));
+    CHECK(sim_pump(s));
+    s->now_ms += 1000;
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(lg_node_urgent(&s->nodes[i].node, &u));
+        CHECK_EQ(u.author, LG_PROTO_DAD);
+        CHECK_EQ(u.reads, 1);
+        CHECK_EQ(u.age_ms, 1000u);
+    }
     sim_destroy(s);
 }
 
@@ -1779,6 +1998,8 @@ void test_messaging(void)
     test_node_refuses_unsafe_frames();
     test_key_pinning();
     test_ping_pong();
+    test_ping_battery();
+    test_urgent_record();
     test_read_receipt();
     test_names();
     test_position_body();

@@ -274,14 +274,19 @@ void lg_client_disconnected(lg_client_t *c)
     c->registered = false;
 }
 
-void lg_client_ping(lg_client_t *c)
+void lg_client_ping(lg_client_t *c, uint8_t battery)
 {
     if (!c->connected) {
         return;
     }
+    if (battery > 100u) {
+        battery = LG_BATTERY_UNKNOWN;
+    }
+    uint8_t body[LG_PING_LEN];
+    size_t blen = lg_ping_enc(battery, body);
     lg_env_t e;
     base_env(c, &e, LG_T_PING, LG_SCOPE_SYSTEM, 0);
-    (void)send_frame(c, &e, NULL, 0);
+    (void)send_frame(c, &e, body, blen);
 }
 
 bool lg_client_time_from_gps(const lg_client_t *c)

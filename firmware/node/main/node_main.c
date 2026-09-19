@@ -12,6 +12,7 @@
 
 #include "backbone.h"
 #include "ble_adv.h"
+#include "ble_status.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -468,6 +469,8 @@ static const restart_kind_t RESTART_KINDS[] = {
 
 #define RUN_MARK 0x4C475255u   /* "LGRU": the RTC record below was written by this firmware */
 
+static uint32_t s_brownouts;   /* the rr_brownout count as of this boot, for the BLE status (D68) */
+
 static RTC_NOINIT_ATTR uint32_t s_run_mark;
 static RTC_NOINIT_ATTR uint32_t s_run_uptime_s;
 
@@ -491,6 +494,7 @@ static void record_restart(void)
         if (nvs_set_u32(h, kind->key, n + 1) == ESP_OK) {
             (void)nvs_commit(h);
         }
+        (void)nvs_get_u32(h, "rr_brownout", &s_brownouts);
         nvs_close(h);
     }
     bool ran = s_run_mark == RUN_MARK && kind->reason != ESP_RST_POWERON && kind->reason != ESP_RST_BROWNOUT;
@@ -528,6 +532,11 @@ static void record_availability(uint32_t now)
 static void note_uptime(void)
 {
     s_run_uptime_s = app_now_ms() / 1000u;
+}
+
+uint32_t node_brownouts(void)
+{
+    return s_brownouts;
 }
 
 void node_print_restarts(void)
@@ -945,6 +954,9 @@ static void core_task(void *arg)
         app_time_slew(now - last_slew);
         last_slew = now;
         lgbb_poll(now);
+#if NODE_BLE_ADV_ENABLED
+        ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */
+#endif
         while (xQueueReceive(g_app.cmd_queue, &cmd, 0) == pdTRUE) {
             handle_command(&cmd);
         }
@@ -1062,6 +1074,8 @@ void app_main(void)
     esp_log_level_set("BTDM_INIT", ESP_LOG_WARN);   /* controller init logs "Bluetooth MAC: ..." at INFO (D21) */
     if (ble_adv_init(payload, sizeof(payload)) != ESP_OK) {
         ESP_LOGE(TAG, "[BLE] Disabled: init failed");
+    } else {
+        (void)ble_status_init(s_backbone_key);
     }
 #else
     ESP_LOGW("BLE", "[BLE] Advertising disabled in this build (NODE_BLE_ADV_ENABLED 0, coexistence A/B test)");

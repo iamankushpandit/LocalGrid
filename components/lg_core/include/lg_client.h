@@ -169,8 +169,10 @@ void lg_client_connected(lg_client_t *c);
 void lg_client_disconnected(lg_client_t *c);
 
 /* Sends a keepalive PING while connected. The node answers PONG, recorded in last_pong_ms.
- * Nodes close sessions that stay silent for 30 s, so call it every few seconds. */
-void lg_client_ping(lg_client_t *c);
+ * Nodes close sessions that stay silent for 30 s, so call it every few seconds. The PING carries
+ * the battery in percent (0..100; anything else is sent as LG_BATTERY_UNKNOWN), which the AP shows
+ * in its BLE status beacon (D68). */
+void lg_client_ping(lg_client_t *c, uint8_t battery);
 
 void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len);
 

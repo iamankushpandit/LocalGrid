@@ -40,6 +40,15 @@ typedef struct {
 } lg_register_ack_t;
 
 /*
+ * PING: client -> node, the keepalive (every 10 s). Body: empty, or since D68 one byte, the
+ * handheld's battery in percent (0..100, LG_BATTERY_UNKNOWN when it cannot measure), which the AP
+ * keeps for its BLE status beacon. Nodes before D68 ignore the body; nodes since accept both
+ * lengths, so a handheld before D68 reports nothing.
+ */
+#define LG_PING_LEN         1u
+#define LG_BATTERY_UNKNOWN  255u
+
+/*
  * MSG_ACK: node -> author (ACCEPTED / REJECTED_*), recipient -> author (DELIVERED, then READ).
  * The body is unchanged by READ: it is a status value, appended so the existing ones keep
  * their numbers, and older code ignores a status it does not know (design review answer 24).
@@ -249,6 +258,10 @@ size_t lg_register_enc(const lg_register_t *v, uint8_t *out);
 bool   lg_register_dec(const uint8_t *in, size_t len, lg_register_t *v);
 size_t lg_register_ack_enc(const lg_register_ack_t *v, uint8_t *out);
 bool   lg_register_ack_dec(const uint8_t *in, size_t len, lg_register_ack_t *v);
+/* Writes LG_PING_LEN bytes and returns that length. */
+size_t lg_ping_enc(uint8_t battery, uint8_t *out);
+/* Empty (battery LG_BATTERY_UNKNOWN) or LG_PING_LEN bytes holding 0..100 or LG_BATTERY_UNKNOWN. */
+bool   lg_ping_dec(const uint8_t *in, size_t len, uint8_t *battery);
 size_t lg_msg_ack_enc(const lg_msg_ack_t *v, uint8_t *out);
 bool   lg_msg_ack_dec(const uint8_t *in, size_t len, lg_msg_ack_t *v);
 size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out);

@@ -46,6 +46,25 @@ bool lg_register_ack_dec(const uint8_t *in, size_t len, lg_register_ack_t *v)
     return true;
 }
 
+size_t lg_ping_enc(uint8_t battery, uint8_t *out)
+{
+    out[0] = battery;
+    return LG_PING_LEN;
+}
+
+bool lg_ping_dec(const uint8_t *in, size_t len, uint8_t *battery)
+{
+    if (len == 0) {
+        *battery = LG_BATTERY_UNKNOWN;   /* a handheld from before D68 */
+        return true;
+    }
+    if (len != LG_PING_LEN || (in[0] > 100u && in[0] != LG_BATTERY_UNKNOWN)) {
+        return false;
+    }
+    *battery = in[0];
+    return true;
+}
+
 size_t lg_msg_ack_enc(const lg_msg_ack_t *v, uint8_t *out)
 {
     lg_wr32(out, v->author);

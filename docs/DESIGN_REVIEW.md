@@ -400,7 +400,7 @@ Four layers, each independently versioned:
 | 0x03 | NODE_STATUS | SYSTEM | node → all nodes (flood, every 30 s) |
 | 0x10 | REGISTER | SYSTEM | client → node |
 | 0x11 | REGISTER_ACK | SYSTEM | node → client |
-| 0x12 | PING / 0x13 PONG | SYSTEM | either |
+| 0x12 | PING / 0x13 PONG | SYSTEM | either. A handheld's PING body is empty or, since D68, one byte: its battery in percent (0..100, 255 none), kept by its AP for the BLE status beacon. APs accept both lengths |
 | 0x20 | PRESENCE_UPDATE | SYSTEM | node → nodes, node → clients |
 | 0x21 | PRESENCE_REQUEST | SYSTEM | client → node, node → node |
 | 0x22 | PRESENCE_DIGEST | SYSTEM | node → nodes (every 30 s) |

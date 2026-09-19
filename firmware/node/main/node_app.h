@@ -77,3 +77,4 @@ void     app_time_follow_new_generation(void);
 void     app_time_slew(uint32_t elapsed_ms);
 void     console_start(void);
 void     node_print_restarts(void);   /* restart counts by cause; safe from the console task */
+uint32_t node_brownouts(void);        /* brownout restarts counted in NVS, read once at boot (D68) */

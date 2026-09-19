@@ -1564,7 +1564,9 @@ static void step(uint32_t now)
     case HH_LINK_ONLINE: {
         if (now - s.last_ping_ms >= PING_INTERVAL_MS) {
             s.last_ping_ms = now;
-            lg_client_ping(&s.client);
+            /* D68: the battery rides on the keepalive, for the AP's BLE status beacon. */
+            int8_t pct = hh_service_battery_percent();
+            lg_client_ping(&s.client, pct < 0 ? (uint8_t)LG_BATTERY_UNKNOWN : (uint8_t)pct);
         }
         uint32_t heard = MAX_U32(s.client.last_pong_ms, s.online_since_ms);
         if (now - heard > PONG_TIMEOUT_MS) {

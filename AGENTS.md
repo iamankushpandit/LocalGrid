@@ -24,7 +24,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui` (drawn with `lg_draw`), meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
 | `tests/target` | On-board test app with a simulated three-node grid. |
-| `tools/` | Secrets generator and multi-port serial capture. |
+| `tools/` | Secrets generator, multi-port serial capture, build and flash, and `grid_watch.py`, the laptop dashboard that reads the grid over BLE (`docs/grid-watch.md`). |
 
 ## Skills
 
@@ -34,6 +34,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 - `.claude/skills/flash/SKILL.md` — flash one, several, or all boards with their assigned firmware from `tools/bench_devices.json`.
 - `.claude/skills/power/SKILL.md` — supply voltage on one or all boards, now or monitored with min, average, and max.
 - `.claude/skills/wifi/SKILL.md` — count the APs broadcasting the grid SSID from this laptop's radio.
+- `.claude/skills/grid-watch/SKILL.md` — watch the grid's status from this laptop over BLE (D68) on a local dashboard, without joining its Wi-Fi.
 - `.claude/skills/protocol-change/SKILL.md` — add or change a message type or `lg_core` behavior.
 - `.claude/skills/new-board/SKILL.md` — add a board: profile, code, any new driver, build, bring-up checklist, evidence.
 

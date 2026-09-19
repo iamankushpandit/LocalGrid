@@ -96,6 +96,28 @@ typedef struct {
     uint32_t voice;             /* voice frames taken here and delivered or passed on (D61) */
 } lg_node_stats_t;
 
+/*
+ * The newest urgent broadcast this node carried (D68), for the AP's BLE status beacon. RAM only:
+ * an AP that restarts reports none until the next one passes.
+ */
+#define LG_URGENT_ACTIVE_MS 900000u   /* an urgent broadcast counts as active for 15 minutes */
+typedef struct {
+    uint32_t author;      /* 0: none carried since this node started */
+    uint32_t boot;        /* its identity, to match read reports */
+    uint32_t seq;
+    uint32_t at_ms;       /* now_ms when this node first carried it */
+    uint32_t readers;     /* bit i: roster user i's READ report for it passed this node */
+    bool     all_clear;   /* it carried LG_FLAG_ALL_CLEAR (D66) */
+} lg_urgent_seen_t;
+
+typedef struct {
+    uint32_t author;      /* 0: none carried */
+    uint32_t age_ms;      /* since it was carried */
+    uint8_t  reads;       /* distinct handhelds whose READ report for it this node has seen */
+    bool     all_clear;   /* the newest urgent broadcast is an all clear */
+    bool     active;      /* some author's urgent broadcast within LG_URGENT_ACTIVE_MS, not stood down since */
+} lg_urgent_info_t;
+
 typedef struct {
     uint16_t            self;
     uint32_t            boot;
@@ -115,6 +137,11 @@ typedef struct {
     lg_voice_seen_t     voice_seen[LG_MAX_DEVICES];
     uint32_t            voice_refused_ms[LG_MAX_DEVICES];
     bool                has_voice_refused[LG_MAX_DEVICES];
+    /* D68, all indexed by roster user index and kept in RAM only. */
+    uint8_t             battery[LG_MAX_DEVICES];    /* from each local handheld's PING; LG_BATTERY_UNKNOWN */
+    lg_urgent_seen_t    urgent;                     /* the newest urgent broadcast carried */
+    uint32_t            urgent_open_ms[LG_MAX_DEVICES];   /* author's last urgent that was not an all clear */
+    bool                urgent_open[LG_MAX_DEVICES];      /* ... and no all clear from them since */
     uint8_t             time_quality;               /* last quality this node announced or sent */
     uint8_t             tz_len;                     /* D67: 0 = no zone known */
     char                tz[LG_TZ_MAX + 1];
@@ -202,6 +229,19 @@ void lg_node_announce_names(lg_node_t *n);
  */
 #define LG_PRESENCE_ANNOUNCE_MS 60000u
 void lg_node_announce_presence(lg_node_t *n);
+
+/*
+ * BLE status beacon (D68). A handheld's battery arrives on its PING and is kept while it is
+ * registered here; the newest urgent broadcast carried (from a local handheld or the backbone) is
+ * kept with the READ reports for it that pass this node, local or relayed.
+ */
+
+/* Battery percent last reported by device on its session here, LG_BATTERY_UNKNOWN when it has
+ * reported none (a handheld before D68, no battery sense, or not registered here). */
+uint8_t lg_node_battery(const lg_node_t *n, uint32_t device);
+
+/* The newest urgent broadcast carried, as of io.now_ms. False (out zeroed) when none. */
+bool lg_node_urgent(const lg_node_t *n, lg_urgent_info_t *out);
 
 /* The newest name held for device, or NULL when it has none. */
 const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device);
