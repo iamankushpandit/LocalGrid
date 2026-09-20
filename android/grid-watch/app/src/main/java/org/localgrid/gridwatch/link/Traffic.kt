@@ -19,6 +19,24 @@ object Traffic {
     const val LINK = 28
     const val BUCKET = 4
 
+    /**
+     * D71's LoRa section: 64 bytes appended once after the last link entry. It is *appended*, not
+     * numbered in — the layout byte stays 1 — so an AP built before D71, or a record cut short on
+     * the way here, simply has no section and every LoRa field stays null. Never guessed.
+     */
+    const val LORA = 64
+
+    /** lora.h: the module's fixed settings, the same on every AP of a grid. */
+    object Radio {
+        const val BAND_MHZ = "868.5 MHz"
+        const val SF = 9
+        const val BW_KHZ = 125
+        const val CR = "4/5"
+        const val PREAMBLE = 12
+        const val POWER_DBM = 22
+        val words: String get() = "SF$SF, BW $BW_KHZ kHz, CR $CR, $BAND_MHZ, $POWER_DBM dBm"
+    }
+
     /** lg_traffic_class_t (components/lg_core/include/lg_node.h), in its own order. */
     val CLASSES = listOf(
         "direct", "group", "broadcast", "voice", "ack", "presence", "announce", "position",
@@ -66,12 +84,42 @@ object Traffic {
         val loopAvgUs: Long, val espnowErrors: Long, val wifiErrors: Long, val cpuBusy: Int?,
     )
 
+    /**
+     * The second backbone (D71), as the AP packs it. Facts only; the wording is the phone's.
+     *
+     * The record carries one last RSSI and SNR for the radio as a whole and a bitmask of which
+     * APs' heartbeats are current — not a line per peer. The per-peer signal the admin page shows
+     * comes from `/api/status` ([Status.Lora]), and only for the AP this phone actually asked.
+     */
+    data class Lora(
+        val fitted: Boolean, val configured: Boolean, val broadcast: Boolean, val off: Boolean,
+        val big: Boolean, val address: Int, val network: Int, val rssi: Int, val snr: Int,
+        val framesOut: Long, val framesIn: Long, val framesFirst: Long,
+        val partsOut: Long, val partsIn: Long, val partsDropped: Long,
+        val reasmTimeouts: Long, val sealFail: Long, val refusedBig: Long,
+        val queueDepth: Int, val queueHigh: Int, val airtimeMs: Long, val retries: Long,
+        val queueDropped: Long, val heardS: Long?, val peerBits: Int, val restarts: Int,
+    ) {
+        /** The AP indexes whose heartbeat is current (bit n is AP n). */
+        val peersUp: List<Int> get() = (0..7).filter { (peerBits shr it) and 1 == 1 }
+
+        /** Everything that went wrong, in one number. */
+        val trouble: Long get() = partsDropped + reasmTimeouts + sealFail + queueDropped + refusedBig
+
+        /** A module is there, answered at boot, and has never heard a thing. */
+        val silent: Boolean get() = fitted && heardS == null
+
+        val airtimeS: Double get() = airtimeMs / 1000.0
+    }
+
     data class Record(
         val ap: Int, val cpuBusy: Int?, val bucketS: Double, val uptimeS: Long, val gridTime: Long,
         val inTotal: Long, val outTotal: Long, val messages: Map<String, Counts>,
         val faults: Map<String, Long>, val handhelds: Handhelds, val perf: Perf,
         val buckets: List<Bucket>, val links: List<Link>,
         val rate1m: Double?, val rate5m: Double?,
+        /** Null when the AP sent no LoRa section at all: an AP older than D71, never a guess. */
+        val lora: Lora? = null,
     ) {
         val totalMessages: Long get() = inTotal + outTotal
         fun fault(name: String): Long = faults[name] ?: 0L
@@ -136,6 +184,29 @@ object Traffic {
             )
             o += LINK
         }
+
+        // D71, appended after the links. Absent on an AP built before it, and absent (rather than
+        // half-read) if the record stops inside it: an incomplete radio report is worse than none.
+        val lora = if (o + LORA <= blob.size) {
+            val flags = u8(o)
+            val heard = u32(o + 48)
+            Lora(
+                fitted = flags and 0x01 != 0, configured = flags and 0x02 != 0,
+                broadcast = flags and 0x04 != 0, off = flags and 0x08 != 0,
+                big = flags and 0x10 != 0,
+                address = u8(o + 1), network = u8(o + 54),
+                rssi = blob[o + 2].toInt(), snr = blob[o + 3].toInt(),
+                framesOut = u32(o + 4), framesIn = u32(o + 8), framesFirst = u32(o + 56),
+                partsOut = u32(o + 12), partsIn = u32(o + 16), partsDropped = u32(o + 20),
+                reasmTimeouts = u32(o + 24), sealFail = u32(o + 28), refusedBig = u32(o + 60),
+                queueDepth = u16(o + 32), queueHigh = u16(o + 34), airtimeMs = u32(o + 36),
+                retries = u32(o + 40), queueDropped = u32(o + 44),
+                heardS = if (heard == 0xFFFFFFFFL) null else (heard / 1000.0).roundToInt().toLong(),
+                peerBits = u8(o + 52), restarts = u8(o + 53),
+            )
+        } else {
+            null
+        }
         val bs = if (u16(6) > 0) u16(6) / 1000.0 else 30.0
 
         fun rate(seconds: Double): Double? {
@@ -149,7 +220,7 @@ object Traffic {
             ap = u8(1), cpuBusy = if (cpu == 255) null else cpu, bucketS = bs, uptimeS = u32(8),
             gridTime = u32(12), inTotal = u32(16), outTotal = u32(20), messages = messages,
             faults = faults, handhelds = handhelds, perf = perf, buckets = buckets, links = links,
-            rate1m = rate(60.0), rate5m = rate(300.0),
+            rate1m = rate(60.0), rate5m = rate(300.0), lora = lora,
         )
     }
 
@@ -168,7 +239,25 @@ object Traffic {
         const val CPU_WARN = 85
         const val LINK_FAIL_PCT = 5
         const val STACK_LOW_B = 1024
+
+        // LoRa (D71). The signal steps are the admin page's own (firmware/node/main/web/admin.html);
+        // the queue is four small slots (lora.c SMALL_TXQ_SLOTS), so 4 waiting means full.
+        const val LORA_RSSI_WARN = -100
+        const val LORA_RSSI_BAD = -115
+        const val LORA_QUEUE_WARN = 3
+        const val LORA_QUEUE_BAD = 4
+
+        /** A module that answered at boot and has heard nothing for this long is not talking. */
+        const val LORA_SILENT_S = 300L
+
+        /** Airtime as a share of the time the AP has been up: the radio is busy past this. */
+        const val LORA_AIRTIME_PCT_WARN = 5.0
+        const val LORA_AIRTIME_PCT_BAD = 10.0
     }
+
+    /** How loud a LoRa signal is, in the admin page's three steps. */
+    fun loraSignalIsBad(rssi: Int): Boolean = rssi < Limit.LORA_RSSI_BAD
+    fun loraSignalIsWeak(rssi: Int): Boolean = rssi < Limit.LORA_RSSI_WARN
 
     /**
      * The average pass through the AP's main loop, in words. The AP counts it in microseconds
@@ -182,7 +271,12 @@ object Traffic {
     /** A note is (text, red): red means it crossed a limit, amber means keep an eye on it. */
     data class Note(val text: String, val red: Boolean)
 
-    fun notes(t: Record, name: String, apName: (Int) -> String): List<Note> {
+    fun notes(
+        t: Record,
+        name: String,
+        loraPeers: List<Status.LoraPeer> = emptyList(),
+        apName: (Int) -> String,
+    ): List<Note> {
         val out = ArrayList<Note>()
         val p = t.perf
         fun add(text: String, red: Boolean) = out.add(Note(text, red))
@@ -229,6 +323,86 @@ object Traffic {
                 add("The link from $name to ${apName(l.ap)} is failing ${pct.roundToInt()}% of its sends.", true)
             }
         }
+        out += loraNotes(t, name, loraPeers, apName)
         return out
     }
+
+    /**
+     * What the second backbone (D71) is doing wrong, in plain English.
+     *
+     * "No module fitted" is never a fault: an AP is never expected to have one, and a grid may
+     * mix APs with and without. A module that is fitted and has heard nothing is a fault, and the
+     * two are told apart here rather than left to the reader.
+     */
+    fun loraNotes(
+        t: Record,
+        name: String,
+        peers: List<Status.LoraPeer> = emptyList(),
+        apName: (Int) -> String,
+    ): List<Note> {
+        val out = ArrayList<Note>()
+        val l = t.lora ?: return out            // an AP older than D71 says nothing, so nor do we
+        if (!l.fitted) return out               // no module here: by design, not a fault
+        fun add(text: String, red: Boolean) = out.add(Note(text, red))
+
+        if (!l.configured) {
+            add("$name's LoRa module has not been configured: it answered, but the settings did not take.", true)
+        }
+        if (l.off) add("$name's LoRa is switched off for a test and will come back by itself.", false)
+        if (l.silent) {
+            add("$name has a LoRa module and has never heard another one: check the antenna, the network ID and that another AP has a module.", true)
+        } else if (l.heardS != null && l.heardS >= Limit.LORA_SILENT_S) {
+            add("$name has heard nothing over LoRa for ${l.heardS / 60} minutes, although a module is fitted.", true)
+        }
+        for (p in peers) {
+            if (!p.up) add("$name's LoRa link to ${apName(p.ap)} is down; it was last heard ${if (p.ageS == null) "never" else "${p.ageS} s ago"}.", true)
+            else if (loraSignalIsBad(p.rssi)) {
+                add("$name hears ${apName(p.ap)} over LoRa at only ${p.rssi} dBm: near the edge of range.", true)
+            }
+        }
+        if (peers.isEmpty() && l.peersUp.isEmpty() && !l.silent) {
+            add("$name has a LoRa module but no peer's heartbeat is current: the LoRa backbone is down here.", true)
+        }
+        if (l.sealFail > 0) {
+            add("$name could not authenticate ${l.sealFail} LoRa ${if (l.sealFail == 1L) "frame" else "frames"}: another AP may be running different secrets, or another network is on this channel.", true)
+        }
+        if (l.queueDropped > 0) {
+            add("$name's LoRa send queue overflowed ${l.queueDropped} times: the oldest low-priority frames were dropped (never an alert).", true)
+        }
+        if (l.queueDepth >= Limit.LORA_QUEUE_BAD) {
+            add("$name's LoRa send queue is full right now (${l.queueDepth} of ${Limit.LORA_QUEUE_BAD} slots): the radio cannot keep up with what it is asked to carry.", true)
+        } else if (l.queueHigh >= Limit.LORA_QUEUE_WARN) {
+            // A full queue on its own loses nothing - the AP waits. Losing a frame is queueDropped.
+            add("$name's LoRa send queue has reached ${l.queueHigh} of ${Limit.LORA_QUEUE_BAD} waiting frames; a LoRa frame is seconds of airtime, so a short queue is normal.", false)
+        }
+        if (l.refusedBig > 0) {
+            add("$name refused ${l.refusedBig} LoRa payloads for being larger than it can hold; nothing was truncated.", true)
+        }
+        if (l.partsDropped > 0) {
+            add("$name dropped ${l.partsDropped} LoRa ${if (l.partsDropped == 1L) "part" else "parts"} (malformed, duplicate, or no room to reassemble).", false)
+        }
+        if (l.reasmTimeouts > 0) {
+            add("${l.reasmTimeouts} LoRa ${if (l.reasmTimeouts == 1L) "frame" else "frames"} never arrived complete at $name and were given up.", false)
+        }
+        if (l.restarts > 0) add("$name has had to reset a wedged LoRa module ${l.restarts} times.", false)
+        val pct = if (t.uptimeS > 0) 100.0 * l.airtimeS / t.uptimeS else 0.0
+        if (pct >= Limit.LORA_AIRTIME_PCT_BAD) {
+            add("$name's LoRa radio has been transmitting ${pct.roundToInt()}% of the time: the air is crowded and frames will start waiting.", true)
+        } else if (pct >= Limit.LORA_AIRTIME_PCT_WARN) {
+            add("$name's LoRa radio has been transmitting ${pct.roundToInt()}% of the time.", false)
+        }
+        return out
+    }
+
+    /**
+     * The one line that says whether the radio earns its keep, in the admin page's words: frames
+     * that arrived over LoRa and that Wi-Fi had *not* already delivered.
+     */
+    fun loraWorth(l: Lora): String =
+        if (l.framesFirst > 0) {
+            "${l.framesFirst} of the ${l.framesIn} frames that arrived by LoRa got here first, " +
+                "before Wi-Fi had them."
+        } else {
+            "Nothing has needed LoRa yet: every frame it carried had already arrived over Wi-Fi."
+        }
 }

@@ -260,7 +260,7 @@ and a five-minute rate (all ten). Counts saturate at 65535.
 | Offset | Size | Field |
 |---|---|---|
 | 0 | u8 | flags: bit 0 a module is fitted, bit 1 it is configured, bit 2 the broadcast address is in use, bit 3 a chaos hook is holding it off, bit 4 there is room to send a long payload |
-| 1 | u8 | this AP's LoRa address (its AP index; handhelds would be 100 + device) |
+| 1 | u8 | this AP's LoRa address (1 + its AP index, leaving 0 free as the broadcast address; handhelds would be 100 + device) |
 | 2 | i8 | RSSI of the last part received |
 | 3 | i8 | SNR of the last part received |
 | 4 | u32 | frames sent |

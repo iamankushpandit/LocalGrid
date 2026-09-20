@@ -1,7 +1,7 @@
 /*
  * ble_link.c - the sealed, read-only BLE admin link (D70). Protocol: docs/ble-link.md.
  *
- * Sealing: K_link = HKDF-SHA256(salt "LG-BLE-LINK-1", ikm = the backbone key, info "admin link"),
+ * Sealing: K_link = HKDF-SHA256(salt "LG-BLE-LINK-1", ikm = K, info "admin link"), K being the
  * the same key the pairing code (D69) carries, so a paired watcher needs nothing new. Every chunk
  * is ChaCha20-Poly1305 with a full 16-byte tag, AAD = its own 4-byte clear header, nonce =
  * (direction, session, counter). The session is picked at random when the connection opens and
@@ -42,7 +42,7 @@ static const char *TAG = "BLE";
 #define LINK_CHUNK_MAX      (LINK_HDR + LINK_BODY_MAX + LINK_TAG)
 #define LINK_IDLE_MS        60000u
 #define LINK_LOGIN_TRIES    5u
-#define LINK_MIN_HEAP       24576u   /* below this the AP has other worries; see docs/ble-link.md */
+
 #define LINK_NOTIFY_WINDOW  4u       /* chunks allowed in flight before waiting for the radio */
 #define LINK_NOTIFY_WAIT_MS 2000u    /* the longest one chunk may wait for a buffer */
 #define LINK_CHALLENGE      32u
@@ -599,6 +599,30 @@ void ble_link_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool noti
         L.last_ms = app_now_ms();
         if (notify_on) {
             /*
+             * Subscribing starts a conversation, and may start a second one on a connection that
+             * never went away: Windows keeps a BLE connection alive after a watcher believes it
+             * has disconnected, so the next watcher subscribes again on the same connection and
+             * counts its messages from zero. Before 2026-09-20 the AP kept the old session and
+             * counters, so that first message was "out of step", the AP hung up, and it then
+             * refused every later watcher: the dashboard's map and traffic worked once after a
+             * reboot and never again. So each subscribe gets a fresh session, fresh counters and
+             * a fresh login. Failed logins are deliberately NOT forgiven here, or resubscribing
+             * would wipe the rate limit.
+             */
+            uint32_t keep_failures = L.failures;
+            uint16_t keep_conn = L.conn;
+            reset_session();
+            L.conn = keep_conn;
+            L.failures = keep_failures;
+            L.notify_on = true;
+            L.last_ms = app_now_ms();
+            uint8_t r[2] = { 0, 0 };
+            if (lg_crypto_random(r, sizeof(r)) != 0) {
+                L.session = (uint16_t)(app_now_ms() & 0xFFFFu);
+            } else {
+                L.session = (uint16_t)(r[0] | ((uint16_t)r[1] << 8));
+            }
+            /*
              * The one message that is not sealed: it carries the session number both directions'
              * nonces are built from. A nonce is public by design and this one is random, so
              * nothing is given away; everything after it is sealed.
@@ -622,14 +646,28 @@ void ble_link_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool noti
 
 esp_err_t ble_link_init(const uint8_t backbone_key[32])
 {
+    /*
+     * K_link comes from K, the status key, not from the backbone key (docs/ble-link.md: "the link
+     * key comes from the same key the pairing code carries"). This matters: a paired phone is
+     * given K alone and never holds the backbone key, so deriving from the backbone key would mean
+     * no phone could ever open the link. It did exactly that until 2026-09-20 - every request
+     * failed to unseal, the AP hung up, and the watcher's map, positions and traffic never worked.
+     */
+    static const char k_salt[] = "LG-BLE-STATUS-1";
+    static const char k_info[] = "ble status";
     static const char salt[] = "LG-BLE-LINK-1";
     static const char info[] = "admin link";
+    uint8_t k[32];
     L.conn = BLE_HS_CONN_HANDLE_NONE;
-    if (lg_hkdf_sha256((const uint8_t *)salt, sizeof(salt) - 1u, backbone_key, 32, (const uint8_t *)info,
+    if (lg_hkdf_sha256((const uint8_t *)k_salt, sizeof(k_salt) - 1u, backbone_key, 32,
+                       (const uint8_t *)k_info, sizeof(k_info) - 1u, k, sizeof(k)) != 0 ||
+        lg_hkdf_sha256((const uint8_t *)salt, sizeof(salt) - 1u, k, sizeof(k), (const uint8_t *)info,
                        sizeof(info) - 1u, L.key, sizeof(L.key)) != 0) {
+        lg_secure_zero(k, sizeof(k));
         ESP_LOGE(TAG, "[BLE] Admin link off: key derivation failed");
         return ESP_FAIL;
     }
+    lg_secure_zero(k, sizeof(k));
     L.mux = xSemaphoreCreateMutex();
     L.inq = xQueueCreate(1, sizeof(link_chunk_t));
     if (L.mux == NULL || L.inq == NULL) {

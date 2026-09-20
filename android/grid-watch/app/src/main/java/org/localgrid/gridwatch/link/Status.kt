@@ -34,6 +34,23 @@ object Status {
         val lon: Double get() = lonU / 1e6
     }
 
+    /**
+     * One AP this one has heard over LoRa (D71). The traffic record carries only a bitmask of
+     * which heartbeats are current; this is where the per-peer signal comes from, and only for
+     * the AP the phone actually asked.
+     */
+    data class LoraPeer(val ap: Int, val up: Boolean, val rssi: Int, val snr: Int, val ageS: Long?)
+
+    /**
+     * The second backbone as `/api/status` reports it: the same facts as the traffic record plus
+     * the module's version string and a line per peer. Absent on an AP built before D71.
+     */
+    data class Lora(
+        val fitted: Boolean, val configured: Boolean, val off: Boolean, val broadcast: Boolean,
+        val big: Boolean, val version: String?, val address: Int, val network: Int,
+        val peers: List<LoraPeer>,
+    )
+
     data class Record(
         val gridName: String, val timezone: String, val ap: Int, val apName: String,
         val boot: Long, val uptimeS: Long, val gridTime: Long, val timeQuality: Int,
@@ -41,6 +58,8 @@ object Status {
         val links: List<Link>, val devices: List<Device>, val users: Map<Int, String>,
         val announceAll: Boolean, val announcers: List<Int>, val groups: List<Group>,
         val positions: List<Position>,
+        /** Null when this AP sent no `lora` object at all: an AP older than D71. */
+        val lora: Lora? = null,
     ) {
         fun nameOf(device: Int): String = users[device] ?: "Handheld $device"
     }
@@ -60,6 +79,26 @@ object Status {
                 fix = gpsNode["fix"].bool(), sats = gpsNode["sats"].int(),
                 hasPos = gpsNode["pos"].bool(), latU = gpsNode["lat_u"].int(),
                 lonU = gpsNode["lon_u"].int(),
+            )
+        } else {
+            null
+        }
+        val loraNode = root["lora"]
+        val lora = if (loraNode is JsonValue.Obj) {
+            Lora(
+                fitted = loraNode["fitted"].bool(), configured = loraNode["configured"].bool(),
+                off = loraNode["off"].bool(), broadcast = loraNode["broadcast"].bool(),
+                big = loraNode["big"].bool(),
+                version = loraNode["version"].strOrNull()?.takeIf { it.isNotBlank() },
+                address = loraNode["address"].int(), network = loraNode["network"].int(),
+                peers = loraNode["peers"].arr().map {
+                    val age = it["age_ms"].long(-1)
+                    LoraPeer(
+                        ap = it["node"].int(), up = it["up"].bool(), rssi = it["rssi"].int(),
+                        snr = it["snr"].int(),
+                        ageS = if (age < 0 || age >= 0xFFFFFFFFL) null else age / 1000,
+                    )
+                },
             )
         } else {
             null
@@ -101,6 +140,7 @@ object Status {
                     fixTime = it["fix_time"].long(), sats = it["sats"].int(),
                 )
             },
+            lora = lora,
         )
     }
 }

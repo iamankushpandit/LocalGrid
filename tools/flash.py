@@ -381,6 +381,13 @@ def flash_board(data, d, args, built):
     if answered == "NONE" and (args.erase or args.new_id or args.update_identity):
         print("  board has no identity yet; this run writes one")
         answered = None
+    # A board whose console is noisy answers its own ID with characters chewed out of it, which
+    # reads as a different board and stops a flash that was meant for it. With --trust-port the
+    # operator has already said which board this is, so a reply that is not even a well-formed ID
+    # counts as no reply. A well-formed but different ID still stops the run.
+    if answered and args.trust_port and not ID_RE.match(answered):
+        print(f"  ignoring a garbled answer from {d['port']}: {answered!r} (--trust-port)")
+        answered = None
     if d.get("id"):
         if answered and answered != d["id"]:
             return False, f"port {d['port']} has {answered} ({decode(data, answered)}), expected {d['id']}"

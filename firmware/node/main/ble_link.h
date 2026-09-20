@@ -12,6 +12,14 @@
  */
 #pragma once
 
+/* Below this the AP has other worries; see docs/ble-link.md. Measured 2026-09-20: this was 24 KB,
+ * which an AP could clear before it carried a LoRa module. LoRa costs about 8.5 KB, so the APs now
+ * run at 17-22 KB free and the link was never offered at all - the watcher's map, positions and
+ * traffic simply never worked. 13 KB still leaves room for a connection (NimBLE's connection
+ * object and a few mbufs, about 2 KB) and refuses one when the AP is genuinely short. */
+#define LINK_MIN_HEAP       13312u
+
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

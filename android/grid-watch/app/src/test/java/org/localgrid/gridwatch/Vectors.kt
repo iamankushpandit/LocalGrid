@@ -26,8 +26,22 @@ object Vectors {
     fun list(key: String): List<ByteArray> = str(key).split(",").map { hex(it) }
 
     val statusJson: String get() = String(resource("status.json"), Charsets.UTF_8)
+
+    /** The same reply from an AP built before D71: no `lora` object at all. */
+    val statusJsonNoLora: String get() = String(resource("status_no_lora.json"), Charsets.UTF_8)
+
     val historyBlob: ByteArray get() = hex(String(resource("history.hex"), Charsets.UTF_8).trim())
-    val trafficBlob: ByteArray get() = hex(String(resource("traffic.hex"), Charsets.UTF_8).trim())
+
+    /** The TRAFFIC record as an AP older than D71 sends it: nothing after the last link entry. */
+    val trafficBlob: ByteArray get() = hexResource("traffic.hex")
+
+    /** D71 fitted and working, the peer link down, and no module at all (same base record). */
+    val trafficLoraBlob: ByteArray get() = hexResource("traffic_lora.hex")
+    val trafficLoraDownBlob: ByteArray get() = hexResource("traffic_lora_down.hex")
+    val trafficLoraNoneBlob: ByteArray get() = hexResource("traffic_lora_none.hex")
+
+    private fun hexResource(name: String): ByteArray =
+        hex(String(resource(name), Charsets.UTF_8).trim())
 
     /** The whole recorded conversation: what the AP notified, and what the reference client wrote. */
     private val transcript: List<Pair<String, String>> by lazy {

@@ -15,11 +15,11 @@ The page has the admin page's own tabs, wording and colours.
 
 | Tab | What is on it | Where it comes from |
 |---|---|---|
-| **Overview** | alert banner, AP cards, handhelds, event log, and a short "traffic now" summary | the beacon, plus traffic |
+| **Overview** | alert banner, AP cards, handhelds, event log, a short "traffic now" summary, and one LoRa line per AP that has a module | the beacon, plus traffic |
 | **Map** | everyone's position, on real map tiles when this laptop has Internet, on a drawn plan when it has not | the link |
 | **Network** | the APs table, availability over the last 2 hours, and what happened to the APs | the link |
 | **Handhelds** | groups, who may announce, and every handheld the grid has seen | the link |
-| **Traffic** | message rates and totals by class, drops and faults, backbone links, handheld sessions, and each AP's performance | the link |
+| **Traffic** | message rates and totals by class, drops and faults, backbone links, the LoRa backbone, handheld sessions, and each AP's performance | the link |
 
 Each pulled section says which AP answered, **by name**, and how long ago. **Refresh** asks again
 now. Without the admin password the page shows the beacon only, and the other tabs say so.
@@ -73,6 +73,48 @@ errors. Anything over a sensible limit is red and says in words what it means ("
 voice frames: push-to-talk will sound broken").
 
 **Counts and sizes only.** No message text and no audio exist on this link at all.
+
+### The LoRa backbone (D71)
+
+Each AP's card on the Traffic tab ends with a **LoRa backbone** panel. It says one of three things,
+and never confuses them:
+
+- **"No LoRa module on NORTH."** The AP answered and has no module. It works exactly as it does
+  without one, and the other APs are unaffected.
+- **"SOUTH said nothing about LoRa."** The AP is running firmware from before D71. The record it
+  sends simply stops after its backbone links, and the tool says nothing about a radio it was told
+  nothing about.
+- **A fitted module**, with everything below.
+
+A fitted module leads with the number the admin page leads with, because it is the one that says
+whether the radio earns its keep: **frames that arrived by LoRa and that Wi-Fi had not already
+delivered** ("19 of the 388 frames that arrived by LoRa got here first, before Wi-Fi had them"). If
+that rises while the Wi-Fi backbone is broken, LoRa is doing the job it was fitted for.
+
+Then the module and its settings — configured or not, address, network ID, SF9/BW125 at 22 dBm,
+and whether it broadcasts to every AP at once or sends one transmission per peer — a note when
+there is no room for long payloads, and a red line when a chaos hook has the radio switched off.
+
+Then **one row per peer**: the link up or down, the last RSSI and SNR, and how long ago that peer
+was heard. Then the counters: the last signal heard, frames and parts in and out, retries, parts
+dropped, frames given up half-arrived (the 10 s reassembly timeout), frames that could not be
+authenticated, the send queue now and at its highest with anything it threw away, payloads refused
+for being too large, airtime used, and module restarts.
+
+**What turns red, and what it means.** A peer link down, nothing heard for longer than 95 s (three
+missed 30 s heartbeats and a little), a frame that could not be authenticated, a queue that filled
+to its four small slots or threw a frame away, and drops or reassembly timeouts well above what a
+busy round normally leaves behind. Each one is also said in words above the cards, in the tool's
+usual voice: *"NORTH has not heard SOUTH over LoRa for 4 minutes."*
+
+**Where the numbers come from.** Everything except the per-peer signal is in the traffic record,
+so it is shown for every AP the tool has counters for. The per-peer RSSI, SNR and age are only in
+the AP's own `/api/status`, which the link pulls from the AP it last connected to, so those three
+columns fill in for that AP and show `--` for the others.
+
+**On the Overview**, an AP with a module gets one line: LoRa up with the best peer's signal, or
+down with which peer it cannot hear and for how long. An AP with no module, or one from before
+D71, puts nothing there at all.
 
 These counters are asked for only while the Traffic tab is open (once every 30 seconds) or when you
 press Refresh; the rest of the time the tool pulls status and history once a minute, one short
@@ -209,3 +251,13 @@ The client follows `firmware/node/main/ble_link.c` and `traffic.c` where the spe
   (oldest first) and 28 bytes per backbone link, all little-endian. A record in another layout, or
   one counting message classes this tool does not know, is refused rather than guessed at; trailing
   bytes a newer AP adds are ignored.
+- **The LoRa section (D71)** is 64 bytes appended after the last link entry, decoded at
+  `decode_lora`. It is appended rather than numbered in, so the layout byte stays 1 and a record
+  that ends after its links still decodes cleanly — that is an AP flashed before D71, and the tool
+  shows no LoRa panel for it. A section cut short is treated the same way, never half-decoded. The
+  fitted bit tells "no module here" from "fitted and silent"; an AP with no module sends the
+  section with flags 0 and every counter 0.
+- **The AP's LoRa address** is `1 + its AP index`, not its index: `docs/ble-link.md` still says
+  "its AP index", but `LORA_ADDR_AP` in `firmware/node/main/lora.h` adds one so that address 0
+  stays free as the broadcast address, and the bench measured 1-3 on the three APs. The firmware
+  wins.

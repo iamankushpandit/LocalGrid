@@ -1,4 +1,4 @@
-# LocalGrid Watch (Android, D69 and D70)
+# LocalGrid Watch (Android, D69, D70 and D71)
 
 Watch an offline network from an Android phone, without joining its Wi-Fi.
 
@@ -12,6 +12,9 @@ Since **0.2.0** it can also ask a nearby AP for the bigger picture over a short 
 the groups and announcements, every handheld the grid has seen, the availability of each AP for
 the last two hours, what happened to each one, and the traffic and performance counters. The
 phone shows the same tabs the AP's admin page shows, from the admin page's own replies.
+
+Since **0.3.0** it also shows the **LoRa backbone** (D71, `docs/lora.md`): whether an AP has a
+module, how well it hears the others, and whether the radio is earning its keep. See below.
 
 **A watcher monitors, and nothing else** (owner, 2026-09-19). This holds by construction, not by
 politeness:
@@ -37,11 +40,11 @@ neither changes anything on the grid (D25).
 
 | Tab | What | Needs the password |
 |---|---|---|
-| Overview | Alerts, each AP's health, handhelds heard, batteries, events, and a traffic-now summary | no (the summary does) |
+| Overview | Alerts, each AP's health, handhelds heard, batteries, events, a traffic-now summary, and one LoRa line per AP that has a module | no (the summary does) |
 | Map | Everyone's coordinates: real map tiles when this phone has Internet, a drawn plan when it has not | yes |
 | Network | Every AP the grid knows, availability for the last 2 hours, what happened to each AP | yes |
 | Handhelds | Groups, who may announce, every handheld the grid has seen | yes |
-| Traffic | Rates and totals by class, voice drops, faults, per-link and handheld counters, each AP's heap, queue, stack, main loop and radio errors | yes |
+| Traffic | Rates and totals by class, voice drops, faults, per-link and handheld counters, the LoRa backbone, each AP's heap, queue, stack, main loop and radio errors | yes |
 
 **Refresh** in the top bar asks an AP now. Otherwise the app asks by itself about once a minute
 while it is on screen, and every 30 s while the Traffic tab is open. Each section says which AP
@@ -50,6 +53,47 @@ answered, by name, and how long ago.
 **Battery.** The link is only opened while the app is on screen or when you press Refresh. The
 background service goes on doing beacon-only watching and SOS notifications, exactly as in 0.1.0,
 and never connects to anything.
+
+## The LoRa backbone (D71)
+
+Some APs carry a second radio — a Reyax RYLR998 on the bench — that reaches kilometres at about
+1.5 kbit/s, for when two APs cannot hear each other over Wi-Fi (`docs/lora.md`). **No AP ever
+expects one**, and a grid may mix APs with and without, so the app shows LoRa only where there is
+something to show:
+
+- **Overview** gains one short line per AP that has a module: up or down, and the best peer's
+  signal. An AP with no module contributes nothing at all, and the section disappears entirely
+  when no AP has one.
+- **Traffic** gains a LoRa panel per AP. It leads with the number that says whether the radio
+  earns its keep — **frames that arrived over LoRa that Wi-Fi had not already delivered** — then
+  the module (configured or not, its version, address and network, and the fixed radio settings
+  SF9 / BW 125 kHz / CR 4/5 / 868.5 MHz / 22 dBm), then each peer's link with its **last RSSI and
+  SNR and how long ago it was heard**, then frames and parts in and out, parts dropped,
+  reassembly given up, frames that could not be authenticated, queue depth and drops, retries,
+  airtime and module restarts.
+
+It goes **red** when a peer link is down, when frames cannot be authenticated, when the send
+queue drops a frame or is full right now, when payloads are refused for being too large, or when
+a fitted module has heard nothing — each with a line in plain English saying what it means.
+Losing parts, giving up on reassembly, resetting a wedged module and a queue that merely reached
+its four slots are amber: a LoRa frame is seconds of airtime, so a short queue is normal.
+
+Three states are told apart rather than lumped together, because they mean different things:
+
+| What the app says | What it means |
+|---|---|
+| "No LoRa module on MAIN" | The AP looked for one and none answered. Not a fault; the AP behaves exactly as it always did. |
+| "…has a LoRa module and has never heard another one" | Fitted and silent. Check the antenna, the network ID, and that another AP has a module. |
+| "This AP does not report LoRa" | The AP's firmware is older than D71 and sends no LoRa section at all. Nothing is guessed from its silence. |
+
+Two details worth knowing. The packed traffic record carries one last RSSI and SNR for the radio
+plus a bitmask of which peers' heartbeats are current — not a line per peer; the **per-peer
+signal and the module's version string come from `/api/status`**, which the phone fetches from
+one AP, so the full per-peer table appears for that AP and a "peers heard" summary for the
+others. And the LoRa section is **appended** to the traffic record rather than numbered into it
+(the layout byte stays 1), so nothing before it moved: an AP built before D71 decodes exactly as
+it always did, and a record cut short inside the section is read as having none rather than half
+of one.
 
 ## The admin password
 
@@ -95,14 +139,18 @@ Needs the Android SDK (platform 36) and JDK 17 or newer (Android Studio's bundle
 
     cd android/grid-watch
     echo sdk.dir=C\:/Users/<you>/AppData/Local/Android/Sdk > local.properties
-    gradlew.bat testDebugUnitTest   # JVM unit tests (73): RFC 8439 vectors, beacon frames,
-                                    # link framing and chunking, the login proof, the decoders
+    gradlew.bat testDebugUnitTest   # JVM unit tests (100): RFC 8439 vectors, beacon frames,
+                                    # link framing and chunking, the login proof, the decoders,
+                                    # and the LoRa section with and without a module
     gradlew.bat lintDebug
     gradlew.bat assembleRelease     # app/build/outputs/apk/release/app-release.apk
 
 The tests read vectors in `app/src/test/resources/vectors/`, generated from `tools/grid_watch.py`
 — the laptop watcher, which is the reference implementation for this link — with a **test** key
-(HKDF over the bytes 0..31), never a real `firmware/common/lg_secrets.h`.
+(HKDF over the bytes 0..31), never a real `firmware/common/lg_secrets.h`. The LoRa vectors
+(`traffic_lora*.hex`, and the `lora` object in `status.json`) are the same records with the D71
+section appended, filled with the bench's own numbers; `traffic.hex` and `status_no_lora.json`
+are deliberately left as they were, so every run also proves an AP older than D71 still decodes.
 
 Release signing reads `keystore.properties` beside this README (gitignored, as is `keystore/`):
 
@@ -123,7 +171,7 @@ an update installs over the old app only when signed with the same key. Without
 3. Samsung phones may show "Auto Blocker" or a Play Protect prompt for an app from outside the
    store: choose to install anyway (Auto Blocker must be off to sideload).
 
-Or with USB debugging on: `adb install -r LocalGrid-Watch.apk`. 0.2.0 installs over 0.1.0 and
+Or with USB debugging on: `adb install -r LocalGrid-Watch.apk`. 0.3.0 installs over an earlier version and
 keeps the pairing, because it is signed with the same key.
 
 Android 12 or newer is required (minSdk 31), so the app never needs the location permission.

@@ -70,6 +70,7 @@ import org.localgrid.gridwatch.grid.GridEvent
 import org.localgrid.gridwatch.grid.HandheldView
 import org.localgrid.gridwatch.grid.Snapshot
 import org.localgrid.gridwatch.link.LinkData
+import org.localgrid.gridwatch.link.Status
 import org.localgrid.gridwatch.link.Traffic
 import org.localgrid.gridwatch.watch.GridHub
 import org.localgrid.gridwatch.watch.LinkHub
@@ -215,6 +216,11 @@ private fun LazyListScope.overviewTab(
     if (link.loggedIn && traffic != null) {
         item { TrafficNow(traffic, nowMs) }
     }
+    // D71: one line per AP that has a module, and nothing at all when none has.
+    val withLora = link.traffic.filter { it.data.lora?.fitted == true }
+    if (link.loggedIn && withLora.isNotEmpty()) {
+        item { LoraNow(withLora, link.status?.data) }
+    }
     item { SectionTitle("APs") }
     val aps = snap?.aps.orEmpty()
     if (aps.isEmpty()) {
@@ -253,6 +259,38 @@ private fun TrafficNow(section: LinkData.Section<Traffic.Record>, nowMs: Long) {
         val notes = Traffic.notes(t, section.apName) { GridHub.apName(it) }
         for (n in notes.filter { it.red }.take(4)) {
             NoteLine(n.text, true)
+        }
+    }
+}
+
+/**
+ * The second backbone (D71) on the Overview: one short line per AP that has a module, and nothing
+ * whatever for an AP that has none — an AP is never expected to carry one.
+ *
+ * The best peer's signal comes from `/api/status` when this phone asked that AP (it has a line
+ * per peer); otherwise from the last part the AP's radio received, which is all the packed
+ * traffic record carries.
+ */
+@Composable
+private fun LoraNow(sections: List<LinkData.Section<Traffic.Record>>, status: Status.Record?) {
+    Section("LoRa backbone") {
+        for (s in sections) {
+            val l = s.data.lora ?: continue
+            val peers = status?.lora?.takeIf { status.ap == s.data.ap }?.peers.orEmpty()
+            val best = peers.filter { it.up }.maxByOrNull { it.rssi }
+            val up = if (peers.isNotEmpty()) peers.any { it.up } else l.peersUp.isNotEmpty() && !l.silent
+            val signal = when {
+                best != null -> "${best.rssi} dBm from ${GridHub.apName(best.ap)}"
+                l.heardS != null -> "${l.rssi} dBm, ${ago(l.heardS)}"
+                else -> "nothing heard yet"
+            }
+            val red = !up || l.silent || l.trouble > 0 ||
+                l.queueDepth >= Traffic.Limit.LORA_QUEUE_BAD
+            Field(
+                s.apName,
+                (if (up) "up · " else "down · ") + signal,
+                if (red) Lg.danger else Lg.accent,
+            )
         }
     }
 }

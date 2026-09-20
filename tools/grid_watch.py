@@ -40,6 +40,7 @@ self-check, 2 when the secrets, the port, or the Bluetooth radio are unusable.
 import argparse
 import asyncio
 import collections
+import hashlib
 import hmac
 import json
 import os
@@ -450,6 +451,9 @@ def decode_history(blob):
 #   link, 28 B each: u8 AP at the far end | u8 up | i8 RSSI | u8 pad | u32 frames sent |
 #                   u32 bytes sent | u32 frames received | u32 bytes received | u32 send failures |
 #                   u32 since a frame arrived, ms
+#   LoRa (D71), 64 B, once, after the last link entry. It is appended, not numbered in: the layout
+#   byte stays 1, so an AP built before D71 simply stops after its links and this tool must read
+#   what it was given and say nothing about a radio it was told nothing about.
 TRAFFIC_LAYOUT = 1
 TRAFFIC_HEADER = 24
 TRAFFIC_CLASS = 12
@@ -457,11 +461,56 @@ TRAFFIC_SESS = 28
 TRAFFIC_PERF = 40
 TRAFFIC_LINK = 28
 TRAFFIC_BUCKET = 4
+TRAFFIC_LORA = 64
 # lg_traffic_class_t (components/lg_core/include/lg_node.h), in its own order.
 MSG_CLASSES = ["direct", "group", "broadcast", "voice", "ack", "presence", "announce", "position",
                "time", "other"]
 FAULT_FIELDS = ["duplicate", "table_full", "unknown_recipient", "decrypt_failed", "ttl_expired",
                 "queue_full", "send_timeout", "voice_dropped", "malformed", "rejected"]
+
+# LoRa flag bits (LORA_TF_* in firmware/node/main/lora.h).
+LORA_FITTED = 0x01
+LORA_CONFIGURED = 0x02
+LORA_BROADCAST = 0x04
+LORA_OFF = 0x08          # a chaos hook is holding the radio off
+LORA_BIG = 0x10          # there is heap for a long payload
+
+
+def decode_lora(b, o):
+    """
+    The 64-byte LoRa section of a TRAFFIC record, or None when this AP did not send one.
+
+    None means "an AP older than D71, which said nothing about LoRa"; a section with the fitted
+    bit clear means "this AP answered, and it has no module". The two are never mixed, and a
+    truncated tail is treated as absent rather than guessed at.
+    """
+    if o + TRAFFIC_LORA > len(b):
+        return None
+    u16 = lambda k: int.from_bytes(b[k:k + 2], "little")
+    u32 = lambda k: int.from_bytes(b[k:k + 4], "little")
+    i8 = lambda k: int.from_bytes(b[k:k + 1], "little", signed=True)
+    flags, heard = b[o], u32(o + 48)
+    return {
+        "fitted": bool(flags & LORA_FITTED),
+        "configured": bool(flags & LORA_CONFIGURED),
+        "broadcast": bool(flags & LORA_BROADCAST),
+        "off": bool(flags & LORA_OFF),
+        "big": bool(flags & LORA_BIG),
+        "address": b[o + 1], "network": b[o + 54],
+        "rssi": i8(o + 2), "snr": i8(o + 3),
+        "frames_out": u32(o + 4), "frames_in": u32(o + 8),
+        "parts_out": u32(o + 12), "parts_in": u32(o + 16),
+        "parts_dropped": u32(o + 20), "reasm_timeouts": u32(o + 24),
+        "seal_fail": u32(o + 28),
+        "queue": u16(o + 32), "queue_high": u16(o + 34),
+        "airtime_s": round(u32(o + 36) / 1000.0, 1), "retries": u32(o + 40),
+        "queue_dropped": u32(o + 44),
+        "heard_s": None if heard == 0xFFFFFFFF else round(heard / 1000.0),
+        "peer_bits": b[o + 52], "restarts": b[o + 53],
+        # The one number that says whether the radio earns its keep, exactly as the admin page
+        # leads with it: frames that arrived over LoRa and that Wi-Fi had not already delivered.
+        "frames_first": u32(o + 56), "refused_big": u32(o + 60),
+    }
 
 
 def decode_traffic(blob):
@@ -516,6 +565,17 @@ def decode_traffic(blob):
                              "failures": u32(o + 20),
                              "heard_s": None if heard == 0xFFFFFFFF else round(heard / 1000.0)})
         o += TRAFFIC_LINK
+    # D71's second backbone, appended after the links. Absent on an AP flashed before D71.
+    out["lora"] = decode_lora(b, o)
+    if out["lora"] is not None:
+        # Which peers this AP is hearing over LoRa. The record carries one bit per AP; the names
+        # of the neighbours come from the link entries above, so the two tables line up.
+        bits = out["lora"]["peer_bits"]
+        known = [l["ap"] for l in out["links"]]
+        for n in range(8):
+            if bits & (1 << n) and n not in known and n != out["ap"]:
+                known.append(n)
+        out["lora"]["peers"] = [{"ap": n, "up": bool(bits & (1 << n))} for n in sorted(known)]
     # The rates the page shows, worked out here so every viewer sees the same arithmetic.
     bs = out["bucket_s"] or 30.0
     buckets = out["buckets"]
@@ -965,9 +1025,12 @@ class LinkSession:
             self.logged_in = True
             return True, "Logged in."
         if opcode == OP_LOGIN_FAIL:
+            # The AP answers every refusal with a wait, two seconds on the first one, so a wait
+            # alone does not mean "too many". Only say that once it has made us wait a while.
             wait = int.from_bytes(body[:4], "little") if len(body) >= 4 else 0
-            return False, ("Wrong admin password." if not wait else
-                           f"Too many failed attempts. Try again in {wait} seconds.")
+            if wait > 4:
+                return False, f"Wrong admin password; the AP is now making us wait {wait} seconds."
+            return False, "Wrong admin password."
         raise LinkError(f"unexpected reply to LOGIN: {OP_NAMES.get(opcode, hex(opcode))}")
 
 
@@ -1012,6 +1075,16 @@ class AdminAuth:
                 self._hash = login_hash(self._password, salt, iterations)
                 self._hash_for = (bytes(salt), int(iterations))
         return login_proof(self._hash, challenge)
+
+    def trouble(self, message):
+        """The pull failed before the AP could judge the password: say so, and keep the password.
+
+        Only while a check is in flight, so a reachability problem never overwrites the AP's own
+        verdict on the password.
+        """
+        with self.lock:
+            if self.state == "trying":
+                self.message = message
 
     def result(self, ok, message):
         with self.lock:
@@ -1168,7 +1241,11 @@ async def puller(state, key, auth, data, stop):
             continue
         pick = state.best_ap()
         if pick is None:
+            # Tell the login box too: it says "checking the password with an AP" until something
+            # answers it, and before this it could sit there for ever while the real reason was
+            # shown somewhere else on the page.
             data.note("error", "No AP of this grid is in range to ask.")
+            auth.trouble("No AP of this grid is in range to check the password with.")
             continue
         ap_index, device = pick
         name = state.ap_name(ap_index)
@@ -1176,11 +1253,15 @@ async def puller(state, key, auth, data, stop):
         try:
             await pull_from_device(device, key, auth, data, name, data.want_traffic)
         except asyncio.TimeoutError:
-            data.note("error", f"{name} did not answer in time; it may be busy with another watcher.")
+            msg = f"{name} did not answer in time; it may be busy with another watcher."
+            data.note("error", msg)
+            auth.trouble(msg)
         except LinkError as e:
             data.note("error", f"{name}: {e}")
+            auth.trouble(f"{name}: {e}")
         except Exception as e:                      # a dropped connection, a busy AP, a stack error
             data.note("error", f"{name}: {type(e).__name__}: {e}")
+            auth.trouble(f"Could not reach {name} to check the password ({type(e).__name__}).")
 
 
 # ---------------------------------------------------------------- the dashboard
@@ -1192,6 +1273,7 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <meta name="referrer" content="no-referrer">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <title>LocalGrid grid watch</title>
 <style>
   /* Theme tokens from firmware/node/main/web/admin.html (D10): same page, same colours. */
@@ -1272,6 +1354,10 @@ PAGE = r"""<!doctype html>
   .loc-tiles { position: absolute; inset: 0; }
   .loc-tiles img { position: absolute; width: 256px; height: 256px; }
   .loc-pins { position: absolute; inset: 0; }
+  .loc-tie { position: absolute; height: 1px; background: var(--muted); transform-origin: 0 0; opacity: .7; }
+  .loc-cluster { position: absolute; transform: translate(-50%, -50%); min-width: 26px; height: 26px;
+    border-radius: 13px; background: var(--accent); color: var(--accent-ink); font-size: 13px;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; font-weight: 600; }
   .loc-pin { position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%;
              background: var(--danger); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--danger); }
   .loc-pin.hh { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-width: 2px; background: var(--accent);
@@ -1347,6 +1433,12 @@ PAGE = r"""<!doctype html>
     <div class="src" id="traffic-brief-src"></div>
     <div class="stats" id="traffic-brief-stats"></div>
     <ul class="notes" id="traffic-brief-notes"></ul>
+  </section>
+
+  <!-- D71: one line per AP that has a LoRa module. An AP without one says nothing here. -->
+  <section data-tab="overview" id="lora-brief" hidden>
+    <h2>LoRa backbone</h2>
+    <ul class="notes" id="lora-brief-lines"></ul>
   </section>
 
   <section data-tab="overview">
@@ -1682,13 +1774,56 @@ function drawTiles(pins) {
   }
   if (!wanted) { tilesWork = false; showMapMode(pins); }
   layer.replaceChildren();
-  for (const p of [...pins].sort((a, b) => a.ap - b.ap)) {
-    const q = worldPx(p.lat, p.lon, z), x = Math.round(q.x - left) + "px", y = Math.round(q.y - top) + "px";
-    const dot = el("div", p.ap ? "loc-pin" : "loc-pin hh");
-    dot.style.left = x; dot.style.top = y; dot.title = p.name;
-    const label = el("div", "loc-label", p.name);
-    label.style.left = x; label.style.top = y;
-    layer.append(dot, label);
+  /*
+   * Devices in the same room land on the same few pixels - a handheld two metres from MAIN is two
+   * pixels away, and consumer GPS scatters them by more than they are really apart. One marker
+   * then hides the other and the grid looks as if it lost a device. A few together are fanned out
+   * side by side with a hairline back to the spot; a crowd becomes one marker with a count that
+   * opens when you tap it.
+   */
+  const spots = [];
+  for (const p of [...pins].sort((a, b) => b.ap - a.ap)) {
+    const q = worldPx(p.lat, p.lon, z);
+    const px = q.x - left, py = q.y - top;
+    const near = spots.find(sp => Math.hypot(sp.x - px, sp.y - py) < 18);
+    if (near) near.members.push(p); else spots.push({ x: px, y: py, members: [p] });
+  }
+  const drawFan = (sp) => {
+    sp.members.forEach((p, i) => {
+      let px = sp.x, py = sp.y;
+      if (sp.members.length > 1) {
+        const a = (i / sp.members.length) * 2 * Math.PI - Math.PI / 2;
+        px += 22 * Math.cos(a);
+        py += 22 * Math.sin(a);
+        const tie = el("div", "loc-tie");
+        tie.style.left = Math.round(sp.x) + "px";
+        tie.style.top = Math.round(sp.y) + "px";
+        tie.style.width = "22px";
+        tie.style.transform = "rotate(" + a + "rad)";
+        layer.append(tie);
+      }
+      const dot = el("div", p.ap ? "loc-pin" : "loc-pin hh");
+      dot.style.left = Math.round(px) + "px"; dot.style.top = Math.round(py) + "px";
+      dot.title = p.name;
+      const label = el("div", "loc-label", p.name);
+      label.style.left = Math.round(px) + "px"; label.style.top = Math.round(py) + "px";
+      layer.append(dot, label);
+    });
+  };
+  for (const sp of spots) {
+    if (sp.members.length <= CLUSTER_AT) {
+      drawFan(sp);
+      continue;
+    }
+    const dot = el("div", "loc-cluster", String(sp.members.length));
+    dot.style.left = Math.round(sp.x) + "px"; dot.style.top = Math.round(sp.y) + "px";
+    dot.title = sp.members.length + " here: " + sp.members.map(p => p.name).join(", ") + " (tap to open)";
+    sp.key = Math.round(sp.x) + ":" + Math.round(sp.y);
+    dot.addEventListener("click", () => {
+      if (openSpots.has(sp.key)) openSpots.delete(sp.key); else openSpots.add(sp.key);
+      drawTiles(pins);
+    });
+    if (openSpots.has(sp.key)) { drawFan(sp); } else { layer.append(dot); }
   }
 }
 
@@ -1957,6 +2092,13 @@ function apNameFromStatus(status, node) {
 const LIM = {
   heapWarnKB: 40, heapBadKB: 20, queueWarn: 8, queueBad: 16, loopWarnMs: 100, loopBadMs: 500,
   sendWaitWarnMs: 2000, cpuWarn: 85, linkFailPct: 5, stackLowB: 1024,
+  // LoRa (D71). The signal bands are the admin page's own, so the two never drift. A peer is
+  // called silent after LORA_LINK_TIMEOUT_MS (95 s, three missed 30 s heartbeats and a little).
+  // The send queue is five slots (four small, one large), so a high-water of four means it was
+  // full of everything it can normally hold. The bench's normal numbers after a busy round were
+  // 2 parts dropped and 6-7 reassembly timeouts, so those only turn red well above that.
+  loraRssiWarn: -100, loraRssiBad: -115, loraSilentS: 95,
+  loraQueueWarn: 3, loraQueueBad: 4, loraDropsBad: 10, loraTimeoutsBad: 20,
 };
 const CLASS_WORDS = {
   direct: "1:1 text", group: "group text", broadcast: "broadcast and urgent",
@@ -1988,7 +2130,7 @@ function sparkline(buckets, bucketS) {
   return svg;
 }
 
-function trafficNotes(t, name) {
+function trafficNotes(t, name, status) {
   const out = [], f = t.faults, p = t.perf;
   if (f.voice_dropped > 0) out.push([name + " has dropped " + f.voice_dropped + " voice frames since it started: " +
     "push-to-talk sounds broken when it does. The AP drops voice rather than block the rest of the grid.", true]);
@@ -2015,7 +2157,181 @@ function trafficNotes(t, name) {
     if (!l.up) out.push(["The link from " + name + " to " + apLabel(l.ap) + " is down.", true]);
     else if (pct >= LIM.linkFailPct) out.push(["The link from " + name + " to " + apLabel(l.ap) + " is failing " + pct.toFixed(0) + "% of its sends.", true]);
   }
+  for (const note of loraNotes(t, name, status)) out.push(note);
   return out;
+}
+
+/* ---- The second backbone (D71). The AP sends facts; the wording is here, as on the admin page ---- */
+
+/* An AP older than D71 sends no LoRa section at all: say nothing rather than guess. */
+function loraSignalClass(rssi) {
+  return rssi >= LIM.loraRssiWarn ? "oktext" : rssi >= LIM.loraRssiBad ? "warntext" : "dangertext";
+}
+
+/* Per-peer signal only ever comes from the pulled /api/status, and only for the AP it came from:
+   the traffic record carries one bit per peer and one last-heard signal for the radio itself. */
+function loraPeerDetail(status, apIndex) {
+  const out = {};
+  if (!status || !status.lora || status.node !== apIndex) return out;
+  for (const p of (status.lora.peers || [])) out[p.node] = p;
+  return out;
+}
+
+function loraNotes(t, name, status) {
+  const out = [], L = t.lora;
+  if (!L || !L.fitted) return out;          // nothing to say about a radio that is not there
+  if (L.off) out.push([name + "'s LoRa radio is switched off for a test; it comes back by itself.", true]);
+  if (!L.configured) out.push([name + "'s LoRa module answered but is not configured yet.", true]);
+  const detail = loraPeerDetail(status, t.ap);
+  for (const p of (L.peers || [])) {
+    if (p.up) continue;
+    // How long ago that peer was heard is only in the pulled status; the record carries one bit.
+    const d = detail[p.ap];
+    out.push([d && d.age_ms < 4294967295
+              ? name + " has not heard " + apLabel(p.ap) + " over LoRa for " + fmtDur(Math.round(d.age_ms / 1000)) + "."
+              : name + " is not hearing " + apLabel(p.ap) + " over LoRa: its heartbeat has stopped arriving.", true]);
+  }
+  if (L.heard_s == null && L.frames_in === 0)
+    out.push([name + "'s LoRa module is fitted and configured but has never heard a frame: it is silent, not missing.", true]);
+  else if (L.heard_s != null && L.heard_s >= LIM.loraSilentS)
+    out.push(["Nothing has arrived on " + name + "'s LoRa radio for " + fmtDur(L.heard_s) + ", and a heartbeat is due every 30 s.", true]);
+  if (L.seal_fail > 0)
+    out.push([name + " could not authenticate " + L.seal_fail + " LoRa frame(s): an AP may be running different secrets.", true]);
+  if (L.queue_dropped > 0)
+    out.push([name + "'s LoRa send queue was full " + L.queue_dropped + " time(s) and threw a frame away; alerts are never the ones dropped.", true]);
+  if (L.queue_high >= LIM.loraQueueBad)
+    out.push([name + "'s LoRa send queue filled right up (" + L.queue_high + " waiting): the air is busier than the radio can carry.", true]);
+  else if (L.queue_high >= LIM.loraQueueWarn)
+    out.push([name + "'s LoRa send queue reached " + L.queue_high + " waiting frames.", false]);
+  if (L.parts_dropped >= LIM.loraDropsBad)
+    out.push([name + " has thrown away " + L.parts_dropped + " LoRa parts: two APs are probably transmitting over each other.", true]);
+  else if (L.parts_dropped > 0)
+    out.push([name + " has thrown away " + L.parts_dropped + " LoRa part(s).", false]);
+  if (L.reasm_timeouts >= LIM.loraTimeoutsBad)
+    out.push([name + " gave up on " + L.reasm_timeouts + " half-arrived LoRa frames: parts are going missing on the air.", true]);
+  else if (L.reasm_timeouts > 0)
+    out.push([name + " gave up on " + L.reasm_timeouts + " half-arrived LoRa frame(s).", false]);
+  if (L.refused_big > 0)
+    out.push([name + " refused " + L.refused_big + " LoRa payload(s) bigger than it has room for; nothing was truncated.", false]);
+  if (L.restarts > 0)
+    out.push([name + " has had to reset its wedged LoRa module " + L.restarts + " time(s).", false]);
+  return out;
+}
+
+/* The per-AP LoRa panel on the Traffic tab. Leads with the number the admin page leads with. */
+function loraPanel(t, name, status) {
+  const L = t.lora, box = el("div");
+  if (!L) {
+    box.append(el("h3", "sub-h", "LoRa backbone"),
+               el("p", "hint", name + " said nothing about LoRa: it is running firmware from before the second backbone existed."));
+    return box;
+  }
+  if (!L.fitted) {
+    box.append(el("h3", "sub-h", "LoRa backbone"),
+               el("p", "hint", "No LoRa module on " + name + ". This AP works exactly as it does without one, and the other APs are unaffected."));
+    return box;
+  }
+  box.append(el("h3", "sub-h", "LoRa backbone"));
+
+  const head = el("p", "hint");
+  head.textContent = L.frames_first > 0
+    ? L.frames_first + " of the " + L.frames_in + " frames that arrived by LoRa got here first, before Wi-Fi had them."
+    : "Nothing has needed LoRa yet: every frame it carried had already arrived over Wi-Fi.";
+  box.append(head);
+
+  const bits = [(L.configured ? "module configured" : "module not configured yet"),
+                "address " + L.address, "network " + L.network,
+                "SF9/BW125, 22 dBm", (L.broadcast ? "broadcasting to every AP at once" : "one transmission per peer")];
+  if (!L.big) bits.push("no room for long payloads");
+  const set = el("p", "hint", bits.join(" · "));
+  box.append(set);
+  if (L.off) box.append(el("p", "dangertext", name + "'s LoRa radio is switched off for a test."));
+
+  const peers = L.peers || [], detail = loraPeerDetail(status, t.ap);
+  if (peers.length) {
+    const lt = el("table"), lhd = el("thead"), lh = el("tr");
+    for (const h of ["LoRa to", "Link", "Signal", "SNR", "Last heard"]) lh.append(el("th", "", h));
+    lhd.append(lh); lt.append(lhd);
+    const lb = el("tbody");
+    for (const p of peers) {
+      const d = detail[p.ap], tr = el("tr");
+      cell(tr, apLabel(p.ap));
+      cell(tr, p.up ? "up" : "down", p.up ? "oktext" : "dangertext");
+      cell(tr, d ? d.rssi + " dBm" : "--", d ? loraSignalClass(d.rssi) : "dim");
+      cell(tr, d ? String(d.snr) : "--", d ? "" : "dim");
+      const age = d ? Math.round(d.age_ms / 1000) : null;
+      cell(tr, d == null ? "--" : (d.age_ms >= 4294967295 ? "never" : fmtDur(age) + " ago"),
+           age != null && age >= LIM.loraSilentS ? "dangertext" : d ? "" : "dim");
+      lb.append(tr);
+    }
+    lt.append(lb);
+    box.append(lt);
+    if (!Object.keys(detail).length)
+      box.append(el("p", "hint", "Signal per peer comes from " + name + "'s own status; open this tab again once " +
+                                 name + " is the AP the link last pulled from."));
+  }
+
+  const dl = el("dl");
+  row(dl, "Last signal heard", L.heard_s == null ? "nothing received yet"
+      : L.rssi + " dBm, SNR " + L.snr + ", " + fmtDur(L.heard_s) + " ago",
+      L.heard_s == null ? "dangertext"
+      : L.heard_s >= LIM.loraSilentS ? "dangertext" : loraSignalClass(L.rssi));
+  row(dl, "Frames", L.frames_out + " out, " + L.frames_in + " in, " + L.frames_first + " of those before Wi-Fi had them");
+  row(dl, "Parts", L.parts_out + " out, " + L.parts_in + " in, " + L.retries + " retried");
+  row(dl, "Parts dropped", String(L.parts_dropped),
+      L.parts_dropped >= LIM.loraDropsBad ? "dangertext" : L.parts_dropped ? "warntext" : "");
+  row(dl, "Frames given up half-arrived", String(L.reasm_timeouts),
+      L.reasm_timeouts >= LIM.loraTimeoutsBad ? "dangertext" : L.reasm_timeouts ? "warntext" : "");
+  row(dl, "Could not be authenticated", String(L.seal_fail), bad(L.seal_fail));
+  row(dl, "Send queue", L.queue + " waiting, highest " + L.queue_high + ", " + L.queue_dropped + " thrown away",
+      L.queue_dropped || L.queue_high >= LIM.loraQueueBad ? "dangertext"
+      : L.queue_high >= LIM.loraQueueWarn ? "warntext" : "");
+  row(dl, "Payloads too big to carry", String(L.refused_big), L.refused_big ? "warntext" : "");
+  row(dl, "On air", fmtDur(L.airtime_s));
+  row(dl, "Module restarts", String(L.restarts), L.restarts ? "warntext" : "");
+  box.append(dl);
+  return box;
+}
+
+/* The Overview line: one per AP with a module, nothing at all for an AP without one. */
+function renderLoraBrief(list, status) {
+  const box = $("lora-brief-lines");
+  box.replaceChildren();
+  let any = false;
+  for (const item of (list || [])) {
+    const L = item.data.lora;
+    if (!L || !L.fitted) continue;          // "no module here" says nothing on the Overview
+    any = true;
+    const detail = loraPeerDetail(status, item.data.ap);
+    let best = null;
+    for (const p of (L.peers || [])) {
+      const d = detail[p.ap];
+      if (p.up && d && (best === null || d.rssi > best.rssi)) best = { ap: p.ap, rssi: d.rssi, snr: d.snr };
+    }
+    const down = (L.peers || []).filter(p => !p.up);
+    const silent = L.heard_s == null || L.heard_s >= LIM.loraSilentS;
+    const line = el("li");
+    line.append(el("span", "k", item.ap + " LoRa "));
+    if (silent || down.length) {
+      const why = silent
+        ? (L.heard_s == null ? "fitted, but nothing has ever arrived on it"
+                             : "silent for " + fmtDur(L.heard_s))
+        : "has not heard " + down.map(p => {
+            const d = detail[p.ap];
+            return apLabel(p.ap) + (d && d.age_ms < 4294967295 ? " for " + fmtDur(Math.round(d.age_ms / 1000)) : "");
+          }).join(" or ");
+      line.append(el("span", "dangertext", "down — " + why + "."));
+    } else if (best) {
+      line.append(el("span", "oktext", "up — best peer " + apLabel(best.ap) + " at "),
+                  el("span", loraSignalClass(best.rssi), best.rssi + " dBm"),
+                  el("span", "oktext", ", SNR " + best.snr + "."));
+    } else {
+      line.append(el("span", "oktext", "up — last heard " + fmtDur(L.heard_s) + " ago at "),
+                  el("span", loraSignalClass(L.rssi), L.rssi + " dBm."));
+    }
+    box.append(line);
+  }
+  $("lora-brief").hidden = !any;
 }
 
 function messageTable(messages, voiceDropped) {
@@ -2039,10 +2355,11 @@ function messageTable(messages, voiceDropped) {
   return table;
 }
 
-function renderTraffic(list, sec) {
+function renderTraffic(list, sec, status) {
   source("traffic-src", sec);
   const box = $("traffic-body"); box.replaceChildren();
   const notes = $("traffic-notes"); notes.replaceChildren();
+  renderLoraBrief(list, status);
   if (!list || !list.length) {
     $("traffic-empty").hidden = false;
     $("traffic-empty").textContent = lastLoggedIn
@@ -2054,7 +2371,7 @@ function renderTraffic(list, sec) {
   const all = [];
   for (const item of list) {
     const t = item.data, name = item.ap;
-    for (const note of trafficNotes(t, name)) all.push(note);
+    for (const note of trafficNotes(t, name, status)) all.push(note);
     const card = el("div");
     card.append(el("h3", "sub-h", name + " · up " + fmtDur(t.uptime_s) + " · counters fetched " + ago(item.at_age_s)));
     const stats = el("div", "stats");
@@ -2099,6 +2416,8 @@ function renderTraffic(list, sec) {
       lt.append(lb);
       card.append(el("h3", "sub-h", "Backbone links"), lt);
     }
+
+    card.append(loraPanel(t, name, status));
 
     const h = t.handhelds, hDl = el("dl");
     row(hDl, "Connected now", h.sessions + " session" + (h.sessions === 1 ? "" : "s") + ", " + h.registered + " registered");
@@ -2158,6 +2477,8 @@ function renderTraffic(list, sec) {
 
 /* ---- polling ---- */
 let lastHistory = null, tilesEnabled = true, tilesOnline = null;
+const CLUSTER_AT = 3;          /* more than this at one spot becomes a cluster you can open */
+const openSpots = new Set();   /* clusters the reader has opened, by their place on the map */
 
 async function poll() {
   try {
@@ -2188,7 +2509,7 @@ async function poll() {
     renderNetwork(status, hist, sections.history);
     renderHandheldTab(status, sections.status, beaconById);
     const traffic = sections.traffic ? sections.traffic.data : null;
-    renderTraffic(traffic, sections.traffic);
+    renderTraffic(traffic, sections.traffic, status);
     if (!traffic) $("traffic-brief").dataset.empty = "1";
     applyTabs(lastLoggedIn);
   } catch (e) {
@@ -2203,11 +2524,25 @@ poll(); setInterval(poll, 1000);
 """
 
 
+ICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img">
+<title>LocalGrid</title>
+<rect width="64" height="64" rx="14" fill="#0E1A14"/>
+<g fill="none" stroke="#5FD38D" stroke-linecap="round" stroke-width="3">
+<path d="M24.2 14.2 A11 11 0 0 1 39.8 14.2" opacity="0.9"/>
+<path d="M19.3 9.3 A18 18 0 0 1 44.7 9.3" opacity="0.5"/></g>
+<path d="M32 22 L14 50 L50 50 Z" fill="none" stroke="#5FD38D" stroke-width="3" stroke-linejoin="round"/>
+<path d="M32 22 L32 39 M14 50 L32 39 L50 50" fill="none" stroke="#5FD38D" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+<g fill="#5FD38D"><circle cx="32" cy="22" r="4.5"/><circle cx="14" cy="50" r="4.5"/><circle cx="50" cy="50" r="4.5"/></g>
+<circle cx="32" cy="39" r="3.5" fill="#0E1A14" stroke="#5FD38D" stroke-width="2"/></svg>"""
+# The project mark (assets/brand/localgrid-icon.svg), inline so the tool needs no other file: the
+# tent is the three APs and their backbone, the waves the radio, the pale circle a handheld.
+
 TILE_HOST = "https://tile.openstreetmap.org"
 TILE_UA = "LocalGrid-grid-watch/1.0 (offline network monitor; one laptop, no bulk downloads)"
 TILE_CACHE_MAX = 512             # tiles kept in memory; nothing is written to disk
 TILE_MAX_INFLIGHT = 2            # OpenStreetMap's tile policy: no heavy parallel fetching
 TILE_RETRY_S = 15.0              # after a failure, stop asking for a while (offline laptop)
+TILE_SAME_LIMIT = 4              # the same picture for this many squares means the server refused us
 
 
 class TileCache:
@@ -2224,6 +2559,9 @@ class TileCache:
         self.lock = threading.Lock()
         self.cache = collections.OrderedDict()
         self.inflight = threading.Semaphore(TILE_MAX_INFLIGHT)
+        self.same_digest = None       # the last picture: the same one everywhere means refusal
+        self.same_count = 0
+        self.refused = False
         self.failed_at = 0.0
         self.fetched = 0
         self.online = None
@@ -2255,6 +2593,20 @@ class TileCache:
                     self.online = False
                 return None
         with self.lock:
+            # OpenStreetMap refuses a client it does not want by serving an "Access blocked"
+            # picture with a success code (seen on this laptop's network, 2026-09-20). The give-away
+            # is one identical picture for every different square, so count the repeats and treat it
+            # as no tiles at all: the page then draws the plan, which always works offline.
+            digest = hashlib.sha256(body).digest()
+            if digest == self.same_digest:
+                self.same_count += 1
+            else:
+                self.same_digest, self.same_count = digest, 1
+            if self.same_count >= TILE_SAME_LIMIT:
+                self.refused = True
+                self.online = False
+                self.failed_at = time.time()
+                return None
             self.cache[key] = body
             self.fetched += 1
             self.online = True
@@ -2276,7 +2628,7 @@ def make_server(state, port, auth=None, data=None, tiles=None):
         s = state.snapshot(now)
         s["auth"] = a
         s["link"] = data.snapshot(now, a["logged_in"])
-        s["tiles"] = {"online": tiles.online, "enabled": tiles.enabled}
+        s["tiles"] = {"online": tiles.online, "enabled": tiles.enabled, "refused": tiles.refused}
         return s
 
     class Handler(BaseHTTPRequestHandler):
@@ -2296,6 +2648,10 @@ def make_server(state, port, auth=None, data=None, tiles=None):
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
                 self._send(page, "text/html; charset=utf-8")
+                return
+            if path in ("/favicon.svg", "/favicon.ico"):
+                # The same mark the AP's own admin page shows, so a tab of each looks like a pair.
+                self._send(ICON_SVG, "image/svg+xml")
                 return
             if path == "/state.json":
                 # The page says which tab is open, so the traffic counters are asked for only
@@ -2512,6 +2868,17 @@ def sample_status_json():
              "fix_time": 1789699940, "sats": 9},
             {"subject": 3, "name": "Priya", "ap": False, "lat_u": 47625100, "lon_u": 13048900,
              "fix_time": 1789699800, "sats": 7}],
+        # D71: the same LoRa facts the admin page reads, with the per-peer signal the packed
+        # traffic record has no room for.
+        "lora": {"fitted": True, "configured": True, "off": False, "broadcast": True, "big": False,
+                 "version": "RYLR998_REYAX_V1.2.6", "address": 1, "network": 14,
+                 "rssi": -14, "snr": 9, "frames_out": 412, "frames_in": 388, "frames_first": 19,
+                 "parts_out": 1236, "parts_in": 1150, "parts_dropped": 2, "reasm_timeouts": 6,
+                 "seal_fail": 0, "refused_big": 0, "queue": 1, "queue_high": 4,
+                 "queue_dropped": 0, "retries": 11, "airtime_ms": 43000, "restarts": 1,
+                 "heard_age_ms": 12000,
+                 "peers": [{"node": 1, "up": True, "rssi": -14, "snr": 9, "age_ms": 12000},
+                           {"node": 2, "up": False, "rssi": -28, "snr": 8, "age_ms": 240000}]},
     }, ensure_ascii=False).encode("utf-8")
 
 
@@ -2557,8 +2924,48 @@ def sample_history_blob():
     return bytes(out)
 
 
-def sample_traffic_blob(voice_dropped=12, heap_min=18 * 1024, queue_high=17):
-    """A TRAFFIC reply in the layout traffic.c builds (see decode_traffic above)."""
+def sample_lora_section(fitted=True):
+    """
+    The 64-byte LoRa section of a TRAFFIC record, with the numbers the bench measured on
+    2026-09-20: a RYLR998 on address 1 of network 14, peer 1 heard and peer 2 not, 19 frames that
+    beat Wi-Fi to it, 2 parts dropped, 6 frames given up half-arrived, a queue that filled to 4,
+    and 43 s on the air. `fitted=False` is what an AP with no module sends: flags 0, all zero.
+    """
+    e = bytearray(TRAFFIC_LORA)
+    if not fitted:
+        return bytes(e)
+    e[0] = LORA_FITTED | LORA_CONFIGURED | LORA_BROADCAST      # no LORA_BIG: no long payloads
+    e[1] = 1                       # this AP's address: 1 + its index (lora.h, LORA_ADDR_AP)
+    e[2] = -14 & 0xFF              # RSSI of the last part received
+    e[3] = 9                       # SNR
+    e[4:8] = (412).to_bytes(4, "little")       # frames sent
+    e[8:12] = (388).to_bytes(4, "little")      # frames received and authenticated
+    e[12:16] = (1236).to_bytes(4, "little")    # parts transmitted
+    e[16:20] = (1150).to_bytes(4, "little")    # parts received
+    e[20:24] = (2).to_bytes(4, "little")       # parts dropped
+    e[24:28] = (6).to_bytes(4, "little")       # reassembly timeouts
+    e[28:32] = (0).to_bytes(4, "little")       # seal failures
+    e[32:34] = (1).to_bytes(2, "little")       # queue depth now
+    e[34:36] = (4).to_bytes(2, "little")       # queue high-water: the four small slots
+    e[36:40] = (43000).to_bytes(4, "little")   # airtime, ms
+    e[40:44] = (11).to_bytes(4, "little")      # part retries
+    e[44:48] = (0).to_bytes(4, "little")       # frames the queue could not hold
+    e[48:52] = (12000).to_bytes(4, "little")   # since a frame last arrived, ms
+    e[52] = 0x02                   # bit n: AP n's heartbeat is current, so AP 1 yes, AP 2 no
+    e[53] = 1                      # module restarts
+    e[54] = 14                     # network ID
+    e[56:60] = (19).to_bytes(4, "little")      # arrived by LoRa before Wi-Fi had them
+    e[60:64] = (0).to_bytes(4, "little")       # payloads refused for being too large
+    return bytes(e)
+
+
+def sample_traffic_blob(voice_dropped=12, heap_min=18 * 1024, queue_high=17, lora="full"):
+    """
+    A TRAFFIC reply in the layout traffic.c builds (see decode_traffic above).
+
+    `lora` picks the tail: "full" a fitted module, "none" an AP that answered with no module,
+    "absent" an AP flashed before D71 that ends after its links, "short" a truncated section.
+    """
     n_links, n_buckets = 2, 10
     classes = {                     # in, out, relayed, per lg_traffic_class_t
         "direct": (1420, 1380, 640), "group": (880, 870, 300), "broadcast": (42, 42, 20),
@@ -2620,6 +3027,12 @@ def sample_traffic_blob(voice_dropped=12, heap_min=18 * 1024, queue_high=17):
         e[20:24] = fail.to_bytes(4, "little")
         e[24:28] = heard_ms.to_bytes(4, "little")
         out += e
+    if lora == "full":
+        out += sample_lora_section(True)
+    elif lora == "none":
+        out += sample_lora_section(False)
+    elif lora == "short":
+        out += sample_lora_section(True)[:20]
     return bytes(out)
 
 
@@ -2908,6 +3321,39 @@ def self_check():
     check("a traffic reply counting classes this tool does not know is refused",
           refused_traffic(bytes(short)))
 
+    # D71: the second backbone, appended after the links.
+    lora = traf["lora"]
+    check("the LoRa section decodes: the module, its address, its network and its settings",
+          lora["fitted"] and lora["configured"] and lora["broadcast"] and not lora["big"]
+          and not lora["off"] and lora["address"] == 1 and lora["network"] == 14
+          and lora["rssi"] == -14 and lora["snr"] == 9 and lora["heard_s"] == 12)
+    check("the LoRa counters decode, frames that beat Wi-Fi to it first",
+          lora["frames_first"] == 19 and lora["frames_out"] == 412 and lora["frames_in"] == 388
+          and lora["parts_out"] == 1236 and lora["parts_in"] == 1150
+          and lora["parts_dropped"] == 2 and lora["reasm_timeouts"] == 6
+          and lora["seal_fail"] == 0 and lora["refused_big"] == 0
+          and lora["queue"] == 1 and lora["queue_high"] == 4 and lora["queue_dropped"] == 0
+          and lora["retries"] == 11 and lora["airtime_s"] == 43.0 and lora["restarts"] == 1)
+    check("the LoRa peers line up with the backbone links, and a peer that is down shows as down",
+          [p["ap"] for p in lora["peers"]] == [1, 2]
+          and lora["peers"][0]["up"] and not lora["peers"][1]["up"])
+    none = decode_traffic(sample_traffic_blob(lora="none"))["lora"]
+    check("an AP with no LoRa module is told apart from one that is fitted and silent",
+          none is not None and none["fitted"] is False and none["frames_in"] == 0
+          and none["address"] == 0 and none["peers"] == [{"ap": 1, "up": False},
+                                                         {"ap": 2, "up": False}])
+    older = decode_traffic(sample_traffic_blob(lora="absent"))
+    check("a record from an AP flashed before D71 still decodes, and claims no LoRa at all",
+          older["lora"] is None and older["links"][0]["rssi"] == -62
+          and older["messages"]["direct"]["in"] == 1420 and older["rate_1m"] == 252.0)
+    cut = decode_traffic(sample_traffic_blob(lora="short"))
+    check("a LoRa section cut short is treated as absent, never half-decoded",
+          cut["lora"] is None and len(cut["links"]) == 2)
+    check("the pulled status carries the per-peer LoRa signal the packed record has no room for",
+          served["status"]["data"]["lora"]["peers"][1]["node"] == 2
+          and served["status"]["data"]["lora"]["peers"][1]["rssi"] == -28
+          and served["status"]["data"]["lora"]["version"].startswith("RYLR998"))
+
     # A wrong password: refused, and nothing is pulled.
     auth2, link2 = AdminAuth(), LinkData()
     auth2.set_password("definitely-not-it")
@@ -2947,6 +3393,10 @@ def self_check():
               all(f'data-tab="{t}"' in page for t in ("overview", "map", "network", "handhelds",
                                                       "traffic"))
               and "Availability, last 2 hours" in page and "What happened to the APs" in page)
+        check("the page has the LoRa panel and the Overview line, worded as the admin page is",
+              'id="lora-brief"' in page and "LoRa backbone" in page
+              and "No LoRa module on" in page
+              and "got here first, before Wi-Fi had them" in page)
         check("the pulled sections are served with the AP's name and how old they are",
               data["link"]["sections"]["status"]["ap"] == "MAIN"
               and "at_age_s" in data["link"]["sections"]["history"])

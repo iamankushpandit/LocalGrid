@@ -109,11 +109,24 @@ static void on_rsp_event(struct ble_npl_event *ev)
  * ones D68 sends either way; only the advertising PDU changes (ADV_IND while connectable,
  * ADV_SCAN_IND otherwise), and both are scannable, so the status beacon never stops.
  */
-#define ADV_MIN_HEAP 24576u
+/*
+ * Measured 2026-09-20: this was 24576, the same floor ble_link.c used, and an AP carrying a LoRa
+ * module runs at 17-25 KB free. So the AP either never offered the link at all, or sat right on
+ * the threshold and tore its advert down and rebuilt it every second as the heap crossed back and
+ * forth - a watcher's connection attempt could never complete, and the map, positions and traffic
+ * never worked. Two changes: the floor is the link's own (one number, not two), and it has
+ * hysteresis, so a heap wobbling around the line cannot flap the advert.
+ */
+#define ADV_MIN_HEAP  LINK_MIN_HEAP            /* rise above this to start offering the link */
+#define ADV_KEEP_HEAP (LINK_MIN_HEAP - 1024u)  /* fall below this to stop offering it */
 
 static bool connectable_now(void)
 {
-    return s_link_ready && !ble_link_busy() && esp_get_free_heap_size() >= ADV_MIN_HEAP;
+    if (!s_link_ready || ble_link_busy()) {
+        return false;
+    }
+    uint32_t heap = esp_get_free_heap_size();
+    return s_connectable ? heap >= ADV_KEEP_HEAP : heap >= ADV_MIN_HEAP;
 }
 
 static void start_advertising(void)

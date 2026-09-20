@@ -86,7 +86,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM19",
+      "port": "COM24",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
