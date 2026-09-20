@@ -31,6 +31,22 @@ Nothing about the boards is written into the script. At the start it opens every
 | pulse | EN low through RTS for 0.2 s: a crash and restart | All |
 | hold | EN held low through RTS for 5 s to 10 min, then released: a power loss | Ports behind a separate USB bridge chip |
 
+## LoRa rounds (`--lora`, D71)
+
+With `--lora` a share of the experiments (`--lora-share`, default 0.35) are LoRa rounds; `--scenario lora` makes every experiment one. These take **no board out**: they type the AP console's own chaos hooks, each of which restores itself from the AP's clock, so a dead harness cannot leave a radio off. They need no handheld.
+
+| Round | What it does | What it proves |
+|---|---|---|
+| `lora_only` | `bb off` on two APs for 90-300 s | Anything that still crosses went by LoRa |
+| `lora_down` | `lora off` on one AP while Wi-Fi stays up | Nothing is lost and nothing stalls without LoRa |
+| `lora_wedge` | `lora reset` | The module comes back configured, its peers return, and how long that took |
+| `lora_blind` | `bb off` on two APs **and** `lora off` on one of them | One AP is genuinely isolated and recovers when both are restored |
+
+- **Traffic during a round** is the AP console's own `ping <token>` diagnostic echo, flooded AP to AP, counted on every other AP's `[BB] Echo from node ...` line. This is also the run's only traffic when fewer than two handhelds are on USB, and the report says so rather than skipping the run.
+- **Counters** come from `lora` typed on the port the run already holds open — never `tools/console.py`, which would reset the board and zero them. They are cumulative since that AP booted, so each round is a snapshot before and after, and a round in which an AP restarted is reported as unattributable instead of a negative.
+- **Reported per round and in the summary**: frames that arrived over LoRa before Wi-Fi had delivered them (`N of them arrived here first`), how long a message took to cross, RSSI and SNR per peer, parts dropped, reassembly timeouts, queue high-water, retries, airtime, module restarts, and each AP's free and lowest heap.
+- `--no-alerts` is honoured: an echo is a diagnostic flood, not an announcement, and no SOS or urgent broadcast is sent.
+
 ## Safety rules the script enforces
 
 - At most all APs but one are out at once, so grid time (RAM-only, D6) survives. `--blackout` allows every AP out, then sets time again from the PC clock.
@@ -66,6 +82,7 @@ The grid counts as steady when all of these are true:
    |---|---|
    | Smoke run, 12 minutes | `python tools/chaos.py --hours 0.2 --live` |
    | Overnight | `python tools/chaos.py --hours 10 --live --quiet-handhelds` |
+   | Night run with LoRa rounds, APs only | `python tools/chaos.py --hours 4 --live --lora --no-alerts` |
    | Replay a night's schedule | add `--seed <seed from the summary>` |
    | Some boards only | `--devices <bench names or device IDs>` |
    | More faults in a short run | `--min-gap 2 --max-gap 5` |

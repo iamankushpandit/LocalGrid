@@ -1977,6 +1977,46 @@ static void test_voice_keeps_text_fresh(void)
     sim_destroy(s);
 }
 
+/*
+ * D70: the traffic counters classify what passes and never hold any of it. A 1:1 text counts as
+ * one 1:1 in on the AP the sender is on, one relayed on the AP in the middle, and one out on the
+ * AP that delivers it; a group text counts as group; and no class ever counts a body.
+ */
+static void test_traffic_counters(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_node_traffic_t before[SIM_NODES];
+    for (int i = 0; i < SIM_NODES; i++) {
+        before[i] = *lg_node_traffic(&s->nodes[i].node);
+        CHECK(before[i].in[LG_TC_PRESENCE] > 0);   /* registration already counted */
+    }
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Where are you?")) >= 0);
+    CHECK(sim_pump(s));
+
+    const lg_node_traffic_t *a = lg_node_traffic(&s->nodes[0].node);
+    const lg_node_traffic_t *b = lg_node_traffic(&s->nodes[1].node);
+    const lg_node_traffic_t *c = lg_node_traffic(&s->nodes[2].node);
+    CHECK_EQ(a->in[LG_TC_DIRECT] - before[0].in[LG_TC_DIRECT], 1u);       /* taken from Dad */
+    CHECK(b->relayed[LG_TC_DIRECT] > before[1].relayed[LG_TC_DIRECT]);     /* passed along the chain */
+    CHECK(c->out[LG_TC_DIRECT] > before[2].out[LG_TC_DIRECT]);             /* delivered to Emma */
+    CHECK_EQ(a->in[LG_TC_GROUP], before[0].in[LG_TC_GROUP]);               /* not a group message */
+    CHECK(a->bytes_in > before[0].bytes_in);
+    CHECK_EQ(a->in[LG_TC_VOICE], 0u);
+
+    /* The ack for it comes back as an ack, not as text. */
+    CHECK(c->in[LG_TC_ACK] + a->out[LG_TC_ACK] > 0u);
+
+    lg_node_traffic_t mid = *a;
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("Dinner at seven.")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(a->in[LG_TC_GROUP] - mid.in[LG_TC_GROUP], 1u);
+    CHECK_EQ(a->in[LG_TC_DIRECT], mid.in[LG_TC_DIRECT]);
+    sim_destroy(s);
+}
+
 void test_messaging(void)
 {
     test_diag_echo();
@@ -1998,6 +2038,7 @@ void test_messaging(void)
     test_node_refuses_unsafe_frames();
     test_key_pinning();
     test_ping_pong();
+    test_traffic_counters();
     test_ping_battery();
     test_urgent_record();
     test_read_receipt();

@@ -40,6 +40,13 @@ int lg_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, siz
                    const uint8_t *info, size_t info_len, uint8_t *out, size_t out_len);
 
 /*
+ * HMAC-SHA256 (RFC 2104), 32 bytes out. Used for the BLE admin link's login proof (D70), where the
+ * key is the stored PBKDF2 hash and the message is the AP's challenge. An empty key is padded with
+ * zeros to the block size, as HMAC specifies.
+ */
+int lg_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len, uint8_t out[32]);
+
+/*
  * PBKDF2-HMAC-SHA256 (RFC 8018 section 5.2) for the admin password.
  * password 1..128 bytes, salt 0..64 bytes, out 1..64 bytes, iterations >= 1.
  */

@@ -230,6 +230,16 @@
     </table></div>
   </section>
 
+  <section id="lora-card" data-tab="network" hidden>
+    <h2>LoRa backbone</h2>
+    <p class="hint" id="lora-state" style="margin:0 0 10px"></p>
+    <div class="table" id="lora-table" hidden><table>
+      <thead><tr><th>AP</th><th>Link</th><th>Signal</th><th>SNR</th><th>Last heard</th></tr></thead>
+      <tbody id="lora-body"></tbody>
+    </table></div>
+    <p class="hint" id="lora-counts" style="margin:10px 0 0"></p>
+  </section>
+
   <section id="groups-card" data-tab="handhelds" hidden>
     <h2>Groups</h2>
     <p class="hint" style="margin:0 0 10px">Groups are shared by every AP and handheld. Removing a group deletes its messages on every handheld. People can also make and change groups they belong to on their handhelds.</p>
@@ -893,11 +903,58 @@
   });
 
   function beginDashboard() {
-    show(["time-card", "grid-card", "location-card", "nodes-card", "avail-card", "incidents-card", "groups-card",
-          "announce-card", "devices-card", "security-card"]);
+    show(["time-card", "grid-card", "location-card", "nodes-card", "lora-card", "avail-card", "incidents-card",
+          "groups-card", "announce-card", "devices-card", "security-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);
+  }
+
+  // The second backbone (D71). The AP sends facts; the wording is here.
+  function renderLora(s) {
+    const L = s.lora;
+    if (!L) { $("lora-card").hidden = true; return; }
+    $("lora-card").hidden = false;
+    const peers = L.peers || [];
+    let state;
+    if (!L.fitted) {
+      state = `No LoRa module on ${esc(s.node_name)}. This AP works exactly as it does without one; the other APs are unaffected.`;
+    } else {
+      const bits = [`Module ${L.configured ? "configured" : "not configured yet"}`];
+      if (L.version) bits.push(esc(L.version));
+      bits.push(`address ${L.address}`, `network ${L.network}`);
+      if (L.off) bits.push('<span class="bad">switched off for a test</span>');
+      if (!L.big) bits.push('<span class="warn">no room for long payloads</span>');
+      if (L.heard_age_ms < 4294967295) {
+        const q = L.rssi >= -100 ? "good" : L.rssi >= -115 ? "warn" : "bad";
+        bits.push(`last heard <span class="${q}">${L.rssi} dBm</span>, SNR ${L.snr}, ${fmtDur(Math.round(L.heard_age_ms / 1000))} ago`);
+      } else {
+        bits.push('<span class="dim">nothing received yet</span>');
+      }
+      state = bits.join(" &middot; ");
+    }
+    $("lora-state").innerHTML = state;
+
+    const rows = peers.map((p) => {
+      const link = p.up ? '<span class="pill good">UP</span>' : '<span class="pill bad">DOWN</span>';
+      const q = p.rssi >= -100 ? "good" : p.rssi >= -115 ? "warn" : "bad";
+      return `<tr><td>${esc(nodeName(p.node))}</td><td>${link}</td><td><span class="${q}">${p.rssi} dBm</span></td><td>${p.snr}</td><td>${fmtDur(Math.round(p.age_ms / 1000))} ago</td></tr>`;
+    });
+    $("lora-body").innerHTML = rows.join("");
+    $("lora-table").hidden = rows.length === 0;
+
+    if (!L.fitted) { $("lora-counts").textContent = ""; return; }
+    // The number that says whether the radio earns its keep: frames Wi-Fi had not already delivered.
+    const worth = L.frames_first > 0
+      ? `<strong>${L.frames_first}</strong> of the ${L.frames_in} frames that arrived by LoRa got here first, before Wi-Fi had them.`
+      : `Nothing has needed LoRa yet: every frame it carried had already arrived over Wi-Fi.`;
+    const bad = L.parts_dropped + L.reasm_timeouts + L.seal_fail + L.queue_dropped + L.refused_big;
+    const trouble = bad === 0 ? "Nothing dropped." :
+      `<span class="warn">${L.parts_dropped} part(s) dropped, ${L.reasm_timeouts} incomplete, ${L.seal_fail} unreadable, ${L.queue_dropped} not queued, ${L.refused_big} too large.</span>`;
+    $("lora-counts").innerHTML =
+      `${worth} Frames out ${L.frames_out}, in ${L.frames_in}; parts out ${L.parts_out}, in ${L.parts_in}; ` +
+      `retries ${L.retries}; queue ${L.queue} (highest ${L.queue_high}); ` +
+      `on air ${(L.airtime_ms / 1000).toFixed(1)} s; module restarts ${L.restarts}. ${trouble}`;
   }
 
   function renderClock() {
@@ -1055,6 +1112,8 @@
     if (strips.length) strips.push('<div></div><div class="axis"><span>2 h ago</span><span>1 h</span><span>now</span></div><div></div>');
     $("avail").innerHTML = strips.join("");
     $("avail-hint").textContent = `As seen from ${s.node_name}: whether each AP was reachable over the AP-to-AP link, minute by minute. Each strip fills in from the right, one sliver a minute. The history survives restarts and unplugging; minutes ${s.node_name} was down are filled in from the other APs' records.`;
+
+    renderLora(s);
 
     lastIncidents = s.incidents || [];
     renderIncidents();

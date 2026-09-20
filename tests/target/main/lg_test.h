@@ -33,3 +33,4 @@ size_t hex2bin(const char *hex, uint8_t *out, size_t cap);
 void test_core(void);
 void test_crypto(void);
 void test_messaging(void);
+void test_lora(void);

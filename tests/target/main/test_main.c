@@ -106,6 +106,7 @@ void app_main(void)
         { "core", test_core },
         { "crypto", test_crypto },
         { "messaging", test_messaging },
+        { "lora", test_lora },
     };
     for (int i = 0; i < (int)(sizeof(suites) / sizeof(suites[0])); i++) {
         int checks_before = lg_checks;

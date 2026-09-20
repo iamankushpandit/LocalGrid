@@ -1,0 +1,22 @@
+# Gradle and Android Studio outputs
+.gradle/
+build/
+app/build/
+.idea/
+.kotlin/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Machine-local: SDK path
+local.properties
+
+# Signing: the keystore and its passwords never go in git
+keystore/
+keystore.properties
+*.jks
+*.keystore
+
+# The built APK copied here for sideloading
+*.apk

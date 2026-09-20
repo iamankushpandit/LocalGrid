@@ -21,3 +21,10 @@ void ble_adv_update(const uint8_t *payload, size_t len);
  * and the NimBLE host task applies it. Does nothing if BLE did not start.
  */
 void ble_adv_set_status(const uint8_t *frame, size_t len);
+
+/*
+ * D70: asks the host task to check whether the advert should still accept an admin-link
+ * connection (free heap, and whether a watcher is already connected) and to change mode if not.
+ * Any task, never blocks. Call about once a second from the core task.
+ */
+void ble_adv_review_connectable(void);

@@ -58,6 +58,7 @@ static lg_presence_entry_t *presence_get(lg_node_t *n, uint32_t device)
             return p;
         }
     }
+    n->traffic.table_full++;   /* D70: the presence table had no room for this device */
     return NULL;
 }
 
@@ -89,12 +90,61 @@ static void env_from_node(lg_node_t *n, lg_env_t *e, uint8_t type, uint8_t scope
     e->origin_node = n->self;
 }
 
+/* ---- traffic counters (D70): what class a frame is, never what it says ---- */
+
+static uint8_t traffic_class(uint8_t type, uint8_t scope)
+{
+    switch (type) {
+    case LG_T_TEXT:
+        return scope == LG_SCOPE_DIRECT ? (uint8_t)LG_TC_DIRECT
+             : scope == LG_SCOPE_GROUP  ? (uint8_t)LG_TC_GROUP
+                                        : (uint8_t)LG_TC_BROADCAST;
+    case LG_T_VOICE:            return (uint8_t)LG_TC_VOICE;
+    case LG_T_MSG_ACK:          return (uint8_t)LG_TC_ACK;
+    case LG_T_PRESENCE_UPDATE:
+    case LG_T_REGISTER:
+    case LG_T_REGISTER_ACK:     return (uint8_t)LG_TC_PRESENCE;
+    case LG_T_NAME:
+    case LG_T_GROUPS:
+    case LG_T_GROUP_EDIT:
+    case LG_T_GRID_STATE:       return (uint8_t)LG_TC_ANNOUNCE;
+    case LG_T_POSITION:         return (uint8_t)LG_TC_POSITION;
+    case LG_T_TIME_SYNC:
+    case LG_T_TIME_ZONE:        return (uint8_t)LG_TC_TIME;
+    default:                    return (uint8_t)LG_TC_OTHER;
+    }
+}
+
+static void note_in(lg_node_t *n, const lg_env_t *e, size_t len)
+{
+    n->traffic.in[traffic_class(e->type, e->scope)]++;
+    n->traffic.bytes_in += (uint32_t)len;
+}
+
+static void note_out(lg_node_t *n, uint8_t type, uint8_t scope, size_t len)
+{
+    n->traffic.out[traffic_class(type, scope)]++;
+    n->traffic.bytes_out += (uint32_t)len;
+}
+
+static void note_relay(lg_node_t *n, const lg_env_t *e, size_t len)
+{
+    n->traffic.relayed[traffic_class(e->type, e->scope)]++;
+    n->traffic.bytes_out += (uint32_t)len;
+}
+
+const lg_node_traffic_t *lg_node_traffic(const lg_node_t *n)
+{
+    return &n->traffic;
+}
+
 static void send_client(lg_node_t *n, uint32_t device, lg_env_t *e, const uint8_t *body, size_t len)
 {
     uint8_t buf[LG_FRAME_MAX];
     int flen = lg_frame_build(e, body, len, buf, sizeof(buf));
     if (flen > 0 && n->io.to_client != NULL) {
         n->io.to_client(n->io.ctx, device, buf, (size_t)flen);
+        note_out(n, e->type, e->scope, (size_t)flen);
     }
 }
 
@@ -217,6 +267,7 @@ static int flood_new(lg_node_t *n, uint8_t type, const uint8_t *body, size_t ble
     }
     (void)lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq);
     flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+    note_out(n, e.type, e.scope, (size_t)flen);
     return LG_OK;
 }
 
@@ -239,6 +290,7 @@ static void reply_ack(lg_node_t *n, const lg_env_t *orig, uint8_t status)
 static void forward(lg_node_t *n, const lg_env_t *e, const uint8_t *body, uint16_t from_node)
 {
     if (e->ttl <= 1) {
+        n->traffic.ttl_expired++;
         return;
     }
     lg_env_t f = *e;
@@ -248,6 +300,7 @@ static void forward(lg_node_t *n, const lg_env_t *e, const uint8_t *body, uint16
     int flen = lg_frame_build(&f, body, e->body_len, buf, sizeof(buf));
     if (flen > 0) {
         flood_frame(n, from_node, buf, (size_t)flen);
+        note_relay(n, e, (size_t)flen);
     }
 }
 
@@ -423,7 +476,11 @@ static void deliver_direct(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
     if (is_local_online(n, p)) {
         n->io.to_client(n->io.ctx, e->target, frame, len);
         n->stats.delivered_local++;
+        note_out(n, e->type, e->scope, len);
         return;
+    }
+    if (p == NULL || p->state != LG_PRES_ONLINE) {
+        n->traffic.unknown_recipient++;   /* no AP has announced this device as online */
     }
     if (from_node == LG_NODE_NONE) {
         if (p != NULL && p->state == LG_PRES_ONLINE && n->io.is_neighbor != NULL &&
@@ -433,6 +490,7 @@ static void deliver_direct(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
         } else {
             flood_frame(n, LG_NODE_NONE, frame, len);
         }
+        note_out(n, e->type, e->scope, len);
         return;
     }
     forward(n, e, body, from_node);
@@ -453,10 +511,12 @@ static void deliver_fanout(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
         if (is_local_online(n, presence_find(n, dev))) {
             n->io.to_client(n->io.ctx, dev, frame, len);
             n->stats.delivered_local++;
+            note_out(n, e->type, e->scope, len);
         }
     }
     if (from_node == LG_NODE_NONE) {
         flood_frame(n, LG_NODE_NONE, frame, len);
+        note_out(n, e->type, e->scope, len);
     } else {
         forward(n, e, body, from_node);
     }
@@ -912,6 +972,7 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         return;
     }
     n->stats.rx_client++;
+    note_in(n, &e, len);
 
     switch (e.type) {
     case LG_T_PING: {
@@ -995,6 +1056,7 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         return;
     }
     n->stats.rx_backbone++;
+    note_in(n, &e, len);
     if (e.type == LG_T_VOICE) {
         handle_backbone_voice(n, from_node, &e, frame, len);   /* its own table, not the dedup window */
         return;

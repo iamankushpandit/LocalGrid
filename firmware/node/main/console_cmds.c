@@ -9,8 +9,13 @@
 #include "esp_log.h"
 #include "lg_power.h"
 #include "gps.h"
+#include "backbone.h"
+#include "lora.h"
 #include "node_app.h"
 #include "sdkconfig.h"
+
+/* No chaos hook may take a radio out for longer than this, whatever was typed. */
+#define CHAOS_MAX_S 3600ul
 
 static int post(node_cmd_type_t type, uint32_t value, const char *text)
 {
@@ -104,6 +109,85 @@ static int cmd_gps(int argc, char **argv)
     return post(NODE_CMD_GPS, 0, NULL);
 }
 
+/* The second backbone (D71). Status and a test send go through the core task; the rest are flags
+ * and one-shot requests the LoRa task picks up, so the console never waits on the radio. */
+static int cmd_lora(int argc, char **argv)
+{
+    if (argc == 1) {
+        return post(NODE_CMD_LORA, 0, NULL);
+    }
+    if (strcmp(argv[1], "send") == 0) {
+        char text[LG_TEXT_MAX + 1] = "lora send";
+        if (argc > 2) {
+            text[0] = '\0';
+            for (int i = 2; i < argc; i++) {
+                if (i > 2) {
+                    strncat(text, " ", sizeof(text) - strlen(text) - 1);
+                }
+                strncat(text, argv[i], sizeof(text) - strlen(text) - 1);
+            }
+        }
+        return post(NODE_CMD_LORA_TEST, 0, text);
+    }
+    if (argc >= 2 && strcmp(argv[1], "off") == 0) {
+        /* Chaos hook. Console only, and it restores itself, so a tool that dies cannot leave an
+         * AP deaf. Seconds are capped so a typo cannot take the radio out for a day. */
+        unsigned long sec = argc > 2 ? strtoul(argv[2], NULL, 10) : 60ul;
+        lora_disable((uint32_t)(sec == 0 || sec > CHAOS_MAX_S ? CHAOS_MAX_S : sec));
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "on") == 0) {
+        lora_enable();
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "reset") == 0) {
+        lora_request_reset();
+        printf("Resetting and reconfiguring the module\n");
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "broadcast") == 0 &&
+        (strcmp(argv[2], "on") == 0 || strcmp(argv[2], "off") == 0)) {
+        bool on = strcmp(argv[2], "on") == 0;
+        lora_set_broadcast(on);
+        printf("Frames for every AP go %s\n", on ? "once to the broadcast address" : "once to each peer");
+        return 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "at") == 0) {
+        /* Bring-up only: whether this firmware's broadcast address works is a question only the
+         * module can answer, and this is how to ask it. Nothing here touches a key or a message. */
+        char at[64] = "";
+        for (int i = 2; i < argc; i++) {
+            if (i > 2) {
+                strncat(at, " ", sizeof(at) - strlen(at) - 1);
+            }
+            strncat(at, argv[i], sizeof(at) - strlen(at) - 1);
+        }
+        lora_request_at(at);
+        printf("Sent \"%s\"; the reply is logged at [LORA]\n", at);
+        return 0;
+    }
+    printf("usage: lora | lora send [text] | lora off [seconds] | lora on | lora reset"
+           " | lora broadcast on|off | lora at <AT command>\n");
+    return 1;
+}
+
+/* The ESP-NOW backbone's chaos hook, the mirror of `lora off` (docs/lora.md). Console only. */
+static int cmd_bb(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "off") == 0) {
+        unsigned long sec = argc > 2 ? strtoul(argv[2], NULL, 10) : 60ul;
+        lgbb_disable((uint32_t)(sec == 0 || sec > CHAOS_MAX_S ? CHAOS_MAX_S : sec));
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "on") == 0) {
+        lgbb_enable();
+        return 0;
+    }
+    printf("ESP-NOW backbone is %s\n", lgbb_is_off() ? "OFF (chaos hook)" : "on");
+    printf("usage: bb | bb off [seconds] | bb on\n");
+    return argc > 1 ? 1 : 0;
+}
+
 static int cmd_groups(int argc, char **argv)
 {
     (void)argc;
@@ -129,6 +213,8 @@ void console_start(void)
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
         { .command = "gps",     .help = "The GPS on MAIN: heard, fix, satellites (D63); gps raw dumps what arrives", .func = cmd_gps },
+        { .command = "lora",    .help = "The LoRa backbone (D71): status; lora send, off/on, reset, broadcast on|off, at <cmd>", .func = cmd_lora },
+        { .command = "bb",      .help = "bb | bb off [seconds] | bb on: stop using the ESP-NOW backbone, for chaos runs", .func = cmd_bb },
         { .command = "groups",  .help = "Groups, their members, and the table's version (D52)", .func = cmd_groups },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.GridWatch" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/lg_bg</item>
+        <item name="android:colorBackground">@color/lg_bg</item>
+        <item name="android:colorAccent">@color/lg_accent</item>
+        <item name="android:statusBarColor">@color/lg_bg</item>
+        <item name="android:navigationBarColor">@color/lg_bg</item>
+    </style>
+</resources>

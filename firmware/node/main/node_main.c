@@ -12,6 +12,7 @@
 
 #include "backbone.h"
 #include "ble_adv.h"
+#include "ble_link.h"
 #include "ble_status.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -31,10 +32,12 @@
 #include "lg_timekeep.h"
 #include "gps.h"
 #include "lg_secrets.h"
+#include "lora.h"
 #include "node_app.h"
 #include "nvs_flash.h"
 #include "power_trace.h"
 #include "sessions.h"
+#include "traffic.h"
 #include "settings.h"
 #include "web_admin.h"
 
@@ -171,22 +174,30 @@ static void io_to_client(void *ctx, uint32_t device, const uint8_t *frame, size_
     sess_send(device, frame, len);
 }
 
+/*
+ * D71: both backbones, from one place. ESP-NOW always carries what it can; the LoRa side then
+ * decides for itself, from the frame and from whether Wi-Fi is really reaching that AP, whether
+ * the frame is worth seconds of airtime (docs/lora.md, "Always in parallel"). An AP with no
+ * module drops out of these three functions at once and behaves exactly as it did before.
+ */
 static void io_unicast(void *ctx, uint16_t node, const uint8_t *frame, size_t len)
 {
     (void)ctx;
     lgbb_send_unicast(node, frame, len);
+    lora_offer(node, frame, len, lgbb_link_acked(node, app_now_ms()));
 }
 
 static void io_flood(void *ctx, uint16_t except, const uint8_t *frame, size_t len)
 {
     (void)ctx;
     lgbb_flood(except, frame, len);
+    lora_offer_flood(except, frame, len);
 }
 
 static bool io_is_neighbor(void *ctx, uint16_t node)
 {
     (void)ctx;
-    return lgbb_is_neighbor(node);
+    return lgbb_is_neighbor(node) || lora_is_peer(node);
 }
 
 static uint32_t io_now_ms(void *ctx)
@@ -679,6 +690,9 @@ static void print_status(void)
         printf("Grid time UNSET: handhelds can only receive and send urgent broadcasts\n");
     }
     printf("Links %u, handhelds %u\n", lgbb_link_count(), sess_registered_count());
+    if (lora_fitted()) {
+        printf("LoRa backbone fitted; `lora` shows its links and counters\n");
+    }
     printf("Heap free %" PRIu32 ", min %" PRIu32 ", largest block %u\n", esp_get_free_heap_size(),
            esp_get_minimum_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     printf("Core: rx_client %" PRIu32 " rx_backbone %" PRIu32 " delivered %" PRIu32 " forwarded %" PRIu32
@@ -814,6 +828,19 @@ static void handle_command(const node_cmd_t *cmd)
     case NODE_CMD_GPS:
         print_gps();
         break;
+    case NODE_CMD_LORA:
+        lora_print();
+        break;
+    case NODE_CMD_LORA_TEST: {
+        if (!lora_fitted()) {
+            printf("LoRa: no module on this AP\n");
+            break;
+        }
+        lora_force_next();   /* this one frame goes on LoRa whatever the policy says */
+        int rc = lg_node_send_diag(&g_app.core, (const uint8_t *)cmd->text, strlen(cmd->text));
+        printf(rc == 0 ? "Echo offered to the LoRa backbone: %s\n" : "Echo not sent: %s\n", cmd->text);
+        break;
+    }
     case NODE_CMD_TIME_SET:
         if (gps_has_fix()) {
             /* D63: the GPS wins while it has a fix. The admin page refuses first; this is the console. */
@@ -946,7 +973,12 @@ static void core_task(void *arg)
     if (esp_task_wdt_add(NULL) != ESP_OK) {
         ESP_LOGW(TAG, "[GRID] Task watchdog not watching the core task");
     }
+    static uint32_t pass_started_us;
     for (;;) {
+        if (pass_started_us != 0) {
+            traffic_loop_pass((uint32_t)esp_timer_get_time() - pass_started_us);   /* D70 */
+        }
+        pass_started_us = (uint32_t)esp_timer_get_time();
         esp_task_wdt_reset();
         sess_poll(20);
         uint32_t now = app_now_ms();
@@ -954,6 +986,7 @@ static void core_task(void *arg)
         app_time_slew(now - last_slew);
         last_slew = now;
         lgbb_poll(now);
+        lora_poll(now);   /* D71: frames that crossed on the second backbone, and its heartbeat */
 #if NODE_BLE_ADV_ENABLED
         ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */
 #endif
@@ -968,6 +1001,10 @@ static void core_task(void *arg)
             sync_time_zone();
             refresh_discovery();
             web_admin_publish_snapshot();
+            traffic_publish(now);            /* D70: the packed traffic record for the admin link */
+#if NODE_BLE_ADV_ENABLED
+            ble_adv_review_connectable();    /* D70: stop offering the link when heap runs short */
+#endif
         }
         if (now - last_grid_state >= GRID_STATE_ANNOUNCE_MS) {
             last_grid_state = now;
@@ -1060,6 +1097,8 @@ void app_main(void)
 
     grid_state_init(g_app.index);
     ESP_ERROR_CHECK(lgbb_init(g_app.index, g_app.boot, s_backbone_key, on_backbone_frame, on_link, clients_count));
+    /* D71: the second backbone. A module that does not answer is logged once and changes nothing. */
+    (void)lora_start(g_app.index, s_discriminator, on_backbone_frame, on_link);
     ESP_ERROR_CHECK(sess_init(LG_PROTO_TCP_PORT));
     /* Every AP serves the admin page (D45). */
     if (web_admin_start() != ESP_OK) {
@@ -1076,12 +1115,16 @@ void app_main(void)
         ESP_LOGE(TAG, "[BLE] Disabled: init failed");
     } else {
         (void)ble_status_init(s_backbone_key);
+        (void)ble_link_init(s_backbone_key);   /* D70: the read-only admin link */
     }
 #else
     ESP_LOGW("BLE", "[BLE] Advertising disabled in this build (NODE_BLE_ADV_ENABLED 0, coexistence A/B test)");
 #endif
 
-    xTaskCreate(core_task, "lg_core", 8192, NULL, 5, NULL);
+    ESP_ERROR_CHECK(traffic_init());
+    TaskHandle_t core = NULL;
+    xTaskCreate(core_task, "lg_core", 8192, NULL, 5, &core);
+    traffic_set_tasks(core, ble_link_task());
     if (g_app.index == 0 && CONFIG_LG_NODE_GPS_RX_GPIO >= 0) {
         (void)gps_start(CONFIG_LG_NODE_GPS_RX_GPIO);   /* D63: MAIN only */
     }

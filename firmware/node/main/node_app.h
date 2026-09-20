@@ -40,6 +40,8 @@ typedef enum {
     NODE_CMD_GROUPS,          /* console: print the group table */
     NODE_CMD_GPS_TIME,        /* the GPS reader: a fixed RMC (D63); value, millis, at_ms */
     NODE_CMD_GPS,             /* console: print the GPS state */
+    NODE_CMD_LORA,            /* console: print the LoRa backbone (D71) */
+    NODE_CMD_LORA_TEST,       /* console: send one echo over LoRa whatever the policy says */
 } node_cmd_type_t;
 
 typedef struct {

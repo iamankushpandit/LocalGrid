@@ -33,6 +33,7 @@ typedef struct {
 static sess_t s_sess[SESS_MAX];
 static int s_listen_fd = -1;
 static uint32_t s_voice_dropped;   /* talk frames a listener could not take at once (D61) */
+static sess_traffic_t s_traffic;   /* D70: counts and sizes only */
 
 /*
  * Frames for the handheld whose own frame is being handled are gathered here and go out as one
@@ -65,6 +66,7 @@ static void close_quiet(sess_t *x)
 static void sess_close(sess_t *x, const char *why)
 {
     ESP_LOGI(TAG, "[NET] Session %s closed: device %" PRIu32 " (%s)", x->addr, x->device, why);
+    s_traffic.disconnects++;
     uint32_t device = x->device;
     close_quiet(x);
     if (device != 0) {
@@ -117,6 +119,7 @@ static void accept_one(uint32_t now)
     }
     if (slot == NULL) {
         ESP_LOGW(TAG, "[NET] Session table full; refusing connection");
+        s_traffic.refused++;
         close(fd);
         return;
     }
@@ -137,6 +140,7 @@ static void accept_one(uint32_t now)
     slot->last_rx_ms = now;
     inet_ntoa_r(peer.sin_addr, slot->addr, sizeof(slot->addr));
     ESP_LOGI(TAG, "[NET] Session opened from %s", slot->addr);
+    s_traffic.opened++;
     ptrace_event(PTRACE_SESSION);
 }
 
@@ -150,6 +154,7 @@ static void on_registered(sess_t *x)
             close_quiet(o);
         }
     }
+    s_traffic.registrations++;
     ESP_LOGI("GRID", "[GRID] Registered device %" PRIu32 " from %s", x->device, x->addr);
 }
 
@@ -168,6 +173,7 @@ static void read_session(sess_t *x, uint32_t now)
     }
     x->fill = (uint16_t)(x->fill + n);
     x->last_rx_ms = now;
+    s_traffic.bytes_in += (uint32_t)n;
 
     while (x->fd >= 0 && x->fill >= 2) {
         uint16_t flen = lg_rd16(x->buf);
@@ -275,7 +281,15 @@ static void write_frames(sess_t *x, const uint8_t *out, size_t total, bool voice
         }
         break;
     }
+    uint32_t waited = app_now_ms() - started;
+    if (waited > s_traffic.slowest_send_ms) {
+        s_traffic.slowest_send_ms = waited;
+    }
+    s_traffic.bytes_out += (uint32_t)sent;
     if (sent < total) {
+        if (waited > SEND_WAIT_MS) {
+            s_traffic.send_timeouts++;
+        }
         sess_close(x, "send failed");
     }
 }
@@ -364,4 +378,20 @@ void sess_print(void)
 uint32_t sess_voice_dropped(void)
 {
     return s_voice_dropped;
+}
+
+void sess_traffic(sess_traffic_t *out)
+{
+    *out = s_traffic;
+    uint8_t open_now = 0, registered = 0;
+    for (size_t i = 0; i < SESS_MAX; i++) {
+        if (s_sess[i].fd >= 0) {
+            open_now++;
+            if (s_sess[i].device != 0) {
+                registered++;
+            }
+        }
+    }
+    out->open_now = open_now;
+    out->registered_now = registered;
 }

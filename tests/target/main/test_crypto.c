@@ -111,6 +111,52 @@ static void test_pbkdf2_rfc7914(void)
     CHECK(!lg_ct_equal((const uint8_t *)"abcd", (const uint8_t *)"abce", 4));
 }
 
+/* RFC 4231 test case 2, and the admin link's login proof and chunk sealing (D70). */
+static void test_hmac_and_ble_link(void)
+{
+    uint8_t out[32], expect[32];
+    hex2bin("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", expect, sizeof(expect));
+    CHECK_EQ(lg_hmac_sha256((const uint8_t *)"Jefe", 4, (const uint8_t *)"what do ya want for nothing?", 28, out), 0);
+    CHECK(memcmp(out, expect, sizeof(out)) == 0);
+
+    /* The login proof: HMAC-SHA256(key = the stored PBKDF2 hash, challenge || "lg-ble-admin").
+     * The password never crosses the link, and a proof for another challenge does not verify. */
+    uint8_t hash[32], challenge[32], msg[32 + 12], proof[32], other[32];
+    for (size_t i = 0; i < 32; i++) {
+        hash[i] = (uint8_t)(0xA0 + i);
+        challenge[i] = (uint8_t)(i * 7u);
+    }
+    memcpy(msg, challenge, 32);
+    memcpy(msg + 32, "lg-ble-admin", 12);
+    CHECK_EQ(lg_hmac_sha256(hash, sizeof(hash), msg, sizeof(msg), proof), 0);
+    CHECK(lg_ct_equal(proof, proof, 32));
+    msg[0] ^= 0x01;   /* a different challenge */
+    CHECK_EQ(lg_hmac_sha256(hash, sizeof(hash), msg, sizeof(msg), other), 0);
+    CHECK(!lg_ct_equal(proof, other, 32));
+
+    /* One sealed chunk: K_link from the beacon key, the 4-byte header as AAD, and the
+     * (direction, session, counter) nonce. The same counter in the other direction is a
+     * different nonce, and a chunk cannot be replayed as the next counter. */
+    uint8_t backbone[32], klink[32];
+    memset(backbone, 0x5A, sizeof(backbone));
+    CHECK_EQ(lg_hkdf_sha256((const uint8_t *)"LG-BLE-LINK-1", 13, backbone, 32,
+                            (const uint8_t *)"admin link", 10, klink, sizeof(klink)), 0);
+    uint8_t hdr[4] = { 0x83, 0x01, 0x40, 0x00 };   /* STATUS, more follows, 64 bytes */
+    uint8_t body[64], sealed[64 + 16], back[64];
+    memset(body, 0x42, sizeof(body));
+    uint8_t nonce[12] = { 0 }, nonce_in[12] = { 0 }, nonce_next[12] = { 0 };
+    nonce[0] = 1; nonce[1] = 0x34; nonce[2] = 0x12; nonce[4] = 7;   /* AP to client, session 0x1234, counter 7 */
+    memcpy(nonce_in, nonce, 12);  nonce_in[0] = 0;
+    memcpy(nonce_next, nonce, 12); nonce_next[4] = 8;
+    CHECK_EQ(lg_aead_seal(klink, nonce, hdr, sizeof(hdr), body, sizeof(body), sealed), 64 + 16);
+    CHECK_EQ(lg_aead_open(klink, nonce, hdr, sizeof(hdr), sealed, sizeof(sealed), back), 64);
+    CHECK(memcmp(back, body, sizeof(body)) == 0);
+    CHECK(lg_aead_open(klink, nonce_in, hdr, sizeof(hdr), sealed, sizeof(sealed), back) < 0);
+    CHECK(lg_aead_open(klink, nonce_next, hdr, sizeof(hdr), sealed, sizeof(sealed), back) < 0);
+    hdr[1] = 0;   /* the "more follows" flag is covered by the tag */
+    CHECK(lg_aead_open(klink, nonce, hdr, sizeof(hdr), sealed, sizeof(sealed), back) < 0);
+}
+
 /* Pairwise keys agree in both directions and differ for a third party. */
 static void test_e2e_pairs(void)
 {
@@ -141,5 +187,6 @@ void test_crypto(void)
     test_x25519_rfc7748();
     test_hkdf_rfc5869();
     test_pbkdf2_rfc7914();
+    test_hmac_and_ble_link();
     test_e2e_pairs();
 }

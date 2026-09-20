@@ -109,3 +109,14 @@ within 4 s and AP health every second.
 Everything above is sealed. A stranger's scanner sees the discovery payload (as today) and a
 scan response of random-looking bytes that changes every 500 ms. Positions (D65) are never in the
 beacon.
+
+## Pairing code (D69)
+
+A phone gets only what it needs to read the beacon: the status key K, never the backbone key.
+
+    LGW1:<base64url without padding of: company ID (u16 LE), discriminator (4 bytes), K (32 bytes)>
+
+38 bytes, so the text is `LGW1:` plus 51 characters. `python tools/grid_watch.py --pair` prints it
+and shows it as a QR code (byte mode, error correction M) on the local page. A reader rejects any
+other prefix or length. Anyone holding the code can read this grid's status until the grid's
+secrets are regenerated, so show it only to phones you trust.

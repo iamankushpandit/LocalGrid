@@ -376,6 +376,11 @@ def flash_board(data, d, args, built):
     answered = query_id(d["port"])
     if answered and answered.startswith("ERROR"):
         return False, answered
+    # A board whose identity partition is empty answers NONE. That is exactly the board a run that
+    # rewrites the identity is meant to fix, so do not refuse it then.
+    if answered == "NONE" and (args.erase or args.new_id or args.update_identity):
+        print("  board has no identity yet; this run writes one")
+        answered = None
     if d.get("id"):
         if answered and answered != d["id"]:
             return False, f"port {d['port']} has {answered} ({decode(data, answered)}), expected {d['id']}"

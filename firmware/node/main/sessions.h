@@ -22,3 +22,20 @@ void    sess_print(void);
 
 /* Talk frames dropped because a listener's socket was full (D61): the AP never waits on one. */
 uint32_t sess_voice_dropped(void);
+
+/* D70: how busy the handheld side is, for the BLE admin link's TRAFFIC reply. Counts and sizes
+ * only; no addresses (D21) and no frame content. */
+typedef struct {
+    uint8_t  open_now;
+    uint8_t  registered_now;
+    uint32_t opened;           /* sessions accepted since boot */
+    uint32_t registrations;
+    uint32_t disconnects;
+    uint32_t bytes_in;
+    uint32_t bytes_out;
+    uint32_t slowest_send_ms;  /* the longest one send() made the core task wait */
+    uint32_t send_timeouts;    /* sends abandoned after SEND_WAIT_MS, closing the session */
+    uint32_t refused;          /* connections refused because the session table was full */
+} sess_traffic_t;
+
+void sess_traffic(sess_traffic_t *out);

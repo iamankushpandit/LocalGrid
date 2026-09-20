@@ -1,9 +1,12 @@
 #include "ble_adv.h"
+
+#include "ble_link.h"
 #include "power_trace.h"
 
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
@@ -19,6 +22,9 @@ static uint8_t s_mfg[2 + 26];
 static size_t  s_mfg_len;
 static uint8_t s_own_addr_type;
 static bool    s_synced;
+static bool    s_connectable;   /* D70: the advert accepts an admin-link connection */
+static bool    s_link_ready;    /* the GATT service registered */
+static struct ble_npl_event s_mode_ev;
 static bool    s_host_ready;   /* nimble_port_init succeeded: the default event queue exists */
 
 /*
@@ -46,6 +52,8 @@ static void set_payload(const uint8_t *payload, size_t len)
     memcpy(s_mfg + 2, payload, len);
     s_mfg_len = 2 + len;
 }
+
+static int gap_event(struct ble_gap_event *event, void *arg);
 
 static int set_fields(void)
 {
@@ -95,6 +103,19 @@ static void on_rsp_event(struct ble_npl_event *ev)
     }
 }
 
+/*
+ * D70: the advert becomes connectable so a watcher can open the admin link, unless one is already
+ * connected or this AP is short of heap. The payload and the scan response are byte for byte the
+ * ones D68 sends either way; only the advertising PDU changes (ADV_IND while connectable,
+ * ADV_SCAN_IND otherwise), and both are scannable, so the status beacon never stops.
+ */
+#define ADV_MIN_HEAP 24576u
+
+static bool connectable_now(void)
+{
+    return s_link_ready && !ble_link_busy() && esp_get_free_heap_size() >= ADV_MIN_HEAP;
+}
+
 static void start_advertising(void)
 {
     if (set_fields() != 0) {
@@ -103,14 +124,63 @@ static void start_advertising(void)
     (void)set_rsp_fields();   /* after a host reset the controller has forgotten it */
     struct ble_gap_adv_params params;
     memset(&params, 0, sizeof(params));
-    params.conn_mode = BLE_GAP_CONN_MODE_NON;
+    s_connectable = connectable_now();
+    params.conn_mode = s_connectable ? BLE_GAP_CONN_MODE_UND : BLE_GAP_CONN_MODE_NON;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
     params.itvl_min = ADV_INTERVAL_UNITS;
     params.itvl_max = ADV_INTERVAL_UNITS;
-    int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, NULL, NULL);
+    int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, gap_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "[BLE] adv start rc=%d", rc);
     }
+}
+
+/* Host task: puts advertising back in the mode connectable_now() asks for. */
+static void restart_advertising(void)
+{
+    (void)ble_gap_adv_stop();
+    start_advertising();
+}
+
+static void on_adv_mode_event(struct ble_npl_event *ev)
+{
+    (void)ev;
+    if (s_synced && s_connectable != connectable_now()) {
+        restart_advertising();
+    }
+}
+
+static int gap_event(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            ble_link_on_connect(event->connect.conn_handle);
+        }
+        restart_advertising();   /* non-connectable now: the beacon goes on, nobody else may join */
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        ble_link_on_disconnect(event->disconnect.conn.conn_handle);
+        restart_advertising();
+        break;
+    case BLE_GAP_EVENT_MTU:
+        ble_link_on_mtu(event->mtu.conn_handle, event->mtu.value);
+        break;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ble_link_on_subscribe(event->subscribe.conn_handle, event->subscribe.attr_handle,
+                              event->subscribe.cur_notify != 0);
+        break;
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        ble_link_on_notify_tx();   /* one reply chunk has left the controller */
+        break;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        start_advertising();
+        break;
+    default:
+        break;
+    }
+    return 0;
 }
 
 static void on_sync(void)
@@ -152,6 +222,8 @@ esp_err_t ble_adv_init(const uint8_t *payload, size_t len)
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     ble_npl_event_init(&s_rsp_ev, on_rsp_event, NULL);
+    ble_npl_event_init(&s_mode_ev, on_adv_mode_event, NULL);
+    s_link_ready = ble_link_gatt_register() == ESP_OK;   /* D70, before the host starts */
     s_host_ready = true;
     nimble_port_freertos_init(host_task);
     return ESP_OK;
@@ -173,6 +245,13 @@ void ble_adv_set_status(const uint8_t *frame, size_t len)
     taskEXIT_CRITICAL(&s_rsp_mux);
     /* Posting an event that is still queued does nothing: the host task takes the newest frame. */
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_rsp_ev);
+}
+
+void ble_adv_review_connectable(void)
+{
+    if (s_host_ready) {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_mode_ev);
+    }
 }
 
 void ble_adv_update(const uint8_t *payload, size_t len)

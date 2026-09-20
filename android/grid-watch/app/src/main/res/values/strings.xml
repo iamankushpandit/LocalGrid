@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LocalGrid Watch</string>
+    <string name="grid_button">Grid</string>
+
+    <string name="channel_watch">Watching</string>
+    <string name="channel_watch_desc">Shows that LocalGrid Watch is listening for the grid in the background.</string>
+    <string name="channel_sos">SOS alerts</string>
+    <string name="channel_sos_desc">A new SOS or urgent alert on the grid. Loud, with vibration.</string>
+    <string name="channel_alerts">All clear</string>
+    <string name="channel_alerts_desc">Someone who sent an SOS has marked themselves safe.</string>
+
+    <plurals name="watching_aps">
+        <item quantity="one">Watching LocalGrid: %d AP heard</item>
+        <item quantity="other">Watching LocalGrid: %d APs heard</item>
+    </plurals>
+    <string name="watching_sos_suffix">" · SOS active"</string>
+    <string name="watching_detail">Listening over Bluetooth only. Tap to open.</string>
+    <string name="stop_watching">Stop watching</string>
+
+    <string name="sos_title">SOS from %1$s</string>
+    <string name="sos_text">Near %1$s, %2$d min ago. Tap to open LocalGrid Watch.</string>
+    <string name="all_clear_title">%1$s is safe</string>
+    <string name="all_clear_text">All clear on the grid.</string>
+</resources>

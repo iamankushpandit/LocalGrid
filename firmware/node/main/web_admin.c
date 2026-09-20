@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "gps.h"
 #include "grid_state.h"
+#include "lora.h"
 #include "lg_body.h"
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
@@ -80,6 +81,11 @@ typedef struct {
     uint32_t        time_generation;
     bool            time_by_gps;
     uint16_t        time_from;
+    /* D71: the second backbone, taken here so the web task never reads live LoRa state. */
+    lora_traffic_t    lora;
+    size_t            n_lora;
+    lora_peer_info_t  lora_peers[LG_MAX_NODES];
+    char              lora_version[28];
 } snapshot_t;
 
 typedef struct {
@@ -107,6 +113,12 @@ typedef struct {
  */
 static struct {
     SemaphoreHandle_t lock;
+    /*
+     * D70: one emitter serves the admin page and the BLE admin link, and they run on different
+     * tasks. w.view, w.view_pos and the scratch buffer below belong to whoever holds this; the
+     * httpd handlers that use them take it too. Held only while a reply is being written.
+     */
+    SemaphoreHandle_t emit;
     snapshot_t        snap;
     pos_snapshot_t    pos;
     snapshot_t        view;       /* web task only */
@@ -177,6 +189,9 @@ void web_admin_publish_snapshot(void)
     grid_state_time_info(&s->time_set_unix, &s->time_set_on, &s->time_generation, &s->time_by_gps);
     s->time_from = grid_state_sync_source();
     s->avail_newest_min = grid_state_avail_newest_minute();
+    lora_traffic(&s->lora);
+    s->n_lora = lora_peer_info(s->lora_peers, LG_MAX_NODES, now);
+    strncpy(s->lora_version, lora_version(), sizeof(s->lora_version) - 1);
 
     pos_snapshot_t *ps = &w.pos;
     memset(ps, 0, sizeof(*ps));
@@ -715,24 +730,25 @@ static esp_err_t h_logout(httpd_req_t *req)
 }
 
 /*
- * A JSON response sent in chunks as it is written, so no handler holds the whole body: pieces
- * gather in a small buffer that goes out whenever the next piece would not fit. After a send
- * fails, everything else is skipped and the handler returns ESP_FAIL, which closes the socket.
+ * A JSON response sent in pieces as it is written, so nothing holds the whole body: pieces gather
+ * in a small buffer that goes to the sink whenever the next piece would not fit. After a write
+ * fails, everything else is skipped. The sink is httpd's chunked response for the admin page and a
+ * sealed BLE chunk for the admin link (D70); the bytes are identical either way.
  */
 #define JOUT_BUF 1024u
 
 typedef struct {
-    httpd_req_t *req;
-    size_t       n;
-    bool         failed;
-    char         buf[JOUT_BUF];
+    const web_sink_t *sink;
+    size_t            n;
+    bool              failed;
+    char              buf[JOUT_BUF];
 } jout_t;
 
-static jout_t s_jo;   /* httpd runs one handler at a time; /api/history borrows the buffer too */
+static jout_t s_jo;   /* the scratch buffer guarded by w.emit; /api/history borrows it too */
 
 static void jout_flush(jout_t *o)
 {
-    if (!o->failed && o->n > 0 && httpd_resp_send_chunk(o->req, o->buf, (ssize_t)o->n) != ESP_OK) {
+    if (!o->failed && o->n > 0 && !o->sink->write(o->sink->ctx, o->buf, o->n)) {
         o->failed = true;
     }
     o->n = 0;
@@ -758,43 +774,44 @@ static void __attribute__((format(printf, 2, 3))) jout(jout_t *o, const char *fm
     }
 }
 
-static esp_err_t jout_end(jout_t *o)
+static bool jout_end(jout_t *o)
 {
     jout_flush(o);
-    if (o->failed) {
-        return ESP_FAIL;
-    }
-    return httpd_resp_send_chunk(o->req, NULL, 0);
+    return !o->failed;
 }
 
-static esp_err_t h_status(httpd_req_t *req)
+/* The admin page's sink: one httpd chunk per piece, exactly as before the sink existed. */
+static bool httpd_sink_write(void *ctx, const void *data, size_t len)
 {
-    if (session_from_request(req) == NULL) {
-        return send_error(req, "401 Unauthorized", "Log in to see grid status.");
-    }
+    return httpd_resp_send_chunk((httpd_req_t *)ctx, (const char *)data, (ssize_t)len) == ESP_OK;
+}
+
+/*
+ * The body of GET /api/status, written to a sink. The caller holds w.emit, so w.view, w.view_pos
+ * and s_jo are ours. Settings are read into a local, not w.cfg, which belongs to the httpd task.
+ */
+static bool emit_status(const web_sink_t *sink)
+{
     take_view(true);
     const snapshot_t *s = &w.view;
     const pos_snapshot_t *ps = &w.view_pos;
 
     gps_state_t gps;
     gps_state(&gps);
-    grid_state_settings(&w.cfg);
+    node_settings_t cfg;
+    grid_state_settings(&cfg);
     /* Small fields, the group table, and positions (D65); AP history goes out as bytes (/api/history, D49). */
     jout_t *o = &s_jo;
-    o->req = req;
+    o->sink = sink;
     o->n = 0;
     o->failed = false;
-    ptrace_event(PTRACE_WEB);
-    httpd_resp_set_status(req, "200 OK");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
-    json_escape(w.cfg.grid_name, name, sizeof(name));
+    json_escape(cfg.grid_name, name, sizeof(name));
     jout(o, "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"posix_tz\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
              ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
              ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,",
-         name, w.cfg.timezone, w.cfg.posix_tz, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
+         name, cfg.timezone, cfg.posix_tz, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
          s->heap_free, s->heap_min, s->handhelds);
     jout(o, "\"gps\":{\"started\":%s,\"heard\":%s,\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32
              ",\"lon_u\":%" PRId32 "},\"links\":[",
@@ -857,8 +874,52 @@ static esp_err_t h_status(httpd_req_t *req)
              i ? "," : "", is_ap ? (p->subject & ~LG_NODE_ID_BASE) : p->subject, pn, is_ap ? "true" : "false",
              p->lat_u, p->lon_u, p->fix_time, p->sats);
     }
-    jout(o, "]}");
+    /*
+     * D71: the second backbone, so the page can show whether the radio is there and whether it is
+     * earning its keep. Facts only; the page does the arithmetic and the wording (D49).
+     */
+    const lora_traffic_t *lr = &s->lora;
+    char lv[2 * sizeof(s->lora_version) + 8];
+    json_escape(s->lora_version, lv, sizeof(lv));
+    jout(o, "],\"lora\":{\"fitted\":%s,\"configured\":%s,\"off\":%s,\"broadcast\":%s,\"big\":%s,"
+            "\"version\":\"%s\",\"address\":%u,\"network\":%u,\"rssi\":%d,\"snr\":%d,"
+            "\"frames_out\":%" PRIu32 ",\"frames_in\":%" PRIu32 ",\"frames_first\":%" PRIu32
+            ",\"parts_out\":%" PRIu32 ",\"parts_in\":%" PRIu32 ",\"parts_dropped\":%" PRIu32
+            ",\"reasm_timeouts\":%" PRIu32 ",\"seal_fail\":%" PRIu32 ",\"refused_big\":%" PRIu32
+            ",\"queue\":%u,\"queue_high\":%u,\"queue_dropped\":%" PRIu32 ",\"retries\":%" PRIu32
+            ",\"airtime_ms\":%" PRIu32 ",\"restarts\":%u,\"heard_age_ms\":%" PRIu32 ",\"peers\":[",
+         (lr->flags & LORA_TF_FITTED) ? "true" : "false", (lr->flags & LORA_TF_CONFIGURED) ? "true" : "false",
+         (lr->flags & LORA_TF_OFF) ? "true" : "false", (lr->flags & LORA_TF_BROADCAST) ? "true" : "false",
+         (lr->flags & LORA_TF_BIG) ? "true" : "false", lv, lr->address, lr->networkid, lr->rssi, lr->snr,
+         lr->frames_out, lr->frames_in, lr->frames_first, lr->parts_out, lr->parts_in, lr->parts_dropped,
+         lr->reasm_timeouts, lr->seal_fail, lr->refused_big, lr->queue_depth, lr->queue_high,
+         lr->queue_dropped, lr->retries, lr->airtime_ms, lr->restarts, lr->heard_age_ms);
+    for (size_t i = 0; i < s->n_lora; i++) {
+        jout(o, "%s{\"node\":%u,\"up\":%s,\"rssi\":%d,\"snr\":%d,\"age_ms\":%" PRIu32 "}", i ? "," : "",
+             s->lora_peers[i].node, s->lora_peers[i].up ? "true" : "false", s->lora_peers[i].rssi,
+             s->lora_peers[i].snr, s->lora_peers[i].age_ms);
+    }
+    jout(o, "]}}");
     return jout_end(o);
+}
+
+static esp_err_t h_status(httpd_req_t *req)
+{
+    if (session_from_request(req) == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to see grid status.");
+    }
+    ptrace_event(PTRACE_WEB);
+    httpd_resp_set_status(req, "200 OK");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    web_sink_t sink = { .ctx = req, .write = httpd_sink_write };
+    xSemaphoreTake(w.emit, portMAX_DELAY);
+    bool ok = emit_status(&sink);
+    xSemaphoreGive(w.emit);
+    if (!ok) {
+        return ESP_FAIL;   /* the socket failed: httpd closes it */
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 /*
@@ -879,11 +940,9 @@ static esp_err_t h_status(httpd_req_t *req)
 #define HIST_HEADER  16u
 #define HIST_AP      76u
 
-static esp_err_t h_history(httpd_req_t *req)
+/* The body of GET /api/history, written to a sink. The caller holds w.emit. */
+static bool emit_history(const web_sink_t *sink)
 {
-    if (session_from_request(req) == NULL) {
-        return send_error(req, "401 Unauthorized", "Log in to see grid status.");
-    }
     take_view(false);
     const snapshot_t *sn = &w.view;
 
@@ -921,10 +980,45 @@ static esp_err_t h_history(httpd_req_t *req)
     }
     memcpy(out + n, sn->incidents, sn->n_incidents * sizeof(grid_incident_t));
     n += sn->n_incidents * sizeof(grid_incident_t);
+    return sink->write(sink->ctx, out, n);
+}
+
+static esp_err_t h_history(httpd_req_t *req)
+{
+    if (session_from_request(req) == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to see grid status.");
+    }
     ptrace_event(PTRACE_WEB);
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, (const char *)out, (ssize_t)n);
+    web_sink_t sink = { .ctx = req, .write = httpd_sink_write };
+    xSemaphoreTake(w.emit, portMAX_DELAY);
+    bool ok = emit_history(&sink);
+    xSemaphoreGive(w.emit);
+    if (!ok) {
+        return ESP_FAIL;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);   /* ends the response httpd_sink_write started */
+}
+
+bool web_admin_emit_status(const web_sink_t *sink, uint32_t wait_ms)
+{
+    if (w.emit == NULL || xSemaphoreTake(w.emit, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+        return false;
+    }
+    bool ok = emit_status(sink);
+    xSemaphoreGive(w.emit);
+    return ok;
+}
+
+bool web_admin_emit_history(const web_sink_t *sink, uint32_t wait_ms)
+{
+    if (w.emit == NULL || xSemaphoreTake(w.emit, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+        return false;
+    }
+    bool ok = emit_history(sink);
+    xSemaphoreGive(w.emit);
+    return ok;
 }
 
 static esp_err_t h_time(httpd_req_t *req)
@@ -1022,8 +1116,12 @@ static esp_err_t h_groups(httpd_req_t *req)
 
     /* Try the edit on a copy of the published table first, so the page hears why it would be
      * refused; the core task then applies it to the real one. */
-    take_view(false);
-    snapshot_t *snap = &w.view;   /* the web task's own copy: the trial edit may change it */
+    /* A copy of its own: the trial edit changes the roster, and w.view belongs to whoever holds
+     * w.emit (the admin link may be writing a reply from it). */
+    lg_roster_t roster;
+    xSemaphoreTake(w.lock, portMAX_DELAY);
+    roster = w.snap.roster;
+    xSemaphoreGive(w.lock);
     node_cmd_t cmd = { .type = NODE_CMD_GROUP_EDIT };
     lg_group_edit_t *e = &cmd.group;
     if (strcmp(op, "create") == 0) {
@@ -1037,7 +1135,7 @@ static esp_err_t h_groups(httpd_req_t *req)
         e->op = LG_GROUP_ANNOUNCERS;
         if (strcmp(devices, "all") == 0) {
             e->members = LG_ANNOUNCE_EVERYONE;
-        } else if (!parse_members(&snap->roster, devices, &e->members)) {
+        } else if (!parse_members(&roster, devices, &e->members)) {
             return send_error(req, "400 Bad Request", "Pick handhelds from the list.");
         }
     } else {
@@ -1049,17 +1147,17 @@ static esp_err_t h_groups(httpd_req_t *req)
             return send_error(req, "400 Bad Request", "A group name is 1 to 15 bytes (fewer with accents or emoji).");
         }
         memcpy(e->name, name, strlen(name));
-        if (!parse_members(&snap->roster, devices, &e->members)) {
+        if (!parse_members(&roster, devices, &e->members)) {
             return send_error(req, "400 Bad Request", "Pick handhelds from the list.");
         }
     }
-    switch (lg_groups_apply_edit(&snap->roster, 0, e, g_app.index)) {
+    switch (lg_groups_apply_edit(&roster, 0, e, g_app.index)) {
     case 0:
         break;
     case LG_ACK_REJ_UNKNOWN_TARGET:
         return send_error(req, "404 Not Found", "That group no longer exists. Reload the page.");
     default:
-        if (e->op == LG_GROUP_CREATE && snap->roster.groups.count >= LG_MAX_GROUPS) {
+        if (e->op == LG_GROUP_CREATE && roster.groups.count >= LG_MAX_GROUPS) {
             return send_error(req, "409 Conflict", "There are already 8 groups. Remove one first.");
         }
         return send_error(req, "400 Bad Request", "Check the name, and pick at least one handheld.");
@@ -1078,7 +1176,8 @@ static esp_err_t h_groups(httpd_req_t *req)
 esp_err_t web_admin_start(void)
 {
     w.lock = xSemaphoreCreateMutex();
-    if (w.lock == NULL) {
+    w.emit = xSemaphoreCreateMutex();
+    if (w.lock == NULL || w.emit == NULL) {
         return ESP_ERR_NO_MEM;
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

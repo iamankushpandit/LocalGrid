@@ -97,6 +97,36 @@ typedef struct {
 } lg_node_stats_t;
 
 /*
+ * Traffic counters (D70), for the BLE admin link's TRAFFIC reply. Counts and sizes only: nothing
+ * here records who said what, and no message body is kept. Every frame the core takes in, sends
+ * out, or relays adds one to its class, so the hot path costs one add. RAM only, per boot.
+ */
+typedef enum {
+    LG_TC_DIRECT = 0,   /* 1:1 text (DIRECT TEXT) */
+    LG_TC_GROUP,        /* group text */
+    LG_TC_BROADCAST,    /* broadcast and urgent text */
+    LG_TC_VOICE,        /* push-to-talk frames (D61) */
+    LG_TC_ACK,          /* delivered and read reports */
+    LG_TC_PRESENCE,     /* presence updates and registration */
+    LG_TC_ANNOUNCE,     /* groups, grid state, names */
+    LG_TC_POSITION,     /* positions (D65) */
+    LG_TC_TIME,         /* time sync and time zone */
+    LG_TC_OTHER,        /* hellos, pings, diagnostics, errors */
+    LG_TC_COUNT
+} lg_traffic_class_t;
+
+typedef struct {
+    uint32_t in[LG_TC_COUNT];
+    uint32_t out[LG_TC_COUNT];
+    uint32_t relayed[LG_TC_COUNT];
+    uint32_t bytes_in;
+    uint32_t bytes_out;
+    uint32_t unknown_recipient;   /* DIRECT for a device no AP has announced */
+    uint32_t table_full;          /* presence or group table had no room */
+    uint32_t ttl_expired;         /* a relayable frame died of TTL here */
+} lg_node_traffic_t;
+
+/*
  * The newest urgent broadcast this node carried (D68), for the AP's BLE status beacon. RAM only:
  * an AP that restarts reports none until the next one passes.
  */
@@ -132,6 +162,7 @@ typedef struct {
     lg_dedup_entry_t    dedup_slots[LG_NODE_DEDUP_SLOTS];
     lg_dedup_t          dedup;
     lg_node_stats_t     stats;
+    lg_node_traffic_t   traffic;                /* D70: counts by class, never content */
     /* Voice (D61) keeps out of the text dedup: its sequences carry LG_VOICE_SEQ_BIT, which would
      * push a text window past every text retransmission. Indexed by roster user index. */
     lg_voice_seen_t     voice_seen[LG_MAX_DEVICES];
@@ -242,6 +273,9 @@ uint8_t lg_node_battery(const lg_node_t *n, uint32_t device);
 
 /* The newest urgent broadcast carried, as of io.now_ms. False (out zeroed) when none. */
 bool lg_node_urgent(const lg_node_t *n, lg_urgent_info_t *out);
+
+/* Traffic counters since this node started (D70). Never NULL. */
+const lg_node_traffic_t *lg_node_traffic(const lg_node_t *n);
 
 /* The newest name held for device, or NULL when it has none. */
 const lg_name_t *lg_node_name(const lg_node_t *n, uint32_t device);
