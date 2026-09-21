@@ -725,6 +725,39 @@ static void stat_gps(void)
     }
     char value[SLIST_VALUE_MAX];
     stat_put(ROW_SECTION, "GPS", NULL, false);
+    /* D73: the GPS is read on the interval the grid sets, and the serial port is handed back in
+     * between so the radios keep the memory. Say which of the three the reader is doing before
+     * anything else, or "no fix" between readings reads as a fault. */
+    if (!g.always) {
+        if (g.phase == 0) {
+            snprintf(value, sizeof(value), "reading now, every %u min", (unsigned)((g.interval_s + 30u) / 60u));
+        } else if (g.next_in_s >= 60u) {
+            snprintf(value, sizeof(value), "next in %lu min %lu s", (unsigned long)(g.next_in_s / 60u),
+                     (unsigned long)(g.next_in_s % 60u));
+        } else {
+            snprintf(value, sizeof(value), "next in %lu s", (unsigned long)g.next_in_s);
+        }
+        stat_put(ROW_FACT, "Reading", value, false);
+        if (g.phase != 0) {
+            /* Nothing is being read, so the live numbers below would be stale. Show what the last
+             * reading found, which is still where this handheld is, and what it bought. */
+            if (g.has_pos) {
+                ui_geo_coord_text(g.lat_u, g.lon_u, value, sizeof(value));
+                stat_put(ROW_FACT, "Position", value, false);
+            }
+            if (g.utc != 0) {
+                char age[16];
+                ui_geo_age_text(g.fix_age_ms == UINT32_MAX ? 0u : g.fix_age_ms / 1000u, age, sizeof(age));
+                snprintf(value, sizeof(value), "%s ago, %u satellites", age, g.used);
+                stat_put(ROW_FACT, "Last fix", value, false);
+            }
+            if (g.freed_bytes != 0) {
+                snprintf(value, sizeof(value), "port released, %lu bytes free", (unsigned long)g.freed_bytes);
+                stat_put(ROW_FACT, "Between", value, false);
+            }
+            return;
+        }
+    }
     if (!g.talking) {
         stat_put(ROW_FACT, "Lock", "no data from the GPS: check its wiring", true);
         return;
@@ -771,11 +804,42 @@ static void stat_gps(void)
     stat_put(ROW_FACT, "Data", value, g.bad > g.sentences / 20u);
 }
 
+/*
+ * The optional LoRa module (D71, D76), only on a board wired for one: whether it is fitted, the
+ * link to an AP and the last signal. Three rows at most, and none at all on the boards that carry
+ * no module, which is nearly all of them.
+ */
+static void stat_lora(void)
+{
+    hh_lora_state_t lo;
+    if (!hh_service_lora(&lo)) {
+        return;   /* this board has no LoRa connector: nothing to say */
+    }
+    char value[SLIST_VALUE_MAX];
+    stat_put(ROW_SECTION, "LoRa", NULL, false);
+    if (!lo.fitted) {
+        stat_put(ROW_FACT, "Module", lo.ever_fitted ? "stopped answering" : "none fitted", lo.ever_fitted);
+        return;
+    }
+    stat_put(ROW_FACT, "Module", lo.off ? "fitted, held off" : "fitted", lo.off);
+    if (lo.heard_age_ms == UINT32_MAX) {
+        stat_put(ROW_FACT, "Link", "no AP heard yet", true);
+        return;
+    }
+    char age[16];
+    ui_geo_age_text(lo.heard_age_ms / 1000u, age, sizeof(age));
+    snprintf(value, sizeof(value), "%s, heard %s ago", lo.link ? "up" : "down", age);
+    stat_put(ROW_FACT, "Link", value, !lo.link);
+    snprintf(value, sizeof(value), "%d dBm, SNR %d", lo.rssi, lo.snr);
+    stat_put(ROW_FACT, "Signal", value, lo.rssi < -110);
+}
+
 static void stat_location(const hh_status_t *st)
 {
     char value[SLIST_VALUE_MAX];
     char where[32];
     stat_gps();
+    stat_lora();
     stat_put(ROW_SECTION, "Location", NULL, false);
     hh_position_t own;
     bool have_own = hh_service_own_position(&own) && own.valid;

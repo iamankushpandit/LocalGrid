@@ -67,6 +67,72 @@ static void test_registration_and_presence(void)
     sim_destroy(s);
 }
 
+/*
+ * Capability bits (design review answer 19, reserved since the first protocol and empty until now).
+ * A handheld says what it can do when it registers; its AP shares that with the grid, so a device
+ * two hops away can ask what is on the network and what each one is able to do, instead of a demo
+ * or a tool being told in advance which board is which.
+ */
+static void test_capabilities_travel(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* Emma is on a board with a speaker but no microphone: it can still send generated voice. */
+    const uint16_t emma_caps = LG_CAP_SPEAKER | LG_CAP_TONE_TALK | LG_CAP_SCREEN | LG_CAP_BATTERY;
+    lg_client_set_caps(cl(s, EMMA), emma_caps);
+    sim_detach(s, EMMA);
+    sim_attach(s, EMMA, 2);            /* re-registers, now reporting what it can do */
+
+    /* Her own AP recorded it from REGISTER ... */
+    const lg_presence_entry_t *here = lg_node_presence(&s->nodes[2].node, LG_PROTO_EMMA);
+    CHECK(here != NULL && here->caps == emma_caps);
+    /* ... and it reached the far end of the chain, two hops away. */
+    const lg_presence_entry_t *far = lg_node_presence(&s->nodes[0].node, LG_PROTO_EMMA);
+    CHECK(far != NULL && far->caps == emma_caps);
+    /* A handheld on that far AP can read it, which is what a demo picks its targets from. */
+    const lg_peer_t *peer = lg_client_peer(cl(s, DAD), LG_PROTO_EMMA);
+    CHECK(peer != NULL && peer->caps == emma_caps);
+    CHECK((peer->caps & LG_CAP_TONE_TALK) != 0);
+    CHECK((peer->caps & LG_CAP_MIC) == 0);
+    sim_destroy(s);
+}
+
+/*
+ * The older presence layout, from before capability bits, must still decode: a grid whose APs are
+ * flashed one at a time (they run on battery in other rooms) would otherwise lose presence
+ * outright. An older sender reports no capabilities rather than wrong ones.
+ */
+static void test_presence_accepts_both_lengths(void)
+{
+    lg_presence_t in = { .device = 7, .node = 2, .epoch = 99, .state = LG_PRES_ONLINE,
+                         .caps = LG_CAP_SPEAKER | LG_CAP_GPS };
+    memset(in.pubkey, 0xA5, LG_PUBKEY_LEN);
+    uint8_t buf[LG_PRESENCE_LEN];
+    CHECK_EQ(lg_presence_enc(&in, buf), LG_PRESENCE_LEN);
+
+    lg_presence_t out;
+    CHECK(lg_presence_dec(buf, LG_PRESENCE_LEN, &out));
+    CHECK_EQ(out.caps, in.caps);
+    CHECK_EQ(out.device, in.device);
+    CHECK(memcmp(out.pubkey, in.pubkey, LG_PUBKEY_LEN) == 0);
+
+    /* The old layout: the same fields with the key where caps now sit, and no capability bits. */
+    uint8_t old[LG_PRESENCE_LEN_V1];
+    memcpy(old, buf, 11);
+    memcpy(old + 11, in.pubkey, LG_PUBKEY_LEN);
+    lg_presence_t legacy;
+    CHECK(lg_presence_dec(old, LG_PRESENCE_LEN_V1, &legacy));
+    CHECK_EQ(legacy.caps, 0u);
+    CHECK_EQ(legacy.device, in.device);
+    CHECK(memcmp(legacy.pubkey, in.pubkey, LG_PUBKEY_LEN) == 0);
+
+    /* Any other length is still refused. */
+    CHECK(!lg_presence_dec(buf, LG_PRESENCE_LEN - 1u, &out));
+    CHECK(!lg_presence_dec(buf, LG_PRESENCE_LEN_V1 + 1u, &out));
+}
+
 static void test_direct_two_hops_encrypted(void)
 {
     sim_t *s = make_chain();
@@ -2052,6 +2118,8 @@ void test_messaging(void)
     test_time_announce();
     test_time_source_and_zone();
     test_registration_and_presence();
+    test_capabilities_travel();
+    test_presence_accepts_both_lengths();
     test_direct_two_hops_encrypted();
     test_direct_same_node();
     test_group();

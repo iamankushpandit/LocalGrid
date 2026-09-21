@@ -36,22 +36,44 @@ static const char *TAG = "BB";
 #define BB_PROBE_AFTER_MS        (BB_HELLO_MS + BB_HELLO_MS / 2u)
 #define BB_PROBE_MS              1000u
 #define BB_GAP_MS                (2u * BB_HELLO_MS)   /* a HELLO later than this counts as a gap */
-#define BB_TX_QUEUE          16u
+/*
+ * Every slot here is BB_FRAME_MAX (1052) bytes, while the largest frame the grid actually sends is
+ * about 288: a text body of 240 plus its tag, or a 256-byte grid-state record, inside a 32-byte
+ * envelope. Sixteen transmit and twelve receive slots was therefore 30 KB of mostly empty buffer on
+ * a board that measured 1 to 6 KB of free heap on 2026-09-21, one allocation from failing. The
+ * depths below are what the bench has ever needed: the highest the transmit queue has been seen is
+ * 1, and a burst that outruns them drops a frame and says so, which the grid already survives.
+ */
+#define BB_TX_QUEUE          6u
 #define BB_TX_DEADMAN_MS     1000u
-#define BB_RX_QUEUE          12u
+#define BB_RX_QUEUE          6u
 #define BB_RX_PER_POLL       8u
+
+/*
+ * A queue slot holds what the grid actually sends, not what the protocol's ceiling allows.
+ * BB_FRAME_MAX is 1052 (LG_FRAME_MAX 1024 plus the outer header and tag) and is still what a
+ * frame is checked against, but the largest frame anything here builds is a 100 ms voice frame:
+ * 32 bytes of envelope, LG_VOICE_DATA_MAX of sound, the 12-byte outer header and a 16-byte tag,
+ * which is 460. Sizing twelve slots for 1052 cost 7 KB of buffer that could never be filled, on
+ * an AP measured at 1 to 6 KB of free heap (2026-09-21). Anything larger than a slot is refused
+ * and counted rather than truncated; the static assert below keeps the two in step.
+ */
+#define BB_SLOT_MAX          512u
+_Static_assert(BB_SLOT_MAX >= LG_ENV_SIZE + LG_VOICE_DATA_MAX + BB_OUTER_LEN + LG_AEAD_TAG_LEN,
+               "a queue slot must hold the largest frame this AP sends: a voice frame");
+_Static_assert(BB_SLOT_MAX <= BB_FRAME_MAX, "a slot cannot be larger than a frame may be");
 
 typedef struct {
     uint8_t  mac[6];
     int8_t   rssi;
     uint16_t len;
-    uint8_t  data[BB_FRAME_MAX];
+    uint8_t  data[BB_SLOT_MAX];
 } lgbb_rx_t;
 
 typedef struct {
     uint8_t  mac[6];
     uint16_t len;
-    uint8_t  data[BB_FRAME_MAX];
+    uint8_t  data[BB_SLOT_MAX];
 } lgbb_tx_t;
 
 typedef struct {
@@ -127,7 +149,7 @@ static struct {
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     static lgbb_rx_t item;   /* the Wi-Fi task delivers callbacks one at a time */
-    if (info == NULL || data == NULL || len <= (int)(BB_OUTER_LEN + LG_AEAD_TAG_LEN) || len > (int)BB_FRAME_MAX) {
+    if (info == NULL || data == NULL || len <= (int)(BB_OUTER_LEN + LG_AEAD_TAG_LEN) || len > (int)BB_SLOT_MAX) {
         return;
     }
     memcpy(item.mac, info->src_addr, 6);

@@ -7,7 +7,7 @@
 
 #define SETTINGS_NAMESPACE  "lgcfg"
 #define SETTINGS_KEY        "admin"
-#define SETTINGS_VERSION    3
+#define SETTINGS_VERSION    4
 #define GROUPS_KEY          "groups"
 
 /* Version 1, written by master-only firmware before D45. Read once and carried forward. */
@@ -35,8 +35,16 @@ typedef struct {
     uint16_t author;
 } settings_v2_t;
 
-_Static_assert(sizeof(settings_v1_t) != sizeof(settings_v2_t) && sizeof(settings_v2_t) != sizeof(node_settings_t),
-               "settings versions are told apart by their size");
+/*
+ * Version 3, D67 until D73: version 4 without the GPS plan. It is not listed as a shape of its
+ * own, because D73's u16 fell into what was already padding: a version 3 record and a version 4
+ * record are the same number of bytes. Those two are told apart by the version field instead, and
+ * the padding a version 3 record carries is zero, which reads as "the GPS plan the firmware
+ * thinks sensible" - exactly what an AP that has never been told should do.
+ */
+_Static_assert(sizeof(settings_v1_t) != sizeof(settings_v2_t) && sizeof(settings_v1_t) != sizeof(node_settings_t) &&
+                   sizeof(settings_v2_t) != sizeof(node_settings_t),
+               "settings versions are told apart by their size, except 3 and 4 by their version field");
 
 esp_err_t settings_load(node_settings_t *out)
 {
@@ -99,13 +107,22 @@ esp_err_t settings_load(node_settings_t *out)
         if (err != ESP_OK) {
             return err;
         }
-        if (len != sizeof(tmp) || tmp.version != SETTINGS_VERSION) {
+        if (len != sizeof(tmp)) {
+            return ESP_OK;   /* incompatible record: treated as unconfigured */
+        }
+        if (tmp.version == 3) {
+            /* D73: the same bytes as version 4, one version older. Everything else carries over,
+             * including (seq, author), so the grid still agrees this record is current. */
+            tmp.gps_plan = LG_GPS_PLAN_DEFAULT;
+            tmp.version = SETTINGS_VERSION;
+        } else if (tmp.version != SETTINGS_VERSION) {
             return ESP_OK;   /* incompatible record: treated as unconfigured */
         }
     }
     tmp.grid_name[SETTINGS_GRID_NAME_MAX] = '\0';
     tmp.timezone[SETTINGS_TZ_MAX] = '\0';
     tmp.posix_tz[SETTINGS_POSIX_TZ_MAX] = '\0';
+    tmp.gps_plan = lg_gps_plan_canon(tmp.gps_plan);   /* D73 */
     *out = tmp;
     return ESP_OK;
 }

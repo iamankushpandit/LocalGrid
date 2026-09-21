@@ -30,6 +30,7 @@ Modes:
 """
 import argparse
 import atexit
+import contextlib
 import csv
 import hashlib
 import json
@@ -40,6 +41,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+from serial_log import hold_port   # take a port from the logging daemon while we use it
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEVICES = ROOT / "tools" / "bench_devices.json"
@@ -364,7 +367,8 @@ def identify(data, chosen):
         if not d["port"]:
             print(f"{d['name']:<12} {'-':<6} {'-':<24} no port in the device map yet")
             continue
-        got = query_id(d["port"])
+        with hold_port(d["port"]):
+            got = query_id(d["port"])
         if got and got.startswith("ERROR"):
             desc = got
             got = "-"
@@ -385,14 +389,18 @@ def identify(data, chosen):
     # Ports nobody put in the map are where a duplicate hides: a second board of a type the map
     # already has answers on a port the map has never heard of, so a listing of the map alone shows
     # nothing wrong. Ask every other serial port on this machine too.
-    mapped = {d["port"] for d in chosen if d["port"]}
+    # Every port the whole map knows, not just the chosen boards': identifying two handhelds
+    # must not open an AP's port and reset it, which the sweep would otherwise do because
+    # that AP is "not in the map" from the chosen subset's point of view.
+    mapped = {d["port"] for d in data["devices"] if d["port"]}
     try:
         from serial.tools import list_ports
         extra = [p.device for p in list_ports.comports() if p.device not in mapped]
     except Exception:
         extra = []
     for port in sorted(extra):
-        got = query_id(port)
+        with hold_port(port):
+            got = query_id(port)
         if not got or got.startswith("ERROR"):
             continue
         desc = decode(data, got) or "an ID this device map does not recognise"
@@ -546,7 +554,9 @@ def main():
             if wait > 0:
                 print(f"\n  waiting {wait:.0f} s so the grid keeps its time", flush=True)
                 time.sleep(wait)
-        ok, detail = flash_board(data, d, args, built)
+        # The logging daemon, if one is running, holds this port; flashing needs it.
+        with hold_port(d["port"]) if d["port"] else contextlib.nullcontext():
+            ok, detail = flash_board(data, d, args, built)
         results.append((d, args.firmware or d["firmware"], ok, detail))
         if d["role"] == "N":
             last_node_done = time.time()

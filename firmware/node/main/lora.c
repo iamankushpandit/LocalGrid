@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 #include "lg_body.h"
 #include "lg_envelope.h"
+#include "lora_seal.h"
 #include "lora_wire.h"
 #include "node_app.h"
 
@@ -112,6 +113,22 @@ static struct {
     uint8_t           msg_id;
 
     lora_asm_t  asmb;             /* LoRa task only */
+
+    /*
+     * D76: the handheld half of the radio. A different key from the backbone's, so a handheld
+     * cannot read or forge one AP talking to another, and a different sender space, so the one key
+     * is never used with a repeated nonce (lora_seal.h). Core task only, like lgbb_seal.
+     */
+    lora_seal_t      hh_seal;
+    lora_client_cb_t on_client;
+    struct {
+        uint32_t session;    /* the pseudo-session device, 0 until one frame has been opened */
+        uint32_t last_ms;
+        bool     heard;
+        int8_t   rssi;
+        int8_t   snr;
+    } hh[LORA_PEER_INDEX_MAX + 1u];
+    uint32_t hh_frames_in, hh_frames_out, hh_refused;
 
     /* core task only */
     lora_peer_t     peers[LG_MAX_NODES];
@@ -664,6 +681,47 @@ static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t
     return ok;
 }
 
+/* D76: how long after hearing a handheld this AP will still spend airtime answering it. */
+#define LORA_CLIENT_TIMEOUT_MS  600000u
+
+bool lora_has_client(uint32_t device)
+{
+    return L.started && L.fitted && !L.off && device >= 1u && device <= LORA_PEER_INDEX_MAX &&
+           L.hh[device].heard && app_now_ms() - L.hh[device].last_ms <= LORA_CLIENT_TIMEOUT_MS;
+}
+
+bool lora_offer_client(uint32_t device, const uint8_t *frame, size_t len)
+{
+    if (!lora_has_client(device)) {
+        return false;   /* transmitting at a handheld nobody has heard is airtime spent on nothing */
+    }
+    if (lora_policy_for_handheld_frame(frame, len) == LORA_SEND_NEVER) {
+        return false;   /* the roster, names, groups, the time zone, live voice: never this way */
+    }
+    /*
+     * Sealed with the LoRa key straight into the slot that carries it. The sender field is this
+     * AP's, above every device number, so an AP and a handheld never build the same nonce.
+     */
+    size_t need = len + LORA_SEAL_OUTER_LEN + LG_AEAD_TAG_LEN;
+    bool alert = lora_is_alert_frame(frame, len);
+    lock();
+    lora_txq_slot_t *slot = lora_txq_reserve(&L.txq, LORA_ADDR_HANDHELD(device), alert, L.msg_id, need,
+                                             app_now_ms() + rand_ms(BACKOFF_MAX_MS));
+    int n = slot != NULL ? lora_seal_frame(&L.hh_seal, slot->data, slot->cap, frame, len) : -1;
+    bool ok = n > 0 && lora_txq_commit(&L.txq, slot, (size_t)n);
+    if (slot != NULL && !ok) {
+        lora_txq_release(&L.txq, slot);
+    }
+    if (ok) {
+        L.msg_id++;
+        L.hh_frames_out++;
+    } else if (slot != NULL) {
+        L.seal_fail++;
+    }
+    unlock();
+    return ok;
+}
+
 bool lora_is_peer(uint16_t node)
 {
     return node < LG_MAX_NODES && L.peers[node].up && !L.off;
@@ -883,6 +941,58 @@ static void handle_hello(uint16_t src, const lg_env_t *e, const uint8_t *body, i
     }
 }
 
+/*
+ * D76: a frame a handheld sent. It is sealed with the LoRa key, and the sender field in that seal
+ * is the handheld's own device number, so this AP knows whose frame it is without a REGISTER. From
+ * there it takes the path a frame off that handheld's TCP session takes, and the AP answers it the
+ * same way (io_to_client falls through to lora_offer_client when there is no session).
+ */
+static void deliver_client(const lora_rx_t *r, uint32_t now)
+{
+    static uint8_t inner[LG_FRAME_MAX];   /* core task only */
+    uint16_t src = 0;
+    uint32_t boot = 0;
+    size_t n = 0;
+    lora_seal_result_t rc = lora_seal_open(&L.hh_seal, r->slot->data, r->slot->total, &src, &boot, inner,
+                                           sizeof(inner), &n);
+    if (rc != LORA_SEAL_OK) {
+        if (rc != LORA_SEAL_REPLAY) {
+            L.seal_fail++;
+        }
+        return;
+    }
+    if (lora_seal_is_ap(src) || src == 0 || src > LORA_PEER_INDEX_MAX) {
+        L.seal_fail++;   /* an AP's sender field on a handheld's frame, or a device with no address */
+        return;
+    }
+    lg_env_t e;
+    if (lg_env_decode(inner, n, &e) != LG_OK || e.origin_id != src) {
+        L.seal_fail++;   /* the sealed identity and the envelope's author must be the same handheld */
+        return;
+    }
+    if (lora_policy_for_handheld_frame(inner, n) == LORA_SEND_NEVER) {
+        L.hh_refused++;   /* it holds the key, but this is not something a handheld may send here */
+        return;
+    }
+    L.frames_in++;
+    L.hh_frames_in++;
+    L.heard_ms = now;
+    L.heard_any = true;
+    if (!L.hh[src].heard) {
+        ESP_LOGI(TAG, "[LORA] Handheld %u heard over LoRa, RSSI %d dBm, SNR %d", (unsigned)src, r->rssi,
+                 r->snr);
+    }
+    L.hh[src].heard = true;
+    L.hh[src].last_ms = now;
+    L.hh[src].rssi = r->rssi;
+    L.hh[src].snr = r->snr;
+    L.hh[src].session = src;   /* authenticated by the seal: the frame's author is its sender */
+    (void)boot;
+    if (L.on_client != NULL) {
+        L.on_client(&L.hh[src].session, inner, n);
+    }
+}
+
 static void deliver(const lora_rx_t *r, uint32_t now)
 {
     static uint8_t inner[LG_FRAME_MAX];   /* core task only */
@@ -981,7 +1091,11 @@ void lora_poll(uint32_t now_ms)
         if (!have) {
             break;
         }
-        deliver(&r, now_ms);
+        if (LORA_PEER_KIND(r.slot->peer) == LORA_PEER_HANDHELD) {
+            deliver_client(&r, now_ms);   /* D76: the LoRa key, and a handheld's small set of frames */
+        } else {
+            deliver(&r, now_ms);
+        }
         lora_asm_done(&L.asmb, r.slot);   /* the reassembly slot is free again */
     }
     for (uint16_t i = 0; i < LG_MAX_NODES; i++) {
@@ -1094,6 +1208,22 @@ void lora_print(void)
            " | airtime %" PRIu32 " ms | module restarts %u\n", t.seal_fail, t.queue_depth, t.queue_high,
            t.queue_dropped, t.retries, t.airtime_ms, t.restarts);
     printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
+    /* D76: the handheld half, sealed with the LoRa key rather than the backbone key. */
+    printf("  handhelds (LoRa key): frames in %" PRIu32 " out %" PRIu32 ", refused %" PRIu32 "\n",
+           L.hh_frames_in, L.hh_frames_out, L.hh_refused);
+    bool any_hh = false;
+    for (uint32_t d = 1; d <= LORA_PEER_INDEX_MAX; d++) {
+        if (!L.hh[d].heard) {
+            continue;
+        }
+        any_hh = true;
+        printf("    device %-2" PRIu32 "  %-10s  RSSI %4d  SNR %3d  %" PRIu32 " ms ago\n", d,
+               lora_has_client(d) ? "answerable" : "too old", L.hh[d].rssi, L.hh[d].snr,
+               app_now_ms() - L.hh[d].last_ms);
+    }
+    if (!any_hh) {
+        printf("    none heard yet\n");
+    }
     printf("  one full part is about %" PRIu32 " ms on the air; it can take a %u-byte payload%s;"
            " live voice never comes this way\n", lora_airtime_ms(LORA_PART_B64_MAX),
            (unsigned)lora_txq_capacity(&L.txq),
@@ -1155,8 +1285,8 @@ static bool take_buffers(void)
     return true;
 }
 
-esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], lgbb_frame_cb_t on_frame,
-                     lgbb_link_cb_t on_link)
+esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], const uint8_t lora_key[32],
+                     lgbb_frame_cb_t on_frame, lgbb_link_cb_t on_link, lora_client_cb_t on_client)
 {
     if (L.started) {
         return ESP_ERR_INVALID_STATE;
@@ -1170,9 +1300,10 @@ esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], lgbb_fra
     L.pins = ap_index == 0 ? main_pins : other_pins;
     L.index = (uint8_t)ap_index;
     L.address = (uint16_t)LORA_ADDR_AP(ap_index);
-    /* AT+NETWORKID takes 3..15 (18 is its default). One byte of the grid's discriminator picks
-     * one, so another LocalGrid built from other secrets is ignored by the module itself. */
-    L.networkid = (uint8_t)(3u + (discriminator[0] % 13u));
+    L.networkid = LORA_NETWORK_ID(discriminator[0]);
+    /* D76: the handheld key, and this AP's sender field in it, which no device number can be. */
+    lora_seal_init(&L.hh_seal, lora_key, (uint16_t)(LORA_SEAL_AP_SENDER | ap_index), g_app.boot);
+    L.on_client = on_client;
     L.broadcast_ok = true;
     L.on_frame = on_frame;
     L.on_link = on_link;

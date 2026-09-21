@@ -813,10 +813,15 @@ static bool emit_status(const web_sink_t *sink)
              ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,",
          name, cfg.timezone, cfg.posix_tz, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
          s->heap_free, s->heap_min, s->handhelds);
+    /* D73: the plan as the grid stores it and what this AP's own reader is doing with it. The page
+     * turns the number into words; the AP only ever sends the number. */
     jout(o, "\"gps\":{\"started\":%s,\"heard\":%s,\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32
-             ",\"lon_u\":%" PRId32 "},\"links\":[",
+             ",\"lon_u\":%" PRId32 ",\"plan\":%u,\"phase\":%u,\"next_s\":%" PRIu32 ",\"readings\":%" PRIu32
+             ",\"fixes\":%" PRIu32 ",\"ttf_ms\":%" PRId32 ",\"freed\":%" PRIu32 "},\"links\":[",
          gps.started ? "true" : "false", gps.heard ? "true" : "false", gps_has_fix() ? "true" : "false", gps.sats,
-         gps.has_pos ? "true" : "false", gps.has_pos ? gps.lat_u : 0, gps.has_pos ? gps.lon_u : 0);
+         gps.has_pos ? "true" : "false", gps.has_pos ? gps.lat_u : 0, gps.has_pos ? gps.lon_u : 0, cfg.gps_plan,
+         gps.phase, gps.next_in_s, gps.readings, gps.fixes,
+         gps.last_ttf_ms == UINT32_MAX ? -1 : (int32_t)gps.last_ttf_ms, gps.freed_bytes);
     for (size_t i = 0; i < s->n_links; i++) {
         jout(o, "%s{\"node\":%u,\"up\":%s,\"rssi\":%d,\"age_ms\":%" PRIu32 "}", i ? "," : "", s->links[i].node,
              s->links[i].up ? "true" : "false", s->links[i].rssi, s->links[i].age_ms);
@@ -1068,6 +1073,44 @@ static esp_err_t h_time(httpd_req_t *req)
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+/*
+ * D73: how often a GPS is read. Admin policy like the zone, so it goes into the same settings
+ * record, gets the same (seq, author) version, replicates to every AP, and reaches handhelds from
+ * whichever AP they are on. The page sends the stored number and nothing else.
+ */
+static esp_err_t h_gps(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to change how often the GPS is read.");
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    char body[ADMIN_BODY_MAX];
+    uint64_t plan = 0;
+    if (!read_body(req, body, sizeof(body)) || !json_uint64(body, "plan", &plan) || plan > 0xFFFFu ||
+        !lg_gps_plan_valid((uint16_t)plan)) {
+        return send_error(req, "400 Bad Request", "Choose one of the intervals offered.");
+    }
+    node_settings_t *cfg = &w.cfg;
+    grid_state_settings(cfg);
+    if (cfg->gps_plan == (uint16_t)plan) {
+        return send_json(req, "200 OK", "{\"ok\":true}");
+    }
+    cfg->gps_plan = (uint16_t)plan;
+    if (grid_state_commit(cfg) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "The setting could not be saved. Try again.");
+    }
+    uint16_t every = lg_gps_plan_seconds((uint16_t)plan);
+    if (every == 0u) {
+        ESP_LOGI(TAG, "[WEB] Admin set the GPS to always on");
+    } else {
+        ESP_LOGI(TAG, "[WEB] Admin set the GPS to a reading every %u s", every);
+    }
+    return send_json(req, "200 OK", "{\"ok\":true}");
+}
+
 /* Devices as the page sends them, "1,3,4", to member bits of r. False for anything else. */
 static bool parse_members(const lg_roster_t *r, const char *list, uint32_t *out)
 {
@@ -1184,7 +1227,7 @@ esp_err_t web_admin_start(void)
     /* Measured high-water mark 2.6 KB with the page polling (/api/status streams from a static
      * buffer, so no handler keeps a large body on the stack); 6 KB leaves room for login's PBKDF2. */
     config.stack_size = 6144;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 13;   /* the routes below; D73 added /api/gps */
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
 
@@ -1205,6 +1248,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/history",  .method = HTTP_GET,  .handler = h_history },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
+        { .uri = "/api/gps",      .method = HTTP_POST, .handler = h_gps },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         httpd_register_uri_handler(server, &routes[i]);

@@ -319,6 +319,33 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
     return LORA_SEND_IF_WIFI_DOWN;
 }
 
+lora_policy_t lora_policy_for_handheld_frame(const uint8_t *frame, size_t len)
+{
+    lg_env_t e;
+    if (frame == NULL || len > LORA_PAYLOAD_MAX || lg_env_decode(frame, len, &e) != LG_OK) {
+        return LORA_SEND_NEVER;
+    }
+    switch (e.type) {
+    case LG_T_TEXT:
+        /* An SOS, an urgent broadcast or an all clear goes whatever Wi-Fi is doing (D74); ordinary
+         * text only when Wi-Fi cannot carry it. */
+        return (e.flags & (LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR)) != 0u ? LORA_SEND_ALWAYS
+                                                                      : LORA_SEND_IF_WIFI_DOWN;
+    case LG_T_POSITION:     /* D65: where the person is, which is most of why they carry this */
+    case LG_T_PING:         /* presence and the battery (D68) */
+    case LG_T_PONG:
+    case LG_T_MSG_ACK:      /* so a sender learns their SOS was taken, and a reader can be reported */
+        return LORA_SEND_IF_WIFI_DOWN;
+    default:
+        /*
+         * Everything else, named rather than assumed: live voice (D61), registration, the roster,
+         * chosen names, group edits, group tables, the time zone and the shared state (D45) are
+         * never put on a handheld's radio.
+         */
+        return LORA_SEND_NEVER;
+    }
+}
+
 bool lora_is_alert_frame(const uint8_t *frame, size_t len)
 {
     return lora_policy_for_frame(frame, len) == LORA_SEND_ALWAYS;

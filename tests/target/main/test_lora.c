@@ -11,6 +11,7 @@
 
 #include "lg_envelope.h"
 #include "lg_test.h"
+#include "lora_seal.h"
 #include "lora_wire.h"
 
 #define PEER_ONE  (LORA_PEER_AP | 1u)
@@ -560,6 +561,266 @@ static void test_airtime(void)
     CHECK(48u * full < LORA_ASM_MAX_MS);
 }
 
+
+/* ---- handhelds on the air (D71's "Ready for handhelds later", unblocked by D76) ---- */
+
+#define PEER_HH_ONE  (LORA_PEER_HANDHELD | 1u)
+#define PEER_HH_TWO  (LORA_PEER_HANDHELD | 2u)
+
+/*
+ * The peer byte. It was made a whole byte so that handhelds needed no wire change when they got
+ * modules; this is the test that they did not, and that an AP's parts and a handheld's are never
+ * mistaken for each other however alike their numbering.
+ */
+static void test_handheld_peer(void)
+{
+    static uint8_t payload[200];
+    uint8_t part[LORA_PART_RAW_MAX];
+    lora_part_t p;
+
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        payload[i] = (uint8_t)(i * 3u + 1u);
+    }
+    size_t n = build(part, sizeof(part), PEER_HH_ONE, 7, 0, 2, payload, sizeof(payload));
+    CHECK(n > 0);
+    CHECK(lora_part_parse(part, n, &p));
+    CHECK_EQ(p.peer, PEER_HH_ONE);
+    CHECK_EQ(LORA_PEER_KIND(p.peer), LORA_PEER_HANDHELD);
+    CHECK_EQ(p.from, 1);
+    CHECK_EQ(LORA_PEER_INDEX(p.peer), 1);
+    /* An AP's index 1 and a handheld's index 1 are different peers, on the air and here. */
+    n = build(part, sizeof(part), PEER_ONE, 7, 0, 2, payload, sizeof(payload));
+    CHECK(lora_part_parse(part, n, &p));
+    CHECK_EQ(LORA_PEER_KIND(p.peer), LORA_PEER_AP);
+
+    /* The nibble is what limits a handheld to device 15; the code that starts a radio checks it. */
+    CHECK_EQ(LORA_PEER_INDEX(LORA_PEER_HANDHELD | LORA_PEER_INDEX_MAX), LORA_PEER_INDEX_MAX);
+
+    /*
+     * Two senders, the same message number, the same part numbers: the sets must not merge. An AP
+     * and a handheld both numbering from 0 at the same moment is the ordinary case, not a corner.
+     */
+    static lora_asm_t a;
+    lora_asm_slot_t *slot = NULL;
+    asm_setup(&a, false);
+    size_t of = lora_part_count(sizeof(payload));
+    CHECK_EQ(of, 2);
+    n = build(part, sizeof(part), PEER_HH_ONE, 4, 0, (uint8_t)of, payload, sizeof(payload));
+    CHECK_EQ(lora_asm_feed(&a, 1000, part, n, &slot), LORA_ASM_NEED_MORE);
+    n = build(part, sizeof(part), PEER_ONE, 4, 0, (uint8_t)of, payload, sizeof(payload));
+    CHECK_EQ(lora_asm_feed(&a, 1000, part, n, &slot), LORA_ASM_NEED_MORE);
+    /* Two slots, two sets. Completing the handheld's must not be completed by the AP's part. */
+    n = build(part, sizeof(part), PEER_HH_ONE, 4, 1, (uint8_t)of, payload, sizeof(payload));
+    CHECK_EQ(lora_asm_feed(&a, 1100, part, n, &slot), LORA_ASM_COMPLETE);
+    CHECK(slot != NULL && slot->peer == PEER_HH_ONE && slot->total == sizeof(payload));
+    CHECK(memcmp(slot->data, payload, sizeof(payload)) == 0);
+    lora_asm_done(&a, slot);
+    n = build(part, sizeof(part), PEER_ONE, 4, 1, (uint8_t)of, payload, sizeof(payload));
+    CHECK_EQ(lora_asm_feed(&a, 1100, part, n, &slot), LORA_ASM_COMPLETE);
+    CHECK(slot != NULL && slot->peer == PEER_ONE);
+    lora_asm_done(&a, slot);
+    CHECK_EQ(a.dropped, 0);
+}
+
+/*
+ * What a handheld's radio carries, and nothing else. This list is the whole promise of D71's
+ * "Ready for handhelds later" and D74: an alert on both radios, a few small things when Wi-Fi
+ * cannot carry them, and everything else refused rather than paid for in airtime and battery.
+ */
+static void test_handheld_policy(void)
+{
+    static uint8_t frame[LORA_SMALL_MAX];
+    size_t n;
+
+    /* The one this radio exists for: it goes whatever Wi-Fi is doing. */
+    n = make_frame(LG_T_TEXT, LG_SCOPE_BROADCAST, LG_FLAG_URGENT, frame, sizeof(frame), 20);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_ALWAYS);
+    n = make_frame(LG_T_TEXT, LG_SCOPE_BROADCAST, LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR, frame, sizeof(frame), 20);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_ALWAYS);
+
+    /* Short text, where the person is, that they are alive, and the acknowledgements those need. */
+    n = make_frame(LG_T_TEXT, LG_SCOPE_DIRECT, 0, frame, sizeof(frame), 20);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    n = make_frame(LG_T_TEXT, LG_SCOPE_GROUP, 0, frame, sizeof(frame), 20);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    n = make_frame(LG_T_POSITION, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 18);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    n = make_frame(LG_T_PING, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 1);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    n = make_frame(LG_T_PONG, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 0);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    /* An acknowledgement is always direct: lg_env_decode refuses any other scope for it. */
+    n = make_frame(LG_T_MSG_ACK, LG_SCOPE_DIRECT, 0, frame, sizeof(frame), 13);   /* LG_MSG_ACK_LEN */
+    CHECK(n > 0);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+
+    /* Never: seconds of airtime for 100 ms of sound, even marked urgent (D61, D71). */
+    n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, 0, frame, sizeof(frame), 64);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_NEVER);
+    n = make_frame(LG_T_VOICE, LG_SCOPE_GROUP, LG_FLAG_URGENT, frame, sizeof(frame), 64);
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_NEVER);
+
+    /* Never: registration, the roster, names, groups, the zone, the GPS plan and the shared state. */
+    const uint8_t refused[] = { LG_T_REGISTER, LG_T_REGISTER_ACK, LG_T_NAME, LG_T_GROUPS, LG_T_GROUP_EDIT,
+                                LG_T_TIME_ZONE, LG_T_GPS_PLAN, LG_T_GRID_STATE, LG_T_PRESENCE_UPDATE,
+                                LG_T_TIME_SYNC, LG_T_NODE_HELLO, LG_T_DIAG_ECHO };
+    for (size_t i = 0; i < sizeof(refused); i++) {
+        n = make_frame(refused[i], LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 8);
+        CHECK(n > 0);
+        CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_NEVER);
+        /* Marking it urgent does not smuggle it onto the air, unlike the AP-to-AP policy. */
+        n = make_frame(refused[i], LG_SCOPE_SYSTEM, LG_FLAG_URGENT, frame, sizeof(frame), 8);
+        CHECK_EQ(lora_policy_for_handheld_frame(frame, n), LORA_SEND_NEVER);
+    }
+
+    /* Nothing that cannot be read is put on the air. */
+    CHECK_EQ(lora_policy_for_handheld_frame(frame, 4), LORA_SEND_NEVER);
+    CHECK_EQ(lora_policy_for_handheld_frame(NULL, 100), LORA_SEND_NEVER);
+
+    /* Housekeeping has no "when there is room" grade here: a handheld's cell does not pay for it. */
+    for (size_t i = 0; i < sizeof(refused); i++) {
+        n = make_frame(refused[i], LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 8);
+        CHECK(lora_policy_for_handheld_frame(frame, n) != LORA_SEND_SPARE_ROOM);
+    }
+}
+
+/*
+ * D76: two keys, and they do not meet. A frame sealed for a handheld cannot be opened with the
+ * backbone key, and one sealed between APs cannot be opened with the LoRa key, so a handheld -
+ * which holds only the second - can neither read nor forge one AP talking to another.
+ */
+static void test_key_separation(void)
+{
+    static const uint8_t lora_key[32] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+    static const uint8_t backbone_key[32] = { 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01 };
+    static uint8_t frame[LORA_SMALL_MAX];
+    static uint8_t sealed[LORA_SMALL_MAX];
+    static uint8_t opened[LG_FRAME_MAX];
+    static lora_seal_t handheld, ap, impostor;
+    uint16_t src = 0;
+    uint32_t boot = 0;
+    size_t out_len = 0;
+
+    size_t n = make_frame(LG_T_TEXT, LG_SCOPE_BROADCAST, LG_FLAG_URGENT, frame, sizeof(frame), 20);
+    CHECK(n > 0);
+
+    /* Device 3 is a handheld; the AP puts its own index in a space no device number reaches. */
+    lora_seal_init(&handheld, lora_key, 3u, 7u);
+    lora_seal_init(&ap, lora_key, (uint16_t)(LORA_SEAL_AP_SENDER | 1u), 4u);
+    lora_seal_init(&impostor, backbone_key, (uint16_t)(LORA_SEAL_AP_SENDER | 1u), 4u);
+
+    int sn = lora_seal_frame(&handheld, sealed, sizeof(sealed), frame, n);
+    CHECK_EQ(sn, (int)(LORA_SEAL_OUTER_LEN + n + LG_AEAD_TAG_LEN));
+    /* The AP opens it with the LoRa key... */
+    CHECK_EQ(lora_seal_open(&ap, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_OK);
+    CHECK_EQ(src, 3);
+    CHECK_EQ(boot, 7);
+    CHECK_EQ(out_len, n);
+    CHECK(memcmp(opened, frame, n) == 0);
+    CHECK(!lora_seal_is_ap(src));
+    /* ...and nobody opens it with any other key. */
+    CHECK_EQ(lora_seal_open(&impostor, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_AUTH_FAIL);
+    CHECK_EQ(impostor.auth_fail, 1);
+
+    /* And the other way round: a frame sealed under the backbone key stays shut to the LoRa key. */
+    static lora_seal_t reader;
+    lora_seal_init(&reader, lora_key, 3u, 7u);
+    sn = lora_seal_frame(&impostor, sealed, sizeof(sealed), frame, n);
+    CHECK(sn > 0);
+    CHECK_EQ(lora_seal_open(&reader, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_AUTH_FAIL);
+
+    /* An AP's replies are marked as an AP's, so a handheld cannot pass itself off as one. */
+    sn = lora_seal_frame(&ap, sealed, sizeof(sealed), frame, n);
+    CHECK(sn > 0);
+    CHECK_EQ(lora_seal_open(&handheld, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_OK);
+    CHECK(lora_seal_is_ap(src));
+    CHECK_EQ(src & 0x0Fu, 1);
+
+    /* The same frame twice on the air is heard twice and delivered once. */
+    CHECK_EQ(lora_seal_open(&handheld, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_REPLAY);
+    CHECK_EQ(handheld.replayed, 1);
+
+    /* Our own frame coming back is a wiring fault, never a message. */
+    CHECK_EQ(lora_seal_open(&ap, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_MALFORMED);
+
+    /* A truncated or wrong-version payload is refused before any key is touched. */
+    CHECK_EQ(lora_seal_open(&handheld, sealed, LORA_SEAL_OUTER_LEN + LG_AEAD_TAG_LEN, &src, &boot, opened,
+                            sizeof(opened), &out_len), LORA_SEAL_MALFORMED);
+    sealed[0] = 0xFEu;
+    CHECK_EQ(lora_seal_open(&handheld, sealed, (size_t)sn, &src, &boot, opened, sizeof(opened), &out_len),
+             LORA_SEAL_MALFORMED);
+}
+
+/*
+ * Nonces never repeat under the one shared key. The sequence only ever grows, and the sender field
+ * keeps an AP's numbering and a handheld's apart, so two devices holding the same key never build
+ * the same twelve bytes.
+ */
+static void test_nonce_discipline(void)
+{
+    static const uint8_t key[32] = { 0x5A };
+    static uint8_t frame[LORA_SMALL_MAX];
+    static uint8_t a_out[LORA_SMALL_MAX], b_out[LORA_SMALL_MAX];
+    static lora_seal_t hh, ap;
+
+    size_t n = make_frame(LG_T_POSITION, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 18);
+    lora_seal_init(&hh, key, 3u, 7u);
+    lora_seal_init(&ap, key, (uint16_t)(LORA_SEAL_AP_SENDER | 3u), 7u);
+
+    uint32_t last = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        CHECK(lora_seal_frame(&hh, a_out, sizeof(a_out), frame, n) > 0);
+        CHECK(lora_seal_frame(&ap, b_out, sizeof(b_out), frame, n) > 0);
+        /* Same boot, same sequence, same everything but the one field that separates them. */
+        CHECK(memcmp(a_out, b_out, LORA_SEAL_OUTER_LEN) != 0);
+        CHECK(memcmp(a_out + 4, b_out + 4, 8) == 0);
+        uint32_t seq = lg_rd32(a_out + 8);
+        CHECK(seq > last);   /* never reused, never reset within a boot */
+        last = seq;
+    }
+    /* A frame too big to seal must not move the counter: a gap is harmless, a repeat is not. */
+    uint32_t before = hh.seq;
+    CHECK(lora_seal_frame(&hh, a_out, LORA_SEAL_OUTER_LEN, frame, n) < 0);
+    CHECK_EQ(hh.seq, before);
+}
+
+/*
+ * No module fitted, which is how nearly every handheld will run. Nothing is given memory, so
+ * nothing can be reassembled and nothing can be queued: the radio refuses cleanly and counts it,
+ * rather than reaching for a buffer that was never taken.
+ */
+static void test_no_module(void)
+{
+    static lora_asm_t a;
+    static lora_txq_t q;
+    static uint8_t payload[100];
+    uint8_t part[LORA_PART_RAW_MAX];
+    lora_asm_slot_t *slot = NULL;
+
+    lora_asm_init(&a);   /* as hh_lora_start leaves it: no slot has memory until a module answers */
+    lora_txq_init(&q);
+    CHECK_EQ(lora_asm_capacity(&a), 0);
+    CHECK_EQ(lora_txq_capacity(&q), 0);
+    CHECK_EQ(lora_txq_waiting(&q), 0);
+
+    size_t n = build(part, sizeof(part), PEER_ONE, 1, 0, 1, payload, sizeof(payload));
+    lora_asm_result_t r = lora_asm_feed(&a, 1000, part, n, &slot);
+    CHECK(r == LORA_ASM_OVERSIZE || r == LORA_ASM_FULL);
+    CHECK(slot == NULL);
+    CHECK(!lora_txq_push(&q, 2, true, 1, payload, sizeof(payload), 0));   /* not even an alert */
+    CHECK(lora_txq_reserve(&q, 2, true, 1, sizeof(payload), 0) == NULL);
+    CHECK(lora_txq_peek(&q, 100000) == NULL);
+    CHECK(!lora_txq_alert_due(&q, 100000));
+    CHECK_EQ(q.depth, 0);
+    CHECK_EQ(lora_asm_expire(&a, 1000000), 0);
+}
+
 void test_lora(void)
 {
     test_base64();
@@ -570,4 +831,9 @@ void test_lora(void)
     test_at_parser();
     test_round_trip();
     test_airtime();
+    test_handheld_peer();
+    test_handheld_policy();
+    test_key_separation();
+    test_nonce_discipline();
+    test_no_module();
 }

@@ -78,7 +78,62 @@ static struct {
     QueueHandle_t    rx;
     uint16_t         talk_id;
     uint32_t         rx_dropped;
+    volatile uint16_t tone_ms;    /* >0: this talk is generated, not recorded (hh_voice_tone_start) */
+    uint32_t         tone_phase;  /* carried between frames so the waveform has no seam at a frame edge */
+    uint32_t         tone_step;
+    uint32_t         tone_swap;   /* ms on the current note, for the warble */
 } v = { .mux = portMUX_INITIALIZER_UNLOCKED };
+
+/*
+ * A quarter of a sine, 64 points, 0..32767. A quarter is all that need be stored: the other three
+ * are its reflections, which fold() below works out from the phase. Kept in flash, not RAM.
+ */
+static const uint16_t SINE_Q[64] = {
+        0,   804,  1608,  2410,  3212,  4011,  4808,  5602,  6393,  7179,  7962,  8739,  9512, 10278, 11039, 11793,
+    12539, 13279, 14010, 14732, 15446, 16151, 16846, 17530, 18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594,
+    23170, 23731, 24279, 24811, 25329, 25832, 26319, 26790, 27245, 27683, 28105, 28510, 28898, 29268, 29621, 29956,
+    30273, 30571, 30852, 31113, 31356, 31580, 31785, 31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757,
+};
+
+/* Sine of a 24-bit phase, folded out of the quarter table above. */
+static int16_t fold(uint32_t phase)
+{
+    uint32_t q = (phase >> 22) & 3u;                 /* which quarter */
+    uint32_t i = (phase >> 16) & 63u;                /* 0..63 inside it */
+    uint16_t m = (q & 1u) ? SINE_Q[63u - i] : SINE_Q[i];
+    return (q & 2u) ? (int16_t)-(int32_t)m : (int16_t)m;
+}
+
+/* The phase step for a frequency at the 8 kHz voice rate, in the 24-bit phase fold() reads. */
+#define TONE_STEP(hz)  (uint32_t)(((uint64_t)(hz) << 24) / 8000u)
+#define TONE_LOW_HZ    620u
+#define TONE_HIGH_HZ   930u
+#define TONE_WARBLE_MS 250u    /* how long it sits on each of the two notes */
+#define TONE_LEVEL     3u      /* a third of full scale: loud enough to hear, never clipping */
+
+/*
+ * Fills one frame with a two-note warble. It alternates rather than holding one note because a
+ * steady tone tells you nothing about timing: a warble makes a dropped or reordered frame audible
+ * as a stumble, and its two frequencies sit inside the band IMA ADPCM was meant to carry, so what
+ * comes out the far end says something about the path rather than about the codec's limits.
+ *
+ * The phase carries across calls, so frames join without a click at the seam.
+ */
+static void fill_tone(int16_t *pcm, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        pcm[i] = (int16_t)(fold(v.tone_phase) / (int16_t)TONE_LEVEL);
+        v.tone_phase += v.tone_step;
+    }
+    /* Swap notes on frame boundaries: a frame is 100 ms, the warble 250 ms, so the note changes
+       every two or three frames without any timer of its own. */
+    v.tone_swap += FRAME_SAMPLES * 1000u / 8000u;
+    if (v.tone_swap >= TONE_WARBLE_MS) {
+        v.tone_swap = 0;
+        v.tone_step = (v.tone_step == TONE_STEP(TONE_LOW_HZ)) ? TONE_STEP(TONE_HIGH_HZ)
+                                                              : TONE_STEP(TONE_LOW_HZ);
+    }
+}
 
 static uint32_t now_ms(void)
 {
@@ -260,7 +315,7 @@ static void capture_task(void *arg)
         hh_voice_state(&st);
         uint8_t scope = st.talk_scope;
         uint32_t target = st.talk_target;
-        if (lg_bsp_audio_mic_start() != ESP_OK) {
+        if (!v.tone_ms && lg_bsp_audio_mic_start() != ESP_OK) {
             v.talk_req = false;
             set_talking(false, 0, 0);
             set_problem("The microphone did not start");
@@ -276,19 +331,36 @@ static void capture_task(void *arg)
         ESP_LOGI(TAG, "[MSG] Talking to %s %" PRIu32, scope == LG_SCOPE_GROUP ? "group" : "device", target);
         while (v.talk_req) {
             size_t got = 0;
-            while (got < FRAME_SAMPLES && v.talk_req) {
-                int n = lg_bsp_audio_mic_read(pcm + got, FRAME_SAMPLES - got, MIC_WAIT_MS);
-                if (n < 0) {
-                    v.talk_req = false;
-                    set_problem("The microphone stopped");
-                    break;
+            if (v.tone_ms) {
+                /* No microphone to block on, so the frame is both generated and paced here: a real
+                 * talk is limited by the audio hardware to one frame each 100 ms, and without the
+                 * same limit this loop would flood the AP with a talk nobody could have spoken. */
+                fill_tone(pcm, FRAME_SAMPLES);
+                got = FRAME_SAMPLES;
+                vTaskDelay(pdMS_TO_TICKS(FRAME_SAMPLES * 1000u / 8000u));
+                if (now_ms() - started >= v.tone_ms) {
+                    v.talk_req = false;   /* this frame still goes; the END below closes the talk */
                 }
-                got += (size_t)n;
+            } else {
+                while (got < FRAME_SAMPLES && v.talk_req) {
+                    int n = lg_bsp_audio_mic_read(pcm + got, FRAME_SAMPLES - got, MIC_WAIT_MS);
+                    if (n < 0) {
+                        v.talk_req = false;
+                        set_problem("The microphone stopped");
+                        break;
+                    }
+                    got += (size_t)n;
+                }
             }
             if (got < FRAME_SAMPLES) {
                 break;   /* released mid-frame: that part is dropped, the END below closes the talk */
             }
-            agc(pcm, FRAME_SAMPLES);
+            if (!v.tone_ms) {
+                /* The AGC is there to even out how loudly a person holds a board to their mouth.
+                 * A generated talk is already at a known level, and running it through would only
+                 * measure the generator. */
+                agc(pcm, FRAME_SAMPLES);
+            }
             size_t hl = pack(&enc, talk, frame, 0, out);
             hh_adpcm_encode(&enc, pcm, FRAME_SAMPLES, out + hl);
             if (hh_service_voice_send(scope, target, out, hl + FRAME_DATA) != ESP_OK) {
@@ -302,7 +374,10 @@ static void capture_task(void *arg)
         }
         size_t hl = pack(&enc, talk, frame, LG_VOICE_END, out);
         (void)hh_service_voice_send(scope, target, out, hl);
-        lg_bsp_audio_mic_stop();
+        if (!v.tone_ms) {
+            lg_bsp_audio_mic_stop();
+        }
+        v.tone_ms = 0;   /* the next talk is a real one unless it asks to be generated again */
         set_talking(false, 0, 0);
         ESP_LOGI(TAG, "[MSG] Talk ended: %u frame(s), %" PRIu32 " dropped before the AP, %" PRIu32 " ms", frame,
                  dropped, now_ms() - started);
@@ -444,13 +519,71 @@ esp_err_t hh_voice_start(void)
     return ESP_OK;
 }
 
+/*
+ * Creates the capture task if this board never had one, which is every board without a microphone.
+ * Called only from hh_voice_tone_start, so a handheld that never generates a talk pays nothing:
+ * the task and its buffers are about 5 KB, and the radios come first for memory (D73).
+ */
+static esp_err_t capture_on_demand(void)
+{
+    if (v.capture != NULL) {
+        return ESP_OK;
+    }
+    capture_buf_t *buf = calloc(1, sizeof(*buf));   /* the capture task's for good: it never ends */
+    if (buf == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(capture_task, "hh_talk", TASK_STACK, buf, TASK_PRIORITY, &v.capture) != pdPASS) {
+        free(buf);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t hh_voice_tone_start(uint8_t scope, uint32_t target, uint16_t ms)
+{
+    if (scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!v.st.can_hear && !v.st.can_talk) {
+        return ESP_ERR_NOT_SUPPORTED;   /* no audio hardware at all: the alert unit (D66) */
+    }
+    esp_err_t err = capture_on_demand();
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (ms == 0 || ms > MAX_TALK_MS) {
+        ms = (ms == 0) ? 3000u : (uint16_t)MAX_TALK_MS;
+    }
+    taskENTER_CRITICAL(&v.mux);
+    bool busy = v.st.talking || v.st.heard != 0;
+    if (!busy) {
+        v.st.talking = true;
+        v.st.talk_scope = scope;
+        v.st.talk_target = target;
+        v.st.problem[0] = '\0';
+        v.st.version++;
+    }
+    taskEXIT_CRITICAL(&v.mux);
+    if (busy) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    v.tone_phase = 0;
+    v.tone_swap = 0;
+    v.tone_step = TONE_STEP(TONE_LOW_HZ);
+    v.tone_ms = ms;
+    v.talk_req = true;
+    xTaskNotifyGive(v.capture);
+    return ESP_OK;
+}
+
 esp_err_t hh_voice_ptt_start(uint8_t scope, uint32_t target)
 {
     if (scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (v.capture == NULL) {
-        return ESP_ERR_NOT_SUPPORTED;
+    if (v.capture == NULL || !v.st.can_talk) {
+        return ESP_ERR_NOT_SUPPORTED;   /* no microphone, whatever a generated talk may have built */
     }
     taskENTER_CRITICAL(&v.mux);
     bool busy = v.st.talking || v.st.heard != 0;

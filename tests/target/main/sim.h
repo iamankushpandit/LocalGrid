@@ -81,6 +81,7 @@ typedef struct {
     uint32_t    position_events;  /* LG_CEV_POSITION (D65) */
     uint32_t    last_position;    /* its subject */
     uint32_t    tz_events;        /* LG_CEV_TIME_ZONE (D67) */
+    uint32_t    gps_plan_events;  /* LG_CEV_GPS_PLAN (D73) */
     lg_e2e_t    e2e;
     lg_client_t client;
 } sim_client_t;

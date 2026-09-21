@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "lg_gps_plan.h"
 #include "lg_roster.h"
 
 #define SETTINGS_GRID_NAME_MAX  32
@@ -32,6 +33,11 @@ typedef struct {
      * ("CST6CDT,M3.2.0,M11.1.0"); what handhelds use to show local time. "" until an admin saves
      * the time or zone on a page that makes one. */
     char     posix_tz[SETTINGS_POSIX_TZ_MAX + 1];
+    /* D73: how often a GPS is read, stored as lg_gps_plan.h describes (0 the firmware default,
+     * 0xFFFF always on, otherwise seconds). Admin policy like the zone, so it rides the same
+     * record and the same (seq, author) version between APs, and APs push it to handhelds. A
+     * record written before D73 has no such field and reads as 0, which is the default. */
+    uint16_t gps_plan;
 } node_settings_t;
 
 /* Loads settings; an absent or incompatible record yields configured == false. */

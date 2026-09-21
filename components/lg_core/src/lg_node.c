@@ -110,6 +110,7 @@ static uint8_t traffic_class(uint8_t type, uint8_t scope)
     case LG_T_GRID_STATE:       return (uint8_t)LG_TC_ANNOUNCE;
     case LG_T_POSITION:         return (uint8_t)LG_TC_POSITION;
     case LG_T_TIME_SYNC:
+    case LG_T_GPS_PLAN:
     case LG_T_TIME_ZONE:        return (uint8_t)LG_TC_TIME;
     default:                    return (uint8_t)LG_TC_OTHER;
     }
@@ -163,6 +164,7 @@ static size_t presence_body(const lg_presence_entry_t *p, uint8_t *out)
     pr.node   = p->node;
     pr.epoch  = p->epoch;
     pr.state  = p->state;
+    pr.caps   = p->caps;
     memcpy(pr.pubkey, p->pubkey, LG_PUBKEY_LEN);
     return lg_presence_enc(&pr, out);
 }
@@ -223,6 +225,19 @@ static void send_tz_to_client(lg_node_t *n, uint32_t device)
     lg_env_t e;
     env_from_node(n, &e, LG_T_TIME_ZONE, LG_SCOPE_SYSTEM, device);
     send_client(n, device, &e, (const uint8_t *)n->tz, n->tz_len);
+}
+
+/* D73: how often to read a GPS, to one attached device, if this node has been told. */
+static void send_gps_plan_to_client(lg_node_t *n, uint32_t device)
+{
+    if (!n->gps_plan_known) {
+        return;
+    }
+    uint8_t body[LG_GPS_PLAN_BODY_LEN];
+    lg_wr16(body, n->gps_plan);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_GPS_PLAN, LG_SCOPE_SYSTEM, device);
+    send_client(n, device, &e, body, sizeof(body));
 }
 
 static void push_time_to_local_clients(lg_node_t *n, uint8_t quality)
@@ -920,6 +935,7 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         p->node  = n->self;
         p->epoch = reg.attach_epoch;
         p->state = LG_PRES_ONLINE;
+        p->caps  = reg.caps;   /* what this device says it can do; shared on from here (answer 19) */
         memcpy(p->pubkey, reg.pubkey, LG_PUBKEY_LEN);
 
         /* Time is sticky (D48, D53): an AP that restarted with no clock takes it back from a
@@ -945,6 +961,7 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
             send_time_to_client(n, reg.device, quality);
         }
         send_tz_to_client(n, reg.device);
+        send_gps_plan_to_client(n, reg.device);   /* D73 */
         send_groups_to_client(n, reg.device);
 
         for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
@@ -1037,10 +1054,14 @@ static void apply_presence(lg_node_t *n, const lg_presence_t *pr)
         /* Presence is announced again every LG_PRESENCE_ANNOUNCE_MS (D48), so most updates repeat what this
          * AP already holds; only a change is worth a frame to each local handheld. */
         bool changed = pr->epoch != p->epoch || pr->node != p->node || pr->state != p->state ||
+                       (pr->caps != 0u && pr->caps != p->caps) ||
                        memcmp(p->pubkey, pr->pubkey, LG_PUBKEY_LEN) != 0;
         p->epoch = pr->epoch;
         p->node  = pr->node;
         p->state = pr->state;
+        if (pr->caps != 0u) {
+            p->caps = pr->caps;   /* an AP that predates capability bits says 0: keep what we know */
+        }
         memcpy(p->pubkey, pr->pubkey, LG_PUBKEY_LEN);
         if (changed) {
             notify_local_clients(n, p, 0);
@@ -1240,6 +1261,22 @@ int lg_node_set_time_zone(lg_node_t *n, const char *tz)
         const lg_presence_entry_t *q = &n->presence[i];
         if (q->in_use && is_local_online(n, q)) {
             send_tz_to_client(n, q->device);
+        }
+    }
+    return LG_OK;
+}
+
+int lg_node_set_gps_plan(lg_node_t *n, uint16_t plan)
+{
+    if (n->gps_plan_known && plan == n->gps_plan) {
+        return LG_OK;
+    }
+    n->gps_plan_known = true;
+    n->gps_plan = plan;
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *q = &n->presence[i];
+        if (q->in_use && is_local_online(n, q)) {
+            send_gps_plan_to_client(n, q->device);
         }
     }
     return LG_OK;

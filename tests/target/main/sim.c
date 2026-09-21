@@ -182,6 +182,8 @@ static void c_event(void *ctx, const lg_client_event_t *ev)
         c->last_position = ev->value;
     } else if (ev->type == LG_CEV_TIME_ZONE) {
         c->tz_events++;
+    } else if (ev->type == LG_CEV_GPS_PLAN) {
+        c->gps_plan_events++;
     }
 }
 

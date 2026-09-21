@@ -47,6 +47,19 @@ User-facing text calls the product "an offline network", never a camp or campsit
 - **Crypto only through `lg_crypto.h`**, with RFC test vectors in `tests/target` for every primitive.
 - **Nonces never repeat.** Nonces are built from (author, boot counter, sequence); the boot counter is committed to NVS before any radio transmit. A retransmission reuses the identical plaintext, AAD, and grid time.
 - **Prefix public symbols** with `lg_` (core, crypto) or a module prefix such as `lgbb_`. Short names collide with Espressif's closed libraries; `bb_init` already exists in the PHY library.
+- **Ask the hardware, never recall it** (D77). `tools/bench_devices.json`, this guide, and anything an
+  agent remembers are hints that go stale the moment a board is re-plugged or reflashed. Before
+  flashing, before reporting a board's state, and before answering a question about which board is
+  which, ask: `python tools/flash.py --identify` for identity, `python tools/grid_watch.py` for live
+  grid state. State whether an answer came from hardware or from the map, and say so when a board
+  could not be asked. The one cost is that opening a serial port resets the board, so do not ask an
+  AP in the middle of a measurement; that is a reason to pick the moment, not to guess. Identity
+  answers who a board is now, never who it used to be, so ask before overwriting an identity, not
+  after.
+- **Read the logs, not the ports** (D78). `python tools/serial_log.py --daemon` keeps every connected
+  board's console in `logs/serial/`, and `--status`, `--who` and `--find REGEX` answer from those files
+  without opening anything. Only flashing opens a port, and there a reset is expected; `flash.py` and
+  `console.py` take the port from the daemon automatically. Always report how old a log answer is.
 - **Test on the ESP32 boards only** (D25). The PC builds, flashes, and reads serial logs; it never stands in for a handheld or a node.
 - **Layers stay separate** (D27). Infrastructure components never include UI headers. `lg_bsp` is the only UI-side code that includes ESP-IDF drivers, and `lg_draw` reaches hardware only through it. Handheld screens and services exchange events and commands through a queue: screens never touch sockets, and services never draw. LVGL is retired (D55); nothing may bring it back. `tools/check_layers.py` checks this, and `tools/build.py` runs it on every build.
 - **Information is sticky** (D48). Anything a device learns that another could use must survive the holder restarting and be shared with neighbours, versioned so newer wins and duplicates merge, and announced on link up and periodically. A record kept on only one device is a design gap.

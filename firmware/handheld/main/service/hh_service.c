@@ -14,6 +14,7 @@
  */
 #include "hh_battery.h"
 #include "hh_gps.h"
+#include "hh_lora.h"
 #include "hh_mem.h"
 #include "hh_service.h"
 
@@ -37,6 +38,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lg_board.h"
 #include "lg_body.h"
 #include "lg_client.h"
 #include "lg_crypto.h"
@@ -49,6 +51,10 @@
 
 #ifndef LG_SECRET_DISCRIMINATOR
 #error "lg_secrets.h has no LG_SECRET_DISCRIMINATOR. Run: python tools/gen_secrets.py --update"
+#endif
+/* D76: handhelds hold this and never the APs' backbone key. It seals only LoRa frames. */
+#ifndef LG_SECRET_LORA_KEY
+#error "lg_secrets.h has no LG_SECRET_LORA_KEY. Run: python tools/gen_secrets.py --update"
 #endif
 
 static const char *TAG = "NET";
@@ -565,6 +571,55 @@ static struct {
     lg_position_t pos[POS_SLOTS];     /* guarded by s.lock: the service's copy for other tasks */
 } gp = { .rx = -1, .tx = -1 };
 
+/*
+ * D73: how often this handheld reads its GPS, as the grid stores it. The AP pushes the grid's
+ * choice at registration and whenever it changes; it is kept here so a handheld that boots with no
+ * AP in range still reads on the schedule the grid agreed rather than falling back to always on.
+ */
+#define GPS_PLAN_KEY "gpsplan"
+
+static uint16_t gps_plan_load(void)
+{
+    uint16_t plan = LG_GPS_PLAN_DEFAULT;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u16(h, GPS_PLAN_KEY, &plan) != ESP_OK) {
+            plan = LG_GPS_PLAN_DEFAULT;
+        }
+        nvs_close(h);
+    }
+    return lg_gps_plan_canon(plan);
+}
+
+/* LG_CEV_GPS_PLAN: a new plan from the AP. Applied at once and kept (D48). */
+static void gps_plan_take(uint16_t plan)
+{
+    plan = lg_gps_plan_canon(plan);
+    hh_gps_set_plan(plan);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u16(h, GPS_PLAN_KEY, plan);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    uint16_t every = lg_gps_plan_seconds(plan);
+    ESP_LOGI("TIME", "[TIME] GPS plan from the grid: %s%s",
+             every == 0u ? "always on" : "a reading on a schedule", err == ESP_OK ? "" : "; not saved to flash");
+    s.dirty = true;   /* Status says what the GPS is doing (D23) */
+}
+
+/*
+ * A position from the last reading is still this handheld's position while the next reading is not
+ * overdue (D73): between readings it simply ages, and its age is already carried (D65).
+ */
+static bool gps_pos_usable(const hh_gps_state_t *g)
+{
+    return g->has_pos && (g->fix || (!g->always && g->fix_age_ms <= hh_gps_hold_ms()));
+}
+
 static int pos_slot(uint32_t subject)
 {
     if (subject >= 1u && subject <= LG_MAX_DEVICES) {
@@ -593,7 +648,7 @@ static bool send_own_position(uint32_t now)
 {
     hh_gps_state_t g;
     hh_gps_state(&g);
-    if (s.link != HH_LINK_ONLINE || !g.fix || !g.has_pos) {
+    if (s.link != HH_LINK_ONLINE || !gps_pos_usable(&g)) {
         return false;
     }
     uint8_t flags = g.fix_age_ms < POS_LIVE_MS ? LG_POS_LIVE : 0u;
@@ -618,8 +673,8 @@ static void position_step(uint32_t now)
     }
     hh_gps_state_t g;
     hh_gps_state(&g);
-    if (!g.fix || !g.has_pos) {
-        return;
+    if (!gps_pos_usable(&g)) {
+        return;   /* D73: only once a reading is overdue does a position stop being resent */
     }
     if (gp.pos_due || !gp.sent_any || now - gp.sent_ms >= POS_PERIOD_MS ||
         moved_m(g.lat_u, g.lon_u, gp.sent_lat, gp.sent_lon) > POS_MOVE_M) {
@@ -632,11 +687,12 @@ static void gps_update(void)
 {
     hh_gps_state_t g;
     hh_gps_state(&g);
-    if (g.fix != gp.fix || g.sats != gp.sats || g.has_pos != gp.has_pos || g.lat_u != gp.lat_u ||
+    bool usable = gps_pos_usable(&g);
+    if (g.fix != gp.fix || g.sats != gp.sats || usable != gp.has_pos || g.lat_u != gp.lat_u ||
         g.lon_u != gp.lon_u) {
         gp.fix = g.fix;
         gp.sats = g.sats;
-        gp.has_pos = g.has_pos;
+        gp.has_pos = usable;
         gp.lat_u = g.lat_u;
         gp.lon_u = g.lon_u;
         xSemaphoreTake(s.lock, portMAX_DELAY);
@@ -645,7 +701,12 @@ static void gps_update(void)
         s.dirty = true;
     }
     if (!g.fix) {
-        gp.owns_clock = false;   /* the clock carries on from the last fix; the grid may correct it again */
+        /* D73: a released module has no live fix, and that is not the same as having lost one. The
+         * clock stays the last reading's until the next reading is overdue, so a handheld reading
+         * every five minutes keeps its time exactly as one reading continuously does. */
+        if (g.always || g.fix_age_ms > hh_gps_hold_ms()) {
+            gp.owns_clock = false;   /* the clock carries on from the last fix; the grid may correct it again */
+        }
         return;
     }
     /* The time the fix stood for, plus how long ago its sentence began to arrive. */
@@ -688,11 +749,179 @@ static void position_mirror(uint32_t subject)
     xSemaphoreGive(s.lock);
 }
 
+/* ---- LoRa (D71's "Optional on handhelds too", unblocked by D76) ----
+ *
+ * The radio is optional and almost always absent, so everything here is behind hh_lora_fitted()
+ * and costs a handheld without a module nothing at all.
+ *
+ * Why this builds its own frames rather than hooking io_send alone: lg_client transmits only while
+ * it is registered with an AP, and the case this radio exists for is precisely the one where it is
+ * not - out of Wi-Fi range with an SOS to send. So when a module is fitted and Wi-Fi is not
+ * carrying, the service builds the very frame lg_client would have sent for each pending outbox
+ * entry: the same boot, the same sequence, the same grid time, and for a 1:1 message the same
+ * end-to-end nonce, AAD and plaintext. It is a retransmission of that message on another radio,
+ * which is what the nonce rule allows, and never a second message with a second identity.
+ */
+
+static int s_lora_rx = LG_PIN_NONE, s_lora_tx = LG_PIN_NONE, s_lora_rst = LG_PIN_NONE;
+static uint32_t s_lora_ping_ms;   /* last keepalive built for the radio, 0 never */
+
+static uint32_t io_local_time(void *ctx);
+
+/* A frame an AP sent over LoRa: exactly the path a frame from the socket takes. */
+static void lora_frame_in(const uint8_t *frame, size_t len)
+{
+    lg_client_on_frame(&s.client, frame, len);
+}
+
+/* The next sequence number from lg_client's own counter, so one counter numbers every frame this
+ * handheld authors and no nonce is ever built twice. */
+static uint32_t lora_next_seq(void)
+{
+    if (++s.client.seq == 0) {
+        s.client.seq = 1;
+    }
+    return s.client.seq;
+}
+
+/* Builds the frame lg_client would transmit for one pending outbox entry. 0 when it cannot be. */
+static size_t build_outbox_frame(const lg_out_msg_t *m, uint8_t *out, size_t cap)
+{
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.type        = LG_T_TEXT;
+    e.scope       = m->scope;
+    e.flags       = m->flags;
+    e.target      = m->target;
+    e.origin_id   = s.device;
+    e.origin_boot = m->boot;
+    e.origin_seq  = m->seq;
+    e.grid_time   = m->grid_time;
+
+    if (m->scope != LG_SCOPE_DIRECT) {
+        int n = lg_frame_build(&e, m->text, m->len, out, cap);
+        return n > 0 ? (size_t)n : 0u;
+    }
+    const lg_peer_t *p = lg_client_peer(&s.client, m->target);
+    if (p == NULL || !p->has_key) {
+        return 0;   /* no key for this person yet: the Wi-Fi path refuses it too */
+    }
+    e.flags |= LG_FLAG_E2E_PAYLOAD;
+    uint8_t nonce[LG_E2E_NONCE_LEN];
+    uint8_t aad[LG_E2E_AAD_LEN];
+    uint8_t ct[LG_DIRECT_BODY_MAX];
+    lg_e2e_nonce(&e, nonce);
+    lg_e2e_aad(&e, aad);
+    int sealed = lg_e2e_seal(&s.e2e, m->target, p->pubkey, nonce, aad, sizeof(aad), m->text, m->len, ct);
+    if (sealed != (int)(m->len + LG_AEAD_TAG_LEN)) {
+        return 0;
+    }
+    int n = lg_frame_build(&e, ct, (size_t)sealed, out, cap);
+    return n > 0 ? (size_t)n : 0u;
+}
+
+/*
+ * Every pass: hand over what arrived, and offer what Wi-Fi is not carrying. hh_lora_offer applies
+ * D74 (only an alert goes while Wi-Fi works) and its own rate limit, so offering the same pending
+ * message every second costs one transmission every HH_LORA_REOFFER_MS and no more.
+ */
+static void lora_step(uint32_t now)
+{
+    static uint8_t frame[LG_FRAME_MAX];   /* service task only */
+
+    hh_lora_poll(now);   /* every pass: a frame that arrived should not wait a second */
+    if (!hh_lora_fitted()) {
+        return;
+    }
+    /*
+     * Offering, though, is once a second at most. The service loop runs far more often than that,
+     * and building the frames means sealing each pending 1:1 message end to end: work that would
+     * be thrown away by hh_lora_offer's own rate limit anyway.
+     */
+    static uint32_t last_offer_ms;
+    if (last_offer_ms != 0 && now - last_offer_ms < 1000u) {
+        return;
+    }
+    last_offer_ms = now == 0 ? 1u : now;
+    bool wifi_ok = s.link == HH_LINK_ONLINE && s.sock >= 0;
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        const lg_out_msg_t *m = &s.client.outbox[i];
+        if (m->state != LG_OUT_PENDING) {
+            continue;
+        }
+        size_t n = build_outbox_frame(m, frame, sizeof(frame));
+        if (n != 0) {
+            (void)hh_lora_offer(frame, n, wifi_ok);
+        }
+    }
+    if (wifi_ok) {
+        return;   /* presence, the battery and the position are already going over Wi-Fi */
+    }
+    /*
+     * Off Wi-Fi: tell whichever AP can hear that this handheld is alive, how full its battery is
+     * (D68) and where it is (D65). Both are rate-limited to about once a minute inside hh_lora,
+     * which is what a cell can pay for at 22 dBm.
+     */
+    if (s_lora_ping_ms == 0 || now - s_lora_ping_ms >= HH_LORA_ROUTINE_MS) {
+        s_lora_ping_ms = now == 0 ? 1u : now;
+        int8_t pct = hh_service_battery_percent();
+        uint8_t body[LG_PING_LEN];
+        size_t blen = lg_ping_enc(pct < 0 ? (uint8_t)LG_BATTERY_UNKNOWN : (uint8_t)pct, body);
+        lg_env_t e;
+        memset(&e, 0, sizeof(e));
+        e.type = LG_T_PING;
+        e.scope = LG_SCOPE_SYSTEM;
+        e.origin_id = s.device;
+        e.origin_boot = s.boot;
+        e.origin_seq = lora_next_seq();
+        e.grid_time = io_local_time(NULL);
+        int n = lg_frame_build(&e, body, blen, frame, sizeof(frame));
+        if (n > 0) {
+            (void)hh_lora_offer(frame, (size_t)n, false);
+        }
+    }
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    if (g.fix && g.has_pos) {
+        lg_position_t pos = {
+            .subject = s.device,
+            .lat_u = g.lat_u,
+            .lon_u = g.lon_u,
+            .fix_time = g.last_unix,
+            .sats = g.sats,
+            .flags = (uint8_t)(g.fix_age_ms < POS_LIVE_MS ? LG_POS_LIVE : 0u),
+        };
+        if (lg_position_valid(pos.lat_u, pos.lon_u, pos.fix_time)) {
+            uint8_t body[LG_POSITION_LEN];
+            size_t blen = lg_position_enc(&pos, body);
+            lg_env_t e;
+            memset(&e, 0, sizeof(e));
+            e.type = LG_T_POSITION;
+            e.scope = LG_SCOPE_SYSTEM;
+            e.target = s.device;
+            e.origin_id = s.device;
+            e.origin_boot = s.boot;
+            e.origin_seq = lora_next_seq();
+            e.grid_time = io_local_time(NULL);
+            int n = lg_frame_build(&e, body, blen, frame, sizeof(frame));
+            if (n > 0) {
+                (void)hh_lora_offer(frame, (size_t)n, false);
+            }
+        }
+    }
+}
+
 /* ---- lg_client io (service task only) ---- */
 
 static bool io_send(void *ctx, const uint8_t *frame, size_t len)
 {
     (void)ctx;
+    /*
+     * D74: an alert goes on both radios, always. Everything else hh_lora_offer refuses while Wi-Fi
+     * is carrying it, so this line costs a handheld with no module nothing and a handheld with one
+     * only the alerts that must never be lost to a link that had quietly died.
+     */
+    (void)hh_lora_offer(frame, len, s.sock >= 0);
     if (s.sock < 0 || len > LG_FRAME_MAX) {
         return false;
     }
@@ -788,6 +1017,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         break;
     case LG_CEV_TIME_ZONE:
         tz_take(lg_client_time_zone(&s.client));
+        break;
+    case LG_CEV_GPS_PLAN:
+        gps_plan_take((uint16_t)ev->value);   /* D73 */
         break;
     case LG_CEV_TIME:
         if (ev->value == 0) {
@@ -1603,6 +1835,7 @@ static void step(uint32_t now)
         lg_client_tick(&s.client);
     }
     position_step(now);
+    lora_step(now);   /* D71/D76: does nothing at all on a handheld with no module */
 }
 
 static void publish(void)
@@ -1660,6 +1893,7 @@ static void publish(void)
         snprintf(o->name, sizeof(o->name), "%s", roster_name(dev));
         o->node = p->node;
         o->online = s.link == HH_LINK_ONLINE && p->state == LG_PRES_ONLINE;
+        o->caps = p->caps;
     }
     /* Who a group can include: this handheld and those the grid has told it about. Roster
      * places no handheld has taken are never offered: they would be people who do not exist. */
@@ -1832,6 +2066,45 @@ static esp_err_t fail_start(esp_err_t err, const char *problem)
     return err;
 }
 
+/*
+ * What this handheld can do, read from its own board profile and this build rather than from a
+ * list of boards kept somewhere (answer 19, D48). A board added later reports itself correctly
+ * with no change here, which is what lets a demo or a tool ask the grid what is present and what
+ * each device is able to do instead of being told in advance.
+ */
+static uint16_t own_caps(const lg_board_t *b)
+{
+    uint16_t caps = 0;
+    if (b == NULL) {
+        return 0;
+    }
+    if (b->audio.kind != LG_AUDIO_NONE) {
+        caps |= LG_CAP_SPEAKER;
+        /* Every board that can drive audio can also send a talk generated in firmware; only the
+         * ones with a codec and a microphone can carry a person's voice (hh_voice.h). */
+        caps |= LG_CAP_TONE_TALK;
+    }
+    if (b->audio.kind == LG_AUDIO_ES8311_I2S) {
+        caps |= LG_CAP_MIC;
+    }
+    if (b->panel.kind != LG_PANEL_NONE) {
+        caps |= LG_CAP_SCREEN;
+    }
+    if (b->touch.kind != LG_TOUCH_NONE) {
+        caps |= LG_CAP_TOUCH;
+    }
+    if (b->gps_rx != LG_PIN_NONE) {
+        caps |= LG_CAP_GPS;
+    }
+    if (b->lora_rx != LG_PIN_NONE) {
+        caps |= LG_CAP_LORA;
+    }
+    if (b->supply_sense != LG_PIN_NONE) {
+        caps |= LG_CAP_BATTERY;
+    }
+    return caps;
+}
+
 esp_err_t hh_service_start(const lg_identity_t *identity)
 {
     hh_battery_start();   /* D62: first, so the badge works even when the network cannot start */
@@ -1905,10 +2178,33 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
         .on_voice = io_voice,
     };
     lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, &s.roster, &io);
+    lg_client_set_caps(&s.client, own_caps(lg_board_find(identity->board)));
     load_names();
     snprintf(s.status.name, sizeof(s.status.name), "%s", roster_name(s.device));
-    if (gp.rx >= 0 && hh_gps_start(gp.rx, gp.tx, gps_notify) != ESP_OK) {
+    if (gp.rx >= 0 && hh_gps_start(gp.rx, gp.tx, gps_plan_load(), gps_notify) != ESP_OK) {
         ESP_LOGW("TIME", "[GPS] No GPS reader; this handheld runs as one without a GPS");
+    }
+    /*
+     * D71/D76: the optional radio. A board with no LoRa pins is refused here and nothing is
+     * started, no port opened and no buffer taken; a board with pins but no module says so once
+     * from its own task and is then indistinguishable from a handheld built before it existed.
+     * The boot counter is already committed above, which is what the nonce rule needs.
+     */
+    if (s_lora_rx >= 0) {
+        hh_lora_cfg_t lc = {
+            .rx_gpio = s_lora_rx,
+            .tx_gpio = s_lora_tx,
+            .rst_gpio = s_lora_rst,
+            .device = s.device,
+            .boot = s.boot,
+            .on_frame = lora_frame_in,
+        };
+        memcpy(lc.discriminator, s_discriminator, sizeof(lc.discriminator));
+        static const uint8_t lora_key[] = LG_SECRET_LORA_KEY;
+        _Static_assert(sizeof(lora_key) == LG_AEAD_KEY_LEN,
+                       "LG_SECRET_LORA_KEY must be 32 bytes: run python tools/gen_secrets.py --update");
+        memcpy(lc.key, lora_key, sizeof(lc.key));
+        (void)hh_lora_start(&lc);
     }
     if (xTaskCreate(service_task, "hh_net", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
         return fail_start(ESP_ERR_NO_MEM, "Network task did not start");
@@ -2160,6 +2456,34 @@ void hh_service_set_gps_pins(int rx_gpio, int tx_gpio)
     gp.tx = tx_gpio;
 }
 
+/* ---- LoRa, for the Status screen and the console (D23) ---- */
+
+void hh_service_set_lora_pins(int rx_gpio, int tx_gpio, int rst_gpio)
+{
+    s_lora_rx = rx_gpio;
+    s_lora_tx = tx_gpio;
+    s_lora_rst = rst_gpio;
+}
+
+bool hh_service_lora(hh_lora_state_t *out)
+{
+    hh_lora_info_t t;
+    hh_lora_info(&t);
+    memset(out, 0, sizeof(*out));
+    out->present = (t.flags & HH_LORA_F_STARTED) != 0;
+    out->fitted = (t.flags & HH_LORA_F_FITTED) != 0;
+    out->ever_fitted = (t.flags & HH_LORA_F_EVER) != 0;
+    out->link = (t.flags & HH_LORA_F_LINK) != 0;
+    out->off = (t.flags & HH_LORA_F_OFF) != 0;
+    out->ap = t.ap;
+    out->rssi = t.rssi;
+    out->snr = t.snr;
+    out->heard_age_ms = t.heard_age_ms;
+    out->frames_out = t.frames_out;
+    out->frames_in = t.frames_in;
+    return out->present;
+}
+
 const char *hh_service_clock_source(void)
 {
     switch (gp.source) {
@@ -2186,8 +2510,8 @@ bool hh_service_own_position(hh_position_t *out)
     memset(out, 0, sizeof(*out));
     hh_gps_state_t g;
     hh_gps_state(&g);
-    if (!g.started || !g.fix || !g.has_pos) {
-        return false;
+    if (!g.started || !gps_pos_usable(&g)) {
+        return false;   /* D73: where this handheld is, ageing between readings */
     }
     out->valid = true;
     out->lat_u = g.lat_u;
@@ -2230,7 +2554,9 @@ bool hh_service_gps(uint8_t *sats, bool *fix)
     if (fix != NULL) {
         *fix = g.fix;
     }
-    return g.started && g.talking;
+    /* D73: between readings the module is released and says nothing, which is the plan working,
+     * not a handheld without a GPS. */
+    return g.started && (g.talking || (!g.always && g.phase == LG_GPS_PHASE_IDLE && g.heard));
 }
 
 bool hh_service_gps_info(hh_gps_info_t *out)
@@ -2244,6 +2570,15 @@ bool hh_service_gps_info(hh_gps_info_t *out)
     out->fitted = true;
     out->talking = g.talking;
     out->fix = g.fix;
+    /* D73 */
+    out->phase = g.phase;
+    out->always = g.always;
+    out->interval_s = g.interval_s;
+    out->next_in_s = g.next_in_s;
+    out->readings = g.readings;
+    out->fixes = g.fixes;
+    out->last_ttf_ms = g.last_ttf_ms;
+    out->freed_bytes = g.freed_bytes;
     out->fix_type = g.fix_type >= 2u && g.fix_type <= 3u ? g.fix_type : 0u;
     out->corrected = g.quality == 2u;
     out->used = g.sats;
@@ -2252,7 +2587,7 @@ bool hh_service_gps_info(hh_gps_info_t *out)
     out->best_snr = g.best_snr;
     out->hdop_c = g.hdop_c == 0u ? HH_GPS_UNKNOWN : g.hdop_c;
     out->pdop_c = g.pdop_c == 0u ? HH_GPS_UNKNOWN : g.pdop_c;
-    out->has_pos = g.has_pos && g.fix;
+    out->has_pos = gps_pos_usable(&g);   /* D73: a position ages between readings, it does not vanish */
     out->lat_u = g.lat_u;
     out->lon_u = g.lon_u;
     out->has_alt = g.has_alt && g.fix;

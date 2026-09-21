@@ -44,6 +44,10 @@ typedef struct {
     char     name[HH_NAME_MAX];
     uint16_t node;
     bool     online;
+    /* What their device can do (LG_CAP_* in lg_types.h), as the grid shared it in presence.
+     * 0 means nobody has said yet, or they run a build from before capabilities were reported:
+     * treat it as unknown, never as "can do nothing". */
+    uint16_t caps;
 } hh_person_t;
 
 typedef struct {
@@ -303,6 +307,16 @@ typedef struct {
     uint32_t fix_age_ms;    /* UINT32_MAX never */
     uint32_t sentences;
     uint32_t bad;
+    /* D73: the GPS is read on the interval the grid replicates, and the port is given back in
+     * between. Status says which of the three it is doing, and what that buys. */
+    uint8_t  phase;         /* 0 reading now, 1 waiting for the next reading */
+    bool     always;        /* the grid's plan is "always on": nothing is ever released */
+    uint16_t interval_s;    /* seconds between readings; 0 when always on */
+    uint32_t next_in_s;     /* until the next reading; 0 while one is running */
+    uint32_t readings;      /* readings begun since boot */
+    uint32_t fixes;         /* of those, ones that reached a fix */
+    uint32_t last_ttf_ms;   /* time to a fix in the last reading that got one; UINT32_MAX never */
+    uint32_t freed_bytes;   /* heap the last release gave back; 0 until one has happened */
 } hh_gps_info_t;
 
 /* false (and out->fitted false) on a board with no GPS pin or none heard. Any task. */
@@ -311,6 +325,35 @@ bool hh_service_gps_info(hh_gps_info_t *out);
 /* Before hh_service_start: the board profile's GPS UART pins, LG_PIN_NONE (-1) for none. With no
  * rx pin, or none of this called, nothing about a GPS runs. */
 void hh_service_set_gps_pins(int rx_gpio, int tx_gpio);
+
+/* ---- LoRa (D71, D76) ----
+ *
+ * A handheld may carry the same RYLR998 the APs do. It is optional in exactly the way an AP's is:
+ * with no module fitted nothing is transmitted, no buffer is taken and the screens say so in one
+ * line. When Wi-Fi cannot reach an AP the radio carries this handheld's position, its presence and
+ * battery, an SOS or urgent broadcast, short text and the acknowledgements those need - and
+ * nothing else, ever (D74). The service owns it; screens read the state below (D27).
+ */
+typedef struct {
+    bool     present;        /* this board has LoRa pins and the reader runs */
+    bool     fitted;         /* a module is answering now */
+    bool     ever_fitted;    /* one answered at some point since boot */
+    bool     link;           /* an AP has been heard recently */
+    bool     off;            /* the console hook is holding the radio off */
+    uint8_t  ap;             /* the AP last heard, by its LoRa address; 0 none */
+    int8_t   rssi;           /* of the last part received */
+    int8_t   snr;
+    uint32_t heard_age_ms;   /* since the last part arrived; 0xFFFFFFFF never */
+    uint32_t frames_out;
+    uint32_t frames_in;
+} hh_lora_state_t;
+
+/* Copies the radio's state; false (and present false) on a board with no LoRa connector. Any task. */
+bool hh_service_lora(hh_lora_state_t *out);
+
+/* Before hh_service_start: the board profile's LoRa pins, LG_PIN_NONE (-1) for none. With no rx
+ * pin, or none of this called, nothing about a LoRa module runs and no serial port is opened. */
+void hh_service_set_lora_pins(int rx_gpio, int tx_gpio, int rst_gpio);
 
 /*
  * D67: Unix seconds (grid time is UTC) as local wall-clock time in the grid's zone, which the AP

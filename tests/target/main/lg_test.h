@@ -35,3 +35,4 @@ void test_crypto(void);
 void test_messaging(void);
 void test_lora(void);
 void test_identity(void);
+void test_gps_plan(void);

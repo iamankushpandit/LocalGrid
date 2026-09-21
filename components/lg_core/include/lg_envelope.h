@@ -50,6 +50,7 @@ typedef enum {
     LG_T_GROUPS          = 0x52,   /* AP to AP and AP to handheld: the whole group table and its version (D52) */
     LG_T_GROUP_EDIT      = 0x53,   /* handheld to AP: make, change, or remove one group (D52) */
     LG_T_TIME_ZONE       = 0x54,   /* AP to handheld: the grid's time zone as a POSIX TZ string (D67) */
+    LG_T_GPS_PLAN        = 0x55,   /* AP to handheld: how often a GPS is read, u16 stored form (D73) */
     LG_T_DIAG_ECHO       = 0x70,   /* node console test: flooded once, reported by every node */
     LG_T_ERROR           = 0x7F,
 } lg_msg_type_t;

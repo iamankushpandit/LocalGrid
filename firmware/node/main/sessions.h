@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -17,6 +18,10 @@ esp_err_t sess_init(uint16_t port);
 /* Waits up to timeout_ms for socket activity, then handles it. */
 void    sess_poll(int timeout_ms);
 void    sess_send(uint32_t device, const uint8_t *frame, size_t len);
+
+/* Whether a handheld has an open TCP session here. A reply to one that does not may still have
+ * somewhere to go: a handheld heard over LoRa (D76). */
+bool    sess_has(uint32_t device);
 uint8_t sess_registered_count(void);
 void    sess_print(void);
 

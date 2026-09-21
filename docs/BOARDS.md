@@ -64,6 +64,7 @@ Two rules apply to every field:
 | `supply_sense` | ADC1 pin behind a resistor divider, or `LG_PIN_NONE`. ADC2 is unusable while Wi-Fi runs. | Schematic. |
 | `supply_divider_milli` | Divider ratio in thousandths (`2000` is 2:1). | Resistor values on the schematic, then confirmed: `power` against a multimeter. |
 | `gps_rx`, `gps_tx` | A free UART connector for a GPS module (D65): `gps_rx` takes the module's TXD. `LG_PIN_NONE` if there is nowhere to wire one. A pin here is a connector, not a promise a module is fitted. | Schematic. The pins must not be the serial console's UART. |
+| `lora_rx`, `lora_tx`, `lora_reset` | A free UART connector and a spare GPIO for a LoRa module (D71, D76): `lora_rx` takes the module's TXD, `lora_tx` goes to its RXD, and `lora_reset` pulls its RST low (or `LG_PIN_NONE`, and the firmware falls back to `AT+RESET`). `LG_PIN_NONE` where there is nowhere to wire one, which is every board but the FNK0104B. The module needs 3.3 V and never runs without its antenna. | Schematic. Not the console UART, and not the GPS UART: a board with a GPS needs a second free port. |
 
 ### `panel` (`lg_panel_profile_t`)
 

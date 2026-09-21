@@ -45,30 +45,10 @@ typedef struct {
 
 /* ---- radio settings ---- */
 
-/*
- * Band. 868.5 MHz is the European licence-free LoRa band; a 915 MHz region must change this one
- * number (and only this one) before flashing.
- */
-#define LORA_BAND_HZ        868500000u
-#define LORA_UART_BAUD      115200        /* the RYLR998 leaves the factory at this rate */
-/* AT+PARAMETER: spreading factor 9, bandwidth 125 kHz (code 7), coding rate 4/5 (code 1),
- * preamble 12. docs/lora.md names SF9/BW125; preamble 12 is the module's own default and is
- * required when the network ID is left at 18. */
-#define LORA_SF             9
-#define LORA_BW_CODE        7
-#define LORA_CR_CODE        1
-#define LORA_PREAMBLE       12
-#define LORA_POWER_DBM      22            /* AT+CRFOP, 0..22 */
+/* The band, the AT+PARAMETER numbers, the transmit power and the address plan are shared with the
+ * handheld's radio (D76), so both firmwares read them from one file. */
+#include "lora_radio.h"
 
-/*
- * The address plan (docs/lora.md, "Ready for handhelds later"): 0-15 are APs, by AP index, and
- * 100 + device number are handhelds, which nothing sends to yet. The RYLR998's AT+SEND to address
- * 0 reaches every address on the network ID, so it is the broadcast address and nothing else:
- * an AP is 1 + its index. Measured on the bench, 2026-09-20: with MAIN sitting on address 0 as
- * well, NORTH and SOUTH linked to each other but MAIN's link kept timing out, because a module
- * cannot be both a broadcast target and a private one. Keeping 0 free fixed it. `lora broadcast
- * off` still falls back to one transmission per peer.
- */
 /* Long payloads (D72 voice notes) are off until a board has the heap for them. Measured on the
  * bench 2026-09-20: with the 6 KB receive and send slots taken, an AP that had 22-28 KB free ran
  * at 9-12 KB with a 1 KB low-water mark once handhelds joined, and MAIN reached 0. Nothing sends a
@@ -76,10 +56,6 @@ typedef struct {
  * logged and counted. The wire format still carries 48 parts, so turning this on later changes
  * nothing on the air. */
 #define LORA_LONG_PAYLOAD   0
-
-#define LORA_ADDR_BROADCAST 0u
-#define LORA_ADDR_AP(i)     ((uint16_t)((i) + 1u))
-#define LORA_ADDR_HANDHELD(d) ((uint16_t)(100u + (d)))
 
 /* ---- timing ---- */
 
@@ -100,8 +76,32 @@ typedef struct {
  * peer whose only link is LoRa brings the same catch-up announcements with it (D48, D53).
  * Returns ESP_OK once the task is running, whether or not a module answered.
  */
-esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], lgbb_frame_cb_t on_frame,
-                     lgbb_link_cb_t on_link);
+/*
+ * A frame a handheld sent over LoRa (D76). session_device is this AP's pseudo-session for that
+ * handheld: it is set from the sealed frame's own sender field, which the LoRa key authenticates,
+ * so the handheld needs no REGISTER over a radio that could not answer one. The glue hands it
+ * straight to lg_node_on_session_frame, which is what makes a LoRa frame the same frame it would
+ * have been over Wi-Fi.
+ */
+typedef void (*lora_client_cb_t)(uint32_t *session_device, const uint8_t *frame, size_t len);
+
+/*
+ * lora_key is LG_SECRET_LORA_KEY (D76): it seals frames to and from handhelds, and nothing else.
+ * AP-to-AP frames keep the backbone key, so a handheld can neither read nor forge one AP talking
+ * to another. on_client may be NULL, and then a handheld's frames are counted and dropped.
+ */
+esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], const uint8_t lora_key[32],
+                     lgbb_frame_cb_t on_frame, lgbb_link_cb_t on_link, lora_client_cb_t on_client);
+
+/*
+ * Core task: a frame lg_core wants to send to a handheld that has no TCP session here. It goes
+ * only if that handheld has been heard over LoRa recently and only if it is one of the few kinds
+ * a handheld's radio carries (lora_policy_for_handheld_frame). Returns true when it was queued.
+ */
+bool lora_offer_client(uint32_t device, const uint8_t *frame, size_t len);
+
+/* Whether a handheld has been heard over LoRa recently enough to answer. Core task. */
+bool lora_has_client(uint32_t device);
 
 /*
  * Core task, every pass: delivers frames that arrived, expires links, and sends the heartbeat.

@@ -40,6 +40,22 @@ typedef struct {
 esp_err_t hh_voice_start(void);
 
 /*
+ * Talks with a generated tone instead of the microphone, for `ms` milliseconds (capped at one
+ * minute, as a held talk bar is). Everything after the capture is the ordinary talk path: the
+ * same AGC, ADPCM encoding, frame numbering and END frame, sent through the same service call,
+ * so what this exercises is push-to-talk itself and not a parallel imitation of it.
+ *
+ * It exists because only the FNK0104B has a microphone (see can_talk), which left voice
+ * undemonstrable on the four boards that can only listen, and untestable without a person
+ * willing to talk into a board. A board with no microphone may talk this way; a board with no
+ * audio hardware at all still cannot.
+ *
+ * The capture task is created on the first call on a board that has no microphone, so a handheld
+ * that never runs a demo pays nothing for this.
+ */
+esp_err_t hh_voice_tone_start(uint8_t scope, uint32_t target, uint16_t ms);
+
+/*
  * Starts talking to a 1:1 conversation (LG_SCOPE_DIRECT, target = device) or a group
  * (LG_SCOPE_GROUP, target = group id). ESP_ERR_NOT_SUPPORTED on a board with no microphone,
  * ESP_ERR_INVALID_STATE while someone else is being played or a talk is already running,

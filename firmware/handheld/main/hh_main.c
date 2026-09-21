@@ -11,6 +11,7 @@
 #include "hh_console.h"
 #include "hh_mem.h"
 #include "hh_service.h"
+#include "hh_demo.h"
 #include "hh_voice.h"
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
@@ -77,6 +78,11 @@ void app_main(void)
 
     /* The service first, so the launcher's first paint already says what is happening. */
     hh_service_set_gps_pins(board != NULL ? board->gps_rx : LG_PIN_NONE, board != NULL ? board->gps_tx : LG_PIN_NONE);
+    /* D71/D76: the optional LoRa module. Every board but the FNK0104B has LG_PIN_NONE here, and a
+     * board with no pin starts nothing at all. */
+    hh_service_set_lora_pins(board != NULL ? board->lora_rx : LG_PIN_NONE,
+                             board != NULL ? board->lora_tx : LG_PIN_NONE,
+                             board != NULL ? board->lora_reset : LG_PIN_NONE);
     esp_err_t err = hh_service_start(&identity);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[NET] Network service not started: %s", esp_err_to_name(err));
@@ -87,6 +93,12 @@ void app_main(void)
      * a speaker listens. */
     if (err == ESP_OK && (err = hh_voice_start()) != ESP_OK) {
         ESP_LOGE(TAG, "[NET] Push-to-talk not started: %s", esp_err_to_name(err));
+    }
+
+    /* The self-running demonstration. Its task only waits to be asked, so it costs a task control
+     * block and nothing else until somebody starts a run. */
+    if (hh_demo_start() != ESP_OK) {
+        ESP_LOGW(TAG, "[NET] Demo not available: no memory for its task");
     }
 
     /* Decision D24: the product firmware keeps the self test. This is the quick part, which

@@ -73,14 +73,25 @@ typedef struct {
     uint8_t  status;
 } lg_msg_ack_t;
 
-/* PRESENCE_UPDATE: node -> nodes (flood), node -> client. */
-#define LG_PRESENCE_LEN (11u + LG_PUBKEY_LEN)
+/*
+ * PRESENCE_UPDATE: node -> nodes (flood), node -> client.
+ *
+ * Two lengths are accepted. LG_PRESENCE_LEN_V1 is the layout before capability bits existed;
+ * LG_PRESENCE_LEN adds the two bytes design review answer 19 always specified, carrying what the
+ * device can do (LG_CAP_* in lg_types.h). A decoder takes either and reports caps 0 for the older
+ * one, so a grid whose APs are updated one at a time keeps working instead of losing presence
+ * outright: on a bench where APs run on battery in other rooms, they cannot all be flashed at
+ * once. Encoders always write the longer form.
+ */
+#define LG_PRESENCE_LEN_V1 (11u + LG_PUBKEY_LEN)
+#define LG_PRESENCE_LEN    (13u + LG_PUBKEY_LEN)
 typedef enum { LG_PRES_OFFLINE = 0, LG_PRES_ONLINE = 1 } lg_presence_state_t;
 typedef struct {
     uint32_t device;
     uint16_t node;
     uint32_t epoch;
     uint8_t  state;
+    uint16_t caps;           /* LG_CAP_* bits the device reported when it registered; 0 if unknown */
     uint8_t  pubkey[LG_PUBKEY_LEN];
 } lg_presence_t;
 
@@ -176,6 +187,16 @@ typedef struct {
  * turns it into local time on a screen.
  */
 bool lg_tz_valid(const uint8_t *s, size_t n);
+
+/*
+ * GPS_PLAN (D73): AP -> handheld, scope SYSTEM. Exactly two bytes, a little-endian u16: how often
+ * a handheld reads its own GPS, in the form the grid settings store and replicate between APs
+ * (0 the firmware default, 0xFFFF always on, otherwise seconds; firmware/common/lg_gps_plan.h
+ * turns it into a schedule, and the admin page turns it into words). The core carries the number
+ * and never interprets it, so an interval the owner adds later needs no protocol change. Sent at
+ * registration and whenever the grid's choice changes.
+ */
+#define LG_GPS_PLAN_BODY_LEN 2u
 
 /* NODE_HELLO: node -> neighbors, every 2 s. */
 #define LG_HELLO_LEN 4u

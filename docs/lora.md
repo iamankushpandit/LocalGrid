@@ -208,9 +208,9 @@ must not need a breaking change when it happens, so two things are settled now:
 
 What a handheld over LoRa would send is deliberately small: its position (D65), presence, an SOS or
 urgent broadcast, and short text. Not voice, not registration, not the shared state. The open
-question, to answer before that work starts: **which key seals a handheld's LoRa frames**, since
-handhelds do not hold the APs' backbone key. Probably a LoRa key derived from the grid secret and
-held by both, but that is a decision, not an assumption.
+question was **which key seals a handheld's LoRa frames**, since handhelds do not hold the APs'
+backbone key; D76 answered it with a LoRa key derived from the backbone key with HKDF and held by
+both. The section below is what was then built.
 
 ## Push-to-talk over LoRa: notes, never live (owner asked 2026-09-20)
 
@@ -267,6 +267,78 @@ When handhelds get modules, the module is optional there in exactly the way it i
 handheld with no module behaves as it does today, and the grid never assumes a handheld can be
 reached that way. An AP must therefore keep working with any mixture - some handhelds with a
 module, some without, some whose module has just died.
+
+## Handhelds, as built (2026-09-21)
+
+The FNK0104B is the first handheld wired for a module: module TXD to **GPIO 21**, module RXD to
+**GPIO 14**, RST to **GPIO 2**, 3.3 V and ground from the I2C header. Those three numbers live in
+the board profile (`lora_rx`, `lora_tx`, `lora_reset`), like the GPS pins beside them, and every
+other board has `LG_PIN_NONE`. Its GPS keeps UART0 (GPIO 44/43) and the radio takes UART1, so the
+two modules share only power and ground. **Never power the module without its antenna**, and the
+100-470 uF capacitor the APs need applies here too: a handheld's regulator also feeds Wi-Fi bursts.
+
+**A handheld with no module pays nothing.** A board whose profile names no LoRa pin opens no serial
+port, starts no task and takes no buffer. A board with pins but nothing fitted says so once at
+`[LORA]`, takes no frame buffers, transmits nothing, keeps no timer and shows "Module: none fitted"
+on Status. The 2.5 KB of frame buffers (2 reassembly and 3 send slots of 512 bytes) is taken once,
+the first time a module answers, and never again.
+
+**Two keys (D76).** A handheld seals its LoRa frames with `LG_SECRET_LORA_KEY`, which it and the APs
+hold and which is derived one way from the backbone key. AP-to-AP frames keep the backbone key,
+unchanged. The **peer kind in the part header picks the key**, so the two conversations never meet
+and a handheld can neither read nor forge one AP talking to another.
+
+**Nonces still never repeat**, under a key that several devices hold. The twelve clear bytes are
+both the nonce and the AEAD's associated data, and in them:
+
+- the **sender** separates every holder of the key. A handheld sends its device number (1-15, the
+  nibble the part header carries); an AP sends `0x8000 | its index`, which no device number can be.
+- the **boot counter** is the one each device commits to NVS before it transmits anything.
+- the **sequence** only grows within a boot, from one counter per device. On the handheld that is
+  `lg_client`'s own counter, so the frame a message would have had over Wi-Fi and the frame it gets
+  over LoRa are the same frame with the same identity, not two messages. A part retransmitted after
+  a failure carries identical sealed bytes: a repeated ciphertext, not a repeated nonce.
+
+**What a handheld sends, and nothing else**: its position (D65), its keepalive with the battery
+(D68), an SOS, urgent broadcast or all clear, short text, and the acknowledgements those need. Live
+voice, registration, the roster, chosen names, group edits, group tables, the time zone and the
+shared state are refused by name, in `lora_policy_for_handheld_frame()`, and the on-board tests
+hold the list to exactly that.
+
+**When it sends** (D74): only when Wi-Fi cannot reach an AP, except that an alert always goes on
+both radios. Two rate limits keep a three-second retransmission timer from becoming a transmission
+every three seconds: the same message identity goes on the air at most once every **30 s**, and the
+keepalive and the position at most once every **60 s**. An alert is not exempt - an SOS that went
+out is an SOS that went out.
+
+**The AP side.** A handheld's frame is opened with the LoRa key, and the sender field in that seal
+is the handheld's own device number, so the AP knows whose frame it is **without a REGISTER**: it
+keeps a pseudo-session per handheld and hands the frame to exactly the code a frame off that
+handheld's TCP session would reach. Replies go the same way round: when `lg_core` sends to a
+handheld that has no TCP session, the AP puts the frame on LoRa if it has heard that handheld
+within ten minutes and if it is one of the few kinds a handheld's radio carries. `lora` on the AP
+console lists the handhelds heard, their signal and whether they are still answerable.
+
+**Where a handheld goes when it has no session.** An AP does not mark a LoRa-only handheld
+*online* in presence, because presence is established by REGISTER and registration is not offered
+to this radio. So its text and its SOS reach the grid and are acknowledged, and its position and
+battery are recorded and replicated, but the roster still shows it offline. That is a deliberate
+limit, not an oversight: online means "an AP can reach it in a second", which over LoRa is untrue.
+
+**Battery, measured from the datasheet and the airtime.** At 22 dBm the RYLR998 draws about 110 mA
+while transmitting, and one full part is about 0.93 s: **0.03 mAh per part**, so about **0.09 mAh**
+for a short text (three parts) and the same for an SOS. The keepalive and the position are one part
+each. At the rate limits above, a handheld that has fallen off Wi-Fi and has nothing to say spends
+about **0.06 mAh a minute**, or 3.6 mAh an hour. What actually costs is **listening**: the module
+draws 11-15 mA in receive the whole time it is powered, about **13 mAh an hour**, which on a 1000
+mAh cell is most of a day's charge on its own. A handheld sending as fast as the radio and the
+three-slot queue allow would add roughly 35 mAh an hour on top.
+
+**Not decided, for the owner**: whether a low battery should quieten the radio. A sensible rule
+would be *below 20 %, only alerts go on LoRa* and *below 10 %, the keepalive and the position stop
+too*, leaving the SOS working to the last. Turning the module off between transmissions would save
+the 13 mAh an hour, at the cost of not hearing anything - which is the wrong trade for a device
+carried in case of an emergency. Nothing of this is built: it is policy, and policy is the owner's.
 
 ## Memory, measured (2026-09-20)
 
@@ -348,6 +420,11 @@ lora reset                reset and reconfigure the module
 lora broadcast on|off     one transmission to address 0, or one per peer
 lora at <AT command>      ask the module directly, for bring-up; the reply is logged at [LORA]
 ```
+
+A handheld answers the same `lora`, `lora reset`, `lora off [seconds]`, `lora on`, `lora broadcast
+on|off` and `lora at <command>`, plus `lora force`, which puts the next frame on the air whatever
+the policy would say. It has no `bb` and no `lora send`: a handheld has one backbone, and `force`
+is the honest way to make it talk on the bench.
 
 The chaos run then adds LoRa rounds: break the Wi-Fi backbone between two APs, send text and an
 SOS, and count what arrived and how long it took; break LoRa instead and check nothing is lost;

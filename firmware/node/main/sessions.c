@@ -308,6 +308,16 @@ static void gather_flush(bool stop)
     }
 }
 
+bool sess_has(uint32_t device)
+{
+    for (size_t i = 0; i < SESS_MAX; i++) {
+        if (s_sess[i].fd >= 0 && s_sess[i].device == device) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void sess_send(uint32_t device, const uint8_t *frame, size_t len)
 {
     if (len > LG_FRAME_MAX) {

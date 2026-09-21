@@ -210,6 +210,8 @@ def time_source(text, board):
 
 IDENTITY = re.compile(r"LGID: (\S+) role=(\w+) board=(\w+)(?: node=(\d+) (\S+))?(?: device=(\d+))?")
 GROUP_ROW = re.compile(r"^\s*(\d+)\s+(\S+)\s+(member|not a member)\s*$")
+# Printed by every role, so grid time is observable with no AP on USB (handheld-only runs).
+GRID_TIME = re.compile(r"\[TIME\] Grid time (\d{10,})")
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")   # D21: never write a hardware address
 
 
@@ -333,6 +335,7 @@ class Board:
         self.links = set()
         self.status = None               # AP: last "[GRID] links" sample since boot
         self.registered_node = None      # handheld: node it is registered with
+        self.grid_time = None            # last "[TIME] Grid time N" this board printed, from any role
         self.settings_version = None
         self.lowest_heap = None          # bytes on APs, KB on handhelds (as the firmware prints them)
         self.free_heap = None            # the last free-heap sample, same units
@@ -562,6 +565,11 @@ class Chaos:
                 b.wrong = True
         elif m := GROUP_ROW.search(line):
             b.groups[m.group(2)] = m.group(3) == "member"
+        if m := GRID_TIME.search(line):
+            # Every role prints this, so grid time can be observed without an AP on USB. That is the
+            # difference between a handheld-only run sending ordinary messages and sending nothing at
+            # all: with no evidence of grid time, D6 leaves a handheld only urgent messages to send.
+            b.grid_time = int(m.group(1))
         if CRASH.search(line):
             self.finding(f"{b.name}: crash output: {line.strip()}", board=b.name)
         if b.is_ap and parse_lora_line(line, b.lora, b.lora_peers):
@@ -748,7 +756,15 @@ class Chaos:
             elif self.time_set and a.status["time"] == "UNSET":
                 why.append(f"{a.name} grid time UNSET")
         for h in self.hhs:
-            if self.present(h) and h.registered_node not in live_idx:
+            if not self.present(h):
+                continue
+            if not self.aps:
+                # No AP is on USB, so this run cannot know which AP indices are alive. A handheld
+                # that is registered with some AP is as much as can be checked, and is enough:
+                # the APs it is choosing between are exactly what is under test.
+                if h.registered_node is None:
+                    why.append(f"{h.name} not registered with any AP")
+            elif h.registered_node not in live_idx:
                 why.append(f"{h.name} not registered with a live AP")
         versions = {a.settings_version for a in live_aps if a.settings_version is not None}
         if len(versions) > 1:
@@ -756,8 +772,14 @@ class Chaos:
         return why
 
     def grid_has_time(self):
-        """True once any AP that is up reports grid time it did not get from the PC."""
-        return any(self.present(a) and a.status is not None and a.status["time"] != "UNSET" for a in self.aps)
+        """True once any board that is up reports grid time it did not get from the PC.
+
+        An AP says so in its status line. When no AP is on USB the handhelds are the only witnesses,
+        and a handheld that prints grid time has it from the grid, never from this tool.
+        """
+        if any(self.present(a) and a.status is not None and a.status["time"] != "UNSET" for a in self.aps):
+            return True
+        return any(self.present(h) and h.grid_time for h in self.hhs)
 
     def backbone_whole(self):
         live = [a for a in self.aps if self.present(a)]
@@ -1016,8 +1038,16 @@ class Chaos:
             where = f"AP {b.index} {b.ap_name}" if b.is_ap else f"device {b.index}"
             self.say(f"{b.slot}: {b.name} {b.id} on {b.port}, board {b.board}, {where}, {b.bridge}"
                      f"{'' if b.holdable else ' (pulse only: cannot be held)'}")
+        if not self.aps and len(self.hhs) < 2:
+            raise SystemExit("No AP and fewer than two handhelds answered; nothing could be injected")
         if not self.aps:
-            raise SystemExit("No AP answered; nothing was injected")
+            # The mirror of the no-handheld case below. APs running on battery in other rooms are a
+            # real bench topology (2026-09-21), and a run can still take handhelds out and measure
+            # whether messages keep flowing and handhelds re-register. What it cannot test is AP
+            # faults, the backbone, or LoRa rounds, and the report says so rather than implying the
+            # grid survived something it was never asked to survive.
+            self.say(f"No AP is on USB: {len(self.hhs)} handhelds only. Handheld faults and messages "
+                     "are under test; AP outages, backbone healing and LoRa rounds are not.")
 
     def release_port(self, b):
         """Both lines low, then close: a plain close holds CP210x and CH34x boards in reset."""
@@ -1039,7 +1069,7 @@ class Chaos:
         """Set grid time on one AP and wait until an AP reports it. A command typed while the AP is still
         starting is lost without an answer, so it is typed again until a status line shows the time."""
         def time_seen():
-            return any(a.status and a.status["time"] != "UNSET" for a in self.aps if self.present(a))
+            return self.grid_has_time()
 
         # A GPS on MAIN (D63) or a handheld's clock usually gives the grid time within seconds; the PC
         # typing `time set` then only fights it (MAIN refuses while its GPS has a fix, another AP
@@ -1390,7 +1420,13 @@ class Chaos:
         out = [f"# Chaos run {self.start_wall:%Y-%m-%d %H:%M}", "",
                f"{'Final' if final else 'Interim'} report after {datetime.timedelta(seconds=int(self.now_s()))}. "
                f"Seed {self.args.seed}, planned {self.args.hours} h, boards: {', '.join(b.name for b in self.boards)}.",
-               "", "## Result", "",
+               ""] + ([
+                   "**No AP was on USB, so no AP was restarted and the backbone was never broken on "
+                   "purpose.** Handheld faults and ordinary messages are what this run measured; AP "
+                   "outages, backbone healing and LoRa rounds were not tested. Rows about them below "
+                   "are empty because nothing was injected, not because nothing failed.", ""]
+                   if not self.aps else []) + [
+               "## Result", "",
                "| Measure | Value |", "|---|---|",
                f"| Experiments | {len(exps)}, recovered {sum(e.get('result') == 'recovered' for e in exps)}, "
                f"not recovered {sum(e.get('result') == 'not recovered' for e in exps)} |",

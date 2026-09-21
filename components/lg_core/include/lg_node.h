@@ -82,6 +82,7 @@ typedef struct {
     uint16_t node;
     uint8_t  state;     /* lg_presence_state_t */
     uint8_t  in_use;
+    uint16_t caps;      /* LG_CAP_* the device reported when it registered; 0 unknown */
     uint8_t  pubkey[LG_PUBKEY_LEN];
 } lg_presence_entry_t;
 
@@ -176,6 +177,10 @@ typedef struct {
     uint8_t             time_quality;               /* last quality this node announced or sent */
     uint8_t             tz_len;                     /* D67: 0 = no zone known */
     char                tz[LG_TZ_MAX + 1];
+    /* D73: how often a handheld reads its own GPS, as the grid settings store it. The core only
+     * carries the number; what it means is lg_gps_plan's, and the AP's glue puts it here. */
+    bool                gps_plan_known;
+    uint16_t            gps_plan;
 } lg_node_t;
 
 void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roster, const lg_node_io_t *io);
@@ -208,6 +213,15 @@ void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality);
  * (not lg_tz_valid; the zone held is kept).
  */
 int lg_node_set_time_zone(lg_node_t *n, const char *tz);
+
+/*
+ * D73: how often handhelds should read their own GPS, as the grid settings store it (a u16; see
+ * firmware/common/lg_gps_plan.h). A value that differs from the one held is kept and sent to every
+ * locally attached device, and each registering device gets it after REGISTER_ACK, so a handheld
+ * that has never met this AP learns the grid's choice in the same breath as the time zone. An AP
+ * that has not heard the settings yet never calls this, so nothing is cleared. Always LG_OK.
+ */
+int lg_node_set_gps_plan(lg_node_t *n, uint16_t plan);
 
 /*
  * Floods this node's current grid time to every node and pushes it to every

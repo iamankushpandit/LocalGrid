@@ -7,9 +7,11 @@
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "esp_system.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lg_gps_plan.h"
 #include "node_app.h"
 
 static const char *TAG = "TIME";
@@ -21,6 +23,7 @@ static const char *TAG = "TIME";
 #define GPS_FRESH_MS  5000u     /* a fix older than this is lost: the module stopped reporting one */
 #define TASK_STACK    3072
 #define TASK_PRIORITY 3         /* below the core task (5): time can wait a few milliseconds */
+#define IDLE_STEP_MS  200u      /* how often a released reader looks at the clock */
 
 static struct {
     portMUX_TYPE mux;
@@ -29,7 +32,16 @@ static struct {
     int          rx;
     volatile uint32_t dump_bytes;   /* console `gps raw`: bytes still to print as they arrive */
     uint32_t     bytes;             /* every byte received, good or not */
+    /* D73. The plan is the GPS task's alone; other tasks leave a number in `pending` and the task
+     * picks it up, so no lock is taken on the path that matters and no reading is cut in half. */
+    lg_gps_plan_t     plan;
+    volatile uint16_t pending;      /* a plan to adopt, or PENDING_NONE */
+    volatile bool     wake;         /* someone asked for a reading now */
+    bool              open;         /* the UART driver is installed */
+    uint32_t          open_free;    /* free heap just after the last install */
 } g = { .mux = portMUX_INITIALIZER_UNLOCKED, .rx = -1 };
+
+#define PENDING_NONE 0xFFFEu   /* not a plan anyone can set: LG_GPS_PLAN_ALWAYS is 0xFFFF */
 
 static int hex(char c)
 {
@@ -144,6 +156,7 @@ static void on_rmc(const char *line, uint32_t at_ms)
     g.st.last_unix = unix;
     g.fix_ms = at_ms;
     taskEXIT_CRITICAL(&g.mux);
+    lg_gps_plan_on_fix(&g.plan, at_ms);   /* D73: this reading has what it came for */
     node_cmd_t cmd = { .type = NODE_CMD_GPS_TIME, .value = unix, .millis = (uint16_t)ms, .at_ms = at_ms };
     (void)xQueueSend(g_app.cmd_queue, &cmd, 0);   /* a full queue skips one second; the next comes */
 }
@@ -184,65 +197,16 @@ static void on_line(const char *line, uint32_t at_ms)
     }
 }
 
-static void gps_task(void *arg)
-{
-    (void)arg;
-    static char line[GPS_LINE_MAX];
-    static uint8_t buf[128];
-    size_t len = 0;
-    uint32_t line_ms = 0;   /* when the line's '$' arrived: the time the sentence stands for is just before */
-    for (;;) {
-        int n = uart_read_bytes(GPS_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
-        uint32_t now = app_now_ms();
-        if (n > 0) {
-            g.bytes += (uint32_t)n;
-        }
-        for (int i = 0; i < n && g.dump_bytes > 0; i++, g.dump_bytes--) {
-            char c = (char)buf[i];
-            if (c == '\n' || (c >= 0x20 && c < 0x7F)) {
-                putchar(c);
-            } else if (c != '\r') {
-                printf("<%02X>", (unsigned)(uint8_t)c);   /* garbage shows as hex: wrong baud or a bad line */
-            }
-        }
-        for (int i = 0; i < n; i++) {
-            char c = (char)buf[i];
-            if (c == '$') {
-                len = 0;
-                line_ms = now;
-            }
-            if (c == '\r' || c == '\n') {
-                if (len > 0) {
-                    line[len] = '\0';
-                    on_line(line, line_ms);
-                    len = 0;
-                }
-                continue;
-            }
-            if (len < sizeof(line) - 1u) {
-                line[len++] = c;
-            } else {
-                len = 0;   /* longer than NMEA allows: noise, not a sentence */
-            }
-        }
-        bool lost = false;
-        taskENTER_CRITICAL(&g.mux);
-        if (g.st.fix && now - g.fix_ms > GPS_FRESH_MS) {
-            g.st.fix = false;
-            lost = true;
-        }
-        taskEXIT_CRITICAL(&g.mux);
-        if (lost) {
-            ESP_LOGW(TAG, "[TIME] GPS fix lost; grid time carries on from this AP's clock");
-        }
-    }
-}
+/* ---- opening and closing the port (D73) ---- */
 
-esp_err_t gps_start(int rx_gpio)
+/* The sentence being assembled. File scope so a reading that ends mid-sentence can drop it: the
+ * next reading starts on a clean line rather than gluing two halves together (D73). */
+static char s_line[GPS_LINE_MAX];
+static size_t s_len;
+static uint32_t s_line_ms;   /* when the line's '$' arrived: the time it stands for is just before */
+
+static esp_err_t uart_open(void)
 {
-    if (rx_gpio < 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
     const uart_config_t cfg = {
         .baud_rate = GPS_BAUD,
         .data_bits = UART_DATA_8_BITS,
@@ -251,48 +215,227 @@ esp_err_t gps_start(int rx_gpio)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
+    uint32_t before = esp_get_free_heap_size();
     esp_err_t err = uart_driver_install(GPS_UART, GPS_RX_BUF, 0, 0, NULL, 0);
     if (err == ESP_OK) {
         err = uart_param_config(GPS_UART, &cfg);
     }
     if (err == ESP_OK) {
-        err = uart_set_pin(GPS_UART, UART_PIN_NO_CHANGE, rx_gpio, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        err = uart_set_pin(GPS_UART, UART_PIN_NO_CHANGE, g.rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     }
     if (err == ESP_OK) {
         /* No GPS fitted is normal (D63). A pulled-up idle line reads as nothing, not as noise. */
-        err = gpio_set_pull_mode((gpio_num_t)rx_gpio, GPIO_PULLUP_ONLY);
+        err = gpio_set_pull_mode((gpio_num_t)g.rx, GPIO_PULLUP_ONLY);
     }
+    if (err != ESP_OK) {
+        (void)uart_driver_delete(GPS_UART);
+        return err;
+    }
+    s_len = 0;   /* a reading starts on a clean line, never on half of the last one's */
+    g.open = true;
+    g.open_free = esp_get_free_heap_size();
+    uint32_t took = before > g.open_free ? before - g.open_free : 0u;
+    ESP_LOGD(TAG, "[TIME] GPS reading %" PRIu32 ": port open, %" PRIu32 " bytes of heap taken", g.plan.readings, took);
+    return ESP_OK;
+}
+
+static void uart_close(bool had_fix)
+{
+    if (!g.open) {
+        return;
+    }
+    (void)uart_driver_delete(GPS_UART);
+    g.open = false;
+    uint32_t after = esp_get_free_heap_size();
+    uint32_t freed = after > g.open_free ? after - g.open_free : 0u;
+    taskENTER_CRITICAL(&g.mux);
+    g.st.freed_bytes = freed;
+    g.st.fix = false;   /* nothing is being read: there is no live fix, only the last one's age */
+    taskEXIT_CRITICAL(&g.mux);
+    uint32_t next_s = lg_gps_plan_next_in_s(&g.plan, app_now_ms());
+    if (had_fix) {
+        ESP_LOGI(TAG, "[TIME] GPS reading done in %" PRIu32 " ms; port released (%" PRIu32
+                      " bytes back), next in %" PRIu32 " s",
+                 g.plan.last_ttf_ms == UINT32_MAX ? g.plan.last_open_ms : g.plan.last_ttf_ms, freed, next_s);
+    } else {
+        ESP_LOGW(TAG, "[TIME] GPS reading found no fix in %" PRIu32 " ms; port released (%" PRIu32
+                      " bytes back), next in %" PRIu32 " s",
+                 g.plan.last_open_ms, freed, next_s);
+    }
+}
+
+/* A plan another task left for this one, and a request for a reading now. */
+static void take_orders(uint32_t now)
+{
+    uint16_t want = g.pending;
+    if (want != PENDING_NONE) {
+        g.pending = PENDING_NONE;
+        if (lg_gps_plan_set(&g.plan, want, now)) {
+            ESP_LOGI(TAG, "[TIME] GPS plan: %s", lg_gps_plan_always(&g.plan) ? "always on" : "read on a schedule");
+        }
+    }
+    if (g.wake) {
+        g.wake = false;
+        lg_gps_plan_wake(&g.plan, now);
+    }
+}
+
+static void read_port(uint32_t wait_ms)
+{
+    static uint8_t buf[128];
+    int n = uart_read_bytes(GPS_UART, buf, sizeof(buf), pdMS_TO_TICKS(wait_ms));
+    uint32_t now = app_now_ms();
+    if (n > 0) {
+        g.bytes += (uint32_t)n;
+    }
+    for (int i = 0; i < n && g.dump_bytes > 0; i++, g.dump_bytes--) {
+        char c = (char)buf[i];
+        if (c == '\n' || (c >= 0x20 && c < 0x7F)) {
+            putchar(c);
+        } else if (c != '\r') {
+            printf("<%02X>", (unsigned)(uint8_t)c);   /* garbage shows as hex: wrong baud or a bad line */
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        char c = (char)buf[i];
+        if (c == '$') {
+            s_len = 0;
+            s_line_ms = now;
+        }
+        if (c == '\r' || c == '\n') {
+            if (s_len > 0) {
+                s_line[s_len] = '\0';
+                on_line(s_line, s_line_ms);
+                s_len = 0;
+            }
+            continue;
+        }
+        if (s_len < sizeof(s_line) - 1u) {
+            s_line[s_len++] = c;
+        } else {
+            s_len = 0;   /* longer than NMEA allows: noise, not a sentence */
+        }
+    }
+    bool lost = false;
+    taskENTER_CRITICAL(&g.mux);
+    if (g.st.fix && now - g.fix_ms > GPS_FRESH_MS) {
+        g.st.fix = false;
+        lost = true;
+    }
+    taskEXIT_CRITICAL(&g.mux);
+    if (lost && lg_gps_plan_always(&g.plan)) {
+        /* Only worth saying when the module is meant to be reporting all the time; on a schedule a
+         * fix going quiet between readings is the point, not a fault. */
+        ESP_LOGW(TAG, "[TIME] GPS fix lost; grid time carries on from this AP's clock");
+    }
+}
+
+static void gps_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t now = app_now_ms();
+        take_orders(now);
+        switch (lg_gps_plan_tick(&g.plan, now)) {
+        case LG_GPS_ACT_OPEN:
+            if (uart_open() != ESP_OK) {
+                ESP_LOGE(TAG, "[TIME] GPS port would not open; trying again at the next reading");
+            }
+            break;
+        case LG_GPS_ACT_CLOSE:
+            uart_close(g.plan.fix);
+            break;
+        default:
+            break;
+        }
+        if (g.open) {
+            read_port(20u);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(IDLE_STEP_MS));
+        }
+    }
+}
+
+esp_err_t gps_start(int rx_gpio, uint16_t plan)
+{
+    if (rx_gpio < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    g.rx = rx_gpio;
+    g.pending = PENDING_NONE;
+    g.st.freed_bytes = 0;
+    lg_gps_plan_init(&g.plan, plan, app_now_ms());
+    esp_err_t err = uart_open();   /* the first reading starts at boot, whatever the interval is */
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[TIME] GPS reader not started: %s", esp_err_to_name(err));
         return err;
     }
-    g.rx = rx_gpio;
     g.st.started = true;
     if (xTaskCreate(gps_task, "gps", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
+        uart_close(false);
+        g.st.started = false;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "[TIME] Listening for a GPS on GPIO%d at %d baud", rx_gpio, GPS_BAUD);
+    uint16_t every = lg_gps_plan_seconds(plan);
+    ESP_LOGI(TAG, "[TIME] Listening for a GPS on GPIO%d at %d baud, %s", rx_gpio, GPS_BAUD,
+             lg_gps_plan_always(&g.plan) ? "always on" : "a reading on a schedule");
+    if (!lg_gps_plan_always(&g.plan)) {
+        ESP_LOGI(TAG, "[TIME] GPS read every %u s; the port is released in between (D73)", every);
+    }
     return ESP_OK;
+}
+
+void gps_set_plan(uint16_t plan)
+{
+    g.pending = lg_gps_plan_canon(plan);
+}
+
+void gps_wake(void)
+{
+    g.wake = true;
 }
 
 void gps_state(gps_state_t *out)
 {
+    uint32_t now = app_now_ms();
     taskENTER_CRITICAL(&g.mux);
     *out = g.st;
     uint32_t fix_ms = g.fix_ms;
     taskEXIT_CRITICAL(&g.mux);
-    out->fix_age_ms = fix_ms == 0 ? UINT32_MAX : app_now_ms() - fix_ms;
+    out->fix_age_ms = fix_ms == 0 ? UINT32_MAX : now - fix_ms;
+    /* D73: the plan is the GPS task's, read without a lock. Every field is a word, each is only
+     * ever written by that one task, and a reader that catches one pass old is harmless. */
+    out->phase = g.plan.phase;
+    out->always = lg_gps_plan_always(&g.plan);
+    out->plan = g.plan.stored;
+    out->interval_s = out->always ? 0u : lg_gps_plan_seconds(g.plan.stored);
+    out->next_in_s = lg_gps_plan_next_in_s(&g.plan, now);
+    out->readings = g.plan.readings;
+    out->fixes = g.plan.fixes;
+    out->last_ttf_ms = g.plan.last_ttf_ms;
 }
 
 bool gps_has_fix(void)
 {
     gps_state_t st;
     gps_state(&st);
-    return st.fix && st.fix_age_ms <= GPS_FRESH_MS;
+    if (!st.started) {
+        return false;
+    }
+    if (st.always) {
+        return st.fix && st.fix_age_ms <= GPS_FRESH_MS;
+    }
+    /* Released between readings, so a live fix is not the question: the question is whether the
+     * last reading found one and the next is not overdue (D73). */
+    return st.fix_age_ms <= lg_gps_plan_hold_ms(&g.plan);
 }
 
 void gps_dump(uint32_t bytes)
 {
     printf("GPS: %" PRIu32 " bytes received since boot; printing the next %" PRIu32 "\n", g.bytes, bytes);
+    if (!lg_gps_plan_reading(&g.plan)) {
+        printf("GPS: between readings; bringing the next one forward\n");
+        gps_wake();
+    }
     g.dump_bytes = bytes;
 }

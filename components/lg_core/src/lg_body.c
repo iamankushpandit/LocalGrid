@@ -125,20 +125,25 @@ size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out)
     lg_wr16(out + 4, v->node);
     lg_wr32(out + 6, v->epoch);
     out[10] = v->state;
-    memcpy(out + 11, v->pubkey, LG_PUBKEY_LEN);
+    lg_wr16(out + 11, v->caps);
+    memcpy(out + 13, v->pubkey, LG_PUBKEY_LEN);
     return LG_PRESENCE_LEN;
 }
 
 bool lg_presence_dec(const uint8_t *in, size_t len, lg_presence_t *v)
 {
-    if (len != LG_PRESENCE_LEN) {
+    /* Either layout, and nothing else: see LG_PRESENCE_LEN_V1 in lg_body.h. A sender that predates
+       capability bits says nothing about what it can do, which is reported as no bits rather than
+       guessed at from anything else. */
+    if (len != LG_PRESENCE_LEN && len != LG_PRESENCE_LEN_V1) {
         return false;
     }
     v->device = lg_rd32(in);
     v->node   = lg_rd16(in + 4);
     v->epoch  = lg_rd32(in + 6);
     v->state  = in[10];
-    memcpy(v->pubkey, in + 11, LG_PUBKEY_LEN);
+    v->caps   = (len == LG_PRESENCE_LEN) ? lg_rd16(in + 11) : 0u;
+    memcpy(v->pubkey, in + (len == LG_PRESENCE_LEN ? 13u : 11u), LG_PUBKEY_LEN);
     return v->state <= LG_PRES_ONLINE;
 }
 

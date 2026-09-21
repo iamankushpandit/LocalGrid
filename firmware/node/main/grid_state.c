@@ -32,13 +32,17 @@ static const char *TAG = "GRID";
  *   180  u32   boot counter          184  u8   reset reason          185 u32 previous run s
  *   189  u8    time stratum
  *   190  48 B  POSIX time zone (D67), NUL-padded, "" when none
- * Layout 4 (GS_LEN_V4 bytes, APs before D67) is the same without the POSIX zone and still read.
+ *   238  u16   GPS reading plan (D73), as the settings store it
+ * Layout 5 (GS_LEN_V5 bytes, APs between D67 and D73) is the same without the GPS plan, and
+ * layout 4 (GS_LEN_V4 bytes, APs before D67) without the zone either; both are still read.
  * AV_KIND (0x80): u32 grid minute of the newest entry, u8 count, then count x (u8 ap, 30 B packed)
  * INC_KIND (0x81): u8 count, then count x grid_incident_t (16 B each, as stored)
  * Every frame travels sealed under the backbone key, like every backbone frame.
  */
-#define GS_LAYOUT          5u
-#define GS_LEN             238u
+#define GS_LAYOUT          6u
+#define GS_LEN             240u
+#define GS_LAYOUT_V5       5u
+#define GS_LEN_V5          238u
 #define GS_LAYOUT_V4       4u
 #define GS_LEN_V4          190u
 #define AV_KIND            0x80u
@@ -52,7 +56,8 @@ static const char *TAG = "GRID";
 
 _Static_assert(GS_LEN <= LG_GRID_STATE_MAX, "grid state body exceeds the core's limit");
 _Static_assert(SETTINGS_GRID_NAME_MAX + 1 == 33 && SETTINGS_TZ_MAX + 1 == 48 && SETTINGS_POSIX_TZ_MAX + 1 == 48 &&
-                   GS_LEN == GS_LEN_V4 + SETTINGS_POSIX_TZ_MAX + 1, "grid state layout needs updating");
+                   GS_LEN_V5 == GS_LEN_V4 + SETTINGS_POSIX_TZ_MAX + 1 && GS_LEN == GS_LEN_V5 + LG_GPS_PLAN_LEN,
+               "grid state layout needs updating");
 
 /* ---- sticky records (D48), packed (D49) ---- */
 
@@ -426,6 +431,14 @@ void grid_state_posix_tz(char *out, size_t cap)
     xSemaphoreGive(s.lock);
 }
 
+uint16_t grid_state_gps_plan(void)
+{
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    uint16_t plan = s.settings.gps_plan;
+    xSemaphoreGive(s.lock);
+    return plan;
+}
+
 void grid_state_settings(node_settings_t *out)
 {
     xSemaphoreTake(s.lock, portMAX_DELAY);
@@ -509,6 +522,7 @@ static void encode(uint8_t out[GS_LEN])
     lg_wr32(out + 105, c->iterations);
     memcpy(out + 109, c->hash, SETTINGS_HASH_LEN);
     memcpy(out + 190, c->posix_tz, SETTINGS_POSIX_TZ_MAX + 1);
+    lg_wr16(out + 238, c->gps_plan);   /* D73 */
     xSemaphoreGive(s.lock);
     lg_wr32(out + 141, k.time_gen);
     lg_wr16(out + 145, k.time_author);
@@ -613,7 +627,8 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
         return;
     }
     bool v4 = len == GS_LEN_V4 && body[0] == GS_LAYOUT_V4;   /* an AP before D67: no POSIX zone */
-    if (!v4 && (len != GS_LEN || body[0] != GS_LAYOUT)) {
+    bool v5 = len == GS_LEN_V5 && body[0] == GS_LAYOUT_V5;   /* an AP before D73: no GPS plan */
+    if (!v4 && !v5 && (len != GS_LEN || body[0] != GS_LAYOUT)) {
         ESP_LOGW(TAG, "[GRID] Grid state from AP %u ignored: length %u or layout %u not understood", origin_node,
                  (unsigned)len, len > 0 ? body[0] : 0u);
         return;
@@ -633,6 +648,9 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
     if (!v4) {
         memcpy(in.posix_tz, body + 190, SETTINGS_POSIX_TZ_MAX + 1);
     }
+    if (!v4 && !v5) {
+        in.gps_plan = lg_gps_plan_canon(lg_rd16(body + 238));
+    }
     uint32_t time_gen = lg_rd32(body + 141);
     uint16_t time_author = lg_rd16(body + 145);
     uint32_t time_set_unix = lg_rd32(body + 147);
@@ -649,6 +667,11 @@ void grid_state_on_frame(uint16_t origin_node, const uint8_t *body, size_t len)
     xSemaphoreTake(s.lock, portMAX_DELAY);
     bool take = well_formed && newer(in.seq, in.author, s.settings.seq, s.settings.author);
     esp_err_t err = ESP_OK;
+    if (take && (v4 || v5)) {
+        /* D73: a newer version made on an AP before D73 (a new password, say) carries no GPS plan.
+         * Keep the one the grid agreed rather than snapping every AP back to the default. */
+        in.gps_plan = s.settings.gps_plan;
+    }
     if (take && v4 && strcmp(in.timezone, s.settings.timezone) == 0) {
         /* A newer version made on an AP before D67 (a new password, say) carries no POSIX zone: keep
          * ours while the zone it names is the same one. */

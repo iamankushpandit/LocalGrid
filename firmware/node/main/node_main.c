@@ -166,12 +166,47 @@ static void sync_time_zone(void)
     }
 }
 
+/*
+ * D73: how often a GPS is read, from the replicated settings, into this AP's own reader and into
+ * the core, which sends it to the handhelds here now and to each one that registers. Runs beside
+ * sync_time_zone on the core task once a second and acts only on a change, so the admin page here
+ * and another AP's grid state reach a handheld's GPS by the same path.
+ */
+static void sync_gps_plan(void)
+{
+    static bool s_known;
+    static uint16_t s_sent;
+    uint16_t plan = grid_state_gps_plan();
+    if (s_known && plan == s_sent) {
+        return;
+    }
+    s_known = true;
+    s_sent = plan;
+    gps_set_plan(plan);   /* harmless on an AP with no GPS: nothing reads it */
+    (void)lg_node_set_gps_plan(&g_app.core, plan);
+    uint16_t every = lg_gps_plan_seconds(plan);
+    if (every == 0u) {
+        ESP_LOGI("TIME", "[GRID] GPS plan: always on");
+    } else {
+        ESP_LOGI("TIME", "[GRID] GPS plan: a reading every %u s", every);
+    }
+}
+
 /* ---- lg_core io ---- */
 
 static void io_to_client(void *ctx, uint32_t device, const uint8_t *frame, size_t len)
 {
     (void)ctx;
-    sess_send(device, frame, len);
+    if (sess_has(device)) {
+        sess_send(device, frame, len);
+        return;
+    }
+    /*
+     * D76: no TCP session, but the handheld may have reached this AP over LoRa. The radio answers
+     * only a handheld it has heard recently and only the few kinds of frame a handheld's radio
+     * carries; an AP with no module drops out of this at once.
+     */
+    (void)lora_offer_client(device, frame, len);
 }
 
 /*
@@ -355,6 +390,16 @@ static void io_on_client_time(void *ctx, uint32_t device, uint32_t unix_s)
 static void on_backbone_frame(uint16_t from_node, const uint8_t *frame, size_t len)
 {
     lg_node_on_backbone_frame(&g_app.core, from_node, frame, len);
+}
+
+/*
+ * D76: a frame a handheld sent over LoRa. session_device is the pseudo-session lora.c keeps for
+ * that handheld, already set from the sealed frame's authenticated sender, so this is exactly the
+ * call a frame off that handheld's TCP session would make.
+ */
+static void on_lora_client_frame(uint32_t *session_device, const uint8_t *frame, size_t len)
+{
+    lg_node_on_session_frame(&g_app.core, session_device, frame, len);
 }
 
 static void on_link(uint16_t node, bool up)
@@ -953,6 +998,22 @@ static void print_gps(void)
         printf("GPS: last fix %" PRIu32 ", %" PRIu32 " ms ago; grid time %s\n", st.last_unix, st.fix_age_ms,
                s_gps_owns && g_app.time_quality == LG_TIME_AUTHORITATIVE ? "comes from it" : "does not come from it");
     }
+    /* D73: the schedule, and what releasing the port gives back. */
+    if (st.always) {
+        printf("GPS: always on; the port is never released\n");
+    } else if (st.phase == LG_GPS_PHASE_READING) {
+        printf("GPS: reading now (every %u s)\n", st.interval_s);
+    } else {
+        printf("GPS: waiting, next reading in %" PRIu32 " s (every %u s)\n", st.next_in_s, st.interval_s);
+    }
+    printf("GPS: %" PRIu32 " readings, %" PRIu32 " with a fix", st.readings, st.fixes);
+    if (st.last_ttf_ms != UINT32_MAX) {
+        printf(", last fix took %" PRIu32 " ms", st.last_ttf_ms);
+    }
+    if (st.freed_bytes != 0) {
+        printf(", %" PRIu32 " bytes of heap free between readings", st.freed_bytes);
+    }
+    printf("\n");
 }
 
 /* ---- core task ---- */
@@ -999,6 +1060,7 @@ static void core_task(void *arg)
             ptrace_second(now / 1000u, lgbb_tx_frame_count(), lgbb_link_count(), quality_name(g_app.time_quality));
             record_availability(now);
             sync_time_zone();
+            sync_gps_plan();   /* D73 */
             refresh_discovery();
             web_admin_publish_snapshot();
             traffic_publish(now);            /* D70: the packed traffic record for the admin link */
@@ -1110,7 +1172,10 @@ void app_main(void)
     grid_state_init(g_app.index);
     ESP_ERROR_CHECK(lgbb_init(g_app.index, g_app.boot, s_backbone_key, on_backbone_frame, on_link, clients_count));
     /* D71: the second backbone. A module that does not answer is logged once and changes nothing. */
-    (void)lora_start(g_app.index, s_discriminator, on_backbone_frame, on_link);
+    static const uint8_t lora_key[] = LG_SECRET_LORA_KEY;
+    _Static_assert(sizeof(lora_key) == 32, "LG_SECRET_LORA_KEY must be 32 bytes: run python tools/gen_secrets.py --update");
+    (void)lora_start(g_app.index, s_discriminator, lora_key, on_backbone_frame, on_link,
+                     on_lora_client_frame);
     ESP_ERROR_CHECK(sess_init(LG_PROTO_TCP_PORT));
     /* Every AP serves the admin page (D45). */
     if (web_admin_start() != ESP_OK) {
@@ -1138,7 +1203,7 @@ void app_main(void)
     xTaskCreate(core_task, "lg_core", 8192, NULL, 5, &core);
     traffic_set_tasks(core, ble_link_task());
     if (g_app.index == 0 && CONFIG_LG_NODE_GPS_RX_GPIO >= 0) {
-        (void)gps_start(CONFIG_LG_NODE_GPS_RX_GPIO);   /* D63: MAIN only */
+        (void)gps_start(CONFIG_LG_NODE_GPS_RX_GPIO, grid_state_gps_plan());   /* D63, D73: MAIN only */
     }
     console_start();
 }

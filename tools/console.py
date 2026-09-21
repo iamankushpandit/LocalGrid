@@ -26,6 +26,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from flash import LGID, acquire_lock, load_map, release_and_close  # noqa: E402
+from serial_log import hold_port  # noqa: E402
 
 # Decision D21: hardware addresses never appear in tool output, even if firmware logs one.
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
@@ -90,6 +91,14 @@ def send_and_read(ser, command, raw):
 
 
 def ask(device, command, trust_port, raw=False, settled=False):
+    import serial
+
+    # Opening the port resets the board, so the logging daemon must let go of it first.
+    with hold_port(device["port"]):
+        return _ask(device, command, trust_port, raw, settled)
+
+
+def _ask(device, command, trust_port, raw=False, settled=False):
     import serial
 
     try:

@@ -36,6 +36,9 @@ static const lg_board_t BOARDS[] = {
         .supply_sense = LG_PIN_NONE,   /* no divider on this dev board; wire one to an ADC1 pin to measure */
         .gps_rx = LG_PIN_NONE,
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
     },
     {
         /* LCDWIKI E32R32P, sold as Hosyond 3.2in. ST7789P3, BGR (measured: red and blue
@@ -74,6 +77,9 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 2000,
         .gps_rx = LG_PIN_NONE,   /* UART0 is this board's console, and no free connector carries a UART */
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
     },
     {
         /* Freenove FNK0104B. ILI9341 with TFT_eSPI's ILI9341_2 sequence, BGR, inversion
@@ -122,6 +128,12 @@ static const lg_board_t BOARDS[] = {
          * The owner wired a GT-U7 here on device 1. */
         .gps_rx = 44,
         .gps_tx = 43,
+        /* D71/D76: the owner wired an RYLR998 here on the I2C header's 3.3 V: module TXD to
+         * GPIO21, module RXD to GPIO14, RST to GPIO2. The GPS keeps UART0 on GPIO44/43, so
+         * the two modules share only power and ground. */
+        .lora_rx = 21,
+        .lora_tx = 14,
+        .lora_reset = 2,
     },
     {
         /* LCDWIKI / Hosyond E32R28T-1 (ESP32-32E, classic ESP32), 2.8in, one USB-C. ILI9341 on
@@ -164,6 +176,9 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 2000,
         .gps_rx = LG_PIN_NONE,   /* UART0 is the console; Braino documents no free UART connector */
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
     },
     {
         /* ESP32-2432S028 "cheap yellow display", the dual-USB (USB-C and micro-USB) variant with
@@ -206,6 +221,9 @@ static const lg_board_t BOARDS[] = {
         .supply_sense = LG_PIN_NONE,
         .gps_rx = LG_PIN_NONE,   /* UART0 is the console; Braino documents no free UART connector */
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
     },
     {
         /* LCDWIKI E32R40T (ESP32-32E, classic ESP32), 4.0in, one USB-C. ST7796 at 320x480
@@ -250,6 +268,9 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 2000,
         .gps_rx = LG_PIN_NONE,   /* UART0 is the console; Braino documents no free UART connector */
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
     },
     /*
      * The alert and distress unit (D66): Waveshare's two 1.47in ESP32-C6 boards. They share a name
@@ -311,6 +332,9 @@ static const lg_board_t BOARDS[] = {
         .supply_sense = LG_PIN_NONE,
         .gps_rx = LG_PIN_NONE,
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
         .n_buttons = 1,
         .buttons = {
             { .gpio = 9, .active_low = true, .pull_up = true,
@@ -359,6 +383,9 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 3000,
         .gps_rx = LG_PIN_NONE,
         .gps_tx = LG_PIN_NONE,
+        .lora_rx = LG_PIN_NONE,   /* D71: no LoRa module connector on this board */
+        .lora_tx = LG_PIN_NONE,
+        .lora_reset = LG_PIN_NONE,
         .n_buttons = 1,
         .buttons = {
             { .gpio = 9, .active_low = true, .pull_up = true,

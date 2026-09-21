@@ -18,8 +18,10 @@
  *   4  u8  part count, 1..LORA_PARTS_MAX
  *
  * The sender is a whole byte because handhelds get modules later (docs/lora.md, "Ready for
- * handhelds later"): nothing here needs a format change when they do. This firmware only ever
- * sends, and only ever accepts, LORA_PEER_AP.
+ * handhelds later"): nothing here needed a format change when they did. Both kinds are now on the
+ * air - LORA_PEER_AP between APs, sealed with the backbone key, and LORA_PEER_HANDHELD between a
+ * handheld and an AP, sealed with the LoRa key (D76) - and the kind nibble is what picks the key,
+ * so a handheld can neither read nor forge one AP talking to another.
  *
  * The part number and the count are whole bytes for the same reason: a voice note or any other
  * payload of a few kilobytes is dozens of parts, not three, and widening the field later would be
@@ -99,6 +101,12 @@ size_t lora_b64_decode(const char *in, size_t len, uint8_t *out, size_t cap);
 #define LORA_PEER_HANDHELD  0x10u
 #define LORA_PEER_KIND(b)   ((uint8_t)((b) & 0xF0u))
 #define LORA_PEER_INDEX(b)  ((uint8_t)((b) & 0x0Fu))
+/*
+ * The index is a nibble, so a handheld above device 15 has no place on the air. docs/lora.md says
+ * so and says what widening it would cost: a second byte, which is a wire change. A handheld with
+ * a higher device number never starts its radio, and says so once.
+ */
+#define LORA_PEER_INDEX_MAX 15u
 
 typedef struct {
     uint8_t        peer;        /* kind | index, as on the air */
@@ -207,6 +215,19 @@ typedef enum {
 
 /* Reads the envelope of an unsealed lg frame and says whether LoRa may carry it. */
 lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len);
+
+/*
+ * The same question for a frame between a handheld and an AP (D71's "Ready for handhelds later",
+ * unblocked by D76), in either direction. A handheld's radio carries a deliberately small set and
+ * nothing else: its position (D65), its keepalive and battery, an SOS or urgent broadcast, short
+ * text, and the acknowledgements those need. Registration, the roster, names, group edits, the
+ * shared state and live voice are never offered to it - at 22 dBm and about one message every
+ * three seconds, a handheld's cell cannot pay for housekeeping, and a handheld that has fallen
+ * off Wi-Fi is not going to re-register over a radio the AP cannot answer a roster on.
+ *
+ * LORA_SEND_SPARE_ROOM is never returned here: nothing in this set is housekeeping.
+ */
+lora_policy_t lora_policy_for_handheld_frame(const uint8_t *frame, size_t len);
 
 /* Whether this frame is one of the alerts that must never wait behind anything. */
 bool lora_is_alert_frame(const uint8_t *frame, size_t len);

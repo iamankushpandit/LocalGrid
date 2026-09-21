@@ -7,6 +7,11 @@
  * the clock and the grid do with a fix. Only boards whose profile names a gps_rx pin start it;
  * with nothing fitted the pin idles pulled up, nothing is heard, and nothing is shown or sent.
  *
+ * D73: a handheld's GPS costs battery as well as memory, and Wi-Fi, BLE and LoRa come first for
+ * both. The reader follows the same interval the grid replicates to every AP and pushes to every
+ * handheld: between readings the UART driver and its buffers are released, and each reading lasts
+ * until there is a fix or a bounded window passes. "Always on" behaves exactly as before D73.
+ *
  * Service-side only (D27): screens learn about the GPS through hh_service.h, never from here.
  */
 #pragma once
@@ -15,6 +20,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "lg_gps_plan.h"
 
 #define HH_GPS_FRESH_MS 5000u   /* a fix older than this is lost: the module stopped reporting one */
 
@@ -46,14 +52,35 @@ typedef struct {
     uint8_t  tracked;       /* of those, with a signal */
     uint8_t  best_snr;      /* dB-Hz */
     int      rx_gpio;       /* -1 when not started */
+    /* D73: the schedule, and what it saves. */
+    uint8_t  phase;         /* lg_gps_phase_t: reading now, or waiting for the next reading */
+    bool     always;        /* the plan never releases the module */
+    uint16_t plan;          /* the stored form the grid agreed */
+    uint16_t interval_s;    /* what that means in seconds; 0 when always on */
+    uint32_t next_in_s;     /* until the next reading; 0 while one is running */
+    uint32_t readings;      /* readings begun since boot */
+    uint32_t fixes;         /* of those, ones that reached a fix */
+    uint32_t last_ttf_ms;   /* time to a fix in the last reading that got one; UINT32_MAX never */
+    uint32_t freed_bytes;   /* heap the last release gave back; 0 until one has happened */
 } hh_gps_state_t;
 
 /* Called on the GPS task after each fixed RMC and when a fix is lost. Must only copy and return. */
 typedef void (*hh_gps_notify_t)(void);
 
-/* Starts the reader on rx_gpio (and tx_gpio, or -1). ESP_ERR_INVALID_ARG for a negative rx pin:
- * a board with no GPS connector. */
-esp_err_t hh_gps_start(int rx_gpio, int tx_gpio, hh_gps_notify_t notify);
+/* Starts the reader on rx_gpio (and tx_gpio, or -1) with the plan this handheld last saved (D73).
+ * ESP_ERR_INVALID_ARG for a negative rx pin: a board with no GPS connector. */
+esp_err_t hh_gps_start(int rx_gpio, int tx_gpio, uint16_t plan, hh_gps_notify_t notify);
+
+/* D73: a new plan from the AP. Any task; the GPS task picks it up at its next pass, so no reading
+ * is ever cut in half by a setting arriving. */
+void hh_gps_set_plan(uint16_t plan);
+
+/* Bring the next reading forward to now: the console asking for raw bytes, or a screen that wants
+ * a fresh position rather than an ageing one. */
+void hh_gps_wake(void);
+
+/* How long a fix from the last reading stays this handheld's answer, in milliseconds (D65). */
+uint32_t hh_gps_hold_ms(void);
 
 /* Copies the state; safe from any task, and before or without a start (all zero, rx_gpio -1). */
 void hh_gps_state(hh_gps_state_t *out);

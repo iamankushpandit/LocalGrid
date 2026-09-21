@@ -31,6 +31,26 @@ extern "C" {
 /* Live push-to-talk voice (D61). Voice frames take origin_seq from a per-boot counter of their
  * own with this bit set, so text sequences and nonces never collide with voice and voice never
  * enters the text duplicate windows. */
+/*
+ * What a device can do, as design review answer 19 reserved two bytes for. A device reports its
+ * own bits when it registers, and its AP shares them with the grid in PRESENCE_UPDATE, so any
+ * device or observer can ask what is on the network and what each one is able to do, rather than
+ * being told in advance (D48: a fact one device holds is shared and survives a restart).
+ *
+ * The bits describe what the hardware and firmware can do, never what the holder is permitted to
+ * do or is doing now. Unknown bits are kept and passed on unchanged: a device from a later build
+ * may report capabilities this one has never heard of, and dropping them would lose the very
+ * information this field exists to carry.
+ */
+#define LG_CAP_SPEAKER          0x0001u   /* can play audio: cues, tones, received voice */
+#define LG_CAP_MIC              0x0002u   /* can record: live push-to-talk from a person */
+#define LG_CAP_TONE_TALK        0x0004u   /* can send voice generated in firmware, with no microphone */
+#define LG_CAP_SCREEN           0x0008u   /* has a display showing grid state (D23) */
+#define LG_CAP_TOUCH            0x0010u   /* the display takes touch input */
+#define LG_CAP_GPS              0x0020u   /* has a GPS it can take a position from */
+#define LG_CAP_LORA             0x0040u   /* has a LoRa radio (D71) */
+#define LG_CAP_BATTERY          0x0080u   /* can measure its own supply and report a percentage (D62) */
+
 #define LG_VOICE_SEQ_BIT        0x80000000u
 #define LG_VOICE_SAMPLES        800u         /* 100 ms of 8 kHz mono per frame */
 #define LG_VOICE_DATA_MAX       400u         /* IMA ADPCM bytes for LG_VOICE_SAMPLES */

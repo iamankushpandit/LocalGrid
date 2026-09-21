@@ -14,7 +14,14 @@
 #define LG_PROTO_TCP_PORT       7300    /* handheld control sessions */
 /* D46: one network. Every AP broadcasts this SSID; handhelds pick an AP by BSSID and the vendor IE. */
 #define LG_PROTO_SSID           "LocalGrid Access Point"
-#define LG_PROTO_MAX_STATIONS   15      /* ESP32 SoftAP maximum with ESP-NOW encryption disabled */
+/*
+ * Handhelds one AP will hold at once. 15 is the ESP32 SoftAP's own maximum, but each session costs
+ * over a kilobyte of buffer whether or not anyone is using it: on 2026-09-21 the session table was
+ * 17 KB of an AP's static RAM while the same AP measured 1 to 6 KB of free heap. Ten is more than
+ * the bench has ever had on one AP, and a handheld that finds an AP full moves to another, which
+ * is the roaming the grid already does.
+ */
+#define LG_PROTO_MAX_STATIONS   10
 #define LG_PROTO_UNKNOWN_NODE   7       /* index used by a node board that was never provisioned */
 
 /* Discovery payload carried in beacons (vendor IE) and BLE adverts.

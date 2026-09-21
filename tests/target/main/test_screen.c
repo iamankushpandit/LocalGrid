@@ -18,7 +18,7 @@
 #include "lg_bsp_touch.h"
 #include "lg_draw.h"
 
-#define SUITES  5
+#define SUITES  6
 #define TARGETS 5
 
 #define C_BG      lg_rgb(0x000000)
@@ -123,7 +123,7 @@ void test_screen_start(const lg_identity_t *identity)
     s_device[1] = box(cx, y, cw, F_SMALL, C_MUTED, C_SURFACE, LG_ALIGN_LEFT, board->name);
     y = (int16_t)(y + s_device[1].rect.h + s_pad);
     static const char *names[SUITES] = { "Core protocol", "Encryption", "Messaging", "LoRa backbone",
-                                         "Device identity" };
+                                         "Device identity", "GPS schedule" };
     for (int i = 0; i < SUITES; i++) {
         s_suite_name[i] = box(cx, y, (int16_t)(cw * 45 / 100), F_BODY, C_TEXT, C_SURFACE, LG_ALIGN_LEFT, names[i]);
         s_suite_status[i] = box((int16_t)(cx + cw * 45 / 100), y, (int16_t)(cw - cw * 45 / 100), F_SMALL, C_MUTED,

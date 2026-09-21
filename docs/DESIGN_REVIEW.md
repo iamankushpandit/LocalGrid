@@ -494,6 +494,11 @@ If NVS is unreadable, the boot counter, device index, and keys are all gone toge
 | last seen, node uptime seconds | 4 B |
 | capability bits | 2 B |
 
+Capability bits are `LG_CAP_*` in `lg_types.h`: what the device's hardware and firmware
+can do, never what its holder is allowed to do. A device reports its own when it registers and its
+AP shares them from there, so the grid can be asked what is present and what each one can do. Bits a
+reader does not recognise are kept and passed on unchanged.
+
 Names come from configuration, not presence.
 
 **Mechanism:**

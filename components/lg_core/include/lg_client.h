@@ -79,6 +79,7 @@ typedef struct {
     uint8_t  state;
     uint8_t  in_use;
     uint8_t  has_key;
+    uint16_t caps;                    /* LG_CAP_* from presence; 0 until an AP says */
     uint8_t  pubkey[LG_PUBKEY_LEN];   /* pinned on first sight */
 } lg_peer_t;
 
@@ -96,6 +97,7 @@ typedef enum {
     LG_CEV_VOICE_REFUSED,    /* value: lg_ack_status_t an AP refused our voice with (D61) */
     LG_CEV_POSITION,         /* value: subject whose position is newer (device, or LG_NODE_ID_BASE | node) (D65) */
     LG_CEV_TIME_ZONE,        /* value: length of the new zone; lg_client_time_zone has it (D67) */
+    LG_CEV_GPS_PLAN,         /* value: the grid's GPS reading interval in its stored form (D73) */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -136,6 +138,7 @@ typedef struct {
     uint32_t           boot;
     uint32_t           seq;
     uint32_t           attach_count;
+    uint16_t           caps;               /* LG_CAP_* this handheld reports when registering */
     uint8_t            pubkey[LG_PUBKEY_LEN];
     lg_roster_t       *roster;             /* owned by the glue; replaced by newer group tables */
     uint32_t           group_edit_seq;     /* our last GROUP_EDIT, to report its refusal */
@@ -159,10 +162,20 @@ typedef struct {
     lg_voice_seen_t    voice_seen[LG_MAX_DEVICES];   /* newest voice per author, by roster user index */
     lg_position_t      positions[LG_POS_SLOTS];      /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
     char               tz[LG_TZ_MAX + 1];            /* D67: the grid's POSIX TZ from the AP; "" none yet */
+    bool               gps_plan_known;               /* D73: an AP has said how often to read a GPS */
+    uint16_t           gps_plan;                     /* ... in the grid settings' stored form */
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
                     lg_roster_t *roster, const lg_client_io_t *io);
+
+/*
+ * What this handheld can do (LG_CAP_* in lg_types.h), reported to its AP in every REGISTER and
+ * shared from there with the whole grid. The core cannot work this out for itself: the bits come
+ * from the board profile and the firmware's own build, which live outside lg_core (D27). Set it
+ * before the first connection; setting it later applies at the next registration.
+ */
+void lg_client_set_caps(lg_client_t *c, uint16_t caps);
 
 /* The transport reached the node: sends REGISTER. */
 void lg_client_connected(lg_client_t *c);
@@ -218,6 +231,11 @@ bool lg_client_time_from_gps(const lg_client_t *c);
 /* D67. The grid's time zone as a POSIX TZ string, as the AP last sent it; "" until one arrives.
  * A new one emits LG_CEV_TIME_ZONE. The client keeps none across a restart: the glue does. */
 const char *lg_client_time_zone(const lg_client_t *c);
+
+/* D73. The grid's GPS reading interval in its stored form, as the AP last sent it. False until an
+ * AP says, so a handheld keeps whatever it last saved rather than falling back to always on. A new
+ * one emits LG_CEV_GPS_PLAN. The client keeps none across a restart: the glue does. */
+bool lg_client_gps_plan(const lg_client_t *c, uint16_t *out);
 
 const lg_in_msg_t *lg_client_inbox(const lg_client_t *c, size_t newest_index);
 

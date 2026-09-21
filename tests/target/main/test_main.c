@@ -108,6 +108,7 @@ void app_main(void)
         { "messaging", test_messaging },
         { "lora", test_lora },
         { "identity", test_identity },
+        { "gps", test_gps_plan },
     };
     for (int i = 0; i < (int)(sizeof(suites) / sizeof(suites[0])); i++) {
         int checks_before = lg_checks;

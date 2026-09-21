@@ -155,6 +155,16 @@ typedef struct {
      * GPIO0, the boot button. A pin here is a connector, not a promise that a module is fitted. */
     int8_t             gps_rx;
     int8_t             gps_tx;
+    /*
+     * A LoRa module's UART and reset line (D71, D76): lora_rx takes the module's TXD, lora_tx goes
+     * to its RXD, lora_reset pulls its RST low. LG_PIN_NONE on a board with nowhere to wire one,
+     * which is every board but the FNK0104B today. As with the GPS, every profile sets all three:
+     * a missing field would read as GPIO0, the boot button. A pin here is a connector, not a
+     * promise that a module is fitted; a handheld with none behaves exactly as one built before.
+     */
+    int8_t             lora_rx;
+    int8_t             lora_tx;
+    int8_t             lora_reset;
     lg_board_role_t    role;     /* D66: a handheld, or an alert unit with the reduced screens */
     /* Buttons beyond the touch panel, n_buttons of them; rows past it are never read, so a
      * profile without buttons cannot claim GPIO0 by accident. */

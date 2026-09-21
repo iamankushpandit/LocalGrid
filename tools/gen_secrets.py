@@ -18,6 +18,12 @@ import sys
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "firmware" / "common" / "lg_secrets.h"
 
+LORA_BLOCK = """
+/* D76: the LoRa key APs and handhelds share, derived from the backbone key, which handhelds
+   never hold. Adding it needs a reflash, not a re-pairing: Wi-Fi and the backbone are unchanged. */
+#define LG_SECRET_LORA_KEY {{ {values} }}
+"""
+
 DISCRIMINATOR_BLOCK = """
 /* 4-byte grid discriminator carried in node beacons: HKDF-SHA256(backbone key, "lg-disc").
  * Handhelds recognise nodes with this value and never reference the backbone key. */
@@ -27,6 +33,17 @@ DISCRIMINATOR_BLOCK = """
 
 def c_bytes(data):
     return ", ".join(f"0x{b:02x}" for b in data)
+
+
+def lora_key(key):
+    """The key handhelds get for LoRa: HKDF-SHA256 of the backbone key, so it belongs to this grid
+    and to no other, and cannot be worked back to the backbone key that APs keep to themselves.
+
+    Handhelds are given this one alone (D76). A handheld that is lost or taken apart therefore
+    cannot reach the AP-to-AP backbone, on either radio.
+    """
+    prk = hmac.new(b"LG-LORA-1", key, hashlib.sha256).digest()
+    return hmac.new(prk, b"lora handhelds" + b"", hashlib.sha256).digest()
 
 
 def discriminator(key):
@@ -52,17 +69,28 @@ def create():
 
 
 def update():
+    """Adds whatever this version derives that the file does not have yet, keeping every key it has.
+
+    Everything here comes from the backbone key, so a grid that gains a value needs its boards
+    reflashed, never re-paired: the Wi-Fi passphrase and the backbone key are untouched.
+    """
     text = OUT.read_text(encoding="utf-8")
-    if "LG_SECRET_DISCRIMINATOR" in text:
-        print(f"{OUT} is up to date")
-        return
     m = re.search(r"#define LG_SECRET_BACKBONE_KEY \{([^}]*)\}", text)
     key = bytes(int(v, 16) for v in re.findall(r"0x([0-9a-fA-F]{2})", m.group(1))) if m else b""
     if len(key) != 32:
         sys.exit(f"{OUT} has no 32-byte LG_SECRET_BACKBONE_KEY; regenerate with --force")
-    OUT.write_text(text.rstrip("\n") + "\n" + DISCRIMINATOR_BLOCK.format(values=c_bytes(discriminator(key))),
-                   encoding="utf-8")
-    print(f"added LG_SECRET_DISCRIMINATOR to {OUT}; keys unchanged")
+    added = []
+    if "LG_SECRET_DISCRIMINATOR" not in text:
+        text = text.rstrip("\n") + "\n" + DISCRIMINATOR_BLOCK.format(values=c_bytes(discriminator(key)))
+        added.append("LG_SECRET_DISCRIMINATOR")
+    if "LG_SECRET_LORA_KEY" not in text:
+        text = text.rstrip("\n") + "\n" + LORA_BLOCK.format(values=c_bytes(lora_key(key)))
+        added.append("LG_SECRET_LORA_KEY")
+    if not added:
+        print(f"{OUT} is up to date")
+        return
+    OUT.write_text(text, encoding="utf-8")
+    print(f"added {', '.join(added)} to {OUT}; keys unchanged (reflash the boards, no re-pairing)")
 
 
 if "--update" in sys.argv:

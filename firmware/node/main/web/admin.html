@@ -197,6 +197,29 @@
     <p class="hint">Positions stay in memory on the APs and handhelds, never in flash, and are shown only here, behind the login.</p>
   </section>
 
+  <section id="gps-card" data-tab="settings" hidden>
+    <h2>GPS</h2>
+    <p class="hint" id="gps-state" style="margin-top:0"></p>
+    <label for="gps-plan">How often a GPS is read</label>
+    <div class="row" style="margin-top:0">
+      <select id="gps-plan" style="flex:1; min-width: 220px">
+        <option value="65535">Always on</option>
+        <option value="60">Every minute</option>
+        <option value="300">Every 5 minutes</option>
+        <option value="600">Every 10 minutes</option>
+        <option value="900">Every 15 minutes</option>
+        <option value="1800">Every 30 minutes</option>
+      </select>
+      <button class="ghost" id="gps-save">Save</button>
+    </div>
+    <p class="hint">Wi-Fi, Bluetooth and LoRa keep their memory; the GPS gives way. Between readings the serial
+      port and its buffers are handed back, and the last position simply ages. A grid that stays put does not need
+      more than a reading every few minutes; pick a short interval for a grid on the move, or "Always on" to read
+      without stopping. Every AP and every handheld follows this setting.</p>
+    <p class="hint" id="gps-cost"></p>
+    <div class="msg" id="gps-msg"></div>
+  </section>
+
   <section id="security-card" data-tab="settings" hidden>
     <h2>Admin password</h2>
     <form id="password-form">
@@ -758,6 +781,49 @@
     csrf = ""; clearInterval(poll); show(["login"]);
   });
 
+  /* ---- GPS (D73): the AP sends numbers, the page makes the words ---- */
+
+  function planWords(plan) {
+    if (plan === 65535) return "always on";
+    const s = plan === 0 ? 300 : plan;
+    return s < 120 ? `every ${s} seconds` : `every ${Math.round(s / 60)} minutes`;
+  }
+
+  function renderGps(s) {
+    const g = s.gps || {}, sel = $("gps-plan");
+    /* Never move the menu under the admin's finger while they are choosing. */
+    if (document.activeElement !== sel) sel.value = String(g.plan === 0 ? 300 : g.plan);
+    const always = g.plan === 65535;
+    let state;
+    if (!g.started) {
+      state = `No GPS module on this AP. The setting still applies to every AP and handheld that has one: ${planWords(g.plan)}.`;
+    } else if (always) {
+      state = g.fix ? `Reading without stopping, ${g.sats} satellites.` : "Reading without stopping, looking for satellites.";
+    } else if (g.phase === 0) {
+      state = `Reading now (${planWords(g.plan)}).`;
+    } else {
+      state = `Waiting. The next reading is in ${fmtDur(g.next_s)} (${planWords(g.plan)}).`;
+    }
+    $("gps-state").textContent = state;
+    const bits = [];
+    if (g.readings) bits.push(`${g.readings} reading${g.readings === 1 ? "" : "s"}, ${g.fixes} with a fix`);
+    if (g.ttf_ms >= 0) bits.push(`the last fix took ${(g.ttf_ms / 1000).toFixed(1)} s`);
+    if (g.freed) bits.push(`${g.freed} bytes of memory are free between readings`);
+    $("gps-cost").textContent = bits.length ? `On this AP: ${bits.join("; ")}.` : "";
+  }
+
+  $("gps-save").addEventListener("click", async () => {
+    const plan = Number($("gps-plan").value);
+    say("gps-msg", "Saving…", true);
+    try {
+      await api("/api/gps", { plan });
+      say("gps-msg", `Saved: the GPS is read ${planWords(plan)}. Every AP and handheld follows within a few seconds.`, true);
+      setTimeout(refresh, 800);
+    } catch (e) {
+      say("gps-msg", e.message, false);
+    }
+  });
+
   async function setTime(unixMs, label) {
     say("time-msg", "Setting time…", true);
     try {
@@ -904,7 +970,7 @@
 
   function beginDashboard() {
     show(["time-card", "grid-card", "location-card", "nodes-card", "lora-card", "avail-card", "incidents-card",
-          "groups-card", "announce-card", "devices-card", "security-card"]);
+          "groups-card", "announce-card", "devices-card", "gps-card", "security-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);
@@ -1045,6 +1111,7 @@
     $("zone-hint").textContent = s.posix_tz
       ? `Handhelds show local time${s.timezone ? ` for ${s.timezone}` : ""} (${s.posix_tz}).`
       : "Handhelds show UTC until a time zone is saved: press \"Use this device's time\" once.";
+    renderGps(s);
     $("s-node").textContent = s.node_name;
     $("s-uptime").textContent = fmtDur(s.uptime_s);
     $("s-handhelds").textContent = s.handhelds;

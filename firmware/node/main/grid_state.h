@@ -120,6 +120,9 @@ void grid_state_settings(node_settings_t *out);
 /* Copies only the grid's POSIX time zone (D67), "" when none. Any task. */
 void grid_state_posix_tz(char *out, size_t cap);
 
+/* The grid's GPS reading plan (D73) in its stored form, as lg_gps_plan.h describes it. Any task. */
+uint16_t grid_state_gps_plan(void);
+
 /* Stores new settings as the newest version, authored by this AP, and asks the core task to
  * announce them. Any task. */
 esp_err_t grid_state_commit(const node_settings_t *in);

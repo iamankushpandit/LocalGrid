@@ -6,6 +6,8 @@
  * network task stays the only owner of Wi-Fi and lg_client state.
  */
 #include "hh_console.h"
+#include "hh_lora.h"
+#include "hh_demo.h"
 #include "hh_mem.h"
 #include "lg_power.h"
 
@@ -179,6 +181,62 @@ static int cmd_id(int argc, char **argv)
     (void)argc;
     (void)argv;
     lg_identity_print(s_identity);   /* identity is read-only after boot */
+    return 0;
+}
+
+static const char *demo_step_name(hh_demo_step_t s)
+{
+    switch (s) {
+    case HH_DEMO_IDLE:     return "idle";
+    case HH_DEMO_LOOKING:  return "looking at the grid";
+    case HH_DEMO_DIRECT:   return "1:1 message";
+    case HH_DEMO_GROUP:    return "group message";
+    case HH_DEMO_VOICE:    return "voice";
+    case HH_DEMO_ANNOUNCE: return "announcement";
+    case HH_DEMO_URGENT:   return "urgent and all clear";
+    case HH_DEMO_POSITION: return "positions";
+    case HH_DEMO_ROAM:     return "leaving and rejoining an AP";
+    case HH_DEMO_DONE:     return "finished";
+    }
+    return "?";
+}
+
+static int cmd_demo(int argc, char **argv)
+{
+    hh_demo_state_t st;
+    if (argc >= 2 && strcmp(argv[1], "stop") == 0) {
+        hh_demo_stop();
+        printf("stopping at the next step\n");
+        return 0;
+    }
+    if (argc >= 2 && (strcmp(argv[1], "showcase") == 0 || strcmp(argv[1], "resilience") == 0)) {
+        bool hard = strcmp(argv[1], "resilience") == 0;
+        esp_err_t err = hh_demo_run(hard ? HH_DEMO_RESILIENCE : HH_DEMO_SHOWCASE);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("not on the grid yet: nothing could be demonstrated\n");
+            return 1;
+        }
+        if (err != ESP_OK) {
+            printf("a demo is already running; 'demo stop' ends it\n");
+            return 1;
+        }
+        printf("%s demo started; it runs by itself and shows on the screen\n", argv[1]);
+        return 0;
+    }
+    if (argc >= 2) {
+        printf("usage: demo [showcase|resilience|stop]\n");
+        return 1;
+    }
+    hh_demo_state(&st);
+    printf("demo %s", st.running ? "running" : "idle");
+    if (st.steps > 0) {
+        printf(", %s, step %u of %u, %u shown, %u skipped",
+               demo_step_name(st.step), st.step_n, st.steps, st.done, st.skipped);
+    }
+    printf("\n");
+    if (st.note[0] != '\0') {
+        printf("  %s\n", st.note);
+    }
     return 0;
 }
 
@@ -919,9 +977,87 @@ static int cmd_gps(int argc, char **argv)
             }
             printf("\n");
         }
+        /* D73: the schedule the grid set, and what handing the port back gives this handheld. */
+        if (st.always) {
+            printf("GPS: always on; the port is never released\n");
+        } else if (st.phase == LG_GPS_PHASE_READING) {
+            printf("GPS: reading now (every %u s)\n", st.interval_s);
+        } else {
+            printf("GPS: waiting, next reading in %" PRIu32 " s (every %u s)\n", st.next_in_s, st.interval_s);
+        }
+        printf("GPS: %" PRIu32 " readings, %" PRIu32 " with a fix", st.readings, st.fixes);
+        if (st.last_ttf_ms != UINT32_MAX) {
+            printf(", last fix took %" PRIu32 " ms", st.last_ttf_ms);
+        }
+        if (st.freed_bytes != 0) {
+            printf(", %" PRIu32 " bytes of heap free between readings", st.freed_bytes);
+        }
+        printf("\n");
     }
     printf("Clock: from %s\n", hh_service_clock_source());
     return 0;
+}
+
+/*
+ * D71/D76: the same `lora` the APs answer, minus what only an AP has. A handheld with no module,
+ * or a board with no LoRa pins, says so in one line and does nothing.
+ */
+static int cmd_lora(int argc, char **argv)
+{
+    if (argc == 1) {
+        hh_lora_print();
+        return 0;
+    }
+    if (strcmp(argv[1], "reset") == 0) {
+        hh_lora_request_reset();
+        printf("LoRa: resetting and reconfiguring the module; watch the [LORA] log\n");
+        return 0;
+    }
+    if (strcmp(argv[1], "on") == 0) {
+        hh_lora_enable();
+        printf("LoRa: on\n");
+        return 0;
+    }
+    if (strcmp(argv[1], "off") == 0) {
+        uint32_t seconds = argc >= 3 ? (uint32_t)strtoul(argv[2], NULL, 10) : 60u;
+        hh_lora_disable(seconds);
+        printf("LoRa: off; it comes back on its own\n");
+        return 0;
+    }
+    if (strcmp(argv[1], "force") == 0) {
+        hh_lora_force_next();
+        printf("LoRa: the next frame goes on the air whatever the policy would say\n");
+        return 0;
+    }
+    if (strcmp(argv[1], "broadcast") == 0 && argc >= 3) {
+        bool on = strcmp(argv[2], "on") == 0;
+        hh_lora_set_broadcast(on);
+        printf("LoRa: broadcast %s\n", on ? "on (one transmission to every AP)" : "off (the last AP heard)");
+        return 0;
+    }
+    if (strcmp(argv[1], "at") == 0 && argc >= 3) {
+        char cmd[64];
+        size_t n = 0;
+        for (int i = 2; i < argc && n + 1 < sizeof(cmd); i++) {
+            n += (size_t)snprintf(cmd + n, sizeof(cmd) - n, "%s%s", i > 2 ? " " : "", argv[i]);
+        }
+        hh_lora_request_at(cmd);
+        printf("LoRa: sent \"%s\"; the reply is logged at [LORA]\n", cmd);
+        return 0;
+    }
+    printf("usage: lora | lora reset | lora off [seconds] | lora on | lora force | "
+           "lora broadcast on|off | lora at <AT command>\n");
+    return 1;
+}
+
+static esp_err_t lora_register(void)
+{
+    const esp_console_cmd_t cmd = {
+        .command = "lora",
+        .help = "lora [reset|off [s]|on|force|broadcast on|off|at <cmd>]: the optional LoRa module (D71, D76)",
+        .func = cmd_lora,
+    };
+    return esp_console_cmd_register(&cmd);
 }
 
 static esp_err_t gps_register(void)
@@ -974,6 +1110,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "i2cscan",   .help = "Addresses answering on this board's I2C bus",            .func = cmd_i2cscan },
         { .command = "saver",     .help = "saver [on|off]: the screen saver, kept in NVS",         .func = cmd_saver },
         { .command = "volume",    .help = "volume [off|low|medium|high]: notification loudness, kept in NVS", .func = cmd_volume },
+        { .command = "demo",      .help = "demo [showcase|resilience|stop]: the self-running demonstration", .func = cmd_demo },
         { .command = "mem",       .help = "Heap now: free, lowest, largest block",                   .func = cmd_mem },
         { .command = "name",      .help = "name [new name]: show or change this handheld's name",     .func = cmd_name },
         { .command = "reboot",    .help = "Restart this handheld",                                   .func = cmd_reboot },
@@ -986,6 +1123,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
     }
     (void)mic_register();                /* mic level | loop | gain, push-to-talk audio */
     (void)gps_register();                /* gps [raw], D65 */
+    (void)lora_register();               /* lora ..., D71 and D76 */
     (void)lg_power_register_command();   /* power [-m s [-i ms] [-q]], shared with the APs */
     esp_console_register_help_command();
     return esp_console_start_repl(repl);

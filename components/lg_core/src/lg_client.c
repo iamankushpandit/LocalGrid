@@ -237,6 +237,11 @@ static void handle_position(lg_client_t *c, const lg_env_t *e, const uint8_t *bo
     emit(c, LG_CEV_POSITION, pos.subject);
 }
 
+void lg_client_set_caps(lg_client_t *c, uint16_t caps)
+{
+    c->caps = caps;
+}
+
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
                     lg_roster_t *roster, const lg_client_io_t *io)
 {
@@ -261,7 +266,7 @@ void lg_client_connected(lg_client_t *c)
         .device       = c->device,
         .attach_epoch = (c->boot << 12) | (c->attach_count & 0xFFFu),
         .client_time  = c_local_time(c),
-        .caps         = 0,
+        .caps         = c->caps,
     };
     memcpy(reg.pubkey, c->pubkey, LG_PUBKEY_LEN);
     uint8_t body[LG_REGISTER_LEN];
@@ -300,6 +305,15 @@ bool lg_client_time_from_gps(const lg_client_t *c)
 const char *lg_client_time_zone(const lg_client_t *c)
 {
     return c->tz;
+}
+
+bool lg_client_gps_plan(const lg_client_t *c, uint16_t *out)
+{
+    if (!c->gps_plan_known) {
+        return false;
+    }
+    *out = c->gps_plan;
+    return true;
 }
 
 bool lg_client_time_restricted(const lg_client_t *c)
@@ -849,6 +863,12 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         peer->node  = p.node;
         peer->state = p.state;
         peer->epoch = p.epoch;
+        if (p.caps != 0u) {
+            /* An AP that predates capability bits, or one relaying a device that does, reports 0.
+               Keeping the last non-zero answer means a mixed grid does not forget what it already
+               learned about a device every time an older AP speaks for it. */
+            peer->caps = p.caps;
+        }
         if (!all_zero(p.pubkey, LG_PUBKEY_LEN)) {
             if (!peer->has_key) {
                 memcpy(peer->pubkey, p.pubkey, LG_PUBKEY_LEN);
@@ -885,6 +905,18 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
             memcpy(c->tz, body, e.body_len);
             c->tz[e.body_len] = '\0';
             emit(c, LG_CEV_TIME_ZONE, e.body_len);
+        }
+        break;
+    case LG_T_GPS_PLAN:
+        /* D73: two bytes, taken as they come; lg_gps_plan clamps what it does not like, so a plan
+         * this handheld's firmware does not know still leaves it reading on a sane schedule. */
+        if (e.scope == LG_SCOPE_SYSTEM && e.body_len == LG_GPS_PLAN_BODY_LEN) {
+            uint16_t plan = lg_rd16(body);
+            if (!c->gps_plan_known || plan != c->gps_plan) {
+                c->gps_plan_known = true;
+                c->gps_plan = plan;
+                emit(c, LG_CEV_GPS_PLAN, plan);
+            }
         }
         break;
     case LG_T_TEXT:

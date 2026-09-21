@@ -6,6 +6,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 ## [Unreleased]
 
 ### Changed
+- **D79: a self-running demo, and voice without a microphone.** `demo showcase` and
+  `demo resilience` on a handheld work through a 1:1 message, a group message, a voice talk, an
+  announcement, an urgent call and its all clear, and positions, showing each step on the screen.
+  The script is built when the run starts from who is present and what their devices report they
+  can do, so nothing is hard-coded to the boards on one bench. `hh_voice_tone_start` feeds a
+  generated warble into the real push-to-talk path, so the four handhelds with a speaker but no
+  microphone can send voice; its capture task is created on demand, so a handheld that never runs
+  a demo pays nothing. Verified on the boards: Marshall (no microphone) sent 31 voice frames in
+  3098 ms with none dropped, and Channi heard them a backbone hop away, plus the text, the
+  announcement and the urgent call with its all clear.
+  Both runs verified on the boards; the resilience run moved Marshall from Fuji to Everest and back
+  on the grid in 1 s. Two bugs found and fixed while doing it: the roam step declared success in 0 s
+  without the handheld ever leaving its AP (the reconnect is asynchronous, so it now waits for the
+  link to drop before timing its return), and the demo task overflowed its stack and restarted the
+  board, because `hh_status_t` carries the people, users and groups tables and two of them shared one
+  call chain - those structures now live outside the task stack.
+- **Devices say what they can do, and the grid passes it on.** Design review answer 19 reserved two
+  bytes of capability bits in the presence table and nothing ever filled them. A handheld now reports
+  its own `LG_CAP_*` bits (speaker, microphone, generated voice, screen, touch, GPS, LoRa, battery)
+  in `REGISTER`, read from its board profile rather than any list of boards, and its AP shares them
+  with the grid in `PRESENCE_UPDATE` (D48). Any device or observer can now ask what is on the network
+  and what each one is able to do, instead of being told in advance - so a board added later takes
+  part with no code change. `PRESENCE_UPDATE` grew by 2 bytes; the decoder accepts the older layout
+  too and reports no capabilities for it, so a grid whose APs are flashed one at a time keeps its
+  presence working. Verified on a board: 6125 checks, 0 failures.
+- **D78: `tools/serial_log.py`, a console logger so reading a board costs no reset.** A daemon
+  attaches once to every connected board and writes timestamped console lines to `logs/serial/`;
+  `--status`, `--who` and `--find REGEX` answer from those files and open no port. Only flashing
+  opens a port: `flash.py` and `console.py` take a hold, the daemon yields it and reattaches after.
+  Logs rotate at 8 MB and rotated files are purged after 30 days. A port that will not open is
+  recorded as `#### unreachable`, and every read prints how long ago the board last spoke, so a
+  stale log cannot be mistaken for a healthy one. New skill: `.claude/skills/serial-log/`.
+- **D77: ask the hardware, never recall it.** A rule in `AGENTS.md` and a decision in
+  `docs/DECISIONS.md`: identity comes from `tools/flash.py --identify` and live state from
+  `tools/grid_watch.py`, never from `tools/bench_devices.json` alone and never from recollection.
+  Reports now say whether an answer came from a board or from the map, and say so when a board
+  could not be asked. `flash.py` already asked before writing; this extends it to reports and
+  decisions.
+- `tools/flash.py --identify` no longer resets boards it was not asked about: its sweep for
+  unmapped ports now skips every port in the device map, not only the selected boards', so
+  identifying two handhelds cannot reset an AP in the middle of a measurement.
 - **The APs are named Everest, Fuji and Denali** (AP 0, 1 and 2; owner, 2026-09-20), written into each board's identity partition so the name travels with the board. The bench map's own labels stay `node-main`, `node-north` and `node-south`, because the skills and scripts address boards by those. New handhelds on the bench: device 8 **Marshall** (the second E28, after its cloned identity was undone) and device 9 **Jolly** (a third Freenove).
 - **Noted for the watchers** in `docs/grid-watch.md`: a name arrives one per beacon rotation, so with eight handhelds it can take minutes, and "Handheld 6" is shown both for a handheld that was never named and for one whose name has not been heard yet. On the bench this looked like handhelds losing their names, when the grid was right all along. A logged-in watcher could take every name from the AP's status reply at once instead. To settle when the observers are next worked on.
 
