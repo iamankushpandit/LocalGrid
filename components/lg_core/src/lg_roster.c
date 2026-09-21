@@ -13,6 +13,11 @@ static const lg_user_t proto_users[] = {
     { 5, "Handheld 5" },   /* appended: a user's index is its bit in group and announcer masks */
     { 6, "Handheld 6" },
     { 7, "Handheld 7" },   /* the alert and distress unit (D66); urgent broadcasts need a roster index */
+    { 8, "Handheld 8" },   /* a second E28 joined the bench when one board's cloned identity was undone */
+    { 9, "Handheld 9" },   /* a third Freenove. Room to add a handheld without a firmware change is */
+    { 10, "Handheld 10" }, /* worth having: a device number with no roster entry cannot join at all */
+    { 11, "Handheld 11" },
+    { 12, "Handheld 12" },
 };
 
 void lg_roster_init_prototype(lg_roster_t *r)
@@ -22,11 +27,20 @@ void lg_roster_init_prototype(lg_roster_t *r)
     r->n_users = sizeof(proto_users) / sizeof(proto_users[0]);
     r->groups.next_id = 1;
     r->groups.announcers = LG_ANNOUNCE_EVERYONE;   /* everyone announces until the admin narrows it (D56) */
-    r->version = 4;   /* 3: Handheld 5 and 6 added; 4: Handheld 7 */
+    r->version = 6;   /* 3: Handheld 5 and 6; 4: Handheld 7; 5: Handheld 8; 6: 9 to 12, for headroom */
 }
 
 int lg_roster_user_index(const lg_roster_t *r, uint32_t device)
 {
+    /*
+     * A roster nobody has filled in yet. This is not hypothetical: a handheld whose device number
+     * is not in the roster refuses to start and says so, and saying so asks for a name before the
+     * roster exists. On the bench, 2026-09-20, that read through a null table and left the board
+     * in a boot loop, so the message explaining the problem never reached anyone.
+     */
+    if (r == NULL || r->users == NULL) {
+        return -1;
+    }
     for (size_t i = 0; i < r->n_users; i++) {
         if (r->users[i].device == device) {
             return (int)i;

@@ -1047,6 +1047,18 @@ void app_main(void)
 
     memset(&g_app, 0, sizeof(g_app));
     identify_node();
+    /*
+     * A board running an identity minted for another board must not serve: two APs answering as
+     * the same one break delivery, presence, and addressing across the whole grid, which is worse
+     * than an AP that refuses to start. lg_identity_load has already said so loudly. The console
+     * still comes up, because that is how the board gets fixed.
+     */
+    if (lg_identity_verified() == LG_IDENTITY_MISMATCH) {
+        ESP_LOGE(TAG, "[GRID] Not starting the SoftAP, the backbone, BLE, or the admin page. "
+                      "The serial console is up so this board can be re-provisioned.");
+        console_start();
+        return;
+    }
     g_app.boot = next_boot_counter();
     g_app.cmd_queue = xQueueCreate(4, sizeof(node_cmd_t));
     ESP_LOGI(TAG, "[GRID] LocalGrid node %u %s starting, boot %" PRIu32, g_app.index, g_app.name, g_app.boot);

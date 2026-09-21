@@ -171,6 +171,9 @@ bool lg_client_restore_name(lg_client_t *c, const lg_name_t *name)
 
 const lg_name_t *lg_client_name(const lg_client_t *c, uint32_t device)
 {
+    if (c == NULL || c->roster == NULL) {
+        return NULL;   /* asked before the client was set up: no name to give, and not a crash */
+    }
     int ui = lg_roster_user_index(c->roster, device);
     if (ui < 0 || ui >= (int)LG_MAX_DEVICES || c->names[ui].version == 0) {
         return NULL;

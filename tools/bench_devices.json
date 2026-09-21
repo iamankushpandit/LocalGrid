@@ -86,7 +86,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM24",
+      "port": "COM29",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -98,7 +98,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM16",
+      "port": "COM28",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -110,7 +110,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM27",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -122,7 +122,7 @@
     },
     {
       "name": "hosyond",
-      "port": "COM11",
+      "port": "COM30",
       "role": "H",
       "board": "HY3",
       "firmware": "handheld",
@@ -144,18 +144,18 @@
     },
     {
       "name": "birthdaysuite",
-      "port": "COM22",
+      "port": "",
       "role": "H",
       "board": "F4B",
       "firmware": "handheld",
       "id": "LG-H-F4B-4VV3QPWGE8",
-      "notes": "Second Freenove FNK0104B, added 2026-09-17. Device 3; named BirthdaySuite on the grid (D50).",
+      "notes": "Second Freenove FNK0104B, added 2026-09-17. Device 3; named BirthdaySuite on the grid (D50). Port cleared 2026-09-20: not connected, and COM22 is now a different Freenove.",
       "device_index": 3,
       "id_created": 1789692132
     },
     {
       "name": "e28",
-      "port": "COM4",
+      "port": "COM31",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
@@ -176,7 +176,7 @@
     },
     {
       "name": "e40",
-      "port": "COM13",
+      "port": "COM33",
       "role": "H",
       "board": "E40",
       "firmware": "handheld",
@@ -195,6 +195,29 @@
       "notes": "Waveshare ESP32-C6 1.47in alert and distress unit (D66), added 2026-09-18. Prototype roster user 'Handheld 7'. Its factory demo (RAM test, SD PNG search, BLE and Wi-Fi scans) is the plain board's, so it starts as C6L. The two Waveshare 1.47in C6 boards are wired differently; at boot the firmware probes for the Touch version's I2C parts and switches profile if it finds them (log: [BSP] Board probe). If it reports C6T, re-mint as C6T with --erase --new-id so the ID says what the board is. Set the port; the first flash mints its ID.",
       "device_index": 7,
       "id_created": 1789761120
+    },
+    {
+      "name": "e28b",
+      "port": "COM32",
+      "role": "H",
+      "board": "E28",
+      "firmware": "handheld",
+      "id": "LG-H-E28-3RW4GE8Y1S",
+      "device_index": 8,
+      "notes": "Second LCDWIKI E32R28T-1, found 2026-09-20 carrying the first one's identity because the same map entry had been flashed onto it. Its own ID is minted on the first flash with --new-id. Prototype roster user 'Handheld 8'.",
+      "id_created": 1789956533
+    },
+    {
+      "name": "fnk0104b_c",
+      "port": "COM22",
+      "role": "H",
+      "board": "F4B",
+      "firmware": "handheld",
+      "id": "LG-H-F4B-6WFM53GYMV",
+      "device_index": 9,
+      "notes": "Third Freenove FNK0104B, added 2026-09-20; it arrived running other firmware. Prototype roster user 'Handheld 9'.",
+      "id_created": 1789959450,
+      "id_nonce": "a4c643431727bfdf"
     }
   ]
 }

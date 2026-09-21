@@ -1845,6 +1845,14 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     s.status.node = -1;
     s.status.preferred_node = -1;
     tz_load();   /* D67: before any screen shows a clock, and whether or not the network starts */
+    /*
+     * A handheld running an identity minted for another board does not register: two handhelds
+     * answering as the same device break delivery, presence, and addressing for both. The words
+     * below are what the screen shows (D23), so they say what is wrong without a code.
+     */
+    if (lg_identity_verified() == LG_IDENTITY_MISMATCH) {
+        return fail_start(ESP_ERR_INVALID_STATE, "This board has another board's identity. Re-provision it.");
+    }
     if (!identity->present || !identity->has_device) {
         return fail_start(ESP_ERR_INVALID_STATE, "No device index. Provision with tools/flash.py --update-identity");
     }

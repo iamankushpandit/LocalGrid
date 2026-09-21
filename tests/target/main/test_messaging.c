@@ -1241,6 +1241,34 @@ static void dad_sends_ping(sim_t *s, const uint8_t *body, size_t body_len, uint3
 
 /* D68: a handheld's battery rides on its PING to its own AP; a PING without it still keeps the
  * session alive and reports nothing. */
+/*
+ * Asking a roster that was never filled in. A handheld that cannot start says so, and saying so
+ * asks for a name: on the bench (2026-09-20) that read through a null table and left the board
+ * rebooting, so the explanation never reached anyone.
+ */
+static void test_roster_before_setup(void)
+{
+    /* Static: a client and a roster are kilobytes, and this suite runs on the main task's stack. */
+    static lg_roster_t empty;
+    memset(&empty, 0, sizeof(empty));
+    CHECK_EQ(lg_roster_user_index(&empty, 1), -1);
+    CHECK(lg_roster_user(&empty, 1) == NULL);
+    CHECK_EQ(lg_roster_user_index(NULL, 1), -1);
+
+    static lg_client_t c;
+    memset(&c, 0, sizeof(c));
+    CHECK(lg_client_name(&c, 1) == NULL);       /* no roster yet */
+    CHECK(lg_client_name(NULL, 1) == NULL);
+
+    /* And the roster the grid actually ships carries every handheld the bench has. */
+    static lg_roster_t proto;
+    lg_roster_init_prototype(&proto);
+    for (uint32_t d = 1; d <= 12; d++) {
+        CHECK(lg_roster_user(&proto, d) != NULL);
+    }
+    CHECK(lg_roster_user(&proto, 13) == NULL);
+}
+
 static void test_ping_battery(void)
 {
     uint8_t b = 0;
@@ -2039,6 +2067,7 @@ void test_messaging(void)
     test_key_pinning();
     test_ping_pong();
     test_traffic_counters();
+    test_roster_before_setup();
     test_ping_battery();
     test_urgent_record();
     test_read_receipt();

@@ -112,6 +112,16 @@ int lg_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_
     return hmac_sha256(key, key_len, msg, msg_len, out);
 }
 
+int lg_sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32])
+{
+    if (out == NULL || (msg_len > 0 && msg == NULL)) {
+        return LG_CRYPTO_ERR;
+    }
+    size_t olen = 0;
+    psa_status_t st = psa_hash_compute(PSA_ALG_SHA_256, msg, msg_len, out, 32, &olen);
+    return (st == PSA_SUCCESS && olen == 32) ? 0 : LG_CRYPTO_ERR;
+}
+
 int lg_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len,
                    const uint8_t *info, size_t info_len, uint8_t *out, size_t out_len)
 {

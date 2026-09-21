@@ -18,6 +18,9 @@ Device IDs:
   LG-<role>-<board>-<10 base32 chars>. Role and board decode from the device map.
   The tail is a hash of the MAC, provisioning time, a text label, and random bytes.
   The MAC is read only in memory while minting an ID; it is never printed or saved.
+  The random bytes (the mint nonce) are stored with the ID on the board and in the device
+  map, so the board can recompute its own ID at boot: a board flashed with another board's
+  entry is caught there and refuses to join the grid instead of running as a clone.
 
 Modes:
   default   flash the app; the board keeps its saved settings and its ID
@@ -42,7 +45,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEVICES = ROOT / "tools" / "bench_devices.json"
 PARTITIONS = ROOT / "firmware" / "common" / "partitions_4mb.csv"
 PANIC = re.compile(r"Guru Meditation|abort\(\) was called|assert failed", re.IGNORECASE)
-LGID = re.compile(r"LGID: (\S+)\s")   # whitespace after the ID proves it arrived whole; the line continues with role and board
+LGID = re.compile(r"LGID: (LG-[A-Z]-[A-Z0-9]{3}-[0-9A-HJKMNP-TV-Z]{10}|NONE)\s")
+# The ID itself, not merely what follows "LGID: ": a log line tagged LGID would otherwise be read
+# as an answer, and every board would appear to share one identity (bench, 2026-09-20).
+# The whitespace still proves the line arrived whole.
 ID_RE = re.compile(r"^LG-([A-Z])-([A-Z0-9]{3})-([0-9A-HJKMNP-TV-Z]{10})$")
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ID_LABEL = "LocalGrid device id v1"
@@ -256,11 +262,14 @@ def chip_and_mac(port):
 
 
 def mint_id(role, board, mac, created):
+    """Returns (id, nonce). The nonce is stored with the ID, on the board and in the device map,
+    so the board can recompute its own ID at boot and refuse to run a cloned identity. It is not a
+    secret: it only stops an ID being guessed from a MAC and a rough provisioning time."""
     nonce = os.urandom(8).hex()
     digest = hashlib.sha256(f"{ID_LABEL}|{role}{board}|{mac}|{created}|{nonce}".encode()).digest()
     value = int.from_bytes(digest[:7], "big") >> 6      # 50 bits
     tail_chars = "".join(CROCKFORD[(value >> (5 * (9 - i))) & 31] for i in range(10))
-    return f"LG-{role}-{board}-{tail_chars}"
+    return f"LG-{role}-{board}-{tail_chars}", nonce
 
 
 def identity_partition():
@@ -276,6 +285,10 @@ def write_identity(device, port):
     rows = [["key", "type", "encoding", "value"], ["lgid", "namespace", "", ""],
             ["id", "data", "string", device["id"]], ["role", "data", "string", device["role"]],
             ["board", "data", "string", device["board"]], ["created", "data", "u32", str(device["id_created"])]]
+    # The mint nonce lets the board prove this ID was minted for it (components/lg_identity).
+    # Entries provisioned before it was kept have none; those boards simply cannot check, as before.
+    if device.get("id_nonce"):
+        rows += [["nonce", "data", "string", device["id_nonce"]]]
     if device["role"] == "N":
         rows += [["node_idx", "data", "u8", str(device["node_index"])], ["node_name", "data", "string", device["node_name"]]]
     if device["role"] == "H" and device.get("device_index"):
@@ -345,6 +358,7 @@ def verify(device, fw, expected_id):
 # ---- commands ----
 
 def identify(data, chosen):
+    seen = {}   # device ID -> the ports that answered with it
     print(f"{'NAME':<12} {'PORT':<6} {'ANSWERED ID':<24} DEVICE TYPE")
     for d in chosen:
         if not d["port"]:
@@ -356,9 +370,40 @@ def identify(data, chosen):
             got = "-"
         else:
             desc = decode(data, got) if got else "no answer (not provisioned or older firmware)"
+            if desc is None:
+                # An ID this map cannot decode: another project's board, or one whose board code
+                # this checkout does not know. Say so rather than crashing the whole listing.
+                desc = "answered an ID this device map does not recognise"
             if got and d.get("id") and got != d["id"]:
                 desc += f"  MISMATCH: map expects {d['id']}"
         print(f"{d['name']:<12} {d['port']:<6} {got or '-':<24} {desc}")
+        if got and got != "-" and not got.startswith("ERROR"):
+            seen.setdefault(got, []).append(d["port"])
+    # Two boards answering one ID share a device number and an address, so the grid sees one
+    # handheld apparently in two places at once. It happens when one map entry is flashed onto a
+    # second board, which this tool used to do without a word (bench, 2026-09-20: two E28 boards).
+    # Ports nobody put in the map are where a duplicate hides: a second board of a type the map
+    # already has answers on a port the map has never heard of, so a listing of the map alone shows
+    # nothing wrong. Ask every other serial port on this machine too.
+    mapped = {d["port"] for d in chosen if d["port"]}
+    try:
+        from serial.tools import list_ports
+        extra = [p.device for p in list_ports.comports() if p.device not in mapped]
+    except Exception:
+        extra = []
+    for port in sorted(extra):
+        got = query_id(port)
+        if not got or got.startswith("ERROR"):
+            continue
+        desc = decode(data, got) or "an ID this device map does not recognise"
+        print(f"{'(not in map)':<12} {port:<6} {got:<24} {desc}")
+        seen.setdefault(got, []).append(port)
+    for device_id, ports in sorted(seen.items()):
+        if len(ports) > 1:
+            print(f"\nDUPLICATE IDENTITY: {device_id} answered on {', '.join(ports)}.")
+            print("  Those boards share a device number and an address, and the grid cannot tell")
+            print(f"  them apart. Give one its own: add an entry to {DEVICES.name} and flash that")
+            print("  board with --new-id.")
 
 
 def flash_board(data, d, args, built):
@@ -398,6 +443,10 @@ def flash_board(data, d, args, built):
         m = ID_RE.match(answered)
         if not m or m.group(1) != d["role"] or m.group(2) != d["board"]:
             return False, f"port {d['port']} answered {answered}, which is not a {d['role']}/{d['board']} board"
+        if answered != d.get("id"):
+            # A different ID than this entry held: whatever nonce was recorded belongs to the old
+            # one, and writing it back would make the board fail its own check.
+            d.pop("id_nonce", None)
         d["id"] = answered
         save_map(data)
         print(f"  recognized existing ID {answered}")
@@ -412,7 +461,7 @@ def flash_board(data, d, args, built):
         if not mac:
             return False, "could not read the board to mint an ID"
         d["id_created"] = int(time.time())
-        d["id"] = mint_id(d["role"], d["board"], mac, d["id_created"])
+        d["id"], d["id_nonce"] = mint_id(d["role"], d["board"], mac, d["id_created"])
         print(f"  minted new ID {d['id']}")
     del mac
 

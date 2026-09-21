@@ -2,6 +2,7 @@
  * Serial console for the node. Commands are posted to the core task so that
  * lg_core state is only touched from one task.
  */
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,6 +37,13 @@ static int cmd_id(int argc, char **argv)
     (void)argv;
     lg_identity_print(&g_app.identity);   /* identity is read-only after boot */
     return 0;
+}
+
+/* A board running another board's identity did not start its radios, so only "id" and "power"
+ * have anything to report; everything else would read state that was never built. */
+static bool identity_blocked(void)
+{
+    return lg_identity_verified() == LG_IDENTITY_MISMATCH;
 }
 
 static int cmd_status(int argc, char **argv)
@@ -218,7 +226,15 @@ void console_start(void)
         { .command = "groups",  .help = "Groups, their members, and the table's version (D52)", .func = cmd_groups },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+        if (identity_blocked() && strcmp(cmds[i].command, "id") != 0) {
+            continue;   /* the grid never started; these would report on state that does not exist */
+        }
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
+    }
+    if (identity_blocked()) {
+        printf("\nThis board is running another board's identity, so it is not serving the grid.\n"
+               "Type \"id\" to see it, then give this board its own: "
+               "python tools/flash.py <name> --new-id\n\n");
     }
     /* power: this board has no supply sense unless CONFIG_LG_NODE_SUPPLY_SENSE_GPIO names a
      * divider on an ADC1 pin; either way it reports restarts by cause, which is where a

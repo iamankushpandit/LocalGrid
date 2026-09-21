@@ -47,6 +47,12 @@ int lg_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, siz
 int lg_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len, uint8_t out[32]);
 
 /*
+ * SHA-256 (FIPS 180-4), 32 bytes out. Used by lg_identity to recompute a device ID from the
+ * board's own MAC and check the stored identity was minted for this board.
+ */
+int lg_sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]);
+
+/*
  * PBKDF2-HMAC-SHA256 (RFC 8018 section 5.2) for the admin password.
  * password 1..128 bytes, salt 0..64 bytes, out 1..64 bytes, iterations >= 1.
  */
