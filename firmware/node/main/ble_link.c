@@ -47,7 +47,14 @@ static const char *TAG = "BLE";
 #define LINK_NOTIFY_WAIT_MS 2000u    /* the longest one chunk may wait for a buffer */
 #define LINK_CHALLENGE      32u
 #define LINK_PROOF          32u
-#define LINK_TASK_STACK     3584u
+/*
+ * Measured on MAIN, 2026-09-20: with 3584 this task ran down to 364 bytes of spare stack while
+ * answering GET_STATUS, which formats the admin page's whole JSON through this task. That is a
+ * crash waiting for one more field. 5120 leaves about 1.9 KB spare at the same workload; the extra
+ * 1.5 KB of heap is worth it on an AP that otherwise falls over. The watcher reports this headroom
+ * (D70 traffic), so it can be watched rather than guessed at.
+ */
+#define LINK_TASK_STACK     5120u
 
 /* Opcodes. Replies have bit 7; refusals have bits 7 and 6. */
 enum {

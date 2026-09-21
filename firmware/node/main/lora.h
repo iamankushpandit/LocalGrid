@@ -83,9 +83,15 @@ typedef struct {
 
 /* ---- timing ---- */
 
-#define LORA_HEARTBEAT_MS     30000u   /* docs/lora.md rule 3 */
+/*
+ * The keepalive that proves the radio still works and measures the link, and on a quiet grid it is
+ * most of what LoRa carries: on the bench 2026-09-20, about 18 of MAIN's 35 frames in nine minutes
+ * were heartbeats. One a minute still finds a dead link inside three minutes, which is far quicker
+ * than anyone would notice, and halves what the radio says when nobody needs it.
+ */
+#define LORA_HEARTBEAT_MS     60000u
 #define LORA_HB_STAGGER_MS    3000u    /* times the AP index, so three APs never speak together */
-#define LORA_LINK_TIMEOUT_MS  95000u   /* three missed heartbeats and a little: the link is down */
+#define LORA_LINK_TIMEOUT_MS  190000u  /* three missed heartbeats and a little: the link is down */
 #define LORA_PROBE_MS         60000u   /* how often an AP with no module looks for one again */
 
 /*

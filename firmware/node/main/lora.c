@@ -124,6 +124,7 @@ static struct {
     /* counters: 32-bit adds, read without a lock for the traffic record (D70) */
     uint32_t frames_out, frames_in, frames_first, parts_out, parts_in, parts_dropped;
     uint32_t seal_fail, airtime_ms, retries, refused_big, heard_ms;
+    uint32_t gave_way;   /* housekeeping frames that waited rather than crowd the air */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -174,6 +175,7 @@ static bool read_line(uint32_t timeout_ms, char **out)
 
 static void handle_rcv(const lora_at_t *at);
 static bool take_buffers(void);
+static bool lora_air_is_quiet(void);
 
 /*
  * Waits for one kind of reply. Frames arriving while we wait are never lost: +RCV is handled
@@ -729,14 +731,28 @@ void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)
     if (policy == LORA_SEND_NEVER) {
         return;   /* live voice never crosses LoRa, not even when the console asks (D61, D71) */
     }
-    if (policy == LORA_SEND_IF_WIFI_DOWN && wifi_ok && !force) {
+    if ((policy == LORA_SEND_IF_WIFI_DOWN || policy == LORA_SEND_SPARE_ROOM) && wifi_ok && !force) {
         return;   /* ESP-NOW is carrying it: keep the air clear */
+    }
+    if (policy == LORA_SEND_SPARE_ROOM && !force && !lora_air_is_quiet()) {
+        L.gave_way++;
+        return;   /* housekeeping waits behind what people are waiting for */
     }
     if (node >= LG_MAX_NODES || (!L.peers[node].up && !force)) {
         return;   /* no LoRa link to that AP: transmitting at it would be wasted airtime */
     }
     L.force_once = false;
     (void)queue_sealed((uint16_t)LORA_ADDR_AP(node), policy == LORA_SEND_ALWAYS, frame, len);
+}
+
+/*
+ * Room to spare: fewer than half the small slots hold anything. The queue is only four slots deep,
+ * so "half full" is the point where a message someone is waiting for would start queueing behind
+ * housekeeping that can heal later or over Wi-Fi.
+ */
+static bool lora_air_is_quiet(void)
+{
+    return lora_txq_waiting(&L.txq) * 2u < SMALL_TXQ_SLOTS;
 }
 
 static uint8_t peer_count(uint16_t except_node)
@@ -769,6 +785,10 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
      * peer LoRa can reach is also reachable over Wi-Fi, and the frame is not an alert, the air
      * stays clear.
      */
+    if (policy == LORA_SEND_SPARE_ROOM && !force && !lora_air_is_quiet()) {
+        L.gave_way++;
+        return;
+    }
     bool needed = policy == LORA_SEND_ALWAYS || force;
     for (uint16_t i = 0; i < LG_MAX_NODES && !needed; i++) {
         if (L.peers[i].up && i != except_node && !lgbb_link_acked(i, app_now_ms())) {
@@ -1073,6 +1093,7 @@ void lora_print(void)
     printf("  seal/open failures %" PRIu32 " | queue %u (high %u, dropped %" PRIu32 ") | retries %" PRIu32
            " | airtime %" PRIu32 " ms | module restarts %u\n", t.seal_fail, t.queue_depth, t.queue_high,
            t.queue_dropped, t.retries, t.airtime_ms, t.restarts);
+    printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
     printf("  one full part is about %" PRIu32 " ms on the air; it can take a %u-byte payload%s;"
            " live voice never comes this way\n", lora_airtime_ms(LORA_PART_B64_MAX),
            (unsigned)lora_txq_capacity(&L.txq),

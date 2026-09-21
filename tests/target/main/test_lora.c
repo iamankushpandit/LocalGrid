@@ -270,6 +270,22 @@ static void test_policy(void)
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
     n = make_frame(LG_T_PRESENCE_UPDATE, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 8);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    n = make_frame(LG_T_POSITION, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 18);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+
+    /*
+     * Housekeeping gives way. The shared state and the handheld names heal a miss and can wait;
+     * on a link carrying one message every three seconds they must not sit in front of what
+     * someone is waiting for (D74).
+     */
+    n = make_frame(LG_T_GRID_STATE, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 40);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
+    CHECK(!lora_is_alert_frame(frame, n));
+    n = make_frame(LG_T_NAME, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 12);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
+    /* An urgent one still goes at once: the class never outranks an alert. */
+    n = make_frame(LG_T_GRID_STATE, LG_SCOPE_SYSTEM, LG_FLAG_URGENT, frame, sizeof(frame), 40);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_ALWAYS);
 
     /* Anything we cannot read is not put on the air. */
     CHECK_EQ(lora_policy_for_frame(frame, 4), LORA_SEND_NEVER);

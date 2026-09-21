@@ -202,6 +202,7 @@ typedef enum {
     LORA_SEND_NEVER         = 0,   /* live voice (D61), and anything we cannot read */
     LORA_SEND_ALWAYS        = 1,   /* urgent broadcasts, SOS and all clear: both radios, always */
     LORA_SEND_IF_WIFI_DOWN  = 2,   /* everything else: only when ESP-NOW cannot carry it */
+    LORA_SEND_SPARE_ROOM    = 3,   /* housekeeping: only when ESP-NOW cannot carry it AND the air is quiet */
 } lora_policy_t;
 
 /* Reads the envelope of an unsealed lg frame and says whether LoRa may carry it. */
@@ -250,6 +251,9 @@ void lora_txq_set_slot(lora_txq_t *q, size_t i, uint8_t *buffer, size_t cap);
 
 /* The largest payload the queue can hold, for refusing one before it costs anything. */
 size_t lora_txq_capacity(const lora_txq_t *q);
+
+/* How many slots hold something now: housekeeping gives way once the queue is half full. */
+size_t lora_txq_waiting(const lora_txq_t *q);
 
 /*
  * Reserves the smallest free slot that can hold `cap` bytes, so the caller can build the payload

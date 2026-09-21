@@ -31,7 +31,15 @@
 #include "lg_types.h"
 #include "settings.h"
 
-#define GRID_STATE_ANNOUNCE_MS  30000u
+/*
+ * The healing repeat, for a device that missed a change (D48). A change is announced at once and
+ * on link up, so this only sets how quickly a missed one heals. Measured on the bench 2026-09-20
+ * with nobody using the grid: three APs at 30 s produced about 35 arrivals a minute each, half of
+ * them duplicates of the other APs' relays, and it was the largest single source of traffic and of
+ * MAIN's full send queue. Two minutes costs a device that missed something up to 90 s more to
+ * heal, and nothing else (owner agreed).
+ */
+#define GRID_STATE_ANNOUNCE_MS  120000u
 #define GRID_AP_NAME_MAX        15u
 #define GRID_AVAIL_MINUTES      120u                              /* two hours */
 #define GRID_AVAIL_BYTES        ((GRID_AVAIL_MINUTES + 3u) / 4u)  /* two bits a minute, oldest first */

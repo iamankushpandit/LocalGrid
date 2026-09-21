@@ -305,6 +305,17 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
     if ((e.flags & (LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR)) != 0u) {
         return LORA_SEND_ALWAYS;   /* urgent broadcasts, SOS and all clear go on both radios */
     }
+    /*
+     * When LoRa is the only way between two APs it carries about one message every three seconds,
+     * where Wi-Fi was carrying thirty-five a minute (bench, 2026-09-20), and most of those were the
+     * grid re-announcing its shared state and handheld names to heal a miss. That housekeeping must
+     * not crowd out what people are waiting for, so it travels only while there is room to spare:
+     * what someone said, who is present, where they are and what the time is go first, and the
+     * shared state catches up when Wi-Fi returns or the air is quiet.
+     */
+    if (e.type == LG_T_GRID_STATE || e.type == LG_T_NAME) {
+        return LORA_SEND_SPARE_ROOM;
+    }
     return LORA_SEND_IF_WIFI_DOWN;
 }
 
@@ -327,6 +338,18 @@ void lora_txq_set_slot(lora_txq_t *q, size_t i, uint8_t *buffer, size_t cap)
         q->slots[i].data = buffer;
         q->slots[i].cap = buffer != NULL ? cap : 0u;
     }
+}
+
+/* Slots with something in them: how busy the radio is about to be. */
+size_t lora_txq_waiting(const lora_txq_t *q)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
+        if (q->slots[i].in_use) {
+            n++;
+        }
+    }
+    return n;
 }
 
 size_t lora_txq_capacity(const lora_txq_t *q)
