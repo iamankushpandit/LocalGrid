@@ -91,7 +91,7 @@
       "board": "ELG",
       "firmware": "node",
       "node_index": 0,
-      "node_name": "MAIN",
+      "node_name": "Everest",
       "id": "LG-N-ELG-1ME3HN5EDP",
       "id_created": 1789492913,
       "notes": "AP 0; every AP serves the admin page at http://192.168.4.1/ (D45, D46)"
@@ -103,7 +103,7 @@
       "board": "ELG",
       "firmware": "node",
       "node_index": 1,
-      "node_name": "NORTH",
+      "node_name": "Fuji",
       "id": "LG-N-ELG-81NNZEH78W",
       "id_created": 1789492998,
       "notes": ""
@@ -115,7 +115,7 @@
       "board": "ELG",
       "firmware": "node",
       "node_index": 2,
-      "node_name": "SOUTH",
+      "node_name": "Denali",
       "id": "LG-N-ELG-276YMMKRDB",
       "id_created": 1789493048,
       "notes": ""

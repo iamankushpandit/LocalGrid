@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed
+- **The APs are named Everest, Fuji and Denali** (AP 0, 1 and 2; owner, 2026-09-20), written into each board's identity partition so the name travels with the board. The bench map's own labels stay `node-main`, `node-north` and `node-south`, because the skills and scripts address boards by those. New handhelds on the bench: device 8 **Marshall** (the second E28, after its cloned identity was undone) and device 9 **Jolly** (a third Freenove).
+- **Noted for the watchers** in `docs/grid-watch.md`: a name arrives one per beacon rotation, so with eight handhelds it can take minutes, and "Handheld 6" is shown both for a handheld that was never named and for one whose name has not been heard yet. On the bench this looked like handhelds losing their names, when the grid was right all along. A logged-in watcher could take every name from the AP's status reply at once instead. To settle when the observers are next worked on.
+
 ### Added (D75: a board proves its identity is its own)
 - **A device checks its stored identity against its own MAC at boot.** The mint value is now kept beside the ID (a `nonce` key in the identity partition, `id_nonce` in the bench map), so `lg_identity` can recompute the ID from this board's factory MAC plus the stored role, board and creation time, and compare. `lg_crypto` gained `lg_sha256` so the recompute goes through the one crypto interface; the MAC is read in memory only and is never printed, logged or stored (D21).
 - **A board running another board's identity refuses to join the grid.** An AP starts no SoftAP, backbone, BLE, sessions or admin page and offers only `id` on its console; a handheld does not register and says so on its screen in plain words. Both log it once with the fix. A board provisioned before this change cannot be checked and behaves exactly as before — every bench board is in that state until re-provisioned.

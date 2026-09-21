@@ -120,6 +120,21 @@ These counters are asked for only while the Traffic tab is open (once every 30 s
 press Refresh; the rest of the time the tool pulls status and history once a minute, one short
 connection at a time, so a small AP is left alone.
 
+## To settle next time the watchers are worked on
+
+Names on the beacon-only view arrive slowly and read as if they were the grid's answer.
+
+- **Each AP sends one handheld's name per rotation**, so with eight handhelds a name can take
+  minutes to come round. On 2026-09-20 that looked like handhelds losing their names: the grid was
+  right all along (the board itself reported "Big Pepa", and it appeared once its frame arrived),
+  but a reader had no way to tell.
+- **"Handheld 6" is shown for two different things**: a handheld that has never been named, and one
+  whose name simply has not been heard yet. Say which.
+- **A logged-in watcher need not wait at all.** The admin link's status reply carries every name the
+  AP knows, so names could fill in at once and the beacon only keep them fresh.
+
+Owner, 2026-09-20: note it and discuss when the observers are next touched.
+
 ## What you need
 
 - This repository, with the **same `firmware/common/lg_secrets.h` your APs were built from**. The
