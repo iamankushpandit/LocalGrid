@@ -74,6 +74,9 @@ typedef enum {
     HH_MSG_REJECTED,        /* ours, the grid rejected it; reject is an lg_ack_status_t */
     HH_MSG_REFUSED,         /* this handheld would not send it; reject is an hh_refuse_t */
     HH_MSG_READ,            /* ours, 1:1, and the recipient's handheld showed it to them */
+    /* ours, 1:1: it went out and was taken by an AP, but nobody ever confirmed it arrived,
+     * even after one more try. It may well have arrived; what is known is that nobody said so. */
+    HH_MSG_UNCONFIRMED,
 } hh_msg_state_t;
 
 typedef enum {
@@ -176,6 +179,16 @@ esp_err_t hh_service_send(uint8_t scope, uint32_t target, bool urgent, const cha
 /* An urgent broadcast marked all clear (D66): "<name> is safe". Receivers take down this handheld's
  * SOS alert and show it calmly instead of as another emergency. Same results as hh_service_send. */
 esp_err_t hh_service_send_all_clear(const char *text);
+
+/*
+ * Empties the message list, sent and received, and returns how many were removed. RAM only, so
+ * nothing the grid holds is lost and no one else is told. Does not free an outbox slot that is
+ * still waiting on a delivery acknowledgement.
+ */
+/* How many messages are held, without copying any of them. */
+uint8_t hh_service_message_count(void);
+
+uint8_t hh_service_clear_messages(void);
 
 /* Copies one message, 0 being the newest; false when there are not that many. For readers that
  * need one at a time and should not hold a copy of the whole list (the console). */

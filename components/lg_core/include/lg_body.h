@@ -81,10 +81,21 @@ typedef struct {
  * device can do (LG_CAP_* in lg_types.h). A decoder takes either and reports caps 0 for the older
  * one, so a grid whose APs are updated one at a time keeps working instead of losing presence
  * outright: on a bench where APs run on battery in other rooms, they cannot all be flashed at
- * once. Encoders always write the longer form.
+ * once. Which one an encoder writes is LG_PRESENCE_EMIT_CAPS below.
  */
 #define LG_PRESENCE_LEN_V1 (11u + LG_PUBKEY_LEN)
 #define LG_PRESENCE_LEN    (13u + LG_PUBKEY_LEN)
+
+/*
+ * Which layout an encoder writes. Decoders always take both, so this only governs what this build
+ * sends. It stays 0 until every AP and handheld in a grid runs a build that can read the longer
+ * frame: a grid is flashed one board at a time, and an AP that sent the longer form to neighbours
+ * running an older build would have its handhelds rejected and vanish from their presence tables.
+ * Set it to 1 once the whole grid is updated, which is when capability bits start travelling.
+ */
+#ifndef LG_PRESENCE_EMIT_CAPS
+#define LG_PRESENCE_EMIT_CAPS 0
+#endif
 typedef enum { LG_PRES_OFFLINE = 0, LG_PRES_ONLINE = 1 } lg_presence_state_t;
 typedef struct {
     uint32_t device;

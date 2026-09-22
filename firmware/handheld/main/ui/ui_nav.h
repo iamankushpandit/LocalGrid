@@ -25,6 +25,10 @@ typedef enum {
 
 void ui_go(ui_nav_t to, uint8_t scope, uint32_t target, const char *title);
 
+/* Draws the screen that is showing again, from scratch. For a change that affects every
+ * pixel - a new theme - because screens are retained and would otherwise keep the old look. */
+void ui_repaint(void);
+
 /* Screen entry points, each drawing its whole screen. w and h are the panel's size. */
 void ui_convs_open(uint16_t w, uint16_t h);
 void ui_convs_touch(int16_t x, int16_t y, bool down);

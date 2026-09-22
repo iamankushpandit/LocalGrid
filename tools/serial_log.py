@@ -204,9 +204,11 @@ def daemon(names, quiet):
     LOGS.mkdir(parents=True, exist_ok=True)
     HOLDS.mkdir(parents=True, exist_ok=True)
     # A stale .open marker from a killed daemon would make hold_port() wait its whole timeout.
-    for m in HOLDS.glob("*.open"):
+    # Only this daemon's own ports, so a second daemon watching other boards does not wipe the
+    # markers of the first and quietly break its holds.
+    for dev in chosen:
         with contextlib.suppress(OSError):
-            m.unlink()
+            (HOLDS / f"{dev['port']}.open").unlink()
     boards = [Board(d) for d in chosen]
     if not quiet:
         print(f"logging {len(boards)} board(s) into {LOGS}")

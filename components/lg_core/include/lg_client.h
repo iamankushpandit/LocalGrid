@@ -40,7 +40,30 @@ typedef enum {
     LG_OUT_DELIVERED = 3,   /* 1:1 recipient's device confirmed */
     LG_OUT_REJECTED  = 4,   /* see reject_reason (lg_ack_status_t) */
     LG_OUT_READ      = 5,   /* 1:1 recipient's device showed it to them */
+    /*
+     * 1:1, taken by an AP, and no delivery confirmation came back even after one more try. The
+     * message may well have arrived: what is known is only that nobody confirmed it. The slot is
+     * released here, which is the whole point - see LG_CONFIRM_WAIT_MS.
+     */
+    LG_OUT_UNCONFIRMED = 6,
 } lg_out_state_t;
+
+/*
+ * How long a 1:1 message waits for its recipient's confirmation before it is offered once more,
+ * and again before the slot is let go.
+ *
+ * Without this a handheld goes permanently mute. A 1:1 message stops being retransmitted the
+ * moment an AP accepts it, and its outbox slot is held until the recipient confirms delivery; a
+ * confirmation that is lost is never asked for again, so the slot is held for ever. Sixteen lost
+ * confirmations and the device cannot send at all while reporting itself perfectly healthy
+ * (measured on the bench, 2026-09-21: two handhelds exchanging a message every two seconds both
+ * went mute within ten minutes).
+ *
+ * The retry costs nothing and usually fixes it: a retransmission carries the original message
+ * identity, so the recipient's duplicate check recognises it, does NOT show it twice, and sends
+ * its confirmation again - which is exactly what went missing.
+ */
+#define LG_CONFIRM_WAIT_MS 30000u
 
 typedef struct {
     uint8_t  state;
@@ -52,6 +75,7 @@ typedef struct {
     uint32_t seq;
     uint32_t grid_time;        /* fixed per message id; see lg_e2e_aad */
     uint32_t last_tx_ms;
+    uint8_t  confirm_tries;    /* 1:1: times we re-offered it waiting for a confirmation */
     uint32_t delivered_mask;   /* bit i: roster user i confirmed delivery */
     uint16_t delivered_count;
     uint32_t read_mask;        /* bit i: roster user i reported reading it */

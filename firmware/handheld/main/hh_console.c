@@ -8,6 +8,7 @@
 #include "hh_console.h"
 #include "hh_lora.h"
 #include "hh_demo.h"
+#include "ui_theme.h"
 #include "hh_mem.h"
 #include "lg_power.h"
 
@@ -237,6 +238,29 @@ static int cmd_demo(int argc, char **argv)
     if (st.note[0] != '\0') {
         printf("  %s\n", st.note);
     }
+    return 0;
+}
+
+static int cmd_theme(int argc, char **argv)
+{
+    if (argc >= 2) {
+        bool day = strcmp(argv[1], "day") == 0 || strcmp(argv[1], "daylight") == 0;
+        if (!day && strcmp(argv[1], "night") != 0 && strcmp(argv[1], "dark") != 0) {
+            printf("usage: theme [night|day]\n");
+            return 1;
+        }
+        ui_theme_set(day ? UI_THEME_DAYLIGHT : UI_THEME_NIGHT);
+    }
+    printf("theme: %s (kept across restarts)\n", ui_theme_name(ui_theme_kind()));
+    return 0;
+}
+
+static int cmd_clear(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    uint8_t had = hh_service_clear_messages();
+    printf("cleared %u message(s)\n", (unsigned)had);
     return 0;
 }
 
@@ -1110,6 +1134,8 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "i2cscan",   .help = "Addresses answering on this board's I2C bus",            .func = cmd_i2cscan },
         { .command = "saver",     .help = "saver [on|off]: the screen saver, kept in NVS",         .func = cmd_saver },
         { .command = "volume",    .help = "volume [off|low|medium|high]: notification loudness, kept in NVS", .func = cmd_volume },
+        { .command = "theme",     .help = "theme [night|day]: screen colours; day is for reading outdoors", .func = cmd_theme },
+        { .command = "clear",     .help = "Clear every message this handheld is showing",            .func = cmd_clear },
         { .command = "demo",      .help = "demo [showcase|resilience|stop]: the self-running demonstration", .func = cmd_demo },
         { .command = "mem",       .help = "Heap now: free, lowest, largest block",                   .func = cmd_mem },
         { .command = "name",      .help = "name [new name]: show or change this handheld's name",     .func = cmd_name },

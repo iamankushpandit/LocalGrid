@@ -266,6 +266,10 @@ static const char *marker(const hh_message_t *m, lg_color_t *colour)
     case HH_MSG_ACCEPTED:  *colour = C_MARK_NODE;  return LG_SYMBOL_UPLOAD;
     case HH_MSG_DELIVERED: *colour = C_MARK_DELIV; return LG_SYMBOL_DOWNLOAD;
     case HH_MSG_READ:      *colour = C_MARK_READ;  return LG_SYMBOL_EYE_OPEN;
+    /* Sent, nobody confirmed. Deliberately not the error colour: this message may well have
+     * arrived, and showing it as alarmingly as one that never left would teach people to ignore
+     * the alarming one. */
+    case HH_MSG_UNCONFIRMED: *colour = C_WARNING; return LG_SYMBOL_WARNING;
     default:               *colour = C_ERROR;      return LG_SYMBOL_WARNING;
     }
 }

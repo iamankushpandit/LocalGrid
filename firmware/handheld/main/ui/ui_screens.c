@@ -471,7 +471,7 @@ void ui_group_edit_touch(int16_t x, int16_t y, bool down)
 
 enum { SET_TAB_GRID, SET_TAB_SOUND, SET_TAB_SCREEN, SET_TAB_DEVICE };
 enum { SET_WHICH_AP = 20, SET_RECONNECT, SET_SCAN, SET_VOLUME, SET_TEST, SET_SAVER, SET_CALIBRATE, SET_NAME,
-       SET_RESTART, SET_TALK };
+       SET_RESTART, SET_TALK, SET_THEME, SET_CLEAR_MSGS };
 
 static const char *const SET_TABS[] = { "Grid", "Sound", "Screen", "Device" };
 static const char *const VOLUME_NAMES[LG_VOLUME_STEPS] = { "Off", "Low", "Med", "High" };
@@ -481,6 +481,7 @@ static struct {
     uint8_t  tab;
     uint32_t shown;
     bool     restart_armed;
+    bool     clear_armed;
 } s_set;
 
 static uint32_t settings_build(bool rebuild)
@@ -491,7 +492,7 @@ static uint32_t settings_build(bool rebuild)
     sig = mix(mix(sig, lg_bsp_audio_volume()), lg_bsp_setting_get_bool("saver", true));
     sig = mix(sig, lg_bsp_audio_talk_boost());
     sig = mix(mix_str(sig, st->name), lg_bsp_touch_needs_calibration());
-    sig = mix(mix(sig, st->free_heap / 4096u), s_set.restart_armed);
+    sig = mix(mix(mix(sig, st->free_heap / 4096u), s_set.restart_armed), s_set.clear_armed);
     if (!rebuild) {
         return sig;
     }
@@ -528,6 +529,8 @@ static uint32_t settings_build(bool rebuild)
         }
         break;
     case SET_TAB_SCREEN:
+        /* Daylight first: it is the row someone reaches for while squinting at the screen outside. */
+        slist_add(ROW_ACTION, "Theme", ui_theme_name(ui_theme_kind()), SET_THEME, 0);
         slist_add(ROW_ACTION, "Screen saver", lg_bsp_setting_get_bool("saver", true) ? "on" : "off", SET_SAVER, 0);
         if (lg_bsp_touch_can_calibrate()) {
             slist_row_t *r = slist_add(ROW_ACTION, "Calibrate touch",
@@ -551,6 +554,11 @@ static uint32_t settings_build(bool rebuild)
                      st->psram_total / 1024u);
             slist_add(ROW_FACT, "PSRAM", value, -1, 0);
         }
+        /* Above Restart, and armed the same way: clearing cannot be undone, and a stray tap on a
+           handheld in a pocket should not wipe somebody's messages. */
+        snprintf(value, sizeof(value), "%u held", (unsigned)hh_service_message_count());
+        slist_add(ROW_BUTTON, s_set.clear_armed ? "Tap again to clear messages" : "Clear all messages",
+                  s_set.clear_armed ? NULL : value, SET_CLEAR_MSGS, 0)->style = BTN_DANGER;
         slist_add(ROW_BUTTON, s_set.restart_armed ? "Tap again to restart" : "Restart", NULL, SET_RESTART, 0)->style =
             BTN_DANGER;
         break;
@@ -566,6 +574,7 @@ void ui_settings_open(uint16_t w, uint16_t h, uint8_t tab)
     s_h = h;
     s_set.tab = tab < 4 ? tab : 0;
     s_set.restart_armed = false;
+    s_set.clear_armed = false;
     s_set.shown = settings_build(true);
     slist_show(w, h, 0, false);
 }
@@ -620,6 +629,21 @@ void ui_settings_touch(int16_t x, int16_t y, bool down)
         break;
     case SET_SAVER:
         (void)lg_bsp_setting_set_bool("saver", !lg_bsp_setting_get_bool("saver", true));
+        ui_settings_refresh();
+        break;
+    case SET_THEME:
+        /* ui_theme_set repaints the whole screen, so the change is seen at once rather than
+           leaving this list in the colours it was drawn in. */
+        ui_theme_set(ui_theme_kind() == UI_THEME_DAYLIGHT ? UI_THEME_NIGHT : UI_THEME_DAYLIGHT);
+        break;
+    case SET_CLEAR_MSGS:
+        if (!s_set.clear_armed) {
+            s_set.clear_armed = true;   /* the first tap only asks */
+            ui_settings_refresh();
+            break;
+        }
+        s_set.clear_armed = false;
+        ESP_LOGI("UI", "[UI] Cleared %u message(s)", (unsigned)hh_service_clear_messages());
         ui_settings_refresh();
         break;
     case SET_CALIBRATE:

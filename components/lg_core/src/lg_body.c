@@ -125,9 +125,15 @@ size_t lg_presence_enc(const lg_presence_t *v, uint8_t *out)
     lg_wr16(out + 4, v->node);
     lg_wr32(out + 6, v->epoch);
     out[10] = v->state;
+#if LG_PRESENCE_EMIT_CAPS
     lg_wr16(out + 11, v->caps);
     memcpy(out + 13, v->pubkey, LG_PUBKEY_LEN);
     return LG_PRESENCE_LEN;
+#else
+    /* The older layout, until the whole grid can read the longer one: see LG_PRESENCE_EMIT_CAPS. */
+    memcpy(out + 11, v->pubkey, LG_PUBKEY_LEN);
+    return LG_PRESENCE_LEN_V1;
+#endif
 }
 
 bool lg_presence_dec(const uint8_t *in, size_t len, lg_presence_t *v)

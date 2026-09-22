@@ -6,6 +6,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 ## [Unreleased]
 
 ### Changed
+- **Fixed: a handheld's outbox could wedge permanently.** A 1:1 message now waits 30 s for the
+  recipient's confirmation, is offered once more, and if that brings nothing the slot is freed and
+  the message is marked unconfirmed rather than held for ever. The re-offer carries the original
+  message identity, so the recipient's duplicate check does not show it twice and answers with the
+  confirmation that went missing - the retry usually repairs the fault rather than merely surviving
+  it. A new state, `LG_OUT_UNCONFIRMED` / `HH_MSG_UNCONFIRMED`, reads "sent, but never confirmed"
+  and shows an amber warning rather than the red one used for a message that never left: it may
+  well have arrived, and alarming people about it would teach them to ignore the real alarm.
+  Verified on a board: 6190 checks, 0 failures, including a full outbox of accepted-but-unconfirmed
+  1:1 messages recovering by itself with no restart. Owner chose retry-once over giving up quietly.
+  Originally found by load testing: A 1:1 message goes out
+  `PENDING` and is retransmitted every 3 s; once an AP accepts it the state becomes `ACCEPTED` and
+  retransmission stops. If the recipient's `DELIVERED` ack is then lost, the slot stays `ACCEPTED`
+  for good: `pick_slot` in `lg_client.c` reuses `DELIVERED`, `READ`, `REJECTED` or `ACCEPTED`
+  non-1:1 slots, never an `ACCEPTED` 1:1 one, and nothing ages one out. Sixteen lost acks and the
+  handheld can never send again while reporting itself perfectly healthy. Measured on the bench,
+  2026-09-21: under a load ramp Chase reached 30 % refusals at 180 messages a minute across three
+  senders, all of them `outbox full`, and 25 minutes after the load stopped it still refused every
+  message while showing ONLINE on Fuji at -48 dBm with 117 KB free and "problem: none". A reboot
+  clears it and nothing else does. The APs were never the limit: through the same ramp the AP held
+  33 KB of heap, kept both backbone links and was still forwarding 134 frames a minute.
+  **Awaiting the owner's decision** between ageing out an `ACCEPTED` 1:1 slot, evicting the oldest
+  when nothing else is free, or leaving it and showing the state on screen.
+- **AP outage recovery measured.** Everest was given real power losses (EN held low) of 5, 15, 60,
+  180 and 600 seconds: it recovered from every one, and recovery time did not grow with the outage.
+  Booting was immediate, it was listening within 1 s, both backbone links were back within 2-5 s,
+  and grid time returned in 3 s from its neighbours with no GPS fix of its own (D48, D53). It also
+  refilled its availability history from another AP's record. No crash in 3.4 h of watching, which
+  covered the load ramp and all five outages.
 - **D79: a self-running demo, and voice without a microphone.** `demo showcase` and
   `demo resilience` on a handheld work through a 1:1 message, a group message, a voice talk, an
   announcement, an urgent call and its all clear, and positions, showing each step on the screen.

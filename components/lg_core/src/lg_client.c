@@ -373,7 +373,8 @@ static int pick_slot(const lg_client_t *c)
     }
     for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
         const lg_out_msg_t *m = &c->outbox[i];
-        bool reusable = m->state == LG_OUT_DELIVERED || m->state == LG_OUT_READ || m->state == LG_OUT_REJECTED ||
+        bool reusable = m->state == LG_OUT_DELIVERED || m->state == LG_OUT_READ ||
+                        m->state == LG_OUT_REJECTED || m->state == LG_OUT_UNCONFIRMED ||
                         (m->state == LG_OUT_ACCEPTED && m->scope != LG_SCOPE_DIRECT);
         if (reusable && (best < 0 || m->seq < c->outbox[best].seq)) {
             best = (int)i;
@@ -784,6 +785,10 @@ static void handle_ack(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
         case LG_ACK_ACCEPTED:
             if (m->state == LG_OUT_PENDING) {
                 m->state = LG_OUT_ACCEPTED;
+                /* The wait for the recipient's confirmation starts here, not at the last transmit:
+                   this is the moment the message stopped being retransmitted. */
+                m->last_tx_ms = c_now_ms(c);
+                m->confirm_tries = 0;
             }
             break;
         case LG_ACK_DELIVERED: {
@@ -949,6 +954,24 @@ void lg_client_tick(lg_client_t *c)
         lg_out_msg_t *m = &c->outbox[i];
         if (m->state == LG_OUT_PENDING && now - m->last_tx_ms >= LG_RESEND_MS) {
             transmit(c, i);
+            continue;
+        }
+        /*
+         * A 1:1 message an AP took, still waiting to hear that it arrived. Offer it once more, and
+         * if that brings nothing either, let the slot go: holding it for ever is what leaves a
+         * handheld unable to send anything at all (LG_CONFIRM_WAIT_MS). The re-offer carries the
+         * original identity, so a recipient that already has it will not show it twice and will
+         * send its confirmation again - the confirmation being what was lost.
+         */
+        if (m->state == LG_OUT_ACCEPTED && m->scope == LG_SCOPE_DIRECT &&
+            now - m->last_tx_ms >= LG_CONFIRM_WAIT_MS) {
+            if (m->confirm_tries == 0) {
+                m->confirm_tries = 1;
+                transmit(c, i);
+            } else {
+                m->state = LG_OUT_UNCONFIRMED;
+                emit(c, LG_CEV_OUTBOX, (uint32_t)i);
+            }
         }
     }
 }

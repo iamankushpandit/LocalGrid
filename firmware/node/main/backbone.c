@@ -41,12 +41,15 @@ static const char *TAG = "BB";
  * about 288: a text body of 240 plus its tag, or a 256-byte grid-state record, inside a 32-byte
  * envelope. Sixteen transmit and twelve receive slots was therefore 30 KB of mostly empty buffer on
  * a board that measured 1 to 6 KB of free heap on 2026-09-21, one allocation from failing. The
- * depths below are what the bench has ever needed: the highest the transmit queue has been seen is
- * 1, and a burst that outruns them drops a frame and says so, which the grid already survives.
+ * depths below were cut to 6 each when a slot still cost a whole frame. A slot is now BB_SLOT_MAX
+ * (512 B), so depth is cheap again, and 6 proved too tight in practice: the bench counted
+ * queue_full 174 on a busy AP, every one of them a dropped frame. 12 and 10 cost about 11.3 KB,
+ * which is still far less than the original depths did, and leave room for the burst that arrives
+ * when several handhelds rejoin at once - exactly when an AP can least afford to drop anything.
  */
-#define BB_TX_QUEUE          6u
+#define BB_TX_QUEUE          12u
 #define BB_TX_DEADMAN_MS     1000u
-#define BB_RX_QUEUE          6u
+#define BB_RX_QUEUE          10u
 #define BB_RX_PER_POLL       8u
 
 /*

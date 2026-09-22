@@ -363,6 +363,7 @@ static uint8_t state_from_outbox(const lg_out_msg_t *o)
     case LG_OUT_DELIVERED: return HH_MSG_DELIVERED;
     case LG_OUT_READ:      return HH_MSG_READ;
     case LG_OUT_REJECTED:  return HH_MSG_REJECTED;
+    case LG_OUT_UNCONFIRMED: return HH_MSG_UNCONFIRMED;
     default:               return HH_MSG_PENDING;
     }
 }
@@ -396,6 +397,40 @@ static void ring_update_from_outbox(uint32_t slot)
  * A removed group's messages go (D52). The ring is compacted in place under the lock, because
  * the screens read it from their own task.
  */
+/*
+ * Empties the message list: everything sent and received, of every scope. Asked for from use in
+ * the field (owner, 2026-09-21), where a handheld that has been running for days shows a wall of
+ * old traffic and there was no way to start clean without rebooting it.
+ *
+ * The list is what the screens show and lives only in RAM, so this loses nothing the grid holds:
+ * other handhelds keep their own copies, and clearing here says nothing to anyone else. It does
+ * NOT free an outbox slot that is waiting on a delivery it will never get - that wedge is a
+ * separate matter, still open.
+ */
+uint8_t hh_service_message_count(void)
+{
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    uint8_t n = s.ring_count;
+    xSemaphoreGive(s.lock);
+    return n;
+}
+
+uint8_t hh_service_clear_messages(void)
+{
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    uint8_t had = s.ring_count;
+    for (uint8_t i = 0; i < s.ring_count; i++) {
+        memset(&s.ring[(s.ring_head + i) % HH_MESSAGES], 0, sizeof(s.ring[0]));
+    }
+    s.ring_head = 0;
+    s.ring_count = 0;
+    s.msg_version++;
+    s.dirty = true;
+    xSemaphoreGive(s.lock);
+    ESP_LOGI("MSG", "[MSG] Message list cleared: %u message(s) removed", had);
+    return had;
+}
+
 static void ring_forget_group(uint16_t id)
 {
     xSemaphoreTake(s.lock, portMAX_DELAY);
@@ -2362,6 +2397,7 @@ const char *hh_message_state_text(const hh_message_t *m)
     case HH_MSG_ACCEPTED:  return m->scope == LG_SCOPE_DIRECT ? "sent, waiting for the other handheld" : "sent";
     case HH_MSG_DELIVERED: return "delivered";
     case HH_MSG_READ:      return "read";
+    case HH_MSG_UNCONFIRMED: return "sent, but never confirmed";
     case HH_MSG_REJECTED:
         switch (m->reject) {
         case LG_ACK_REJ_OFFLINE:        return "not delivered: that handheld is offline";

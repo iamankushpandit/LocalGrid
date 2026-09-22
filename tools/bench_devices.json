@@ -86,7 +86,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM29",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -94,11 +94,11 @@
       "node_name": "Everest",
       "id": "LG-N-ELG-1ME3HN5EDP",
       "id_created": 1789492913,
-      "notes": "AP 0; every AP serves the admin page at http://192.168.4.1/ (D45, D46)"
+      "notes": "AP 0; every AP serves the admin page at http://192.168.4.1/ (D45, D46). On COM16 from 2026-09-21 to capture the panic output: it carries both a GPS and a LoRa module and is the only AP that crashes."
     },
     {
       "name": "node-north",
-      "port": "COM28",
+      "port": "",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -106,11 +106,11 @@
       "node_name": "Fuji",
       "id": "LG-N-ELG-81NNZEH78W",
       "id_created": 1789492998,
-      "notes": ""
+      "notes": "Port cleared 2026-09-21 after flashing: back on its own supply, off USB."
     },
     {
       "name": "node-south",
-      "port": "COM16",
+      "port": "",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -118,7 +118,7 @@
       "node_name": "Denali",
       "id": "LG-N-ELG-276YMMKRDB",
       "id_created": 1789493048,
-      "notes": ""
+      "notes": "Port cleared 2026-09-21 after flashing: back on its own supply, off USB."
     },
     {
       "name": "hosyond",

@@ -85,17 +85,31 @@ static void test_capabilities_travel(void)
     sim_detach(s, EMMA);
     sim_attach(s, EMMA, 2);            /* re-registers, now reporting what it can do */
 
-    /* Her own AP recorded it from REGISTER ... */
+    /* Her own AP recorded it from REGISTER, which no wire switch affects. */
     const lg_presence_entry_t *here = lg_node_presence(&s->nodes[2].node, LG_PROTO_EMMA);
     CHECK(here != NULL && here->caps == emma_caps);
-    /* ... and it reached the far end of the chain, two hops away. */
+
     const lg_presence_entry_t *far = lg_node_presence(&s->nodes[0].node, LG_PROTO_EMMA);
-    CHECK(far != NULL && far->caps == emma_caps);
-    /* A handheld on that far AP can read it, which is what a demo picks its targets from. */
     const lg_peer_t *peer = lg_client_peer(cl(s, DAD), LG_PROTO_EMMA);
-    CHECK(peer != NULL && peer->caps == emma_caps);
+    CHECK(far != NULL && peer != NULL);
+#if LG_PRESENCE_EMIT_CAPS
+    /* The whole grid speaks the longer frame: what she can do reaches the far end of the chain,
+       two hops away, and a handheld there can read it. That is what a demo picks its targets from. */
+    CHECK(far->caps == emma_caps);
+    CHECK(peer->caps == emma_caps);
     CHECK((peer->caps & LG_CAP_TONE_TALK) != 0);
     CHECK((peer->caps & LG_CAP_MIC) == 0);
+#else
+    /* Mid-transition, the shipped default: this build still sends the older frame so boards that
+       cannot read the longer one keep their presence. Capabilities therefore stop at the AP that
+       heard them, and everyone else reports 0, which readers must treat as unknown and never as
+       "can do nothing". */
+    CHECK(far->caps == 0u);
+    CHECK(peer->caps == 0u);
+    /* Presence itself must still be intact, which is the point of holding the wire format back. */
+    CHECK(far->state == LG_PRES_ONLINE);
+    CHECK(peer->state == LG_PRES_ONLINE);
+#endif
     sim_destroy(s);
 }
 
@@ -109,28 +123,41 @@ static void test_presence_accepts_both_lengths(void)
     lg_presence_t in = { .device = 7, .node = 2, .epoch = 99, .state = LG_PRES_ONLINE,
                          .caps = LG_CAP_SPEAKER | LG_CAP_GPS };
     memset(in.pubkey, 0xA5, LG_PUBKEY_LEN);
+    /* Whatever this build emits must round-trip through the decoder. */
     uint8_t buf[LG_PRESENCE_LEN];
-    CHECK_EQ(lg_presence_enc(&in, buf), LG_PRESENCE_LEN);
-
+    size_t emitted = lg_presence_enc(&in, buf);
+    CHECK(emitted == LG_PRESENCE_LEN || emitted == LG_PRESENCE_LEN_V1);
     lg_presence_t out;
-    CHECK(lg_presence_dec(buf, LG_PRESENCE_LEN, &out));
-    CHECK_EQ(out.caps, in.caps);
+    CHECK(lg_presence_dec(buf, emitted, &out));
     CHECK_EQ(out.device, in.device);
     CHECK(memcmp(out.pubkey, in.pubkey, LG_PUBKEY_LEN) == 0);
+    CHECK_EQ(out.caps, emitted == LG_PRESENCE_LEN ? in.caps : 0u);
 
-    /* The old layout: the same fields with the key where caps now sit, and no capability bits. */
-    uint8_t old[LG_PRESENCE_LEN_V1];
-    memcpy(old, buf, 11);
-    memcpy(old + 11, in.pubkey, LG_PUBKEY_LEN);
+    /* Both layouts decode whichever this build sends, because a grid is flashed one board at a
+       time and the two must meet on the air. Built by hand so the test does not depend on the
+       switch: the fields, then the key, with capability bits only in the longer one. */
+    uint8_t longer[LG_PRESENCE_LEN];
+    memcpy(longer, buf, 11);
+    longer[11] = (uint8_t)(in.caps & 0xFFu);
+    longer[12] = (uint8_t)(in.caps >> 8);
+    memcpy(longer + 13, in.pubkey, LG_PUBKEY_LEN);
+    lg_presence_t with_caps;
+    CHECK(lg_presence_dec(longer, LG_PRESENCE_LEN, &with_caps));
+    CHECK_EQ(with_caps.caps, in.caps);
+    CHECK(memcmp(with_caps.pubkey, in.pubkey, LG_PUBKEY_LEN) == 0);
+
+    uint8_t shorter[LG_PRESENCE_LEN_V1];
+    memcpy(shorter, buf, 11);
+    memcpy(shorter + 11, in.pubkey, LG_PUBKEY_LEN);
     lg_presence_t legacy;
-    CHECK(lg_presence_dec(old, LG_PRESENCE_LEN_V1, &legacy));
+    CHECK(lg_presence_dec(shorter, LG_PRESENCE_LEN_V1, &legacy));
     CHECK_EQ(legacy.caps, 0u);
     CHECK_EQ(legacy.device, in.device);
     CHECK(memcmp(legacy.pubkey, in.pubkey, LG_PUBKEY_LEN) == 0);
 
     /* Any other length is still refused. */
-    CHECK(!lg_presence_dec(buf, LG_PRESENCE_LEN - 1u, &out));
-    CHECK(!lg_presence_dec(buf, LG_PRESENCE_LEN_V1 + 1u, &out));
+    CHECK(!lg_presence_dec(longer, LG_PRESENCE_LEN - 1u, &out));
+    CHECK(!lg_presence_dec(longer, LG_PRESENCE_LEN_V1 + 1u, &out));
 }
 
 static void test_direct_two_hops_encrypted(void)
@@ -343,6 +370,90 @@ static void test_duplicates_and_retransmit(void)
     CHECK_EQ(cl(s, EMMA)->inbox_count, 2);                   /* still shown once */
     CHECK(s->nodes[0].node.stats.duplicates > dups_before);
     CHECK_EQ(cl(s, DAD)->outbox[d].state, LG_OUT_ACCEPTED);  /* node re-acknowledged */
+    sim_destroy(s);
+}
+
+/*
+ * A 1:1 message an AP accepted, whose delivery confirmation never came back, is offered once more
+ * and then lets its outbox slot go. Without this the slot is held for ever: the message stopped
+ * being retransmitted the moment it was accepted, so nothing ever asks again, and sixteen lost
+ * confirmations leave a handheld unable to send at all (bench, 2026-09-21).
+ */
+static void test_unconfirmed_frees_its_slot(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("did you get this"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+
+    /* As if the confirmation was lost on its way back: accepted, never delivered. */
+    cl(s, DAD)->outbox[slot].state = LG_OUT_ACCEPTED;
+    cl(s, DAD)->outbox[slot].confirm_tries = 0;
+    cl(s, DAD)->outbox[slot].last_tx_ms = s->now_ms;
+
+    /* First timeout: it tries once more and keeps the slot. */
+    s->now_ms += LG_CONFIRM_WAIT_MS + 1;
+    lg_client_tick(cl(s, DAD));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_ACCEPTED);
+    CHECK_EQ(cl(s, DAD)->outbox[slot].confirm_tries, 1);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 1);   /* the re-offer is not a second message */
+
+    /* The re-offer reached her, so she confirms again and the slot resolves properly. */
+    CHECK(cl(s, DAD)->outbox[slot].state == LG_OUT_DELIVERED ||
+          cl(s, DAD)->outbox[slot].state == LG_OUT_READ ||
+          cl(s, DAD)->outbox[slot].state == LG_OUT_ACCEPTED);
+
+    /* Now the case where the retry brings nothing either: it gives up and frees the slot. */
+    cl(s, DAD)->outbox[slot].state = LG_OUT_ACCEPTED;
+    cl(s, DAD)->outbox[slot].confirm_tries = 1;
+    cl(s, DAD)->outbox[slot].last_tx_ms = s->now_ms;
+    s->now_ms += LG_CONFIRM_WAIT_MS + 1;
+    lg_client_tick(cl(s, DAD));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_UNCONFIRMED);
+    sim_destroy(s);
+}
+
+/*
+ * The failure this was built for: every slot holding a 1:1 message that was accepted and never
+ * confirmed. Before the timeout the handheld cannot send at all; afterwards it recovers by itself,
+ * with no restart.
+ */
+static void test_full_outbox_unwedges(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("waiting"));
+        CHECK(slot >= 0);
+        cl(s, DAD)->outbox[i].state = LG_OUT_ACCEPTED;
+        cl(s, DAD)->outbox[i].confirm_tries = 1;   /* already re-offered once */
+        cl(s, DAD)->outbox[i].last_tx_ms = s->now_ms;
+    }
+    CHECK(sim_pump(s));
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        cl(s, DAD)->outbox[i].state = LG_OUT_ACCEPTED;
+        cl(s, DAD)->outbox[i].confirm_tries = 1;
+        cl(s, DAD)->outbox[i].last_tx_ms = s->now_ms;
+    }
+    /* Mute: this is what the bench saw, a handheld that looks healthy and cannot say anything. */
+    CHECK_EQ(lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("hello")), LG_ERR_FULL);
+
+    s->now_ms += LG_CONFIRM_WAIT_MS + 1;
+    lg_client_tick(cl(s, DAD));
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        CHECK_EQ(cl(s, DAD)->outbox[i].state, LG_OUT_UNCONFIRMED);
+    }
+    /* And it can speak again. */
+    int after = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("hello again"));
+    CHECK(after >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "hello again"));
     sim_destroy(s);
 }
 
@@ -2119,6 +2230,8 @@ void test_messaging(void)
     test_time_source_and_zone();
     test_registration_and_presence();
     test_capabilities_travel();
+    test_unconfirmed_frees_its_slot();
+    test_full_outbox_unwedges();
     test_presence_accepts_both_lengths();
     test_direct_two_hops_encrypted();
     test_direct_same_node();

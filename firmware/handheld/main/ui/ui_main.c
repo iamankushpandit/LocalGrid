@@ -100,6 +100,16 @@ void ui_go(ui_nav_t to, uint8_t scope, uint32_t target, const char *title)
     snprintf(s.nav_title, sizeof(s.nav_title), "%s", title != NULL ? title : "");
 }
 
+/*
+ * Re-enters the screen that is showing, which draws it again from scratch. Screens are retained
+ * (D55), so a change that alters every pixel - switching theme - has to ask for this; nothing else
+ * would repaint the parts that happen not to have changed.
+ */
+void ui_repaint(void)
+{
+    s.nav_pending = true;   /* nav_to, scope, target and title already hold the current screen */
+}
+
 static lg_box_t text_box(int16_t x, int16_t y, int16_t w, int16_t h, const lg_font_t *font, lg_color_t fg,
                          lg_color_t bg, uint8_t align, const char *text)
 {
@@ -589,6 +599,7 @@ static void ui_task(void *arg)
 
 esp_err_t ui_start(const lg_board_t *board)
 {
+    ui_theme_start();   /* the remembered theme, before anything is drawn */
     esp_err_t err = lg_draw_start(board, C_BG, &s.w, &s.h);
     if (err != ESP_OK) {
         return err;

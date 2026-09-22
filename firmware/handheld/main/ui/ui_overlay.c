@@ -455,6 +455,19 @@ static void show_all_clear(const char *who, const char *text, uint32_t id, uint3
 
 /* ---- screen saver ---- */
 
+/*
+ * The saver keeps its own colours and does not follow the theme (owner, 2026-09-21). Two reasons.
+ * It is the one thing on this device nobody reads, so the daylight theme's job - being legible in
+ * sunlight - does not apply to it, and a white screen left running while the handheld is idle is
+ * simply the panel at its brightest for no one. And the rain needs three distinct shades for the
+ * head, the trail and the cleared tail; the daylight theme deliberately collapses its accent and
+ * its text to the same black, which would leave the rain a single flat colour.
+ */
+#define SAVER_BG    lg_rgb(0x000000)
+#define SAVER_TRAIL lg_rgb(0x1F7A4A)
+#define SAVER_HEAD  lg_rgb(0xD2F5DE)
+
+
 static uint32_t rnd(void)
 {
     s.rnd ^= s.rnd << 13;
@@ -472,11 +485,11 @@ static void rain_cell(uint8_t col, int16_t row, lg_color_t fg)
     lg_box_t b;
     memset(&b, 0, sizeof(b));
     b.rect = (lg_rect_t){ (int16_t)(col * s.col_w), (int16_t)(row * s.row_h), s.col_w, s.row_h };
-    b.bg = b.outside = C_BG;
+    b.bg = b.outside = SAVER_BG;
     b.font = F_SMALL;
     b.fg = fg;
     b.align = LG_ALIGN_CENTER;
-    if (fg != C_BG) {
+    if (fg != SAVER_BG) {
         b.text[0] = SET[rnd() % (sizeof(SET) - 1u)];
     }
     lg_draw_box(&b);
@@ -488,7 +501,7 @@ static void show_saver(uint32_t now)
     s.cover = OV_SAVER;
     lg_draw_scroll_area(0, 0);
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
-    lg_draw_fill(&all, C_BG);
+    lg_draw_fill(&all, SAVER_BG);
     for (uint8_t i = 0; i < s.cols; i++) {
         s.head[i] = (int16_t)-(int16_t)(rnd() % (uint32_t)(s.h / s.row_h + 1));   /* scattered above */
         s.speed[i] = (uint8_t)(1u + rnd() % 2u);
@@ -506,10 +519,10 @@ static void rain_step(void)
             continue;
         }
         s.wait[i] = 0;
-        rain_cell(i, s.head[i], C_ACCENT);                        /* the old head joins the trail */
-        rain_cell(i, (int16_t)(s.head[i] - RAIN_TRAIL), C_BG);   /* the tail end clears */
+        rain_cell(i, s.head[i], SAVER_TRAIL);                     /* the old head joins the trail */
+        rain_cell(i, (int16_t)(s.head[i] - RAIN_TRAIL), SAVER_BG);   /* the tail end clears */
         s.head[i]++;
-        rain_cell(i, s.head[i], C_TEXT);                          /* the new head is the bright one */
+        rain_cell(i, s.head[i], SAVER_HEAD);                      /* the new head is the bright one */
         if (s.head[i] - RAIN_TRAIL > rows) {
             s.head[i] = (int16_t)-(int16_t)(rnd() % 8u);
             s.speed[i] = (uint8_t)(1u + rnd() % 2u);
