@@ -613,24 +613,32 @@ static struct {
  */
 #define GPS_PLAN_KEY "gpsplan"
 
+/*
+ * A handheld reads its GPS continuously, whatever the grid's plan says (owner, 2026-09-21).
+ *
+ * D73 introduced the schedule for the APs, and there it earns its keep: MAIN carries a GPS, a LoRa
+ * module, BLE, the backbone and the admin page, and was running at 14.7 KB free. A handheld does
+ * far less and has far more room - the Freenove boards sit at about 120 KB - so the memory the
+ * schedule saves there buys nothing.
+ *
+ * What it costs is the fix itself. Acquiring from cold needs sustained reception: a receiver that
+ * is opened for a two-minute window and then released loses what it had gathered, so indoors or
+ * under trees it can cycle for ever and never reach a fix. That is exactly what the bench saw -
+ * an AP by a window held a fix while two handhelds, read on a schedule, showed nothing at all.
+ *
+ * The grid's plan is still received, kept and shown; it simply does not gate a handheld's reader.
+ */
 static uint16_t gps_plan_load(void)
 {
-    uint16_t plan = LG_GPS_PLAN_DEFAULT;
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
-        if (nvs_get_u16(h, GPS_PLAN_KEY, &plan) != ESP_OK) {
-            plan = LG_GPS_PLAN_DEFAULT;
-        }
-        nvs_close(h);
-    }
-    return lg_gps_plan_canon(plan);
+    return LG_GPS_PLAN_ALWAYS;
 }
 
 /* LG_CEV_GPS_PLAN: a new plan from the AP. Applied at once and kept (D48). */
 static void gps_plan_take(uint16_t plan)
 {
     plan = lg_gps_plan_canon(plan);
-    hh_gps_set_plan(plan);
+    /* Kept and reported, but not applied: a handheld's GPS stays on (see gps_plan_load). */
+    hh_gps_set_plan(LG_GPS_PLAN_ALWAYS);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err == ESP_OK) {
@@ -641,7 +649,7 @@ static void gps_plan_take(uint16_t plan)
         nvs_close(h);
     }
     uint16_t every = lg_gps_plan_seconds(plan);
-    ESP_LOGI("TIME", "[TIME] GPS plan from the grid: %s%s",
+    ESP_LOGI("TIME", "[TIME] GPS plan from the grid: %s; this handheld reads continuously anyway%s",
              every == 0u ? "always on" : "a reading on a schedule", err == ESP_OK ? "" : "; not saved to flash");
     s.dirty = true;   /* Status says what the GPS is doing (D23) */
 }

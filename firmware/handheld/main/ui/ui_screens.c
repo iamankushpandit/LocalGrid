@@ -833,7 +833,7 @@ static void stat_gps(void)
  * link to an AP and the last signal. Three rows at most, and none at all on the boards that carry
  * no module, which is nearly all of them.
  */
-static void stat_lora(void)
+static void stat_lora(const hh_status_t *st)
 {
     hh_lora_state_t lo;
     if (!hh_service_lora(&lo)) {
@@ -846,14 +846,30 @@ static void stat_lora(void)
         return;
     }
     stat_put(ROW_FACT, "Module", lo.off ? "fitted, held off" : "fitted", lo.off);
+    /*
+     * A handheld's radio is meant to be quiet. D74 sends everything but an alert over Wi-Fi while
+     * Wi-Fi is working, so on a healthy grid this link is idle by design, and an earlier version of
+     * this screen called that "down" and marked it as a fault - which read as a broken module when
+     * nothing was wrong. Whether it matters depends entirely on whether Wi-Fi is carrying: silence
+     * with Wi-Fi up is the radio in reserve, silence with Wi-Fi down is the thing to worry about.
+     */
+    bool wifi_ok = st != NULL && st->link == HH_LINK_ONLINE;
     if (lo.heard_age_ms == UINT32_MAX) {
-        stat_put(ROW_FACT, "Link", "no AP heard yet", true);
+        stat_put(ROW_FACT, "Link", wifi_ok ? "in reserve; no AP heard on it yet" : "no AP heard yet", !wifi_ok);
         return;
     }
     char age[16];
     ui_geo_age_text(lo.heard_age_ms / 1000u, age, sizeof(age));
-    snprintf(value, sizeof(value), "%s, heard %s ago", lo.link ? "up" : "down", age);
-    stat_put(ROW_FACT, "Link", value, !lo.link);
+    if (lo.link) {
+        snprintf(value, sizeof(value), "up, heard %s ago", age);
+        stat_put(ROW_FACT, "Link", value, false);
+    } else if (wifi_ok) {
+        snprintf(value, sizeof(value), "in reserve, last heard %s ago", age);
+        stat_put(ROW_FACT, "Link", value, false);   /* not a fault: Wi-Fi is carrying */
+    } else {
+        snprintf(value, sizeof(value), "no AP for %s, and Wi-Fi is down", age);
+        stat_put(ROW_FACT, "Link", value, true);
+    }
     snprintf(value, sizeof(value), "%d dBm, SNR %d", lo.rssi, lo.snr);
     stat_put(ROW_FACT, "Signal", value, lo.rssi < -110);
 }
@@ -863,7 +879,7 @@ static void stat_location(const hh_status_t *st)
     char value[SLIST_VALUE_MAX];
     char where[32];
     stat_gps();
-    stat_lora();
+    stat_lora(st);
     stat_put(ROW_SECTION, "Location", NULL, false);
     hh_position_t own;
     bool have_own = hh_service_own_position(&own) && own.valid;

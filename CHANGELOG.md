@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 ## [Unreleased]
 
 ### Changed
+- **D80: a handheld reads its GPS continuously; the schedule stays an AP thing.** D73's periodic
+  reader stopped a handheld ever acquiring: opened for 120 s and released, it threw away its
+  progress each time, and Channi and Jolly logged "found no fix ... port released, next in 180 s"
+  indefinitely while an AP by a window held a fix. Within two minutes of reading continuously Jolly
+  had a fix and was keeping time from it, and the release lines stopped on both boards. The grid's
+  plan is still received, stored and shown; it no longer gates a handheld's reader.
+- **A quiet LoRa link no longer reads as a broken one.** The status screen called a handheld's idle
+  radio "down" and flagged it as a fault, when D74 deliberately keeps it silent while Wi-Fi is
+  carrying: at 22 dBm a handheld's cell moves about one message every three seconds, so it is held
+  in reserve for alerts rather than spent on traffic Wi-Fi can take. It now reads "in reserve, last
+  heard 9 minutes ago" with no warning while Wi-Fi is up, and becomes a warning only when Wi-Fi is
+  down too: "no AP for 9 minutes, and Wi-Fi is down".
 - **Fixed: a handheld's outbox could wedge permanently.** A 1:1 message now waits 30 s for the
   recipient's confirmation, is offered once more, and if that brings nothing the slot is freed and
   the message is marked unconfirmed rather than held for ever. The re-offer carries the original
