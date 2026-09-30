@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (the diagram: a LoRa backbone that looks like one, and nothing sitting on anything)
+- **The backbone is drawn as a backbone.** The LoRa arcs were painted last, on top of the whole mesh, so they read as three swooshes tangled in it. They are now the layer *beneath* the mesh -- drawn first, heavier and calmer (4.5 wide, 45% opacity, long dashes) -- so the picture says what the design says: a second, slower path underneath the Wi-Fi mesh.
+- **A symbol system instead of one-off marks.** The three access points that carry a module wear a dashed orange ring: they are backbone nodes, and the ring is concentric so no link line can collide with it. The antenna symbol now means only "carries a radio that is not driven yet", which is what the two handhelds have. The site's legend explains both.
+- **Overlaps measured, not eyeballed.** A script walks the drawing's elements, works out every bounding box, samples every curve, and reports collisions. It found the laptop's "watching over BLE" label clipping a handheld's speaker glyph with two beams crossing the words, the new handheld modules sitting exactly where a GPS beam ended, and the antennas tucked among link lines. The laptop moved left of the beam, its label split over two lines, and the modules moved outboard. The audit now reports **0 overlaps and 0 lines through labels**, against 26 and 2 before.
+
 ### Added (two handhelds now carry LoRa as well as a GPS)
 - **The hardware caught up with D71's plan**: two handhelds carry a LoRa module alongside their GPS (owner, 2026-09-29), the pair that decision anticipated. **No firmware drives them** — there is no handheld LoRa code at all, and which key seals a handheld's LoRa frames is still open, since handhelds do not hold the APs' backbone key. D71 records this rather than still saying handhelds have none.
 - The diagram draws a LoRa antenna above each of those two handhelds' GPS markers, faded, with a caption saying the firmware is still to be written; the site's symbol legend explains the faded symbol, and the README and the site's "Still to do" both name handheld LoRa firmware as missing. Nothing claims it works.
