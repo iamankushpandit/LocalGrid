@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Fixed (the diagram showed a LoRa antenna on MAIN but no LoRa link to it)
+- The drawing had one orange arc, from the westmost access point to the eastmost, sweeping below everything, while three access points carried a LoRa antenna symbol. MAIN had a module and no link, so the arc read as decoration. It now draws the actual topology: MAIN links over LoRa to both outer access points, and those two link to each other, so the three arcs and the three antenna symbols agree. The label says "LoRa: the three APs that carry a module link to each other directly", and MAIN's own label is "GPS + LoRa" rather than "GPS + LoRa fitted", which read as not working.
+- **Labels no longer sit under the lines.** The new LoRa arcs leave MAIN downwards instead of sideways, clearing the label block, and every floating label ("MAIN", "GPS + LoRa", "watching over BLE", the GPS and LoRa captions) is drawn with a dark halo so a link passing behind it cannot eat the words.
+
 ### Changed (the README and the site tell the truth, and show the network)
 - **A README worth landing on**: the network diagram at the top, badges (chaos tested, licence, ESP-IDF, prototype), what the three radios each do, a **Tested by breaking it** section with the run's numbers and the three bugs in a line each, and an honest **Status** listing what is not done — purpose-built GPS and LoRa handhelds still being designed, no cases for the access points, no field testing yet, ranges estimated not measured, and no binaries published while keys are compiled in.
 - **The network diagram is a file**, `assets/network-diagram.svg`, not markup inside the page: GitHub strips inline SVG from a README, so the site template and the README now show the same drawing from one source. `tools/gen_site.py` copies it.
