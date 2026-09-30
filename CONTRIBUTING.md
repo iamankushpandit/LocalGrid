@@ -1,50 +1,95 @@
-# Contributing to LocalGrid (draft)
+# Contributing to LocalGrid
 
-> **Not accepting outside contributions yet.** LocalGrid has no licence. Until the owner chooses one, nobody else has the right to use, change, or share this code, and the project cannot accept a pull request from anyone but the owner. This guide is prepared so the project can open quickly once that decision is made. Board requests through issues are welcome as information; code is not.
->
-> **TODO (owner): licence.** Choose a licence, add `LICENSE`, and update this notice, `THIRD_PARTY.md`, and the templates in `.github/`.
->
-> **TODO (owner): contributor sign-off.** Decide whether contributions need a Developer Certificate of Origin sign-off (`git commit -s`) or a contributor agreement, and describe it here.
+Thanks for looking. LocalGrid is a prototype with one maintainer, written in the open: every
+architectural question has a numbered answer in [docs/DESIGN_REVIEW.md](docs/DESIGN_REVIEW.md), and
+every standing decision is in [docs/DECISIONS.md](docs/DECISIONS.md). Cite them by number (answer 38,
+D27) in issues and pull requests; it saves everyone time.
 
-LocalGrid is an offline, self-forming ESP32 messaging network (D19): APs (D43) carry 1:1, group, and broadcast text between touchscreen handhelds, with no Internet at runtime. It is a prototype.
+## Where help counts most
 
-## Scope
+### Port a board
 
-The contribution the project is being prepared for first is **hardware support**: a new handheld board, a new panel, touch controller, or codec driver. [`docs/BOARDS.md`](docs/BOARDS.md) is the guide. Protocol, security, and product behaviour are the owner's decisions (see below); propose them in an issue before writing code.
+A display board is mostly data: pins, panel controller, colour order, inversion, backlight, and
+touch wiring in a profile in [`components/lg_board`](components/lg_board). Drivers live in
+`lg_bsp`, and screens read the size at runtime (D9), so a new resolution needs no screen changes.
+Open a **Board port** issue first with the board's exact name and a photo of its label. Ports are
+accepted once the port's owner has run `tests` (`LG_TESTS_RESULT: PASS`) and the handheld firmware
+on it and shown the screen working.
 
-## Building
+### Test on real radios
 
-- ESP-IDF v6.1. Load it first (`. C:\esp\v6.1\esp-idf\export.ps1` in PowerShell, or `. $IDF_PATH/export.sh`).
-- Generate throwaway prototype secrets once: `python tools/gen_secrets.py`. The output, `firmware/common/lg_secrets.h`, is gitignored; never commit it. Every board in one grid must be built from the same file.
-- Build every firmware type for every target: `python tools/build.py`. It refuses builds with warnings and runs the layer check before and after.
-- Flash with `python tools/flash.py`; see the `build` and `flash` skills in `.claude/skills/` for every option.
+Range, roaming between access points, recovery after power loss, and battery life all depend on
+hardware and on the space. `tools/chaos.py` takes access points and handhelds out at random for
+hours and reports how the grid recovered. A captured log from your bench is a valuable contribution
+on its own.
 
-CI (`.github/workflows/build.yml`) runs the same build with fresh throwaway secrets on every push and pull request.
+### The admin page
 
-## Rules
+[`firmware/node/main/web/admin.html`](firmware/node/main/web/admin.html) is one file served by
+every access point. You can work on it with no hardware: `python tools/build_web_preview.py` writes a
+copy that answers from a simulated MAIN in your browser. Devices send packed binary and the browser
+formats it (D49), so new views are usually browser-only.
 
-The full list is in [`AGENTS.md`](AGENTS.md#rules); these are the ones a contribution most often meets.
+### Protocol and crypto review
 
-- **Layers stay separate (D27).** Infrastructure never includes UI headers. `lg_bsp` is the only UI-side code that includes ESP-IDF drivers, and `lg_draw` reaches hardware only through it. Screens and services meet only through `hh_service.h`. LVGL is retired (D55). `python tools/check_layers.py` checks this.
-- **No pixel constants or colours outside board profiles and the theme (D9, D10).** Screens read the screen size at runtime and style through the theme table.
-- **Zero warnings** on every firmware type and target under ESP-IDF v6.1 defaults. Fix the warning; keep the warning level.
-- **`CHANGELOG.md` entry** for every change, newest first.
-- **Decisions are the owner's.** `docs/DECISIONS.md` changes only when the owner decides. If a requirement looks wrong or hardware blocks it, explain the problem, the limit, the options, and a recommendation in an issue.
-- **Never log keys, passphrases, or the plaintext of 1:1 messages**, and never put hardware addresses in the repository or tool output (D21).
-- **Core stays portable and bounded.** `lg_core` includes only C standard headers and its own; fixed-size tables, no heap allocation per message.
-- **Tests for core changes.** A change to `lg_core` or `lg_crypto` needs scenarios in `tests/target` and `LG_TESTS_RESULT: PASS` on a board. See the `protocol-change` skill.
-- **Test on ESP32 boards only (D25).** The PC builds, flashes, and reads serial logs; it never stands in for a handheld or an AP. Handheld firmware, test builds included, shows its results on the screen (D23).
-- **Call it an offline network (D19)** and the infrastructure boards APs (D43) in everything a person reads.
+The core in `components/lg_core` is portable C11 with no ESP-IDF includes. Crypto goes only through
+`lg_crypto.h`, with RFC test vectors for every primitive. Careful review of the envelope, nonce
+construction, and routing is welcome. Report anything exploitable privately (see
+[SECURITY.md](SECURITY.md)).
 
-## Provenance
+## Before you start
 
-LocalGrid must be able to choose its own licence, so everything in the tree needs a known origin.
+- **Ask first for behaviour changes.** The maintainer decides requirements. If a change alters what
+  a device does, open an issue describing the problem, the options, and your recommendation before
+  writing code. Accepted decisions are recorded in `docs/DECISIONS.md`.
+- **Read [AGENTS.md](AGENTS.md).** It is short and it is the rulebook: the core stays portable,
+  everything is bounded, one task owns core state, nonces never repeat, layers stay separate (D27),
+  information is sticky (D48), and devices hold bytes while browsers make text (D49).
+- **Use the product's name for it.** LocalGrid is "an offline network" (D19). Camping is one use
+  case, not what it is.
 
-- Write code yourself, against ESP-IDF. Do not copy code from other projects.
-- Facts are not code: pins, register meanings, and divider ratios may be restated from datasheets, vendor pin tables, or other projects, with the source named in a comment.
-- Braino (github.com/iamankushpandit/Gume, GPLv3) is the owner's project and the source of the measured board facts for the existing handhelds. Restate its facts; never copy its code. The owner can reuse his own code; contributors cannot.
-- Record every outside source in [`THIRD_PARTY.md`](THIRD_PARTY.md): the project, its licence, the file here that uses it, and what was taken.
+## Setting up
 
-## Submitting
+Pure ESP-IDF v6.1 with targets `esp32` and `esp32s3` (D1); see the README's **Build it** section.
+Generate your own keys with `python tools/gen_secrets.py`. The file is gitignored; never commit it,
+and never paste its contents into an issue.
 
-Use the pull request template. For a board, attach the bring-up evidence from `docs/BOARDS.md`. For a board request, use the "New board" issue template.
+## Testing
+
+**Every test runs on ESP32 boards** (D25). A PC builds, flashes, and reads serial logs; it never
+stands in for a handheld or an access point. CI builds every firmware for every target with zero
+warnings, but it cannot run anything, so the pull request needs your evidence:
+
+1. `python tools/build.py` succeeds with zero warnings for every firmware and target you touched.
+2. After any change to `lg_core` or `lg_crypto`: `tests` prints `LG_TESTS_RESULT: PASS` on a board.
+3. For radio or firmware behaviour: captured serial output (`tools/serial_capture.py`) showing it
+   working. Firmware flashed to a handheld must show its results on the screen, not only on serial
+   (D23).
+
+Before pasting a log, check it for anything private: your grid name, people's names, and message
+text. Serial logs never contain keys or 1:1 plaintext by design; tell us if you find otherwise.
+
+## Pull requests
+
+- Branch from and target **`dev`**. `main` is updated from `dev` by the maintainer.
+- One change per pull request, with a `CHANGELOG.md` entry under `[Unreleased]`.
+- Update the milestone report or `docs/DECISIONS.md` in the same pull request if your change
+  affects them.
+- Keep public symbols prefixed (`lg_`, or a module prefix such as `hh_`); short names collide with
+  Espressif's closed libraries.
+- Log network transitions with a bracketed tag (`[NET]`, `[GRID]`, `[TIME]`, ...). Never log keys,
+  passphrases, or 1:1 plaintext.
+
+The **verify** check must pass. It builds everything, runs the layer check, confirms no secrets file
+is tracked, and regenerates the site.
+
+## Licensing
+
+LocalGrid is released under the **GNU GPL v3 or later** (`GPL-3.0-or-later`); see
+[LICENSE](LICENSE). By opening a pull request you agree your contribution is licensed under those
+terms. There is no contributor licence agreement and no sign-off to add. Third-party material keeps
+its own licence, recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## Conduct
+
+Everyone taking part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md).

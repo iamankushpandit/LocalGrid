@@ -1,0 +1,34 @@
+name: Proposal
+description: A change to what LocalGrid does. Decided before code is written.
+labels: [proposal]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Behaviour changes are decided by the maintainer and recorded in docs/DECISIONS.md.
+        Cite design review answers and decisions by number where they apply.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What someone using the grid cannot do, or what goes wrong. Not the solution yet.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options
+      description: The ways it could be solved, and what each costs in RAM, flash, radio time, or power on the weakest board (the 4 MB ESP32 with no PSRAM).
+    validations:
+      required: true
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: Recommendation
+    validations:
+      required: true
+  - type: input
+    id: decisions
+    attributes:
+      label: Related answers and decisions
+      placeholder: e.g. answer 12, D5, D48

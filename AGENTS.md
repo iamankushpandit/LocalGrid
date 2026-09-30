@@ -25,6 +25,8 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
 | `tests/target` | On-board test app with a simulated three-node grid. |
 | `tools/` | Secrets generator, multi-port serial capture, build and flash, and `grid_watch.py`, the laptop dashboard that reads the grid over BLE (`docs/grid-watch.md`). |
+| `site/`, `tools/gen_site.py` | Project site template and generator; every fact comes from the tree (`docs/OPEN_SOURCE.md`). |
+| `.github/` | CI (`verify` is the required check), Pages, issue and pull request templates. |
 
 ## Skills
 

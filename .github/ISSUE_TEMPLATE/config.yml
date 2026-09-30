@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/iamankushpandit/LocalGrid/security/advisories/new
+    about: Do not open a public issue. Report privately here; see SECURITY.md.
+  - name: Question or idea
+    url: https://github.com/iamankushpandit/LocalGrid/discussions
+    about: Anything that is not yet a bug, a port, or a proposal. Asking before building a board port is encouraged.

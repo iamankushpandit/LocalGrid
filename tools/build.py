@@ -45,6 +45,18 @@ def last_result(fw, target):
     return "last build did not complete"
 
 
+def within_budget(fw, target, budget):
+    """(ok, detail): the app must leave at least (100 - budget)% of its partition free."""
+    sizes = SIZE.findall((ROOT / fw["project"] / f"build-{target}.log").read_text(encoding="utf-8", errors="replace"))
+    if not sizes:
+        return False, "no size line in the build log; cannot check the partition budget"
+    size, free = sizes[-1]
+    used = 100 - int(free)
+    if used > budget:
+        return False, f"app uses {used}% of its partition, over the {budget}% budget ({int(size, 16) / 1024:.0f} KB)"
+    return True, f"built, {int(size, 16) / 1024:.0f} KB, {used}% of app partition used (budget {budget}%)"
+
+
 def jobs_for(data, args):
     if args.boards or args.role:
         chosen = select(data, args)
@@ -83,6 +95,8 @@ def main():
     ap.add_argument("--target", action="append", help="limit to this chip target (repeatable), e.g. esp32, esp32s3")
     ap.add_argument("--clean", action="store_true", help="delete the build folder and generated sdkconfig first")
     ap.add_argument("--list", action="store_true", help="show every firmware type and target with its last result")
+    ap.add_argument("--budget", type=int, metavar="PCT",
+                    help="fail a build whose app uses more than PCT%% of its partition (CI uses 85, design review 38)")
     args = ap.parse_args()
     args.all = False   # select() reads it
 
@@ -114,6 +128,8 @@ def main():
             shutil.rmtree(proj / f"build-{target}", ignore_errors=True)
             (proj / f"sdkconfig.{target}").unlink(missing_ok=True)
         ok, detail = build(name, fw, target)
+        if ok and args.budget is not None:
+            ok, detail = within_budget(fw, target, args.budget)
         results.append((name, target, ok, last_result(fw, target) if ok else detail))
 
     print("\nRESULT")

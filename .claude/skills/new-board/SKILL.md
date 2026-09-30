@@ -9,7 +9,7 @@ description: Walk a contributor through adding a LocalGrid board — gather fact
 
 ## Before starting
 
-**Not open yet.** LocalGrid has no licence, so outside contributions cannot be accepted until the owner chooses one (`CONTRIBUTING.md`). Say so to anyone who is not the owner before they spend time on code. A board request issue (`.github/ISSUE_TEMPLATE/new_board.md`) is fine.
+**Open, under GPL-3.0-or-later** (D76). Board ports are welcome; point a contributor at `CONTRIBUTING.md` first. A board request issue (`.github/ISSUE_TEMPLATE/board_port.yml`) is the place to start.
 
 **Facts, never code.** Pins and register meanings may be restated from datasheets, vendor pin tables, Braino (GPLv3, the owner's project), or other projects, with the source named. Code from any of them is never copied. Every outside source goes in `THIRD_PARTY.md`.
 

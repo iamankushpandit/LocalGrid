@@ -1,0 +1,173 @@
+name: CI
+
+# Proves every firmware project builds with zero warnings under ESP-IDF v6.1 on every chip it
+# supports (AGENTS.md, definition of done 1), within 85% of its app partition (design review 38),
+# with the layers kept apart (D27) and the site still generating.
+#
+# What CI cannot do: run anything. Every test runs on the ESP32 boards (D25), so "LG_TESTS_RESULT:
+# PASS" and captured serial output stay the contributor's job, and the pull request template asks
+# for them. CI proves a change compiles on every target and does not break the published site.
+#
+# Runs on pushes to main and dev, and on every pull request. Not `on: push` everywhere: a branch
+# with a pull request open would build everything twice.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Repository checks, which are cheap and always run, then the build matrix.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile every Python tool
+        run: python -m py_compile tools/*.py
+
+      # Infrastructure never includes UI headers, and LVGL stays retired (D27, D55). build.py runs
+      # this too; running it here fails a pull request in seconds rather than after a build.
+      - name: Layer check
+        run: python tools/check_layers.py
+
+      # lg_secrets.h holds the grid passphrase and backbone key. It is gitignored; this catches a
+      # forced add, which .gitignore does not.
+      - name: No secrets in the tree
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)lg_secrets\.h$|(^|/)secrets/|\.bundle\.json$'; then
+            echo "::error::A secrets file is tracked. Remove it with git rm --cached and rotate the keys (python tools/gen_secrets.py --force)."
+            exit 1
+          fi
+
+      # The site is generated on every pull request, not only by the Pages workflow after merge,
+      # so a broken template or a bench detail on the page fails here instead of on the live site.
+      - name: Generate the site
+        run: python tools/gen_site.py --out "$RUNNER_TEMP/site" --repo "${{ github.server_url }}/${{ github.repository }}"
+
+      # Documentation, site, and issue-template changes cannot change a firmware image. Anything
+      # else, including tools/ (build.py decides how firmware builds), builds everything.
+      - name: Decide whether firmware needs building
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" --jq '.[].filename')
+          printf 'Changed:\n%s\n' "$files" | sed 's/^/  /'
+          if printf '%s\n' "$files" | grep -qvE '^(docs/|site/|assets/|web/preview/|\.github/ISSUE_TEMPLATE/)|\.md$|^LICENSE$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Docs and site only: skipping the firmware build."
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The matrix comes from tools/bench_devices.json, the same map build.py and flash.py use, so
+      # a new firmware type or chip target is built here with no edit to this file.
+      - name: Build matrix from the device map
+        id: matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          fw = json.load(open("tools/bench_devices.json", encoding="utf-8"))["firmware"]
+          jobs = [{"firmware": n, "target": t} for n, f in fw.items() for t in f["targets"]]
+          print("matrix=" + json.dumps(jobs))
+          PY
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.1
+    strategy:
+      fail-fast: false        # every firmware and target reports; one failure must not hide another
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: build ${{ matrix.firmware }} (${{ matrix.target }})
+    env:
+      IDF_CCACHE_ENABLE: "1"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - uses: actions/checkout@v4
+
+      # The container runs as root over a checkout owned by the runner user; without this, git
+      # refuses the tree and ESP-IDF's version lookup (git describe) fails noisily.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.firmware }}-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.firmware }}-${{ matrix.target }}-
+
+      # Throwaway keys, generated fresh on every run. These binaries are never uploaded: an image
+      # built here carries these keys, and a published image would hand every downloader the same
+      # grid passphrase (docs/OPEN_SOURCE.md, "Why there is no download yet").
+      - name: Throwaway grid secrets
+        shell: bash
+        run: . "$IDF_PATH/export.sh" >/dev/null && python tools/gen_secrets.py
+
+      # build.py is the same step the bench uses: per-target build folders, warnings refused, the
+      # layer check before and after. --budget adds the partition limit.
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          python tools/build.py --firmware "${{ matrix.firmware }}" --target "${{ matrix.target }}" --budget 85
+
+      - name: Size summary
+        if: success()
+        shell: bash
+        run: |
+          project=$(python3 -c "import json;print(json.load(open('tools/bench_devices.json'))['firmware']['${{ matrix.firmware }}']['project'])")
+          line=$(grep -E 'binary size .* free' "$project/build-${{ matrix.target }}.log" | tail -n 1)
+          echo "**${{ matrix.firmware }} / ${{ matrix.target }}**: ${line}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.firmware }}-${{ matrix.target }}
+          path: "**/build-${{ matrix.target }}.log"
+          retention-days: 7
+
+  # The required status check for the main and dev rulesets. It must report on every pull
+  # request, including docs-only ones where build is skipped: a required check that never runs
+  # leaves the pull request unmergeable. Do not rename it, and do not make the matrix jobs
+  # required; their names change with the matrix.
+  verify:
+    needs: [plan, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Judge the checks and the builds
+        run: |
+          echo "plan:  ${{ needs.plan.result }}"
+          echo "build: ${{ needs.build.result }}"
+          [ "${{ needs.plan.result }}" = "success" ] || exit 1
+          case "${{ needs.build.result }}" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac

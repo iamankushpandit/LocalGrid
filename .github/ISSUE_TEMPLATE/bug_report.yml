@@ -1,0 +1,50 @@
+name: Bug report
+description: Something on the grid does not do what it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Before pasting a log, remove your grid name, people's names, and message text.
+        **Security problems go through SECURITY.md, not here.**
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "`git rev-parse --short HEAD` of the tree you built."
+    validations:
+      required: true
+  - type: textarea
+    id: boards
+    attributes:
+      label: Boards
+      description: Each board involved, its role (access point or handheld), and the firmware on it.
+      placeholder: |
+        3x ESP32 dev board, node firmware
+        1x Freenove FNK0104B, handheld firmware
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Serial output
+      description: From `tools/serial_capture.py` if you can. Lines tagged [NET], [GRID], [TIME], [MSG] matter most.
+      render: text
+  - type: dropdown
+    id: tests
+    attributes:
+      label: Does the tests firmware pass on the same board?
+      options: ["Yes, LG_TESTS_RESULT: PASS", "No, it fails", "Not tried"]

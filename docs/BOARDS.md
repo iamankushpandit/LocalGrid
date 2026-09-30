@@ -2,7 +2,7 @@
 
 How LocalGrid supports a board, which boards it supports today, and how to add one. LocalGrid is an offline network (D19). Infrastructure boards are APs (D43), and handhelds are the touchscreen devices people carry.
 
-> **Not open yet.** LocalGrid has no licence, so outside contributions cannot be accepted until the owner chooses one. See [`CONTRIBUTING.md`](../CONTRIBUTING.md). This guide is ready for when they can.
+> **Open, under GPL-3.0-or-later** (D76). Board ports are the most useful contribution there is; start with [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## Supported boards
 

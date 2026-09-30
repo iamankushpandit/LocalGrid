@@ -1,8 +1,8 @@
 # Provenance and third-party material
 
-LocalGrid carries no licence of its own yet (owner, 2026-09-17: decide before anything is
-published). This file records where material in the tree came from, so that decision can be made
-with the facts in hand.
+LocalGrid is licensed under the GNU GPL v3 or later (`GPL-3.0-or-later`, D76); see
+[LICENSE](LICENSE). This file records where material in the tree came from and the licence each
+piece keeps.
 
 ## Braino (github.com/iamankushpandit/Gume), GPLv3
 

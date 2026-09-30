@@ -247,7 +247,7 @@ What can work is a **voice note**: a few seconds of speech, compressed by a code
 (Codec2 at 1.2-3.2 kbit/s rather than 32), sent as a message and played when it arrives. Ten
 seconds of speech is about 2-5 KB, which is 9-24 s of airtime at long range. A message, not a
 conversation. Nothing of it is built yet, and the speech codec is a handheld matter (note the
-licence question: Codec2 is LGPL, and LocalGrid has no licence yet - see THIRD_PARTY.md).
+licence question: Codec2 is LGPL, which LocalGrid's GPL-3.0-or-later can carry - see THIRD_PARTY.md).
 
 **What the AP side must be ready for now**, because these are awkward to retrofit:
 

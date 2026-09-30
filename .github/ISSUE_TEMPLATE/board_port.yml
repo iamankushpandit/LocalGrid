@@ -1,0 +1,37 @@
+name: Board port
+description: Bring LocalGrid up on an ESP32 board it does not support yet.
+labels: [board-port]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open this before you start, so nobody duplicates the work. Board facts go in a data-only
+        profile in components/lg_board; see CONTRIBUTING.md, "Port a board".
+  - type: input
+    id: board
+    attributes:
+      label: Board
+      description: Exact name and vendor, and a link to its listing or documentation.
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Role
+      options: [Handheld, Access point, Either]
+    validations:
+      required: true
+  - type: textarea
+    id: facts
+    attributes:
+      label: What you know about it
+      description: Chip and module, flash and PSRAM, display controller and resolution, touch controller and bus, audio, battery sense.
+    validations:
+      required: true
+  - type: checkboxes
+    id: have
+    attributes:
+      label: Hardware in hand
+      options:
+        - label: I have this board and can flash it and capture serial output.
+          required: true

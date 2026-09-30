@@ -1,0 +1,73 @@
+name: Pages
+
+# Generates the project site with tools/gen_site.py and publishes it to GitHub Pages on every push
+# to main. The site is the landing page plus the real admin page answering from a simulated MAIN
+# in the browser. No firmware is built or offered here (docs/OPEN_SOURCE.md explains why).
+#
+# Publishing is opt-in. The job generates the site every time, so a broken page is caught, but
+# deploys only when the repository is public or the repository variable PAGES_ENABLED is "true"
+# (Settings -> Secrets and variables -> Actions -> Variables). Going public is the owner's call,
+# and a private repository needs a paid plan for Pages.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.gate.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate the site
+        run: python tools/gen_site.py --out _site --repo "${{ github.server_url }}/${{ github.repository }}"
+
+      - name: Decide whether to publish
+        id: gate
+        run: |
+          if [ "${{ github.event.repository.private }}" = "false" ] || [ "${{ vars.PAGES_ENABLED }}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Site generated but not published: the repository is private and PAGES_ENABLED is not set." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Turns Pages on (source: GitHub Actions) the first time. Allowed to fail: the deploy job
+      # is the real test of whether Pages is on.
+      - uses: actions/configure-pages@v5
+        if: steps.gate.outputs.publish == 'true'
+        continue-on-error: true
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

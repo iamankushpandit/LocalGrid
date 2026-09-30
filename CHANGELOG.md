@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (D76: public, under GPL-3.0-or-later, with the README, site and CI in the tree)
+- **A licence.** `LICENSE` holds the GNU GPL v3 text; LocalGrid is `GPL-3.0-or-later`, the same as the owner's Braino, so work can move between the two projects (D76). Contributions are accepted under it with no contributor licence agreement and no sign-off. `CONTRIBUTING.md`, `README.md`, `THIRD_PARTY.md`, `docs/BOARDS.md`, `docs/lora.md` and the `new-board` skill no longer say the project is closed, and `docs/OPEN_SOURCE.md` records the choice as made rather than proposed.
+- **The README, the project site and the CI workflows are in git.** They had been written but never committed, so a public repository had no README at all and the site existed only in one worktree's untracked files. Added: `README.md`, `site/index.template.html` and `tools/gen_site.py` (the landing page with the network diagram, plus the real admin page answering from a simulated AP in the browser), `SECURITY.md`, `CODE_OF_CONDUCT.md`, `docs/OPEN_SOURCE.md`, `docs/ADS.md`, `.github/workflows/ci.yml` and `pages.yml`, and structured issue templates.
+- `tools/build.py --budget PCT` fails a build whose app uses more than PCT% of its app partition; CI uses 85 (design review 38). CI depended on this flag, which had never been committed either.
+
+### Removed
+- `.github/workflows/build.yml` and `.github/ISSUE_TEMPLATE/new_board.md`, both superseded: `ci.yml` does everything build.yml did and adds the layer check, the tracked-secrets check, the site generation and the partition budget, and its `verify` job is the one required check; `board_port.yml` replaces the board request template with a structured form.
+
 ### Changed
 - **The APs are named Everest, Fuji and Denali** (AP 0, 1 and 2; owner, 2026-09-20), written into each board's identity partition so the name travels with the board. The bench map's own labels stay `node-main`, `node-north` and `node-south`, because the skills and scripts address boards by those. New handhelds on the bench: device 8 **Marshall** (the second E28, after its cloned identity was undone) and device 9 **Jolly** (a third Freenove).
 - **Noted for the watchers** in `docs/grid-watch.md`: a name arrives one per beacon rotation, so with eight handhelds it can take minutes, and "Handheld 6" is shown both for a handheld that was never named and for one whose name has not been heard yet. On the bench this looked like handhelds losing their names, when the grid was right all along. A logged-in watcher could take every name from the AP's status reply at once instead. To settle when the observers are next worked on.
