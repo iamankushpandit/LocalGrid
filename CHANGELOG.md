@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed (the README and the site tell the truth, and show the network)
+- **A README worth landing on**: the network diagram at the top, badges (chaos tested, licence, ESP-IDF, prototype), what the three radios each do, a **Tested by breaking it** section with the run's numbers and the three bugs in a line each, and an honest **Status** listing what is not done — purpose-built GPS and LoRa handhelds still being designed, no cases for the access points, no field testing yet, ranges estimated not measured, and no binaries published while keys are compiled in.
+- **The network diagram is a file**, `assets/network-diagram.svg`, not markup inside the page: GitHub strips inline SVG from a README, so the site template and the README now show the same drawing from one source. `tools/gen_site.py` copies it.
+- **Stale claims removed** from the site and the diagram: LoRa is in use (D74), not "firmware being written"; the handheld link row says six display boards rather than two. The site's "Exploring next" card is replaced by "Tested by breaking it", linking the chaos write-up, and a "Still to do" card matching the README.
+
 ### Added (the chaos engineering write-up, with the run behind it)
 - **`docs/chaos-engineering.md`**: how the self-healing claim was tested by attacking the grid for hours, and the three bugs that came out of it — the banner timer use-after-free, the presence gap that made a restarted AP refuse valid messages, and grid time that no device could restore. Each with what was wrong, how it was found and what fixed it. Also what the framework randomizes, why the serial console is not a backdoor (physical cable only, no grid-wide changes, self-restoring radio hooks), how the three testing layers divide the work (on-device suite, boot self-test, chaos), what it still cannot find, and what field testing needs.
 - **`docs/chaos/2026-09-18-night-run.md`**: the framework's own report from the ten-hour run, kept verbatim with a header explaining how to read it, so every number in the article can be checked against its source. 55 experiments, 55 recovered; backbone whole again in a median 3.7 s; 738 of 782 messages delivered; the 44 that were not are the presence bug. `chaos-runs/` stays gitignored, so this lives under `docs/chaos/`.

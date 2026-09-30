@@ -168,6 +168,9 @@ def main():
     for icon in (ROOT / "assets" / "brand").glob("*.svg"):
         shutil.copy2(icon, out / "assets" / icon.name)
 
+    # The network diagram is a file, not inline, so the README can show the same drawing.
+    shutil.copy2(ROOT / "assets" / "network-diagram.svg", out / "assets" / "network-diagram.svg")
+
     preview = out / "admin" / "index.html"
     subprocess.run([sys.executable, str(ROOT / "tools" / "build_web_preview.py"), str(preview)], check=True)
     check_public("admin/index.html", preview.read_text(encoding="utf-8"))
