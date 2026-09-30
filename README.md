@@ -22,7 +22,7 @@ ever.
 
 </div>
 
-<img src="assets/network-diagram.svg" alt="Circles are access points and small rectangles are handhelds. Access points pass messages to each other in hops, with handhelds on each. Above, GPS satellites give the main access point its time and location, and some handhelds have their own GPS; both optional. A laptop beside the grid watches it over Bluetooth without joining. LoRa links the access points as a longer-range second path.">
+<img src="assets/network-diagram.svg" alt="Circles are access points and small rectangles are handhelds. Access points pass messages to each other in hops, with handhelds on each. Above, GPS satellites give the main access point its time and location, and some handhelds have their own GPS; both optional. A laptop beside the grid watches it over Bluetooth without joining. Three access points carry a LoRa module and link to each other over it, a longer-range second path used when Wi-Fi cannot reach. Two handhelds carry a LoRa module too, drawn faded because their firmware is still to be written.">
 
 ## What it is
 
@@ -94,8 +94,10 @@ positions, the Bluetooth watchers, and the chaos framework.
 
 **Not done yet:**
 
-- **Purpose-built handhelds.** The GPS and LoRa handheld hardware is still being designed; today's
-  handhelds are development boards with modules wired on.
+- **Handheld LoRa firmware.** Two handhelds now carry a LoRa module alongside a GPS, but nothing
+  drives it yet: LoRa works between access points only (D71, D74).
+- **Purpose-built handhelds.** The hardware is still being designed; today's handhelds are
+  development boards with modules wired on.
 - **Enclosures.** The access points have no cases yet.
 - **Field testing.** Every test so far has run on one workbench with every board in radio range and
   on a cable. Chaos testing in the field — devices spread out, on batteries, no wires — is planned,

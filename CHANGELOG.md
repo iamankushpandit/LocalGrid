@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added (two handhelds now carry LoRa as well as a GPS)
+- **The hardware caught up with D71's plan**: two handhelds carry a LoRa module alongside their GPS (owner, 2026-09-29), the pair that decision anticipated. **No firmware drives them** — there is no handheld LoRa code at all, and which key seals a handheld's LoRa frames is still open, since handhelds do not hold the APs' backbone key. D71 records this rather than still saying handhelds have none.
+- The diagram draws a LoRa antenna above each of those two handhelds' GPS markers, faded, with a caption saying the firmware is still to be written; the site's symbol legend explains the faded symbol, and the README and the site's "Still to do" both name handheld LoRa firmware as missing. Nothing claims it works.
+
 ### Fixed (the diagram showed a LoRa antenna on MAIN but no LoRa link to it)
 - The drawing had one orange arc, from the westmost access point to the eastmost, sweeping below everything, while three access points carried a LoRa antenna symbol. MAIN had a module and no link, so the arc read as decoration. It now draws the actual topology: MAIN links over LoRa to both outer access points, and those two link to each other, so the three arcs and the three antenna symbols agree. The label says "LoRa: the three APs that carry a module link to each other directly", and MAIN's own label is "GPS + LoRa" rather than "GPS + LoRa fitted", which read as not working.
 - **Labels no longer sit under the lines.** The new LoRa arcs leave MAIN downwards instead of sideways, clearing the label block, and every floating label ("MAIN", "GPS + LoRa", "watching over BLE", the GPS and LoRa captions) is drawn with a dark halo so a link passing behind it cannot eat the words.
