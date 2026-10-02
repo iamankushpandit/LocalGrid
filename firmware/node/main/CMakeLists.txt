@@ -11,11 +11,14 @@ idf_component_register(SRCS "node_main.c"
                             "web_admin.c"
                             "grid_state.c"
                             "power_trace.c"
+                            "chaos_self.c"
+                            "chaos_log.c"
                             "gps.c"
                             "lora.c"
-                            "lora_wire.c"
+                            "../../common/lg_lora_wire.c"
+                            "../../common/lg_lora_hh.c"
                        INCLUDE_DIRS "." "../../common"
                        EMBED_TXTFILES "web/admin.html"
                        EMBED_FILES "../../../assets/brand/localgrid-icon.svg"
                        REQUIRES lg_core lg_crypto lg_identity lg_power esp_wifi esp_netif esp_event nvs_flash
-                                bt console esp_timer lwip esp_http_server esp_driver_uart esp_driver_gpio)
+                                bt console esp_timer lwip esp_http_server app_update esp_partition esp_driver_uart esp_driver_gpio)

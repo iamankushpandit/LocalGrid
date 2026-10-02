@@ -10,6 +10,9 @@
 #include "backbone.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
+#include "esp_ota_ops.h"   /* D81: the admin page can replace this AP's firmware */
+#include "chaos_log.h"    /* D83 */
+#include "chaos_self.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/semphr.h"
@@ -1173,26 +1176,220 @@ static esp_err_t h_groups(httpd_req_t *req)
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 
+/* ---- D81: over-the-air update ------------------------------------------
+ *
+ * Once an AP runs on battery it has no USB, so this is the only way to change its firmware. The
+ * image is written to the inactive OTA slot and becomes active only on the next restart; the
+ * bootloader keeps the previous slot and rolls back to it if the new image does not confirm itself
+ * (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE), so a bad upload costs a restart rather than a walk.
+ *
+ * Behind the admin login and the CSRF token, exactly like every other change here. It is on the
+ * AP's own Wi-Fi, which is WPA2 with the grid's passphrase, and never reachable from anywhere else:
+ * the grid has no Internet at runtime, ever.
+ *
+ * The body is the raw .bin, streamed in chunks - never buffered whole, because an AP has kilobytes
+ * of free heap and the image is about a megabyte.
+ */
+#define OTA_CHUNK 1024
+
+static esp_err_t h_update(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to update the firmware.");
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    if (target == NULL) {
+        /* An AP still on the factory-only layout: it has nowhere to put a second image. */
+        return send_error(req, "409 Conflict",
+                          "This access point has no update slot. It must be reflashed over USB once.");
+    }
+    int total = req->content_len;
+    if (total <= 0 || (size_t)total > target->size) {
+        return send_error(req, "413 Payload Too Large", "That firmware image does not fit the update slot.");
+    }
+
+    esp_ota_handle_t handle = 0;
+    esp_err_t err = esp_ota_begin(target, (size_t)total, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[WEB] Update could not start: %s", esp_err_to_name(err));
+        return send_error(req, "500 Internal Server Error", "The update could not be started.");
+    }
+    ESP_LOGW(TAG, "[WEB] Firmware update started: %d bytes into %s", total, target->label);
+
+    static char chunk[OTA_CHUNK];   /* one buffer, not one per request: this AP has no heap to spare */
+    int received = 0;
+    while (received < total) {
+        int n = httpd_req_recv(req, chunk, (size_t)(total - received) < OTA_CHUNK
+                                           ? (size_t)(total - received) : OTA_CHUNK);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (n <= 0) {
+            esp_ota_abort(handle);
+            ESP_LOGE(TAG, "[WEB] Update aborted: the upload stopped after %d of %d bytes", received, total);
+            return send_error(req, "400 Bad Request", "The upload did not finish. Nothing was changed.");
+        }
+        err = esp_ota_write(handle, chunk, (size_t)n);
+        if (err != ESP_OK) {
+            esp_ota_abort(handle);
+            ESP_LOGE(TAG, "[WEB] Update write failed: %s", esp_err_to_name(err));
+            return send_error(req, "500 Internal Server Error", "The image could not be written.");
+        }
+        received += n;
+    }
+    /* esp_ota_end checks the image: a truncated or corrupt one is refused here, before it is made
+     * bootable, so the running firmware is still the one that answers the next request. */
+    err = esp_ota_end(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[WEB] Update refused: %s", esp_err_to_name(err));
+        return send_error(req, "400 Bad Request",
+                          "That image was rejected. This access point is still running the old firmware.");
+    }
+    err = esp_ota_set_boot_partition(target);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[WEB] Update could not be made bootable: %s", esp_err_to_name(err));
+        return send_error(req, "500 Internal Server Error", "The update could not be made bootable.");
+    }
+    ESP_LOGW(TAG, "[WEB] Firmware update accepted into %s; restart to run it", target->label);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req,
+        "{\"ok\":true,\"slot\":\"pending\",\"note\":\"Restart this access point to run the new firmware. "
+        "If it does not come up, the previous firmware is kept and restored automatically.\"}");
+}
+
+/* ---- D83: chaos, armed from the admin page --------------------------------
+ *
+ * Why this is not a new hole. Until D81 the argument was that the console lived only on a physical
+ * USB cable. That stopped being true when this page gained a firmware upload: anyone with the admin
+ * password can already replace the whole image, and an image can do anything chaos can. The boundary
+ * is now the admin password, not the cable, and these endpoints grant no capability that /api/update
+ * does not already grant - they only make it convenient. Written up in docs/chaos-engineering.md.
+ *
+ * What still keeps it safe:
+ *   - the chaos code is not in an ordinary build at all (CONFIG_LG_NODE_CHAOS), so a production AP
+ *     has nothing here to reach;
+ *   - two secrets are needed, not one: the grid's WPA2 passphrase to be on this network, and the
+ *     admin password to log in;
+ *   - arming opens a window that CLOSES BY ITSELF unless renewed, so losing contact ends a run;
+ *   - the fault budget is bounded and counted in flash, so it cannot be raised from here.
+ *
+ * The journal is served as packed binary (D49): the device holds bytes, the browser makes text.
+ */
+static esp_err_t h_chaos(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to control chaos testing.");
+    }
+    if (req->method == HTTP_GET) {
+        /* Status, and the journal in the same shape the console prints. */
+        char json[320];
+        snprintf(json, sizeof(json),
+                 "{\"available\":%s,\"armed\":%s,\"window_s\":%" PRIu32 ",\"faults\":%" PRIu32
+                 ",\"max_faults\":%u,\"journal\":%" PRIu32 ",\"journal_full\":%s}",
+                 chaos_self_available() ? "true" : "false",
+                 chaos_self_armed_now() ? "true" : "false",
+                 chaos_self_window_left_s(), chaos_self_count(), (unsigned)CHAOS_MAX_FAULTS,
+                 chaos_log_count(), chaos_log_full() ? "true" : "false");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, json);
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    if (!chaos_self_available()) {
+        return send_error(req, "409 Conflict",
+                          "This is an ordinary build; it cannot attack itself. Upload a chaos build first.");
+    }
+    char body[ADMIN_BODY_MAX];
+    if (!read_body(req, body, sizeof(body))) {
+        return send_error(req, "400 Bad Request", "A request body is required.");
+    }
+    uint64_t minutes = 0;
+    bool want_disarm = strstr(body, "\"disarm\"") != NULL;
+    if (want_disarm) {
+        chaos_self_disarm();
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":true,\"armed\":false}");
+    }
+    if (!json_uint64(body, "minutes", &minutes) || minutes == 0) {
+        return send_error(req, "400 Bad Request", "How many minutes to arm for is required.");
+    }
+    if (!chaos_self_arm((uint32_t)minutes)) {
+        return send_error(req, "409 Conflict",
+                          "Chaos could not be armed. The grid needs a time set, so the window can be "
+                          "enforced and the run can stop itself.");
+    }
+    char json[192];
+    snprintf(json, sizeof(json),
+             "{\"ok\":true,\"armed\":true,\"window_s\":%" PRIu32 ",\"faults\":%" PRIu32 ",\"max_faults\":%u,"
+             "\"note\":\"Renew before the window closes, or this run stops by itself.\"}",
+             chaos_self_window_left_s(), chaos_self_count(), (unsigned)CHAOS_MAX_FAULTS);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+/*
+ * The journal, packed binary, from record ?from=N. Available in every build, because a run ends by
+ * putting an ordinary image back over the air and that is exactly when it is read (D83).
+ */
+static esp_err_t h_chaos_log(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to read the chaos journal.");
+    }
+    uint32_t from = 0;
+    char query[48];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK) {
+            from = (uint32_t)strtoul(val, NULL, 10);
+        }
+    }
+    /* One buffer, sent in batches: an AP has no heap for a whole journal and the reader pages anyway. */
+    static uint8_t batch[64u * CHAOS_LOG_REC_LEN];
+    size_t n = chaos_log_read(from, sizeof(batch) / CHAOS_LOG_REC_LEN, batch, sizeof(batch));
+    httpd_resp_set_type(req, "application/octet-stream");
+    return httpd_resp_send(req, (const char *)batch, n * CHAOS_LOG_REC_LEN);
+}
+
+/*
+ * The state the snapshot and its emitter need, without an HTTP server.
+ *
+ * Split out because a chaos build does not start the server (D85) but the BLE admin link still
+ * reads the same snapshot through the same emitter - and these two mutexes used to be created
+ * inside web_admin_start(). Skipping the server therefore left them NULL and the AP panicked on
+ * the first publish, every boot, about 1.1 s in. Safe to call twice.
+ */
+esp_err_t web_admin_init(void)
+{
+    if (w.lock == NULL) {
+        w.lock = xSemaphoreCreateMutex();
+    }
+    if (w.emit == NULL) {
+        w.emit = xSemaphoreCreateMutex();
+    }
+    return (w.lock != NULL && w.emit != NULL) ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 esp_err_t web_admin_start(void)
 {
-    w.lock = xSemaphoreCreateMutex();
-    w.emit = xSemaphoreCreateMutex();
-    if (w.lock == NULL || w.emit == NULL) {
+    if (web_admin_init() != ESP_OK) {
         return ESP_ERR_NO_MEM;
     }
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    /* Measured high-water mark 2.6 KB with the page polling (/api/status streams from a static
-     * buffer, so no handler keeps a large body on the stack); 6 KB leaves room for login's PBKDF2. */
-    config.stack_size = 6144;
-    config.max_uri_handlers = 12;
-    config.max_open_sockets = 4;
-    config.lru_purge_enable = true;
-
-    httpd_handle_t server = NULL;
-    esp_err_t err = httpd_start(&server, &config);
-    if (err != ESP_OK) {
-        return err;
-    }
+    /*
+     * The routes come first so the handler limit can be counted from them rather than written down
+     * beside them. It was written down once, as 12, and three routes were added later: the server
+     * registered the first twelve, logged "no slots left" three times at info level, and served an
+     * admin page whose newest endpoints simply did not exist. Nothing failed, nothing was refused,
+     * and every source-level check still passed - the routes were all present in this array. Only a
+     * board said otherwise. Counting them makes that impossible rather than unlikely.
+     */
     const httpd_uri_t routes[] = {
         { .uri = "/",             .method = HTTP_GET,  .handler = h_index },
         { .uri = "/favicon.svg",  .method = HTTP_GET,  .handler = h_icon },
@@ -1205,9 +1402,33 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/history",  .method = HTTP_GET,  .handler = h_history },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
+        { .uri = "/api/update",   .method = HTTP_POST, .handler = h_update },
+        { .uri = "/api/chaos",    .method = HTTP_GET,  .handler = h_chaos },
+        { .uri = "/api/chaos",    .method = HTTP_POST, .handler = h_chaos },
+        { .uri = "/api/chaoslog", .method = HTTP_GET,  .handler = h_chaos_log },
     };
-    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        httpd_register_uri_handler(server, &routes[i]);
+    const size_t n_routes = sizeof(routes) / sizeof(routes[0]);
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    /* Measured high-water mark 2.6 KB with the page polling (/api/status streams from a static
+     * buffer, so no handler keeps a large body on the stack); 6 KB leaves room for login's PBKDF2. */
+    config.stack_size = 6144;
+    config.max_uri_handlers = n_routes;
+    config.max_open_sockets = 4;
+    config.lru_purge_enable = true;
+
+    httpd_handle_t server = NULL;
+    esp_err_t err = httpd_start(&server, &config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    for (size_t i = 0; i < n_routes; i++) {
+        /* Loudly, and at a level that shows in an ordinary log: an endpoint that did not register is
+         * a feature that is absent from a running AP while present in the tree. */
+        esp_err_t rerr = httpd_register_uri_handler(server, &routes[i]);
+        if (rerr != ESP_OK) {
+            ESP_LOGE(TAG, "[WEB] Route %s did not register: %s", routes[i].uri, esp_err_to_name(rerr));
+        }
     }
     node_settings_t cfg;   /* the main task: w.cfg belongs to the handlers, which may already run */
     grid_state_settings(&cfg);

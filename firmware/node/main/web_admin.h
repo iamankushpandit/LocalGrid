@@ -18,6 +18,10 @@
 
 #include "esp_err.h"
 
+/* The snapshot state alone, with no HTTP server: a chaos build skips the server but the
+ * BLE admin link still reads the snapshot through this module's emitter (D85). Idempotent. */
+esp_err_t web_admin_init(void);
+
 esp_err_t web_admin_start(void);
 
 /* Call from the core task about once a second. */

@@ -1,0 +1,7 @@
+# D82: adds self-chaos to the AP build. Never for an access point anyone depends on.
+#
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.chaos" build
+#
+# The image is otherwise identical, so it can be uploaded to a battery-powered AP through the
+# admin page (D81) and replaced with an ordinary image the same way when the run is over.
+CONFIG_LG_NODE_CHAOS=y

@@ -21,10 +21,21 @@
 #else
 #define NODE_BLE_ADV_ENABLED  0
 #endif
+/*
+ * D82: a build that breaks itself on purpose, for chaos testing once the APs are on battery and have
+ * no serial cable. Off unless a build asks for it, and never flashed to an access point anyone
+ * depends on. Enable with: idf.py -DNODE_CHAOS=1 build, or add -DNODE_CHAOS_ENABLED=1 to the build.
+ */
+#ifdef CONFIG_LG_NODE_CHAOS
+#define NODE_CHAOS_ENABLED    1
+#else
+#define NODE_CHAOS_ENABLED    0
+#endif
 #ifdef CONFIG_LG_NODE_PMF_CAPABLE
 #define NODE_PMF_CAPABLE      1
 #else
 #define NODE_PMF_CAPABLE      0
+
 #endif
 
 typedef enum {
@@ -80,3 +91,9 @@ void     app_time_slew(uint32_t elapsed_ms);
 void     console_start(void);
 void     node_print_restarts(void);   /* restart counts by cause; safe from the console task */
 uint32_t node_brownouts(void);        /* brownout restarts counted in NVS, read once at boot (D68) */
+/*
+ * How many more handhelds this AP's heap can serve. Advertised in the discovery payload *and* enforced
+ * when a session is accepted, so the two can never disagree - see node_main.c for what happened on
+ * 2026-10-01 when only the advert was true.
+ */
+uint8_t node_station_room(void);

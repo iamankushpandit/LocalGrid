@@ -9,6 +9,7 @@
 #include "lg_envelope.h"
 #include "lg_proto_config.h"
 #include "lwip/sockets.h"
+#include "esp_system.h"
 #include "node_app.h"
 #include "power_trace.h"
 #include "sdkconfig.h"
@@ -18,7 +19,17 @@ static const char *TAG = "NET";
 #define SESS_MAX              LG_PROTO_MAX_STATIONS
 #define SESS_IDLE_MS          30000u
 #define SESS_REGISTER_MS      5000u
-#define SEND_WAIT_MS          2000u   /* the longest one handheld may hold up the core task */
+#define SEND_WAIT_MS          2000u   /* the longest ONE send may hold up the core task */
+/*
+ * And the longest ALL of a pass's sends may, together. The task watchdog panics at 5 s
+ * (CONFIG_ESP_TASK_WDT_TIMEOUT_S), and a pass does backbone, LoRa and BLE work besides sending, so
+ * the budget plus one frame that has to finish must stay well inside it: 2000 + 2000 = 4 s.
+ *
+ * Once the budget is gone, a frame that has not started is dropped rather than waited for -- the
+ * same trade the voice path already makes (D61) -- because a dropped frame costs one message and a
+ * watchdog panic costs every handheld on the AP, their sessions, and the AP's place in the grid.
+ */
+#define SEND_BUDGET_MS        2000u
 
 typedef struct {
     int      fd;
@@ -34,6 +45,7 @@ static sess_t s_sess[SESS_MAX];
 static int s_listen_fd = -1;
 static uint32_t s_voice_dropped;   /* talk frames a listener could not take at once (D61) */
 static sess_traffic_t s_traffic;   /* D70: counts and sizes only */
+static uint32_t s_pass_waited_ms;  /* how long this core pass has already waited on sends */
 
 /*
  * Frames for the handheld whose own frame is being handled are gathered here and go out as one
@@ -119,6 +131,20 @@ static void accept_one(uint32_t now)
     }
     if (slot == NULL) {
         ESP_LOGW(TAG, "[NET] Session table full; refusing connection");
+        s_traffic.refused++;
+        close(fd);
+        return;
+    }
+    /*
+     * And refused when the memory cannot serve it, not merely under-advertised. Closing here is a worse
+     * experience for this one handheld and a far better one for the grid: it tries another AP within
+     * seconds (and penalises this one for a while, D54's avoidance), where being accepted meant every
+     * handheld on this AP losing its session minutes later. Measured on 2026-10-01: Denali advertised no
+     * room, took a fifth handheld, and dropped all of them twice in forty minutes.
+     */
+    if (node_station_room() == 0u) {
+        ESP_LOGW(TAG, "[NET] No heap to serve another handheld (%u free KB); refusing connection",
+                 (unsigned)(esp_get_free_heap_size() / 1024u));
         s_traffic.refused++;
         close(fd);
         return;
@@ -262,6 +288,9 @@ static void write_frames(sess_t *x, const uint8_t *out, size_t total, bool voice
 {
     size_t sent = 0;
     uint32_t started = app_now_ms();
+    /* What is left of this pass's shared budget, never more than one send's own cap. */
+    uint32_t left = s_pass_waited_ms >= SEND_BUDGET_MS ? 0u : SEND_BUDGET_MS - s_pass_waited_ms;
+    uint32_t cap = left < SEND_WAIT_MS ? left : SEND_WAIT_MS;
     while (sent < total) {
         int n = send(x->fd, out + sent, total - sent, 0);
         if (n > 0) {
@@ -273,8 +302,19 @@ static void write_frames(sess_t *x, const uint8_t *out, size_t total, bool voice
                 s_voice_dropped++;
                 return;
             }
-            if (app_now_ms() - started > SEND_WAIT_MS) {
-                break;
+            if (sent == 0 && cap == 0) {
+                /* Nothing sent and no budget left: drop it and keep the session. Closing here would
+                 * punish this handheld for how slow an earlier one was. */
+                s_traffic.budget_drops++;
+                return;
+            }
+            if (app_now_ms() - started > cap) {
+                if (sent == 0) {
+                    s_traffic.budget_drops++;
+                    s_pass_waited_ms += app_now_ms() - started;
+                    return;   /* still nothing out: a drop, not a broken stream, so the session lives */
+                }
+                break;    /* part of it went: the stream is out of step and the session must close */
             }
             vTaskDelay(1);
             continue;
@@ -282,6 +322,10 @@ static void write_frames(sess_t *x, const uint8_t *out, size_t total, bool voice
         break;
     }
     uint32_t waited = app_now_ms() - started;
+    s_pass_waited_ms += waited;
+    if (s_pass_waited_ms > s_traffic.slowest_pass_ms) {
+        s_traffic.slowest_pass_ms = s_pass_waited_ms;
+    }
     if (waited > s_traffic.slowest_send_ms) {
         s_traffic.slowest_send_ms = waited;
     }
@@ -378,6 +422,11 @@ void sess_print(void)
 uint32_t sess_voice_dropped(void)
 {
     return s_voice_dropped;
+}
+
+void sess_pass_begin(void)
+{
+    s_pass_waited_ms = 0;
 }
 
 void sess_traffic(sess_traffic_t *out)

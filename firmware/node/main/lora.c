@@ -16,10 +16,15 @@
 #include "freertos/task.h"
 #include "lg_body.h"
 #include "lg_envelope.h"
-#include "lora_wire.h"
+#include "lg_lora_wire.h"
+#include "lg_lora_hh.h"
+#include "lg_secrets.h"
 #include "node_app.h"
 
 static const char *TAG = "LORA";
+
+/* D77: the key that seals LoRa frames between a handheld and an AP. Never the backbone key. */
+static const uint8_t s_lora_hh_key[32] = LG_SECRET_LORA_HH_KEY;
 
 #define LORA_UART         UART_NUM_1
 #define UART_RX_BUF       1024
@@ -88,6 +93,13 @@ static struct {
     uint16_t    address;
     uint8_t     networkid;
     lora_pins_t pins;
+    /*
+     * D77: the handheld side of the radio. Its own key, its own sequence counter and its own replay
+     * window, entirely separate from the backbone's, so neither domain can retire the other's frames.
+     */
+    lglh_t      hh;
+    uint32_t    hh_frames_in;      /* frames opened from a handheld */
+    uint32_t    hh_refused_type;   /* refused by the allow-list, however well sealed */
     bool        started;
     bool        buffers;          /* the frame buffers were taken: this AP can carry LoRa traffic */
     bool        big;              /* ... including a long payload both ways */
@@ -631,6 +643,31 @@ static void lora_task(void *arg)
  * Seals one frame straight into the queue slot that will carry it: nothing is staged in a second
  * buffer, so the largest payload this AP can send is simply the largest slot it has.
  */
+/*
+ * D77: the same, sealed with the handheld LoRa key instead of the backbone key, for a frame going to
+ * one handheld. A handheld cannot open a backbone-sealed frame and must never be sent one.
+ */
+static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, size_t len)
+{
+    size_t need = len + LGLH_OUTER_LEN + LG_AEAD_TAG_LEN;
+    lock();
+    lora_txq_slot_t *slot = lora_txq_reserve(&L.txq, dest, alert, L.msg_id, need,
+                                             app_now_ms() + rand_ms(BACKOFF_MAX_MS));
+    int n = slot != NULL ? lglh_seal(&L.hh, slot->data, slot->cap, frame, len) : -1;
+    bool ok = n > 0 && lora_txq_commit(&L.txq, slot, (size_t)n);
+    if (slot != NULL && !ok) {
+        lora_txq_release(&L.txq, slot);
+    }
+    if (ok) {
+        L.msg_id++;
+    }
+    unlock();
+    if (!ok) {
+        L.seal_fail++;
+    }
+    return ok;
+}
+
 static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t len)
 {
     size_t need = len + LGBB_OUTER_LEN + LG_AEAD_TAG_LEN;
@@ -719,6 +756,30 @@ void lora_enable(void)
 bool lora_is_off(void)
 {
     return L.off;
+}
+
+/*
+ * D77/D80: offer one frame to a handheld this AP can reach over LoRa. Core task only.
+ *
+ * `wifi_ok` is whether that handheld has a working session here; the policy is the APs' own (D74),
+ * so this costs no airtime while the session is up, except for the alerts that always go on both.
+ * The allow-list is applied here too: an AP should not spend a second of airtime sending a handheld
+ * something the handheld's own side would refuse to open.
+ */
+void lora_offer_handheld(uint32_t device, const uint8_t *frame, size_t len, bool wifi_ok)
+{
+    if (!L.fitted || !L.configured || L.off || frame == NULL || len == 0 || device == 0) {
+        return;
+    }
+    lora_policy_t p = lora_policy_for_frame(frame, len);
+    if (p == LORA_SEND_NEVER || (p != LORA_SEND_ALWAYS && wifi_ok)) {
+        return;
+    }
+    if (!lglh_type_allowed(frame, len)) {
+        L.hh_refused_type++;
+        return;
+    }
+    (void)queue_sealed_hh(LG_LORA_ADDR_HANDHELD(device), p == LORA_SEND_ALWAYS, frame, len);
 }
 
 void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)
@@ -883,8 +944,76 @@ static void handle_hello(uint16_t src, const lg_env_t *e, const uint8_t *body, i
     }
 }
 
+/*
+ * D77/D80: a frame a handheld sealed with the handheld LoRa key. Core task only.
+ *
+ * The handheld has no Wi-Fi session, so there is no REGISTER to set the core's session device. The
+ * sender's index comes from the outer header, which is the AEAD's associated data and therefore
+ * authenticated -- nobody without the key can claim to be device 4. It is presented to the core as
+ * an already-registered session by pre-setting session_device, which is what lets a handheld out of
+ * Wi-Fi range be heard at all (lg_node.c only demands a REGISTER while session_device is 0).
+ *
+ * The honest limit, recorded in D77: every handheld holds this one key, so the index is only as
+ * strong as a shared secret and one handheld could claim to be another. The allow-list below is what
+ * bounds that -- nothing an AP would have to *trust* a handheld about is accepted here -- and 1:1
+ * message content stays sealed end to end with per-device keys this key cannot forge.
+ */
+static void deliver_from_handheld(const lora_rx_t *r, uint32_t now)
+{
+    static uint8_t inner[LG_FRAME_MAX];      /* core task only */
+    /* One session per handheld, kept so the core sees a continuing session rather than a new one. */
+    static uint32_t hh_session[LG_MAX_DEVICES];
+
+    uint16_t sender = 0;
+    size_t n = 0;
+    lglh_open_t rc = lglh_open(&L.hh, r->slot->data, r->slot->total, &sender, inner, sizeof(inner), &n);
+    if (rc != LGLH_OPEN_OK) {
+        if (rc != LGLH_OPEN_NOT_MINE && rc != LGLH_OPEN_REPLAY) {
+            L.seal_fail++;   /* a replay is the two radios agreeing, not a fault */
+        }
+        return;
+    }
+    if (LGLH_KIND(sender) != LGLH_KIND_HH) {
+        return;   /* another AP using this key domain: not a thing that happens, and not ours to route */
+    }
+    uint32_t device = LGLH_INDEX(sender);
+    if (device == 0 || device > LG_MAX_DEVICES) {
+        return;
+    }
+    /* D77: the closed list. Checked here as well as on the handheld, because this is the side that
+     * must not be talked into rewriting the grid. */
+    if (!lglh_type_allowed(inner, n)) {
+        L.hh_refused_type++;
+        return;
+    }
+    L.hh_frames_in++;
+    L.frames_in++;
+    L.heard_ms = now;
+    L.heard_any = true;
+
+    /*
+     * D80: mark it reachable over LoRa before the frame is handled, so anything the core sends back
+     * while handling it -- an acknowledgement above all -- already has somewhere to go.
+     */
+    lg_node_mark_lora_reachable(&g_app.core, device);
+
+    hh_session[device - 1u] = device;
+    lg_node_on_session_frame(&g_app.core, &hh_session[device - 1u], inner, n);
+}
+
 static void deliver(const lora_rx_t *r, uint32_t now)
 {
+    /*
+     * Which key sealed this? The outer header's key-epoch byte says so before a single AEAD
+     * operation is attempted: the backbone writes 0 there and a handheld writes LGLH_EPOCH_HH.
+     * Asking first matters for more than speed -- handing a handheld's frame to lgbb_open would fail
+     * authentication and be counted as a seal failure, so the admin page would show a climbing fault
+     * count for perfectly ordinary traffic.
+     */
+    if (r->slot->total > 1u && r->slot->data[1] == LGLH_EPOCH_HH) {
+        deliver_from_handheld(r, now);
+        return;
+    }
     static uint8_t inner[LG_FRAME_MAX];   /* core task only */
     uint16_t src = 0;
     uint32_t boot = 0;
@@ -1158,6 +1287,12 @@ static bool take_buffers(void)
 esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], lgbb_frame_cb_t on_frame,
                      lgbb_link_cb_t on_link)
 {
+    /*
+     * D77: the handheld side of the radio, keyed separately from the backbone. Its sender identity is
+     * this AP, so a handheld can tell which AP answered it, and its boot counter is the AP's own,
+     * already committed to NVS before any transmit, so a nonce never repeats.
+     */
+    lglh_init(&L.hh, s_lora_hh_key, LGLH_SENDER_AP(ap_index), g_app.boot);
     if (L.started) {
         return ESP_ERR_INVALID_STATE;
     }

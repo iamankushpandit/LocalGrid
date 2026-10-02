@@ -36,6 +36,20 @@ typedef struct {
     uint32_t slowest_send_ms;  /* the longest one send() made the core task wait */
     uint32_t send_timeouts;    /* sends abandoned after SEND_WAIT_MS, closing the session */
     uint32_t refused;          /* connections refused because the session table was full */
+    uint32_t budget_drops;     /* frames dropped because this pass had already waited long enough */
+    uint32_t slowest_pass_ms;  /* the longest all of one pass's sends made the core task wait */
 } sess_traffic_t;
 
 void sess_traffic(sess_traffic_t *out);
+
+/*
+ * Called once at the top of each core-task pass, before anything can send.
+ *
+ * Why it has to exist. SEND_WAIT_MS bounds how long ONE handheld may hold up the core task, and
+ * that was read as bounding the task. It does not: a pass can send to every session, and three
+ * handhelds whose sockets are full cost SEND_WAIT_MS each. The task watchdog bounds the pass at
+ * 5 s and panics, so 3 x 2 s restarted the AP -- observed on Everest with three handhelds joining
+ * at once, two sessions closing with "send failed" two seconds apart and the abort right after
+ * the second. The per-send cap was never the dangerous number; the missing per-pass one was.
+ */
+void sess_pass_begin(void);

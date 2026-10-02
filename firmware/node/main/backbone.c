@@ -560,7 +560,14 @@ static void handle_rx(const lgbb_rx_t *r, uint32_t now)
         return;
     }
     size_t ct_len = (size_t)r->len - BB_OUTER_LEN;
-    uint8_t inner[LG_FRAME_MAX];
+    /*
+     * Static, not on the stack, and for the same reason lora.c's deliver() does it: only the core
+     * task ever gets here, and handle_rx is not re-entrant - lgbb_poll drains the queue one frame at
+     * a time. A kilobyte on the stack matters because this frame's own handling nests further
+     * kilobyte buffers under it (forward, then send_client) and ends in mbedtls, and lg_core
+     * overflowed its 8 KB stack on exactly that path during a chaos run.
+     */
+    static uint8_t inner[LG_FRAME_MAX];
     if (ct_len - LG_AEAD_TAG_LEN > sizeof(inner)) {
         return;
     }

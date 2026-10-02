@@ -28,6 +28,8 @@
 #include "lg_envelope.h"
 #include "node_app.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "chaos_log.h"    /* D85, temporary: TEMPORARY.md T5 */
+#include "chaos_self.h"
 #include "settings.h"
 #include "traffic.h"
 #include "web_admin.h"
@@ -59,8 +61,15 @@ static const char *TAG = "BLE";
 /* Opcodes. Replies have bit 7; refusals have bits 7 and 6. */
 enum {
     OP_HELLO = 0x01, OP_LOGIN = 0x02, OP_GET_STATUS = 0x03, OP_GET_HISTORY = 0x04, OP_GET_TRAFFIC = 0x05,
+    /*
+     * D85, TEMPORARY (docs/TEMPORARY.md T5): chaos control. These four are the only opcodes on this
+     * link that change anything. They exist because the owner asked for a chaos run startable from
+     * the phone once the APs are on battery and have no cable, and they come out before release.
+     */
+    OP_CHAOS_GET = 0x06, OP_CHAOS_ARM = 0x07, OP_CHAOS_DISARM = 0x08, OP_CHAOS_LOG = 0x09,
     OP_SESSION = 0x80, OP_HELLO_OK = 0x81, OP_LOGIN_OK = 0x82, OP_STATUS = 0x83, OP_HISTORY = 0x84,
-    OP_TRAFFIC = 0x85, OP_ERROR = 0xC0, OP_LOGIN_FAIL = 0xC2,
+    OP_TRAFFIC = 0x85, OP_CHAOS = 0x86, OP_CHAOS_LOG_DATA = 0x89,
+    OP_ERROR = 0xC0, OP_LOGIN_FAIL = 0xC2,
 };
 enum { ERR_LOGIN = 1, ERR_BUSY = 2, ERR_BAD = 3, ERR_VERSION = 4, ERR_INTERNAL = 5 };
 #define FLAG_MORE 0x01u
@@ -445,6 +454,98 @@ static void do_traffic(void)
     }
 }
 
+/* ---- D85: chaos, from the phone, behind the admin password. TEMPORARY: TEMPORARY.md T5. --------
+ *
+ * Why this is on BLE at all, having been refused once. D83 put chaos control on Wi-Fi and recorded
+ * that BLE was "deliberately not" used, because D70 says a watcher can never take part and because
+ * Wi-Fi plus the admin password is two secrets where BLE is one. That reasoning still holds as
+ * reasoning - and it was applied against an explicit instruction, which is the part that was wrong.
+ * The owner asked for a run startable from the phone, said plainly that it breaks earlier decisions,
+ * and accepted that for as long as the bench cannot power its own access points.
+ *
+ * What keeps it honest while it is here:
+ *   - **The admin password is already proved on this link.** OP_LOGIN is an HMAC over a random
+ *     32-byte challenge keyed by the stored password hash, so these opcodes inherit real
+ *     authentication rather than inventing one, and every chunk is sealed with K_link besides.
+ *   - **Arming is refused unless the firmware is a chaos build** (CONFIG_LG_NODE_CHAOS), so a
+ *     production AP has nothing to arm: the code is not in the image at all.
+ *   - **The dead-man window is unchanged** - chaos_self_arm still refuses when the grid has no time,
+ *     still caps the window, and the run still stops itself when nobody renews it. Losing the phone
+ *     ends a run; it cannot sustain one.
+ *   - **The fault budget is still counted in flash**, so it cannot be raised from here.
+ *   - **Reading the journal works in every build**, because a run ends by putting an ordinary image
+ *     back over the air and that is exactly when the journal is wanted.
+ *
+ * Bodies are packed binary (D49): the device holds bytes, the phone makes text.
+ */
+static void do_chaos_status(void)
+{
+    uint8_t rec[12];
+    uint32_t left = chaos_self_window_left_s();
+    uint8_t flags = 0;
+    if (chaos_self_available()) { flags |= 0x01u; }
+    if (chaos_self_armed_now()) { flags |= 0x02u; }
+    if (chaos_log_full())       { flags |= 0x04u; }
+    rec[0] = flags;
+    rec[1] = (uint8_t)CHAOS_MAX_FAULTS;
+    lg_wr16(rec + 2, (uint16_t)(left > 65535u ? 65535u : left));
+    lg_wr32(rec + 4, chaos_self_count());
+    lg_wr32(rec + 8, chaos_log_count());
+    reply_t r;
+    reply_begin(&r, OP_CHAOS);
+    if (reply_write(&r, rec, sizeof(rec))) {
+        (void)reply_end(&r);
+    }
+}
+
+static void do_chaos_arm(const uint8_t *body, size_t len)
+{
+    if (len != 2u) {
+        (void)send_error_code(ERR_BAD, "arm takes two bytes: minutes");
+        return;
+    }
+    if (!chaos_self_available()) {
+        (void)send_error_code(ERR_BAD, "this is an ordinary build; it cannot attack itself");
+        return;
+    }
+    uint16_t minutes = lg_rd16(body);
+    if (minutes == 0u) {
+        (void)send_error_code(ERR_BAD, "a window of zero minutes arms nothing");
+        return;
+    }
+    if (!chaos_self_arm((uint32_t)minutes)) {
+        /* Nearly always the clock: without grid time the deadline cannot be enforced, so the AP
+         * could not promise to stop, and refusing is the only safe answer. */
+        (void)send_error_code(ERR_BAD, "the grid needs a time set before chaos can be armed");
+        return;
+    }
+    ESP_LOGW(TAG, "[BLE] Chaos armed for %u minute(s) from the admin link (D85)", (unsigned)minutes);
+    do_chaos_status();
+}
+
+static void do_chaos_disarm(void)
+{
+    chaos_self_disarm();
+    ESP_LOGW(TAG, "[BLE] Chaos disarmed from the admin link (D85)");
+    do_chaos_status();
+}
+
+/* The journal from record `from`, as many whole records as one reply can hold. */
+static void do_chaos_log(const uint8_t *body, size_t len)
+{
+    if (len != 4u) {
+        (void)send_error_code(ERR_BAD, "the journal takes four bytes: the first record wanted");
+        return;
+    }
+    static uint8_t batch[32u * CHAOS_LOG_REC_LEN];   /* link task only; not on its stack */
+    size_t n = chaos_log_read(lg_rd32(body), sizeof(batch) / CHAOS_LOG_REC_LEN, batch, sizeof(batch));
+    reply_t r;
+    reply_begin(&r, OP_CHAOS_LOG_DATA);
+    if (reply_write(&r, batch, n * CHAOS_LOG_REC_LEN)) {
+        (void)reply_end(&r);
+    }
+}
+
 static void handle_request(const link_chunk_t *c)
 {
     if (c->len < LINK_HDR + LINK_TAG) {
@@ -486,7 +587,9 @@ static void handle_request(const link_chunk_t *c)
         (void)send_error_code(ERR_BAD, "say hello first");
         return;
     }
-    if ((op == OP_GET_STATUS || op == OP_GET_HISTORY || op == OP_GET_TRAFFIC) && !L.logged_in) {
+    if ((op == OP_GET_STATUS || op == OP_GET_HISTORY || op == OP_GET_TRAFFIC ||
+         op == OP_CHAOS_GET || op == OP_CHAOS_ARM || op == OP_CHAOS_DISARM ||
+         op == OP_CHAOS_LOG) && !L.logged_in) {
         (void)send_error_code(ERR_LOGIN, "log in first");
         return;
     }
@@ -496,6 +599,10 @@ static void handle_request(const link_chunk_t *c)
     case OP_GET_STATUS:  do_status(false); break;
     case OP_GET_HISTORY: do_status(true); break;
     case OP_GET_TRAFFIC: do_traffic(); break;
+    case OP_CHAOS_GET:    do_chaos_status(); break;
+    case OP_CHAOS_ARM:    do_chaos_arm(body, (size_t)n); break;
+    case OP_CHAOS_DISARM: do_chaos_disarm(); break;
+    case OP_CHAOS_LOG:    do_chaos_log(body, (size_t)n); break;
     default:
         (void)send_error_code(ERR_BAD, "unknown request");
         break;

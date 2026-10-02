@@ -1,7 +1,7 @@
 # ---- Flash and build ----
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../common/partitions_4mb.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../common/partitions_4mb_ota.csv"
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 
@@ -50,3 +50,8 @@ CONFIG_LG_NODE_PMF_CAPABLE=y
 
 # ---- Watchdog: a stuck core task panics with a backtrace instead of only a warning ----
 CONFIG_ESP_TASK_WDT_PANIC=y
+
+# D81: an AP on battery has no USB, so a bad update must not be able to brick it. A newly written
+# image boots once as "pending verify"; the firmware confirms itself only after it has come up far
+# enough to be worth keeping, and the bootloader rolls back to the previous slot otherwise.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

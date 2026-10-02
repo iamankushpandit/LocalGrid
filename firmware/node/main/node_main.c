@@ -11,12 +11,14 @@
 #include <time.h>
 
 #include "backbone.h"
+#include "chaos_self.h"
 #include "ble_adv.h"
 #include "ble_link.h"
 #include "ble_status.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"   /* D81 */
 #include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
 #include "esp_attr.h"
@@ -168,10 +170,21 @@ static void sync_time_zone(void)
 
 /* ---- lg_core io ---- */
 
+/*
+ * D80: one door, two transports. The core decided this device is reachable from this AP; which radio
+ * carries the frame is decided here, from the same presence state the core used.
+ *
+ * A handheld with a session gets it over Wi-Fi as it always did. One known only over LoRa gets it
+ * over LoRa, where the send policy (D74) still applies -- so an alert goes at once and ordinary
+ * traffic only because Wi-Fi cannot carry it, which for this handheld is by definition true.
+ */
 static void io_to_client(void *ctx, uint32_t device, const uint8_t *frame, size_t len)
 {
     (void)ctx;
     sess_send(device, frame, len);
+    if (lg_node_presence_state(&g_app.core, device) == LG_PRES_LORA) {
+        lora_offer_handheld(device, frame, len, false);
+    }
 }
 
 /*
@@ -380,17 +393,89 @@ static uint8_t clients_count(void)
 
 /* ---- discovery payload: beacons and BLE ---- */
 
-/* Fixed discovery part (LG_DISC_LEN bytes), shared by the Wi-Fi vendor IE and BLE. */
+/*
+ * How much heap an AP keeps for itself, and roughly what one more handheld costs it. Measured on the
+ * bench rather than reasoned about: an AP holding one handheld sat at about 10 KB free, and taking it
+ * to two or three drove the minimum to zero.
+ */
+/*
+ * Both figures were measured again on 2026-09-30, after Fuji accepted six handhelds on battery and
+ * panicked holding them. The beacon's own minimum-heap reading, which is what an AP actually survives
+ * at rather than what it momentarily has, fell from 27 KB with no handheld to 18 KB with two: about
+ * **4.5 KB of headroom per station**, half again as much as the 3 KB assumed here, and the error
+ * compounds with every one admitted. Six were admitted. The floor rises with it, because 6 KB is below
+ * the 13 KB an AP needs to keep offering its BLE admin link (ADV_MIN_HEAP, ble_adv.c) - under the old
+ * floor an AP could advertise room right up to the point where the only way to reach it remotely was
+ * gone, which on battery means gone for good.
+ *
+ * The consequence is deliberate and should be read rather than tuned away: an AP on these boards
+ * honestly advertises **three or four** handhelds, not fifteen and not six. That is what its memory can
+ * serve. Raising the real number is a memory problem (the per-session buffers), not an advertising one,
+ * and which number the product needs is the owner's call - see docs/chaos-engineering.md.
+ */
+#define DISC_HEAP_FLOOR        10240u
+#define DISC_HEAP_PER_STATION  4608u
+
+/* Fixed discovery part (LG_DISC_LEN bytes), shared by the Wi-Fi vendor IE and BLE.
+ *
+ * The free-slot byte used to be `LG_PROTO_MAX_STATIONS - clients`: the room in the table, and
+ * nothing about whether this AP could actually serve it. LG_PROTO_MAX_STATIONS is 15, the SoftAP
+ * limit; the real, memory-limited figure on these boards is two or three. So every AP advertised
+ * five times the capacity it had, and both the handhelds' choice of AP and D54's load balancing are
+ * built on that number.
+ *
+ * What that cost, in a chaos run: an AP out of heap refused every association with reason 5 while
+ * still advertising 15 free, so it looked like the emptiest AP on the grid - which is exactly what
+ * D54 rewards - and four of six handhelds chose it over two healthier ones, repeatedly. Advertising
+ * what the memory can honour fixes that at the source; the handheld-side avoidance of an AP that
+ * refused it is the second line, for when this estimate is still wrong.
+ *
+ * It was still wrong. On 2026-09-30, on battery, Fuji advertised room, took all six handhelds on the
+ * bench, ran its minimum heap to zero and panicked - no fault injected, no brownout, 15 seconds from
+ * six attached to a restart. An estimate that is too generous does not merely mislead the load
+ * balancer; it is how an AP talks itself into dying. The constants below were re-measured from that.
+ *
+ * One floor on the floor: an AP with no handhelds at all always offers at least one slot. If every
+ * AP were honest enough to advertise zero at the same moment, `node_usable` would reject all of them
+ * and the grid would strand every handheld - a worse failure than the thrashing this prevents.
+ */
+/*
+ * How many more stations this AP's memory can actually serve, right now.
+ *
+ * One function, because the number it returns is both advertised *and* enforced, and a chaos night
+ * showed what happens when only the first is true. On 2026-10-01 Denali advertised `0 free`, accepted a
+ * fifth handheld anyway - the advert steers a handheld's choice and refuses it nothing - and then
+ * **dropped every session at once**, twice in forty minutes, at a 0 KB heap floor. Fuji, the same evening,
+ * died outright of the same cause. Advertised capacity that is not enforced is not capacity; it is a
+ * suggestion the grid pays for.
+ */
+uint8_t node_station_room(void)
+{
+    uint8_t clients = sess_registered_count();
+    uint8_t table_room = (uint8_t)(LG_PROTO_MAX_STATIONS - clients);
+    uint32_t heap = esp_get_free_heap_size();
+    uint32_t spare = heap > DISC_HEAP_FLOOR ? (heap - DISC_HEAP_FLOOR) / DISC_HEAP_PER_STATION : 0u;
+    uint8_t room = spare > 255u ? 255u : (uint8_t)spare;
+    if (room > table_room) {
+        room = table_room;
+    }
+    if (room == 0u && clients == 0u) {
+        room = 1u;   /* an idle AP must stay joinable, whatever its heap says */
+    }
+    return room;
+}
+
 static size_t build_discovery(uint8_t out[LG_DISC_LEN])
 {
     uint8_t clients = sess_registered_count();
+    uint8_t room = node_station_room();
     out[0] = LG_DISC_MAGIC0;
     out[1] = LG_DISC_MAGIC1;
     out[2] = LG_DISC_VERSION;
     memcpy(out + 3, s_discriminator, 4);
     out[7] = (uint8_t)g_app.index;
     out[8] = 0;   /* was the master flag; there is no master AP (D45) */
-    out[9] = (uint8_t)(LG_PROTO_MAX_STATIONS - clients);
+    out[9] = room;
     out[10] = (uint8_t)((lgbb_link_count() > 0 ? LG_DISC_FLAG_BACKBONE : 0) |
                         (g_app.time_quality != LG_TIME_UNSET ? LG_DISC_FLAG_TIME : 0));
     out[11] = clients;
@@ -980,6 +1065,7 @@ static void core_task(void *arg)
         }
         pass_started_us = (uint32_t)esp_timer_get_time();
         esp_task_wdt_reset();
+        sess_pass_begin();   /* this pass's shared send budget, which the watchdog above enforces */
         sess_poll(20);
         uint32_t now = app_now_ms();
         static uint32_t last_slew;
@@ -987,6 +1073,7 @@ static void core_task(void *arg)
         last_slew = now;
         lgbb_poll(now);
         lora_poll(now);   /* D71: frames that crossed on the second backbone, and its heartbeat */
+        chaos_self_poll(now);   /* D82: inert in an ordinary build */
 #if NODE_BLE_ADV_ENABLED
         ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */
 #endif
@@ -1112,12 +1199,31 @@ void app_main(void)
     /* D71: the second backbone. A module that does not answer is logged once and changes nothing. */
     (void)lora_start(g_app.index, s_discriminator, on_backbone_frame, on_link);
     ESP_ERROR_CHECK(sess_init(LG_PROTO_TCP_PORT));
-    /* Every AP serves the admin page (D45). */
+    /* Every AP serves the admin page (D45) - except in a chaos build driven over BLE. */
+#if defined(CONFIG_LG_NODE_CHAOS) && defined(CONFIG_LG_NODE_CHAOS_NO_WEB)
+    /*
+     * D85. The BLE admin link is only offered above about 13 KB of free heap (D70's ADV_MIN_HEAP),
+     * and these APs sit at 8-13 KB once handhelds attach - so every AP beaconed and refused every
+     * connection, and a chaos run could not be started over BLE at all. The web server's task stack
+     * alone is 6 KB, and nobody is on this AP's Wi-Fi during a run on battery.
+     *
+     * The snapshot is still published: it is what the BLE link's own GET_STATUS reads, through
+     * web_admin's one emitter, so the link's bytes and the page's can never drift apart. Only the
+     * HTTP server is skipped.
+     */
+    ESP_LOGW(TAG, "[WEB] Admin page not started: a chaos build gives its heap to the BLE link (D85)");
+    if (web_admin_init() != ESP_OK) {
+        ESP_LOGE(TAG, "[WEB] Snapshot state could not be created");
+    } else {
+        web_admin_publish_snapshot();
+    }
+#else
     if (web_admin_start() != ESP_OK) {
         ESP_LOGE(TAG, "[WEB] Admin page failed to start");
     } else {
         web_admin_publish_snapshot();
     }
+#endif
 
 #if NODE_BLE_ADV_ENABLED
     uint8_t payload[LG_DISC_LEN];
@@ -1135,10 +1241,50 @@ void app_main(void)
 
     ESP_ERROR_CHECK(traffic_init());
     TaskHandle_t core = NULL;
-    xTaskCreate(core_task, "lg_core", 8192, NULL, 5, &core);
+    /*
+     * 10 KB, raised from 8 KB after lg_core overflowed its stack during a chaos run (the crash was
+     * "A stack overflow in task lg_core has been detected", with no fault injected). The path is
+     * deep and every level of it carries a kilobyte: a backbone frame arrives, is decrypted, is
+     * forwarded - which builds a new frame - and may be handed to a handheld, which builds another,
+     * and the sealing at the bottom is mbedtls's PSA AEAD, whose own frames are not small.
+     *
+     * The frame buffer in backbone.c's handle_rx became static in the same change, which took a
+     * kilobyte off the deepest part of that path, so this is 2 KB more rather than 4. It is still
+     * 2 KB of heap an AP does not have to spare, and that trade is deliberate: a stack overflow is
+     * not something to leave in place to protect a memory figure.
+     */
+    xTaskCreate(core_task, "lg_core", 10240, NULL, 5, &core);
     traffic_set_tasks(core, ble_link_task());
     if (g_app.index == 0 && CONFIG_LG_NODE_GPS_RX_GPIO >= 0) {
         (void)gps_start(CONFIG_LG_NODE_GPS_RX_GPIO);   /* D63: MAIN only */
     }
+    /*
+     * D82: arm the self-chaos schedule, if this is one of those builds. After the radios and the core
+     * task, so the first fault cannot land on a half-started AP.
+     */
+    chaos_self_start(g_app.index, g_app.boot);
     console_start();
+
+    /*
+     * D81: this image has come up. Confirm it, or the bootloader will roll back to the previous slot
+     * on the next restart (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE).
+     *
+     * Confirmed here, at the end of a start-up that has already claimed the identity partition,
+     * joined the grid's own Wi-Fi, opened the session listener and started the core task -- an image
+     * that crashes before this point is exactly the one that should be rolled back, and an AP on
+     * battery with no USB gets its previous firmware back by itself instead of needing a walk.
+     *
+     * Only ever called on an image that is actually pending: on an ordinary boot there is nothing to
+     * confirm and this costs nothing.
+     */
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running != NULL && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            ESP_LOGW(TAG, "[WEB] New firmware confirmed; it is now this access point's image");
+        } else {
+            ESP_LOGE(TAG, "[WEB] New firmware could NOT be confirmed; it will roll back on restart");
+        }
+    }
 }

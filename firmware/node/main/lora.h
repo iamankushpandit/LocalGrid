@@ -3,7 +3,8 @@
  *
  * The module speaks AT commands over a serial port. lora.c owns that port from its own task,
  * detects the module at boot, configures it, keeps it alive, and turns sealed backbone frames
- * into base64 parts and back. lora_wire.c holds everything that needs no radio.
+ * into base64 parts and back. firmware/common/lg_lora_wire.c holds everything that needs no radio, and the
+ * handhelds share it (D77).
  *
  * An AP with no module answers nothing at boot, is logged once, and is then indistinguishable
  * from an AP built before this file existed: no frame is ever offered to a radio that is not
@@ -20,6 +21,7 @@
 #include <stdint.h>
 
 #include "backbone.h"
+#include "lg_lora_wire.h"   /* D77: the radio settings and the address plan, shared with the handhelds */
 #include "esp_err.h"
 
 /* ---- wiring (docs/lora.md, "Wiring (as built)") ----------------------------------------------
@@ -43,22 +45,22 @@ typedef struct {
 #define LORA_PINS_MAIN   { .rx = 32, .tx = 33, .rst = 25 }
 #define LORA_PINS_OTHER  { .rx =  4, .tx =  5, .rst = 13 }
 
-/* ---- radio settings ---- */
+/* ---- radio settings: names kept, values from firmware/common/lg_lora_wire.h (D77) ---- */
 
 /*
  * Band. 868.5 MHz is the European licence-free LoRa band; a 915 MHz region must change this one
  * number (and only this one) before flashing.
  */
-#define LORA_BAND_HZ        868500000u
-#define LORA_UART_BAUD      115200        /* the RYLR998 leaves the factory at this rate */
+#define LORA_BAND_HZ        LG_LORA_BAND_HZ
+#define LORA_UART_BAUD      LG_LORA_UART_BAUD
 /* AT+PARAMETER: spreading factor 9, bandwidth 125 kHz (code 7), coding rate 4/5 (code 1),
  * preamble 12. docs/lora.md names SF9/BW125; preamble 12 is the module's own default and is
  * required when the network ID is left at 18. */
-#define LORA_SF             9
-#define LORA_BW_CODE        7
-#define LORA_CR_CODE        1
-#define LORA_PREAMBLE       12
-#define LORA_POWER_DBM      22            /* AT+CRFOP, 0..22 */
+#define LORA_SF             LG_LORA_SF
+#define LORA_BW_CODE        LG_LORA_BW_CODE
+#define LORA_CR_CODE        LG_LORA_CR_CODE
+#define LORA_PREAMBLE       LG_LORA_PREAMBLE
+#define LORA_POWER_DBM      LG_LORA_POWER_DBM
 
 /*
  * The address plan (docs/lora.md, "Ready for handhelds later"): 0-15 are APs, by AP index, and
@@ -77,9 +79,9 @@ typedef struct {
  * nothing on the air. */
 #define LORA_LONG_PAYLOAD   0
 
-#define LORA_ADDR_BROADCAST 0u
-#define LORA_ADDR_AP(i)     ((uint16_t)((i) + 1u))
-#define LORA_ADDR_HANDHELD(d) ((uint16_t)(100u + (d)))
+#define LORA_ADDR_BROADCAST LG_LORA_ADDR_BROADCAST
+#define LORA_ADDR_AP(i)     LG_LORA_ADDR_AP(i)
+#define LORA_ADDR_HANDHELD(d) LG_LORA_ADDR_HANDHELD(d)
 
 /* ---- timing ---- */
 
@@ -116,6 +118,13 @@ void lora_poll(uint32_t now_ms);
  * reach every AP. Never blocks, never allocates, and does nothing when no module is fitted.
  */
 void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok);
+
+/*
+ * Core task: offer one frame to a handheld reachable over LoRa (D77, D80), sealed with the handheld
+ * key rather than the backbone key. `wifi_ok` is whether that handheld has a working session here.
+ * Does nothing with no module fitted.
+ */
+void lora_offer_handheld(uint32_t device, const uint8_t *frame, size_t len, bool wifi_ok);
 
 /* Core task: like lora_offer, for a frame being flooded to every AP except one. */
 void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len);
