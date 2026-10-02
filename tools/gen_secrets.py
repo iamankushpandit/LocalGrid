@@ -24,15 +24,45 @@ DISCRIMINATOR_BLOCK = """
 #define LG_SECRET_DISCRIMINATOR {{ {values} }}
 """
 
+LORA_HH_BLOCK = """
+/* 256-bit handheld LoRa key (D77): HKDF-SHA256(backbone key, "lg-lora-hh"). Seals LoRa frames
+ * between a handheld and an AP. Both hold it; it is NOT the backbone key, so a handheld image
+ * that leaks never exposes AP-to-AP traffic. */
+#define LG_SECRET_LORA_HH_KEY {{ {values} }}
+"""
+
 
 def c_bytes(data):
     return ", ".join(f"0x{b:02x}" for b in data)
 
 
-def discriminator(key):
-    """RFC 5869 HKDF-SHA256 with an empty salt, as lg_hkdf_sha256 computes it on the nodes."""
+def hkdf(key, info, length):
+    """RFC 5869 HKDF-SHA256 with an empty salt, as lg_hkdf_sha256 computes it on the boards."""
     prk = hmac.new(b"", key, hashlib.sha256).digest()
-    return hmac.new(prk, b"lg-disc" + b"\x01", hashlib.sha256).digest()[:4]
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+def discriminator(key):
+    return hkdf(key, b"lg-disc", 4)
+
+
+def lora_hh_key(key):
+    return hkdf(key, b"lg-lora-hh", 32)
+
+
+# Every value derived from the backbone key: macro name -> (block, deriving function). A value
+# added here is added to an existing lg_secrets.h by --update, without changing a key already in it.
+DERIVED = {
+    "LG_SECRET_DISCRIMINATOR": (DISCRIMINATOR_BLOCK, discriminator),
+    "LG_SECRET_LORA_HH_KEY": (LORA_HH_BLOCK, lora_hh_key),
+}
 
 
 def create():
@@ -47,22 +77,26 @@ def create():
 
 /* 256-bit backbone key: ChaCha20-Poly1305 for node-to-node ESP-NOW frames. */
 #define LG_SECRET_BACKBONE_KEY {{ {c_bytes(key)} }}
-""" + DISCRIMINATOR_BLOCK.format(values=c_bytes(discriminator(key))), encoding="utf-8")
+""" + "".join(block.format(values=c_bytes(derive(key))) for block, derive in DERIVED.values()),
+                   encoding="utf-8")
     print(f"wrote {OUT}")
 
 
 def update():
+    """Adds every derived value the file is missing, and never touches a key it already holds."""
     text = OUT.read_text(encoding="utf-8")
-    if "LG_SECRET_DISCRIMINATOR" in text:
+    missing = [(name, block, derive) for name, (block, derive) in DERIVED.items() if name not in text]
+    if not missing:
         print(f"{OUT} is up to date")
         return
     m = re.search(r"#define LG_SECRET_BACKBONE_KEY \{([^}]*)\}", text)
     key = bytes(int(v, 16) for v in re.findall(r"0x([0-9a-fA-F]{2})", m.group(1))) if m else b""
     if len(key) != 32:
         sys.exit(f"{OUT} has no 32-byte LG_SECRET_BACKBONE_KEY; regenerate with --force")
-    OUT.write_text(text.rstrip("\n") + "\n" + DISCRIMINATOR_BLOCK.format(values=c_bytes(discriminator(key))),
+    OUT.write_text(text.rstrip("\n") + "\n"
+                   + "".join(block.format(values=c_bytes(derive(key))) for _, block, derive in missing),
                    encoding="utf-8")
-    print(f"added LG_SECRET_DISCRIMINATOR to {OUT}; keys unchanged")
+    print(f"added {', '.join(name for name, _, _ in missing)} to {OUT}; keys unchanged")
 
 
 if "--update" in sys.argv:

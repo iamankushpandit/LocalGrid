@@ -39,6 +39,7 @@ by the handhelds themselves; the PC never joins the grid. See .claude/skills/cha
 Output (gitignored): chaos-runs/<start time>/ with raw-NN.log per hour, events.jsonl, summary.md.
 """
 import argparse
+import asyncio
 import datetime
 import json
 import os
@@ -73,6 +74,10 @@ STATUS_EVERY_S = 30            # APs print "[GRID] links ... time ..." this ofte
 PROBE_DEADLINE_S = 30          # a message not received by then is lost
 FAULT_GRACE_S = 40             # a restart this soon after an injected fault is ours
 QUERY_EVERY_S = 3600           # hourly 'nodes' on APs and 'mem' on handhelds
+# A handheld with no Wi-Fi session is sampled this often, and only a fallback that outlasts the grace
+# period is a finding: joining an AP legitimately takes a few seconds, and a roam takes longer.
+FALLBACK_EVERY_S = 10
+FALLBACK_GRACE_S = 45
 SUMMARY_EVERY_S = 600
 PORT_RETRY_S = 30
 # A board that says nothing for this long (APs print a line every second) is checked from the PC side. Twice a
@@ -123,6 +128,13 @@ RX = {
     "bb_on": re.compile(r"\[BB\] ESP-NOW back on"),
     "lora_off": re.compile(r"\[LORA\] Off for (\d+) s"),
     "lora_on": re.compile(r"\[LORA\] Back on"),
+    # A handheld's own self-restoring hook (D78), the mirror of the APs' `bb off` and `lora off`.
+    "wifi_off": re.compile(r"\[NET\] Wi-Fi off for (\d+) s \(chaos hook\)"),
+    # Two ways it comes back, and the round has to recognise both: the timer running out, and `wifi on`
+    # typed at it. Watching only the first reported "Wi-Fi is still switched off after the round" every
+    # time the round put it back itself, which is the one thing it always does.
+    "wifi_on": re.compile(r"\[NET\] Wi-Fi back on: the timed outage is over|"
+                          r"\[NET\] Wi-Fi switched ON"),
     "lora_resetting": re.compile(r"\[LORA\] Resetting the module"),
     "lora_configured": re.compile(r"\[LORA\] Configured ([^:]+): address (\S+?), network (\S+?),"),
     "lora_link_up": re.compile(r"\[LORA\] Link up to AP (\d+), RSSI (-?\d+) dBm, SNR (-?\d+)"),
@@ -146,10 +158,298 @@ LORA_STATUS = {
     "queue": re.compile(r"seal/open failures (\d+) \| queue (\d+) \(high (\d+), dropped (\d+)\) \| retries (\d+)"
                         r" \| airtime (\d+) ms \| module restarts (\d+)"),
 }
+
+# The same command on a handheld prints a different block (firmware/handheld/main/hh_console.c, cmd_lora):
+# a handheld has one kind of peer (APs) and no "arrived here first", and its counters are laid out by line
+# rather than packed. Parsed into the same keys, so lora_delta and the report need to know nothing about
+# which side of the grid a board is on.
+LORA_HH_STATUS = {
+    # The middle group is lazy, not "anything but a comma": ", not configured yet" has a comma in it.
+    "header": re.compile(r"LoRa \(D77\): (module fitted|no module answering)(.*?), address (\d+), "
+                         r"network (\d+)"),
+    "absent": re.compile(r"LoRa \(D77\): this board has no connector for a module"),
+    "module": re.compile(r"^module:\s+(\S+)"),
+    "peers": re.compile(r"^APs heard: (none yet|[\d ]+)"),
+    "last": re.compile(r"^last in:\s+(?:never|(\d+) s ago, RSSI (-?\d+) dBm, SNR (-?\d+))"),
+    "frames": re.compile(r"^frames:\s+(\d+) out, (\d+) in"),
+    "parts": re.compile(r"^parts:\s+(\d+) out, (\d+) in, (\d+) dropped, (\d+) retries"),
+    "refused": re.compile(r"^refused:\s+(\d+) by type \(not carried over LoRa\), (\d+) could not be opened"),
+    "queue": re.compile(r"^queue:\s+(\d+) dropped; reassembly timeouts (\d+)"),
+    "airtime": re.compile(r"^airtime:\s+(\d+) ms; module resets (\d+)"),
+}
+
+
+def parse_lora_hh_line(text, st, peers=None):
+    """One line of a handheld's `lora` block. Same keys as the AP's, so nothing downstream cares."""
+    if LORA_HH_STATUS["absent"].search(text):
+        st.update(fitted=False, connector=False, state="no connector", off=False, done=True)
+        return True
+    if m := LORA_HH_STATUS["header"].search(text):
+        extra = m.group(2) or ""
+        st.update(state=(m.group(1) + extra).strip(), connector=True,
+                  fitted=m.group(1) == "module fitted" and "no module" not in m.group(1),
+                  off="switched OFF" in extra, configured="not configured" not in extra,
+                  address=int(m.group(3)), network=int(m.group(4)), done=False)
+        # A handheld with no module prints one more line and stops, so the block is already complete.
+        if not st["fitted"]:
+            st["done"] = True
+        return True
+    if m := LORA_HH_STATUS["module"].search(text):
+        st["version"] = m.group(1)
+        return True
+    if m := LORA_HH_STATUS["peers"].search(text):
+        if peers is not None:
+            for ap in ([] if m.group(1).startswith("none") else m.group(1).split()):
+                # A handheld reports which APs it has heard recently and nothing per peer: it keeps no
+                # per-link state, only "heard recently" or not, which is what UP means here. The RSSI it
+                # prints belongs to the last frame from any AP, so attributing it to a peer would be a
+                # figure that reads like a measurement and is not one.
+                peers[int(ap)] = {"up": True, "rssi": None, "snr": None, "age_ms": None}
+        return True
+    if m := LORA_HH_STATUS["last"].search(text):
+        if m.group(1) is not None:
+            st.update(heard_age_ms=int(m.group(1)) * 1000, rssi=int(m.group(2)), snr=int(m.group(3)))
+        return True
+    if m := LORA_HH_STATUS["frames"].search(text):
+        st.update(frames_out=int(m.group(1)), frames_in=int(m.group(2)), frames_first=None)
+        return True
+    if m := LORA_HH_STATUS["parts"].search(text):
+        st.update(parts_out=int(m.group(1)), parts_in=int(m.group(2)), parts_dropped=int(m.group(3)),
+                  retries=int(m.group(4)))
+        return True
+    if m := LORA_HH_STATUS["refused"].search(text):
+        st.update(refused_type=int(m.group(1)), seal_fail=int(m.group(2)))
+        return True
+    if m := LORA_HH_STATUS["queue"].search(text):
+        st.update(queue_dropped=int(m.group(1)), reasm_timeouts=int(m.group(2)))
+        return True
+    if m := LORA_HH_STATUS["airtime"].search(text):
+        st.update(airtime_ms=int(m.group(1)), restarts=int(m.group(2)), done=True)   # last line of the block
+        return True
+    return False
 # Counters the firmware adds up since that AP booted, so a restart zeroes them: only these are differenced.
 LORA_COUNTERS = ("frames_out", "frames_in", "frames_first", "parts_out", "parts_in", "parts_dropped",
                  "reasm_timeouts", "refused_big", "seal_fail", "queue_dropped", "retries", "airtime_ms",
                  "restarts")
+
+
+# ---- the access points, seen over BLE (D68) --------------------------------------------------------
+#
+# Why this exists. Once the APs run on battery (D81) the harness holds no port to them, and it was blind:
+# it could fault handhelds and it could not see an AP restart, lose a backbone link, or brown out. That
+# made a whole-system night impossible in the only way that mattered - not because the faults could not
+# be injected (each AP attacks itself, D82, armed over BLE, D85) but because this side could not tell a
+# message lost to an AP outage from a message lost to a bug, and would have called the first a finding.
+#
+# A wrong finding is worse than a missing one; tonight proved that twice. So the harness listens to the
+# same sealed status beacon the laptop dashboard reads, and treats an AP whose beacon says it is in
+# trouble exactly as it treats a board it reset itself: an active fault, which excuses nothing but is
+# recorded against every probe in flight.
+#
+# It takes no port, joins no Wi-Fi, carries no message, and never holds a BLE address (D21, D25, D70).
+
+
+class BleEyes:
+    """What the beacons say about each AP, for a run that holds no cable to them.
+
+    Runs grid_watch's own listener on a thread - the same decoder, the same sealed-frame checks - and
+    exposes the few facts this harness reasons about: whether an AP is being heard, its boot counter, how
+    many backbone links it has, how many handhelds are attached, and its brownout and restart counts.
+    """
+
+    class _Stop:
+        """What grid_watch.listen expects of a stop signal, driven from another thread.
+
+        It calls `stop.is_set()` and **awaits** `stop.wait()`. A threading.Event satisfies the first and
+        not the second - its wait() returns a bool, so awaiting it raises TypeError and the listener dies
+        on its first pass. That is exactly what happened the first time this ran, and the only reason it
+        was caught is that the harness said it had heard no access point instead of assuming it had.
+        """
+
+        def __init__(self, flag):
+            self._flag = flag
+
+        def is_set(self):
+            return self._flag.is_set()
+
+        async def wait(self):
+            while not self._flag.is_set():
+                await asyncio.sleep(0.2)
+            return True
+
+    def __init__(self, secrets_path, names):
+        self.state = None
+        self.stop = None
+        self.thread = None
+        self.error = None
+        self._secrets = secrets_path
+        self._names = names
+        self.started_at = None
+        self.baseline = {}        # AP index -> the first full reading, to difference against
+        self.boot_at = {}         # AP index -> (boot, when this boot counter was first seen)
+        self._last = {}           # AP index -> the last reading while it was still being heard
+
+    def start(self):
+        try:
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+            import grid_watch as gw
+        except Exception as e:
+            self.error = f"grid_watch could not be imported ({e})"
+            return False
+        try:
+            backbone_key, disc = gw.parse_secrets(self._secrets)
+            company = gw.parse_company_id()
+        except Exception as e:
+            self.error = f"the grid's secrets could not be read ({e})"
+            return False
+        self._gw = gw
+        self.state = gw.GridState(gw.derive_key(backbone_key), disc, ap_names=self._names, echo=False)
+        self.stop = threading.Event()
+
+        def run():
+            try:
+                asyncio.run(gw.listen(self.state, company, BleEyes._Stop(self.stop)))
+            except Exception as e:          # a laptop with its Bluetooth off, most likely
+                self.error = f"{type(e).__name__}: {e}"
+
+        self.thread = threading.Thread(target=run, name="ble-eyes", daemon=True)
+        self.thread.start()
+        self.started_at = time.monotonic()
+        return True
+
+    def close(self):
+        if self.stop is not None:
+            self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+
+    def aps(self):
+        """AP index -> what the beacon says, or {} when nothing has been heard yet."""
+        if self.state is None:
+            return {}
+        try:
+            snap = self.state.snapshot()
+        except Exception:
+            return {}
+        out = {}
+        for a in snap.get("aps", []):
+            h = a.get("health") or {}
+            out[a["index"]] = {
+                "name": a.get("name"), "heard": bool(a.get("heard")),
+                "silent_s": a.get("silent_s"), "boot": a.get("boot"),
+                # None, not 0, when no sealed health frame has been read yet: zero links and "nothing
+                # said yet" are different claims, and conflating them marked every AP as having lost its
+                # backbone in the first seconds of a run.
+                "links": len(h["links"]) if h.get("links") is not None else None,
+                "has_health": bool(h), "handhelds": h.get("handhelds_here"),
+                "brownouts": h.get("brownouts"), "restarts": h.get("restarts"),
+                "heap_kb": h.get("heap_kb"), "reset": h.get("reset"),
+                "uptime": h.get("uptime"),
+                # What it advertises room for, from the discovery payload. A grid whose access points
+                # all say "no room" has handhelds with nowhere to go, and that is not a fault.
+                "free_slots": (a.get("disc") or {}).get("free_slots")}
+        for i, row in out.items():
+            if i not in self.baseline and row["boot"] is not None and row["brownouts"] is not None:
+                self.baseline[i] = dict(row)
+            # When this boot counter first appeared, which is what tells a restart that just happened
+            # from one that happened an hour ago. The baseline must not be moved to do this job: the
+            # report differences restarts and brownouts against it for the whole run.
+            if row["boot"] is not None and self.boot_at.get(i, (None,))[0] != row["boot"]:
+                self.boot_at[i] = (row["boot"], time.time())
+            if row["boot"] is not None and (row["silent_s"] or 0) <= BLE_SILENT_S:
+                # Kept so an access point that has gone flat can still be reported: its last uptime is
+                # how long its battery held, which is the whole point of a run that waits for it to die.
+                self._last[i] = dict(row, at=time.time())
+        return out
+
+    def troubled(self):
+        """APs the beacon says are in trouble right now, as reasons keyed by AP index.
+
+        Deliberately generous about what counts: a link short of the others, a boot counter that has
+        moved, or a beacon gone quiet. An AP that is mid-fault must never look healthy here, because the
+        whole point is to stop blaming the grid for what a fault was doing.
+        """
+        rows = self.aps()
+        if not rows:
+            return {}
+        # Only access points that are *currently* being heard set the bar. A dead one keeps its last
+        # reading, and counting that was a real cost: when Everest ran out of battery its stale "2 links"
+        # became the standard the survivors were judged against, so Fuji and Denali - correctly down to
+        # one link each, because the third was gone - looked permanently broken. The grid never counted as
+        # steady again and the run skipped twelve experiments in a row. A grid with an access point out of
+        # battery is not an unsteady grid; it is a smaller grid.
+        live = [r for r in rows.values()
+                if r["heard"] and (r["silent_s"] or 0) <= BLE_SILENT_S and r["links"] is not None]
+        most = max((r["links"] for r in live), default=0)
+        out = {}
+        for i, r in rows.items():
+            why = []
+            if not r["heard"] or (r["silent_s"] or 0) > BLE_SILENT_S:
+                if (r["silent_s"] or 0) > DEAD_AP_S:
+                    # Long gone. Said once in the report, not held against the grid for ever.
+                    continue
+                why.append(f"not heard for {r['silent_s']} s")
+            elif not r["has_health"]:
+                # Heard, but its sealed health frame has not arrived or has gone stale. That is its own
+                # kind of trouble and is reported as itself rather than as a link count of zero.
+                why.append("heard, but no fresh status frame from it")
+            if r["links"] is not None and r["links"] < most:
+                why.append(f"{r['links']} backbone link(s) where another AP has {most}")
+            # A restart makes an access point troubled *while it is recent*. It used to be compared
+            # against the baseline, which is the first reading of the run and never moves - so the first
+            # time an access point restarted it became permanently troubled, the grid was never steady
+            # again, and every remaining experiment was skipped with "grid still not steady". Seen on
+            # 2026-10-01: all three access points restarted 18 minutes into a run (their own armed chaos,
+            # D85), and experiments #1 and #2 were refused with the identical boot numbers five minutes
+            # apart - the same restart reported twice as though it were still happening. A night of
+            # chaos restarts access points on purpose; if each one poisoned the grid for ever, arming
+            # them would guarantee that nothing was ever tested.
+            boot, since = self.boot_at.get(i, (None, None))
+            base = self.baseline.get(i)
+            fresh = since is not None and time.time() - since < AP_RESTART_GRACE_S
+            first = base["boot"] if base else None
+            if fresh and boot is not None and first is not None and boot != first:
+                why.append(f"restarted {int(time.time() - since)} s ago "
+                           f"(boot {boot}, {r['reset']})")
+            if why:
+                out[i] = "; ".join(why)
+        return out
+
+    def has_room(self):
+        """True if any access point still being heard advertises a free slot."""
+        for r in self.aps().values():
+            if not r["heard"] or (r["silent_s"] or 0) > BLE_SILENT_S:
+                continue
+            if r["free_slots"] is None or r["free_slots"] > 0:
+                return True       # unknown counts as room: never excuse a real failure on a guess
+        return False
+
+    def silence(self):
+        """Seconds since each AP was last heard, by AP index. Only APs heard at least once appear."""
+        out = {}
+        for i, r in self.aps().items():
+            if r["boot"] is None:
+                continue
+            out[i] = r["silent_s"] if r["silent_s"] is not None else 0
+        return out
+
+    def last_seen(self):
+        """The last full reading of each AP, kept so a dead one can still be accounted for."""
+        return dict(self._last)
+
+    def changes(self):
+        """What has moved since the first full reading: restarts and brownouts, per AP."""
+        rows, out = self.aps(), {}
+        for i, r in rows.items():
+            base = self.baseline.get(i)
+            if not base:
+                continue
+            d_restarts = (r["restarts"] or 0) - (base["restarts"] or 0)
+            d_brownouts = (r["brownouts"] or 0) - (base["brownouts"] or 0)
+            if d_restarts or d_brownouts:
+                out[i] = {"name": r["name"], "restarts": d_restarts, "brownouts": d_brownouts,
+                          "boot": r["boot"], "reset": r["reset"], "heap_kb": r["heap_kb"]}
+        return out
 
 
 def parse_lora_line(line, st, peers=None):
@@ -157,6 +457,8 @@ def parse_lora_line(line, st, peers=None):
 
     Pure, so --self-check exercises it on sample lines with no board attached."""
     text = re.sub(r"^\s*(?:grid>\s*)?", "", line).strip()
+    if parse_lora_hh_line(text, st, peers):
+        return True
     if m := LORA_STATUS["absent"].search(text):
         st.update(fitted=False, state=m.group(1), off=False, done=True)
         return True
@@ -224,13 +526,49 @@ def outage_seconds(rng):
     return round(rng.uniform(120, 600))
 
 
-LORA_KINDS = ("lora_only", "lora_down", "lora_wedge", "lora_blind")
+LORA_KINDS = ("lora_only", "lora_down", "lora_wedge", "lora_blind", "lora_handheld")
+# Rounds that take no board out and break no radio link, but change what the grid is allowed to lean on.
+#
+# no_net is the answer to "the backup hid the fault". Every other round leaves LoRa available, so a
+# handheld with a module can carry its traffic through a Wi-Fi fault and the run reports success. This one
+# switches the module off on every handheld that has one, which makes those handhelds behave like the ones
+# that will ship without a module - and then any loss is a Wi-Fi failure with nowhere to hide.
+#
+# alerts walks the sequence a person actually uses in an emergency: an announcement, an SOS, and the all
+# clear that stands it down. The last of those had never been sent on this bench, because the console had
+# no way to send it until today.
+EXTRA_KINDS = ("no_net", "alerts")
 LORA_WHAT = {
     "lora_only": "ESP-NOW off on every named AP: anything that still crosses went by LoRa",
     "lora_down": "LoRa off on one AP while Wi-Fi stays up: nothing may be lost and nothing may stall",
     "lora_wedge": "the module reset under it: does it come back configured, with its peers, and how fast",
     "lora_blind": "ESP-NOW off on two APs and LoRa off on one of them: one AP genuinely isolated",
+    "lora_handheld": "Wi-Fi off on one handheld that has a module: its own messages must still cross and "
+                     "be acknowledged, not wait in its outbox for Wi-Fi to come back",
 }
+
+# The AP-side rounds use AP console hooks, so they need an AP on USB. This one does not: it is typed at a
+# handheld, which is why it is the only LoRa round that can run while the APs are on battery - and it is
+# the one that covers the leg the AP rounds never touch. The bench found on 2026-09-30 that a LoRa-only
+# handheld could receive and not send, and no AP-side round would ever have shown it.
+LORA_HH_KINDS = ("lora_handheld",)
+
+
+# The handheld LoRa round. A frame is seconds of airtime at SF9, so probes go in at a walking pace and the
+# round waits for the last of them rather than calling a message lost that was still on the air.
+BLE_SILENT_S = 20              # a D68 beacon goes out every 500 ms; this much silence is a fault
+# Past this, an access point is not "in trouble" any more - it is gone, and the grid it left behind is a
+# smaller grid that can still be tested. Held well short of --ap-dead-after so the two never disagree.
+DEAD_AP_S = 180
+# How long after an access point restarts it still counts as "in trouble". Long enough for it to rejoin
+# the backbone and announce its health, short enough that the grid becomes steady again afterwards - and
+# it MUST become steady again, see BleEyes.troubled.
+AP_RESTART_GRACE_S = 120
+LORA_HH_PROBE_GAP_S = 12
+LORA_HH_SETTLE_S = 45
+HH_WIFI_OFF_MAX_S = 3600       # firmware/handheld/main/service/hh_service.h caps it at the same number
+HH_LORA_OFF_MAX_S = 3600       # firmware/handheld/main/service/hh_lora.h caps it at the same number
+HH_REJOIN_S = 60               # how long a handheld may take to find an AP again once Wi-Fi is back
 
 
 def lora_window_seconds(rng):
@@ -239,13 +577,27 @@ def lora_window_seconds(rng):
     return round(rng.uniform(90, 300))
 
 
-def lora_round(rng, aps):
-    """Which LoRa hook, on which APs. Victims are always APs: the hooks are AP console commands."""
-    kinds = ["lora_down", "lora_wedge"]
-    if len(aps) >= 2:
-        kinds += ["lora_only", "lora_only", "lora_blind"]     # the one that proves LoRa carries, twice as often
+def lora_round(rng, aps, lora_hhs=(), n_hhs=0):
+    """Which LoRa hook, and on what.
+
+    AP victims for the AP-side hooks, which are AP console commands. `lora_handheld` instead takes one
+    handheld that has a module, and needs a second handheld to message it - with only one handheld there
+    is nobody for its traffic to cross to, and nothing would be proved.
+    """
+    kinds = []
+    if aps:
+        kinds += ["lora_down", "lora_wedge"]
+        if len(aps) >= 2:
+            kinds += ["lora_only", "lora_only", "lora_blind"]   # the one that proves LoRa carries, twice as often
+    if lora_hhs and n_hhs >= 2:
+        kinds += ["lora_handheld", "lora_handheld"]   # the handheld leg, as often as the AP one that pairs with it
+    if not kinds:
+        return None
     kind = rng.choice(kinds)
-    victims = rng.sample(aps, 2) if kind in ("lora_only", "lora_blind") else [rng.choice(aps)]
+    if kind == "lora_handheld":
+        victims = [rng.choice(list(lora_hhs))]
+    else:
+        victims = rng.sample(aps, 2) if kind in ("lora_only", "lora_blind") else [rng.choice(aps)]
     return {"victims": victims, "kind": kind,
             "outage_s": 0 if kind == "lora_wedge" else lora_window_seconds(rng)}
 
@@ -263,13 +615,32 @@ def make_schedule(rng, n_aps, n_hhs, args):
         if t >= end:
             return plan
         r = rng.random()
-        if aps and getattr(args, "lora", False) and rng.random() < getattr(args, "lora_share", 0.0):
-            # A LoRa round takes no board out: the APs stay powered and the hooks restore themselves,
+        if getattr(args, "lora", False) and rng.random() < getattr(args, "lora_share", 0.0):
+            # A LoRa round takes no board out: every board stays powered and every hook restores itself,
             # so the AP count rules above do not apply to it.
-            e = lora_round(rng, aps)
+            e = lora_round(rng, aps, lora_hhs=[h for h in hhs if h in getattr(args, "_lora_hhs", hhs)],
+                           n_hhs=len(hhs))
+            if e is None:
+                continue
             plan.append({"n": len(plan) + 1, "at_s": round(t), **e})
             t += e["outage_s"] + 120     # LoRa peers come back on a 30 s heartbeat; leave room for it
             continue
+        # no_net and alerts (EXTRA_KINDS). Placed after the LoRa branch on purpose: with
+        # --scenario lora every round must be a LoRa one, and that branch always continues there.
+        # Neither takes a board out, so the AP-count rules above do not apply to them either.
+        if hhs and rng.random() < getattr(args, "extra_share", 0.0):
+            choices = []
+            if len(hhs) >= 2 and getattr(args, "_lora_hhs", hhs):
+                choices.append("no_net")   # at parity with alerts: this is the one that proves Wi-Fi alone
+            if len(hhs) >= 2 and not getattr(args, "no_alerts", False):
+                choices += ["alerts"]
+            if choices:
+                kind = rng.choice(choices)
+                outage = lora_window_seconds(rng) if kind == "no_net" else 0
+                plan.append({"n": len(plan) + 1, "at_s": round(t), "victims": [], "kind": kind,
+                             "outage_s": outage})
+                t += outage + 120
+                continue
         if args.scenario == "blackout":
             victims = list(aps)          # every experiment is the whole grid going away and coming back
         elif args.blackout and aps and r < 0.05:
@@ -306,6 +677,11 @@ def print_schedule(plan, args):
                            if any(e["kind"] == k for e in loras))
         extra = (f", {len(loras)} LoRa rounds ({counts}; total "
                  f"{sum(e['outage_s'] for e in loras) // 60} min of windows)")
+    extras = [e for e in plan if e["kind"] in EXTRA_KINDS]
+    if extras:
+        counts = ", ".join(f"{k} {sum(e['kind'] == k for e in extras)}" for k in EXTRA_KINDS
+                           if any(e["kind"] == k for e in extras))
+        extra += f", {len(extras)} backup-and-alert rounds ({counts})"
     print(f"{len(plan)} experiments: {len(holds)} holds (total {sum(holds) // 60} min out), "
           f"{sum(e['kind'] == 'pulse' for e in plan)} pulses{extra}")
 
@@ -333,6 +709,7 @@ class Board:
         self.links = set()
         self.status = None               # AP: last "[GRID] links" sample since boot
         self.registered_node = None      # handheld: node it is registered with
+        self.last_node = None            # handheld: the AP it was last registered with, kept after a drop
         self.settings_version = None
         self.lowest_heap = None          # bytes on APs, KB on handhelds (as the firmware prints them)
         self.free_heap = None            # the last free-heap sample, same units
@@ -341,6 +718,8 @@ class Board:
         self.lora_links = set()          # AP indices LoRa reports up, from the [LORA] Link up/down lines
         self.lora_off = None             # True/False once a hook has logged; None until then
         self.bb_off = None
+        self.wifi_off = None             # handheld: its Wi-Fi switched off on purpose (D78)
+        self.grid_time = None            # the newest grid time this board printed, 0/None if never
         self.lora_reset_at = None        # monotonic time of the last "Resetting the module"
         self.lora_configured_at = None   # monotonic time of the last "[LORA] Configured ..."
         self.volume = None
@@ -349,6 +728,12 @@ class Board:
         self.last_line_at = time.monotonic()
         self.boot_at = 0.0                 # monotonic time of the last boot banner
         self.silence_step = 0            # 0 quiet is fine, 1 lines released again, 2 port reopened
+        # Closing a port while its reader thread sits in read() takes the whole process down with a
+        # segmentation fault (exit 139). close_all() stops every reader first, but a port released
+        # DURING discovery - one not in --devices, or one that gave no ID - had no way to stop just
+        # its own reader, and releasing an unusable port crashed the run before a fault was injected.
+        self.stop_reader = threading.Event()
+        self.reader_thread = None
 
     def set_bridge(self, vid):
         self.vid = vid
@@ -395,6 +780,12 @@ class Chaos:
         self.next_query = time.monotonic() + QUERY_EVERY_S
         self.next_summary = time.monotonic() + SUMMARY_EVERY_S
         self.time_set = False
+        self.eyes = None            # BleEyes once started: what the beacons say about APs on battery
+        self.ap_death_at = None     # when every AP was first declared out of battery
+        self.fallback = {}           # handheld name -> the fallback episode open right now
+        self.fallback_log = []       # every finished episode, for the report and events.jsonl
+        self.next_fallback = 0.0
+        self.no_net_until = 0.0      # while a "no safety net" round has LoRa switched off on purpose
         self.time_source = None   # where the grid last got its time from outside itself; see time_source()
         self.link_saves = 0
         self.known_ports = set()
@@ -438,13 +829,15 @@ class Chaos:
         b.injected_at = time.monotonic()      # opening resets CP210x and CH340 boards: not a finding
         b.lost_since = None
         self.known_ports.add(b.port)
+        b.stop_reader.clear()
         t = threading.Thread(target=self.reader, args=(b, b.ser), daemon=True)
         t.start()
+        b.reader_thread = t
         self.readers.append(t)
 
     def reader(self, b, ser):
         buf = b""
-        while not self.stopping.is_set():
+        while not self.stopping.is_set() and not b.stop_reader.is_set():
             try:
                 chunk = ser.read(1024)
             except (self.serial.SerialException, OSError, TypeError, AttributeError):
@@ -498,6 +891,7 @@ class Chaos:
         """Every held board released and every port closed with both lines low (a plain close holds boards in reset).
         Readers stop first: closing a port under a thread blocked in read() crashed Python (exit 139) after a run."""
         self.stopping.set()
+        self.close_eyes()      # the BLE listener is a thread too, and it must not outlive the run
         for t in self.readers:
             t.join(timeout=1)
         for b in self.boards:
@@ -564,7 +958,11 @@ class Chaos:
             b.groups[m.group(2)] = m.group(3) == "member"
         if CRASH.search(line):
             self.finding(f"{b.name}: crash output: {line.strip()}", board=b.name)
-        if b.is_ap and parse_lora_line(line, b.lora, b.lora_peers):
+        # Any board, not only an AP. Handhelds have had their own `lora` block since D77, and gating this
+        # on is_ap is why the first live run of the handheld LoRa round reported "handhelds with a LoRa
+        # module: none" while two of them had one fitted and working. The two blocks are told apart by
+        # their own headers (D71 on an AP, D77 on a handheld), so neither can be read as the other.
+        if parse_lora_line(line, b.lora, b.lora_peers):
             b.lora["at"] = self.now_s()
             return                       # a `lora` status line is nothing else
         if (m := RX["ap_boot"].search(line)) or (m := RX["hh_boot"].search(line)):
@@ -599,6 +997,7 @@ class Chaos:
             b.settings_version = int(m.group(1))
         elif m := RX["registered"].search(line):
             b.registered_node = int(m.group(1))
+            b.last_node = b.registered_node
             self.event("registered", board=b.name, node=b.registered_node)
             if b.failover:
                 start, exp = b.failover
@@ -674,6 +1073,26 @@ class Chaos:
         elif RX["bb_on"].search(line):
             b.bb_off = False
             self.event("bb_on", board=b.name)
+        elif m := RX["wifi_off"].search(line):
+            b.wifi_off = True
+            # And it therefore has no Wi-Fi session, which has to be recorded here rather than waited
+            # for. The handheld does log losing its AP, but not always and not promptly, and until this
+            # was set the harness went on believing the session existed with the radio switched off.
+            # Two consequences, both seen live on 2026-10-01 within ten minutes of a run starting:
+            #
+            #   * ordinary traffic was aimed at the handheld as though it were on Wi-Fi, counted as
+            #     "both ends registered", and the loss blamed on the grid - two false findings, 12 s and
+            #     60 s after the radio went off, while LoRa had not even finished coming up.
+            #   * worse, the fallback audit keys on exactly this field, so it could not see a handheld on
+            #     the backup during a LoRa round at all - blind to 85 of the 236 rounds in that schedule,
+            #     which are the ones whose backup use most needs judging.
+            #
+            # last_node is deliberately kept: which AP it was on is still the useful fact about it.
+            b.registered_node = None
+            self.event("wifi_off", board=b.name, seconds=int(m.group(1)))
+        elif RX["wifi_on"].search(line):
+            b.wifi_off = False
+            self.event("wifi_on", board=b.name)
         elif m := RX["lora_off"].search(line):
             b.lora_off = True
             b.lora_links.clear()
@@ -701,6 +1120,10 @@ class Chaos:
             if b.volume is None:
                 b.volume = m.group(1)
         elif m := RX["time"].search(line):
+            # A board printing a grid time is the only evidence of the clock available when the APs are
+            # on battery and nothing can be asked over a cable.
+            if g := re.search(r"Grid time (\d+)", m.group(1)):
+                b.grid_time = int(g.group(1))
             self.event("time", board=b.name, text=m.group(1))
             source = time_source(m.group(1), b.name)
             if source is not None and self.time_source is None:
@@ -712,7 +1135,8 @@ class Chaos:
         b.status = None
         # A restart clears both chaos hooks and zeroes every LoRa counter; the links start again from nothing.
         b.lora_links.clear()
-        b.bb_off = b.lora_off = None
+        b.bb_off = b.lora_off = b.wifi_off = None
+        b.grid_time = None
         if b.registered_node is not None or not b.is_ap:
             b.drops += 1
         b.registered_node = None
@@ -748,8 +1172,42 @@ class Chaos:
             elif self.time_set and a.status["time"] == "UNSET":
                 why.append(f"{a.name} grid time UNSET")
         for h in self.hhs:
-            if self.present(h) and h.registered_node not in live_idx:
-                why.append(f"{h.name} not registered with a live AP")
+            if not self.present(h):
+                continue
+            if h.wifi_off:
+                continue      # its radio is off because this run switched it off (D78)
+            if self.aps:
+                if h.registered_node not in live_idx:
+                    why.append(f"{h.name} not registered with a live AP")
+            elif self.eyes is not None and self.eyes.troubled():
+                pass   # an AP is mid-fault: this is not the moment to call the grid unsteady or steady
+            elif self.eyes is not None and not self.eyes.has_room():
+                # Every access point that is left says it is full, so this handheld has nowhere to go.
+                # That is the grid being as healthy as it can be, not the grid being broken - and the
+                # distinction matters, because the night ended with one access point on battery holding
+                # four handhelds and two more that could not attach. Treating that as unsteady meant
+                # nothing was ever tested again, which is the opposite of what a chaos run is for.
+                pass
+            elif h.wifi_off:
+                # Its Wi-Fi is off because this run switched it off (D78). Being unregistered is the
+                # round working, not the grid failing, and before registered_node was cleared on that
+                # hook this branch could not be reached to say so.
+                pass
+            elif h.registered_node is None:
+                # The APs are on battery, so this run holds no AP port and has no live AP index to
+                # compare against. "Registered with a live AP" can then never be true, and the first
+                # live run of the handheld LoRa round stalled on exactly that: the grid was healthy and
+                # the gate said otherwise, so nothing was ever injected. A handheld being registered at
+                # all is the evidence available here, and it is evidence about the same thing - an AP
+                # accepted it, so that AP is alive whether or not a cable can reach it.
+                why.append(f"{h.name} is not registered with any AP")
+        if not self.aps and self.eyes is not None:
+            # No cable to any AP, so their own beacons are the only account of them. An AP short of a
+            # backbone link, or one that has just restarted, means the grid is not back yet.
+            rows = self.eyes.aps()
+            for i, reason in sorted(self.eyes.troubled().items()):
+                name = rows.get(i, {}).get("name") or f"AP {i}"
+                why.append(f"{name} (over BLE): {reason}")
         versions = {a.settings_version for a in live_aps if a.settings_version is not None}
         if len(versions) > 1:
             why.append(f"APs disagree on settings version {sorted(versions)}")
@@ -770,7 +1228,192 @@ class Chaos:
             self.background()
             if until and until():
                 return True
+            if self.aps_dead():
+                # Nothing below this is worth waiting for: the grid has no access points left. Said here
+                # rather than only in the loop, because a gap between experiments is minutes long and a
+                # run should not sit through one after the thing it was testing has gone.
+                return bool(until and until())
         return bool(until and until())
+
+    def aps_dead(self):
+        """True once every access point this run ever heard has been silent long enough to call it flat.
+
+        Only in --until-aps-die, and only about access points *on battery*: a cable makes this meaningless
+        and a restart makes it a false alarm, which is why the threshold is minutes. A beacon goes out
+        every 500 ms, so ten minutes of nothing from all of them is not a fault any of them could survive.
+        """
+        if not self.args.until_aps_die or self.eyes is None or self.aps:
+            return False
+        quiet = self.eyes.silence()
+        if not quiet:
+            return False      # none heard yet: that is a start-up problem, not a death
+        limit = self.args.ap_dead_after * 60
+        if any(s is None or s < limit for s in quiet.values()):
+            return False
+        if self.ap_death_at is None:
+            self.ap_death_at = time.monotonic()
+            last = self.eyes.last_seen()
+            for i in sorted(quiet):
+                r = last.get(i, {})
+                self.say(f"{r.get('name') or ('AP ' + str(i))} last heard {quiet[i]} s ago, "
+                         f"after {r.get('uptime') or 'an unknown time'} on battery")
+            self.event("aps_dead", silence_s=quiet,
+                       last={str(i): last.get(i, {}) for i in quiet})
+            self.finding("Every access point has gone silent: taking them as out of battery, and "
+                         "ending the run. This is the measurement the run was for, not a fault.",
+                         harness=True)
+        return True
+
+    def battery_section(self):
+        """How long each access point's battery held, which is what --until-aps-die exists to measure."""
+        if not self.args.until_aps_die:
+            return []
+        if self.eyes is None:
+            return ["", "## Battery", "", "The access points were not watched, so nothing was measured.",
+                    ""]
+        last = self.eyes.last_seen()
+        if not last:
+            return ["", "## Battery", "", "No access point was ever heard, so nothing was measured.", ""]
+        out = ["", "## How long the batteries held", "",
+               "Uptime is the access point's own, from its status beacon, so it is time since it last "
+               "started - a restart part way through (its own chaos, or a crash) resets it and the "
+               "**Restarts** column says whether that happened.", "",
+               "| AP | Last heard | Uptime then | Restarts during the run | Lowest heap | Verdict |",
+               "|---|---|---|---|---|---|"]
+        quiet = self.eyes.silence()
+        moved = self.eyes.changes()
+        for i in sorted(last):
+            r = last[i]
+            s = quiet.get(i)
+            dead = self.ap_death_at is not None and s is not None and s >= self.args.ap_dead_after * 60
+            out.append(f"| {r.get('name') or i} | {int(s) if s is not None else '?'} s ago | "
+                       f"{r.get('uptime') or '?'} | {moved.get(i, {}).get('restarts', 0)} | "
+                       f"{r.get('heap_kb')} KB | {'flat' if dead else 'still up at the end'} |")
+        out += ["", "A flat battery is read from silence, not measured: these boards cannot report their "
+                "own charge, so the figure is how long the access point kept beaconing. It is a floor on "
+                "the battery's life, not the battery's life.", ""]
+        return out
+
+    def wifi_should_have_worked(self, h):
+        """Could this handheld have had a Wi-Fi session right now? Returns (yes, why not).
+
+        The question behind the whole audit. A handheld carrying its traffic on LoRa looks perfectly
+        healthy from the outside - messages arrive, nothing logs an error - so a Wi-Fi fault underneath
+        it is invisible unless something asks whether the backup was *needed*. It usually was: an AP
+        this run is holding down, a radio it switched off, a grid with no room left. When it was not,
+        that is a bug, and on a handheld with no second radio it is an outage.
+        """
+        now = time.monotonic()
+        if h.wifi_off:
+            return False, "its Wi-Fi is switched off by this run (D78)"
+        if h.held or now - h.injected_at < FAULT_GRACE_S:
+            return False, "it is under a fault from this run"
+        if self.eyes is not None and self.eyes.troubled():
+            return False, "an AP is in trouble on its own"
+        live = [a for a in self.aps
+                if self.present(a) and not a.held and now - a.injected_at >= FAULT_GRACE_S]
+        heard = self.eyes.aps() if self.eyes is not None else {}
+        up = [i for i, r in heard.items()
+              if r["heard"] and (r["silent_s"] or 0) <= BLE_SILENT_S] if heard else []
+        if not live and not up:
+            return False, "no AP was up"
+        if self.eyes is not None and heard and not self.eyes.has_room():
+            return False, "every AP it can hear is full"
+        where = (", ".join(a.name for a in live) or ", ".join(f"AP {i}" for i in sorted(up)))
+        return True, f"{where} was up with room"
+
+    def close_fallback(self, h, ep, now):
+        """A handheld got its Wi-Fi session back: file the episode."""
+        ep["seconds"] = round(now - ep.pop("since"), 1)
+        ep["node"] = h.registered_node
+        self.fallback.pop(h.name, None)
+        self.fallback_log.append(ep)
+        self.event("fallback_ended", **ep)
+
+    def fallback_audit(self, now):
+        """Watch every handheld that has no Wi-Fi session, and say whether it should have had one.
+
+        This is the check that the night of 2026-10-01 needed and did not have. A handheld sat on LoRa
+        for minutes with a usable AP at -47 dBm in earshot, because of a scoring bug, and the run called
+        it a success: every message arrived, carried by the second radio. The backup hid the fault. Not
+        every handheld will have that backup, so an unjustified fallback is reported as a finding whether
+        or not anything was lost.
+        """
+        if now < self.next_fallback:
+            return
+        self.next_fallback = now + FALLBACK_EVERY_S
+        for h in self.hhs:
+            ep = self.fallback.get(h.name)
+            if not self.present(h):
+                continue
+            if h.registered_node is not None:
+                if ep is not None:
+                    self.close_fallback(h, ep, now)
+                continue
+            ok, why = self.wifi_should_have_worked(h)
+            # The board's profile is the fallback answer, because `lora` has not been typed at every
+            # handheld yet in the first half-minute of a run - and the earliest episodes are exactly
+            # then, as the ports open. Reading an empty table as "no module" mislabelled the two boards
+            # that have one. D77: F4B is the only handheld profile with LoRa pins.
+            fitted = (self.lora_last.get(h.name) or {}).get("fitted")
+            has_radio = bool(fitted) if fitted is not None else h.board == "F4B"
+            if ep is None:
+                ep = {"handheld": h.name, "since": now, "t": self.now_s(), "last_node": h.last_node,
+                      "has_lora": has_radio, "unjustified_s": 0.0, "reason": why, "reported": False}
+                self.fallback[h.name] = ep
+                self.event("fallback_began", **{k: v for k, v in ep.items() if k != "since"})
+            ep["reason"] = why
+            if ok:
+                ep["unjustified_s"] += FALLBACK_EVERY_S
+            if ok and not ep["reported"] and ep["unjustified_s"] >= FALLBACK_GRACE_S:
+                ep["reported"] = True
+                carried = "its traffic is crossing on LoRa, so nothing looked broken" if has_radio else \
+                          "it has no second radio, so it is simply offline"
+                self.finding(
+                    f"{h.name} has had no Wi-Fi session for {int(ep['unjustified_s'])} s with no reason: "
+                    f"{why}, and no fault was injected. {carried.capitalize()}. "
+                    f"A handheld with no backup radio would be off the grid for this long.",
+                    handheld=h.name, unjustified_s=ep["unjustified_s"], has_lora=has_radio,
+                    last_node=h.last_node, kind="unjustified_fallback")
+
+    def backup_section(self):
+        """Every time a handheld leaned on the backup, and whether it had to.
+
+        The owner's requirement, in his words: "if it is using a backup we need to make sure that there
+        was a good reason to use the backup", because some handhelds will not have one.
+        """
+        eps = self.fallback_log + [dict(e, seconds=round(time.monotonic() - e["since"], 1))
+                                   for e in self.fallback.values()]
+        out = ["", "## Did anything lean on the backup, and did it need to?", "",
+               "Every stretch a handheld spent with **no Wi-Fi session**. A handheld with a LoRa module "
+               "keeps working through one of these and looks healthy from the outside, which is exactly "
+               "how a Wi-Fi fault stays hidden - so each one is judged on whether Wi-Fi *could* have "
+               "worked, not on whether messages arrived. **Unjustified** means an AP was up, had room, "
+               "and no fault was injected: a bug, and an outage on any handheld without a second radio.",
+               ""]
+        carried = [p for p in self.probes if "backup" in (p.get("sender_path"), p.get("receiver_path"))]
+        avoidable = [p for p in carried if p.get("wifi_possible")]
+        if carried:
+            out += [f"**{len(carried)} message(s) crossed with an end on the backup**, "
+                    f"{sum(p['result'] == 'delivered' for p in carried)} of them delivered. "
+                    f"**{len(avoidable)} of those should not have needed it** - Wi-Fi was available at "
+                    f"the moment they were sent. Each one is a message that a handheld without a second "
+                    f"radio would have had no way to send.", ""]
+        if not eps:
+            out += ["No handheld was ever without a Wi-Fi session.", ""]
+            return out
+        bad = [e for e in eps if e.get("unjustified_s", 0) >= FALLBACK_GRACE_S]
+        out += [f"{len(eps)} episode(s); **{len(bad)} unjustified**.", "",
+                "| Handheld | Started (s) | Lasted (s) | Unjustified (s) | Second radio | Why it had none |",
+                "|---|---|---|---|---|---|"]
+        for e in sorted(eps, key=lambda x: -x.get("unjustified_s", 0))[:40]:
+            out.append(f"| {e['handheld']} | {e['t']} | {e.get('seconds', 'still going')} | "
+                       f"{int(e.get('unjustified_s', 0)) or ''} | {'yes' if e.get('has_lora') else 'NO'} | "
+                       f"{e.get('reason') or ''} |")
+        out += ["", "A justified episode is the grid working: an AP held down by this run, a radio it "
+                "switched off (D78), or every AP genuinely full. Those are not faults, and they are "
+                "listed so the unjustified ones can be told apart rather than lost among them.", ""]
+        return out
 
     def check_silence(self, now):
         for b in self.boards:
@@ -805,6 +1448,7 @@ class Chaos:
         now = time.monotonic()
         self.retry_ports()
         self.check_silence(now)
+        self.fallback_audit(now)
         self.probe_tick(now)
         if now >= self.next_query:
             self.next_query = now + QUERY_EVERY_S
@@ -820,8 +1464,20 @@ class Chaos:
     # ---- probes: the handhelds message each other ----
 
     def active_faults(self):
+        """Everything faulty right now: boards this run is holding, and APs their own chaos is breaking.
+
+        The second half is why a whole-system night can be read at all. An AP that is restarting or has
+        lost a backbone link is in exactly the state this harness would have put it in with a reset line,
+        and a message that failed while that was true is not evidence of a bug.
+        """
         now = time.monotonic()
-        return [b.name for b in self.boards if b.held or now - b.injected_at < FAULT_GRACE_S]
+        mine = [b.name for b in self.boards if b.held or now - b.injected_at < FAULT_GRACE_S]
+        if self.eyes is None:
+            return mine
+        theirs = self.eyes.troubled()
+        rows = self.eyes.aps()
+        return mine + [f"{rows.get(i, {}).get('name') or ('AP ' + str(i))} (its own chaos)"
+                       for i in sorted(theirs)]
 
     def probe_tick(self, now):
         for token, p in list(self.pending.items()):
@@ -839,7 +1495,7 @@ class Chaos:
             # No two handhelds on USB: the grid's traffic under test is the APs' own diagnostic echo.
             self.echo_probe()
             return
-        self.handheld_probe(now)
+        self.handheld_probe()
 
     def echo_probe(self):
         """One AP floods a diagnostic echo (`ping <token>`); every other live AP should log it. This is
@@ -873,28 +1529,62 @@ class Chaos:
             self.finding(f"AP echo {p['token']} from {p['sender']} {p['result']} with no fault anywhere "
                          f"(reached {sorted(p['got'])} of {p['receivers']})", token=p["token"])
 
-    def handheld_probe(self, now):
-        senders = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
-        if not senders:
-            return
-        sender = self.rng.choice(senders)
-        receiver = self.rng.choice([h for h in self.hhs if h is not sender])
+    def handheld_probe(self, sender=None, receiver=None, kind=None):
+        """Send one token message between two handhelds and remember it until it lands.
+
+        Drawn at random by the ordinary traffic, or aimed by a round that needs a particular pair - a
+        LoRa round has to send *to and from* the handheld whose Wi-Fi is off, which is the whole claim
+        under test. Returns the token, or None if nothing was sent.
+        """
+        if sender is None:
+            senders = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
+            if not senders:
+                # Every handheld is on the backup, or none is registered. Sending anyway is the point:
+                # the harness used to go quiet in exactly the state it most needed to measure, so a grid
+                # carried entirely by LoRa produced no traffic and therefore no evidence either way.
+                senders = [h for h in self.hhs if self.present(h)]
+            if not senders:
+                return None
+            sender = self.rng.choice(senders)
+        elif not self.present(sender):
+            return None
+        if receiver is None:
+            receiver = self.rng.choice([h for h in self.hhs if h is not sender])
         # --no-alerts (a night run): announcements and urgent broadcasts take over every handheld's screen,
         # and urgent ones sound even with the volume off (D40), so only 1:1 and group messages are sent, and
         # none at all while grid time is unset (then urgent is all a handheld may send, D6).
-        if self.args.no_alerts and not self.time_set:
-            return
-        kinds = (["direct"] if self.args.no_alerts else ["broadcast", "direct"]) + (["group"] if self.group else [])
-        kind = self.rng.choice(kinds) if self.time_set else "urgent"
-        target = {"broadcast": "all", "direct": str(receiver.index), "group": self.group,
-                  "urgent": "urgent"}[kind]
+        if kind is None and self.args.no_alerts and not self.time_set:
+            return None
+        if kind is None:
+            kinds = (["direct"] if self.args.no_alerts
+                     else ["broadcast", "direct"]) + (["group"] if self.group else [])
+            kind = self.rng.choice(kinds) if self.time_set else "urgent"
+        # "announce" is a plain broadcast, which is what an announcement is on the wire (D56); it is named
+        # separately so the report can tell an announcement apart from the background broadcast traffic.
+        # "safe" is D66's all clear, which only reached serial today - `send safe <text>`.
+        target = {"broadcast": "all", "announce": "all", "direct": str(receiver.index),
+                  "group": self.group, "urgent": "urgent", "safe": "safe"}[kind]
         self.probe_n += 1
         token = f"CX{self.run_id}-{self.probe_n:05d}"
-        p = {"token": token, "kind": kind, "sender": sender.name, "receiver": receiver.name, "mono": now,
+        # The path each end was on, written down at send time so the log can be analysed afterwards
+        # without re-deriving it: "wifi" means a session with an AP, "backup" means no session, so
+        # anything that crosses goes over LoRa. wifi_possible says whether that was avoidable.
+        paths = {}
+        for role, b in (("sender", sender), ("receiver", receiver)):
+            paths[role + "_path"] = "wifi" if b.registered_node is not None else "backup"
+        if "backup" in paths.values():
+            ok, why = self.wifi_should_have_worked(
+                sender if sender.registered_node is None else receiver)
+            paths["wifi_possible"] = ok
+            paths["backup_reason"] = why
+        p = {"token": token, "kind": kind, "sender": sender.name, "receiver": receiver.name,
+             "mono": time.monotonic(),   # the clock probe_tick measures the deadline against, always
              "t": self.now_s(), "sender_node": sender.registered_node, "receiver_node": receiver.registered_node,
-             "faults_at_send": self.active_faults(), "drops": (sender.drops, receiver.drops)}
-        if self.write(sender, f"send {target} {token}"):
-            self.pending[token] = p
+             "faults_at_send": self.active_faults(), "drops": (sender.drops, receiver.drops), **paths}
+        if not self.write(sender, f"send {target} {token}"):
+            return None
+        self.pending[token] = p
+        return token
 
     def unsent_direct(self, sender, target):
         """The oldest direct probe from this sender to this device with no message ID yet. The firmware handles
@@ -1016,11 +1706,120 @@ class Chaos:
             where = f"AP {b.index} {b.ap_name}" if b.is_ap else f"device {b.index}"
             self.say(f"{b.slot}: {b.name} {b.id} on {b.port}, board {b.board}, {where}, {b.bridge}"
                      f"{'' if b.holdable else ' (pulse only: cannot be held)'}")
+        if not self.aps and not self.hhs:
+            raise SystemExit("No board answered; nothing was injected")
         if not self.aps:
-            raise SystemExit("No AP answered; nothing was injected")
+            # The APs are on battery (D81/D82): no serial cable, so no AP-side fault can be *typed* at
+            # them. They still attack themselves when armed over BLE (D82, D85), so a whole-system night
+            # is possible - what this side needs is to *see* them, or it would blame the grid for what an
+            # AP outage was doing. That is what BleEyes is for.
+            self.say("No AP is on USB: the APs are on battery. AP-side faults cannot be typed at them, "
+                     "and each AP attacks itself when armed over BLE (chaos_ble.py, D85).")
+            self.event("no_aps_on_usb")
+            self.start_ble_eyes()
+            if not self.args.lora:
+                self.say("Nothing for this side to inject without --lora, because every other fault "
+                         "needs an AP port. The APs' own faults still land if they are armed.")
+
+    def start_ble_eyes(self):
+        """Listen to the APs' status beacons, so a run with no cable to them is not blind."""
+        if self.args.no_ble:
+            self.say("--no-ble: this run will not watch the APs at all, so a message lost while an AP "
+                     "was down will be reported as a finding. Only useful when no AP is armed.")
+            return
+        names = {b.index: b.ap_name for b in self.aps if b.ap_name}
+        if not names:
+            try:
+                names = {d["node_index"]: d["node_name"] for d in load_map().get("devices", [])
+                         if d.get("role") == "N" and isinstance(d.get("node_index"), int)}
+            except Exception:
+                names = {}
+        self.eyes = BleEyes(self.args.secrets, names)
+        if not self.eyes.start():
+            self.finding(f"The APs could not be watched over BLE ({self.eyes.error}), so an AP fault "
+                         "would be invisible to this run and its losses blamed on the grid",
+                         harness=True)
+            self.eyes = None
+            return
+        self.say("Watching the APs over BLE (D68): their restarts, backbone links and brownouts are "
+                 "recorded, and a probe in flight while an AP is in trouble is not counted against the "
+                 "grid.")
+        if self.wait(25, until=lambda: any(r["has_health"] for r in self.eyes.aps().values())):
+            rows = self.eyes.aps()
+            for i in sorted(rows):
+                r = rows[i]
+                links = "no status frame yet" if r["links"] is None else f"{r['links']} link(s)"
+                self.say(f"  heard {r['name'] or ('AP ' + str(i))} (AP {i}): boot {r['boot']}, {links}"
+                         + (f", {r['handhelds']} handheld(s), {r['brownouts']} brownout(s) so far"
+                            if r["has_health"] else ""))
+            self.event("ble_eyes", aps=rows)
+        else:
+            why = f" ({self.eyes.error})" if self.eyes.error else ""
+            self.finding(f"No AP was heard over BLE within 20 s{why}, so this run cannot tell an AP "
+                         "fault from a grid fault", harness=True)
+
+    def close_eyes(self):
+        if self.eyes is not None:
+            self.eyes.close()
+
+    def ap_section(self):
+        """What the access points did to themselves, from their beacons (D68).
+
+        A run that holds no cable to them still has to account for them, or a night reads as a clean bill
+        of health for a grid whose access points were restarting all the way through it. Restarts and
+        brownouts are counters kept in NVS, so only their movement during this run means anything.
+        """
+        if self.eyes is None:
+            return ["", "## The access points", "",
+                    "Not watched over BLE this run, so nothing here is an account of them.", ""]
+        rows = self.eyes.aps()
+        if not rows:
+            return ["", "## The access points", "",
+                    "None was heard over BLE, so this run has no account of them at all - which also "
+                    "means any message it called lost may have been lost to an AP that was down.", ""]
+        moved = self.eyes.changes()
+        out = ["", "## The access points, over BLE (they hold no cable)", "",
+               "| AP | Heard | Boot | Links | Handhelds | Restarts here | Brownouts here | Lowest heap |",
+               "|---|---|---|---|---|---|---|---|"]
+        for i in sorted(rows):
+            r = rows[i]
+            d = moved.get(i, {})
+            out.append(f"| {r['name'] or i} | {'yes' if r['heard'] else 'NO'} | {r['boot']} | "
+                       f"{r['links']} | {r['handhelds']} | {d.get('restarts', 0)} | "
+                       f"{d.get('brownouts', 0)} | {r['heap_kb']} KB |")
+        out.append("")
+        if moved:
+            out.append("What moved during the run, and what it means:")
+            out.append("")
+            for i in sorted(moved):
+                d = moved[i]
+                bits = []
+                if d["restarts"]:
+                    bits.append(f"**restarted {d['restarts']} time(s)** (last reason: {d['reset']})")
+                if d["brownouts"]:
+                    bits.append(f"**{d['brownouts']} brownout(s)** - a supply problem, not a fault "
+                                "anything here injected")
+                out.append(f"- {d['name'] or ('AP ' + str(i))}: " + "; ".join(bits)
+                           + f"; lowest heap {d['heap_kb']} KB")
+            out.append("")
+            out.append("A restart here is **not** necessarily a bug: an armed chaos build restarts itself "
+                       "on purpose (D82). Its own journal says which, and this side cannot: read it with "
+                       "`python tools/chaos_ble.py --ap <name> journal`.")
+        else:
+            out.append("No access point restarted or browned out while this run was going.")
+        out.append("")
+        return out
 
     def release_port(self, b):
-        """Both lines low, then close: a plain close holds CP210x and CH34x boards in reset."""
+        """Both lines low, then close: a plain close holds CP210x and CH34x boards in reset.
+
+        Its reader is stopped and joined first. Closing the port under a thread blocked in read()
+        is a segmentation fault, not an exception, so no amount of try/except around the close
+        catches it - the thread has to be gone before the handle is."""
+        b.stop_reader.set()
+        if b.reader_thread is not None:
+            b.reader_thread.join(timeout=2)
+            b.reader_thread = None
         ser, b.ser = b.ser, None
         if ser is None:
             return
@@ -1039,7 +1838,11 @@ class Chaos:
         """Set grid time on one AP and wait until an AP reports it. A command typed while the AP is still
         starting is lost without an answer, so it is typed again until a status line shows the time."""
         def time_seen():
-            return any(a.status and a.status["time"] != "UNSET" for a in self.aps if self.present(a))
+            if any(a.status and a.status["time"] != "UNSET" for a in self.aps if self.present(a)):
+                return True
+            # With the APs on battery there is no AP status line to read. A handheld's clock is evidence
+            # of the same fact: a handheld only has grid time because an AP gave it one (D53, D60).
+            return not self.aps and any(h.grid_time for h in self.hhs if self.present(h))
 
         # A GPS on MAIN (D63) or a handheld's clock usually gives the grid time within seconds; the PC
         # typing `time set` then only fights it (MAIN refuses while its GPS has a fix, another AP
@@ -1048,6 +1851,12 @@ class Chaos:
             self.time_set = True
             self.event("time_from_grid", source=self.time_source or "unknown")
             self.say(f"grid time came from {self.time_source or 'the grid'}; the PC did not set it")
+            return
+        if not self.aps:
+            # Nothing here can set the time: `time set` is an AP command and the PC is not a grid member
+            # (D25). Either the grid has a clock of its own or this run records that it did not.
+            self.finding("No AP is on USB and no handheld reported grid time, so the time could not be "
+                         "confirmed; rounds that need it will be skipped")
             return
         for attempt in range(1, 5):
             ap = next((a for a in self.aps if self.present(a)), None)
@@ -1077,6 +1886,10 @@ class Chaos:
         return False
 
     def run_experiment(self, e):
+        if e["kind"] == "no_net":
+            return self.run_no_net_experiment(e)
+        if e["kind"] == "alerts":
+            return self.run_alerts_experiment(e)
         if e["kind"] in LORA_KINDS:
             return self.run_lora_experiment(e)
         slots = {b.slot: b for b in self.aps + self.hhs}
@@ -1229,9 +2042,229 @@ class Chaos:
             self.wait(min(every, max(0.0, end - time.monotonic())))
         self.wait(ECHO_DEADLINE_S + 5, until=lambda: not self.echo_pending)
 
+    def alert_burst(self, sender):
+        """Announcement, SOS, all clear - in that order, from one handheld, as a person would use them.
+
+        Returns the tokens, which the ordinary probe machinery resolves and counts like any other message.
+        The order matters: the all clear is only meaningful after the SOS it stands down, and D86's
+        re-stamping applies to both of them, so sending them apart would not exercise the same path.
+        """
+        tokens = []
+        # D6: with no grid time an announcement is refused by design, and counting that as a failed
+        # message would manufacture a finding out of correct behaviour. Urgent and the all clear are the
+        # two a handheld may always send, so those are what an alert round does until time is set.
+        sequence = ("announce", "urgent", "safe") if self.time_set else ("urgent", "safe")
+        for kind in sequence:
+            tok = self.handheld_probe(sender=sender, kind=kind)
+            if tok:
+                tokens.append(tok)
+                self.wait(6)   # let each land before the next takes over every screen
+        return tokens
+
+    def run_alerts_experiment(self, e):
+        """The emergency path end to end: announcement, SOS, and standing it down.
+
+        Driven as its own round rather than left to the random traffic because the three are a sequence,
+        and because the all clear is the one alert that had never been tested on this bench at all.
+        """
+        senders = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
+        if not senders:
+            senders = [h for h in self.hhs if self.present(h)]
+        if not senders:
+            self.say(f"#{e['n']} skipped: no handheld present to raise an alert")
+            return
+        v = self.rng.choice(senders)
+        exp = {**e, "slots": e.get("victims", []), "victims": [v.name], "started": self.now_s(),
+               "failover": [], "result": None, "what": "announcement, SOS, and the all clear"}
+        self.experiments.append(exp)
+        self.phase = f"#{e['n']}"
+        self.say(f"#{e['n']} alerts from {v.name}: announcement, SOS, all clear")
+        self.event("fault", **{k: val for k, val in exp.items() if k not in ("at_s", "failover")})
+        tokens = self.alert_burst(v)
+        # Wait for the last of them to be resolved by probe_tick, rather than guessing.
+        self.wait(PROBE_DEADLINE_S + 10, until=lambda: not any(tk in self.pending for tk in tokens))
+        got = [p for p in self.probes if p["token"] in tokens]
+        exp["sent"] = len(tokens)
+        exp["delivered"] = sum(p["result"] == "delivered" for p in got)
+        exp["result"] = "done"   # it took nothing out, so there was nothing to recover from
+        exp["alerts"] = [{"token": p["token"], "kind": p["kind"], "result": p["result"]} for p in got]
+        if not tokens:
+            self.finding(f"#{e['n']} {v.name}: not one alert could even be queued", n=e["n"], board=v.name)
+        self.phase = ""
+
+    def run_no_net_experiment(self, e):
+        """Switch the second radio off everywhere, so Wi-Fi has to stand on its own.
+
+        The owner's requirement, and the lesson of 2026-10-01: "in some of these handhelds, we won't have
+        those radios. So we need to catch them." Every other round leaves LoRa there to carry the traffic,
+        which is how a Wi-Fi bug can pass a whole night unnoticed - messages arrived, so nothing looked
+        wrong. With the module off, a handheld that cannot hold a Wi-Fi session is simply off the grid,
+        exactly as a module-less handheld would be, and the loss is reported.
+
+        `lora off <seconds>` restores itself from the handheld's own clock (HH_LORA_OFF_MAX_S), so a
+        harness that dies in here cannot leave a handheld without its second radio, and a restart ends it.
+        """
+        have = [h for h in self.hhs
+                if self.present(h) and (self.lora_last.get(h.name) or {}).get("fitted")]
+        if not have:
+            self.say(f"#{e['n']} skipped: no handheld with a LoRa module to take away")
+            return
+        if len([h for h in self.hhs if self.present(h)]) < 2:
+            self.say(f"#{e['n']} skipped: needs two handhelds so messages have somewhere to go")
+            return
+        window = e["outage_s"]
+        restore_s = min(HH_LORA_OFF_MAX_S, int(window) + 60)
+        exp = {**e, "slots": e.get("victims", []), "victims": [h.name for h in have],
+               "started": self.now_s(), "failover": [], "result": None, "window_s": window,
+               "what": "every second radio off: Wi-Fi alone, as on a handheld with no module"}
+        self.experiments.append(exp)
+        self.phase = f"#{e['n']}"
+        self.say(f"#{e['n']} no_net for {window} s: LoRa off on {', '.join(h.name for h in have)}")
+        self.event("fault", **{k: val for k, val in exp.items() if k not in ("at_s", "failover")})
+        first = len(self.probes)
+        try:
+            for h in have:
+                self.write(h, f"lora off {restore_s}")
+            self.wait(8)
+            # Ordinary traffic keeps flowing through wait(); add one full alert sequence, because an SOS
+            # with no second radio is the case that matters most.
+            self.alert_burst(self.rng.choice([h for h in self.hhs if self.present(h)]))
+            self.wait(max(0.0, window - 30))
+        finally:
+            for h in have:
+                self.write(h, "lora on")
+        during = [p for p in self.probes[first:] if p["clean"]]
+        lost = [p for p in during if p["result"] != "delivered"]
+        exp["messages"] = len(during)
+        exp["lost"] = len(lost)
+        exp["result"] = "done"   # it took nothing out, so there was nothing to recover from
+        if during and lost:
+            self.finding(f"#{e['n']} with every second radio off, {len(lost)} of {len(during)} messages "
+                         f"between registered handhelds did not arrive. Nothing could fall back, which is "
+                         f"the point: this is what a handheld without a module would have suffered.",
+                         n=e["n"], lost=len(lost), of=len(during), kind="no_backup_loss")
+        elif not during:
+            self.say(f"#{e['n']} no message was exchanged while the radios were off; nothing proved")
+        self.phase = ""
+
+    def run_lora_handheld_experiment(self, e):
+        """The handheld leg: take one handheld's Wi-Fi away and make it carry its own traffic over LoRa.
+
+        This is the round the AP-side ones cannot cover. They take ESP-NOW away between APs, which proves
+        LoRa carries *between APs*; nothing they do makes a handheld use its own module, because a handheld
+        only reaches for LoRa when its own Wi-Fi session is gone (D74, D78). On 2026-09-30 that gap hid a
+        real fault for as long as it existed: a LoRa-only handheld could receive a message and an SOS and
+        could originate nothing but its announcement, and a chaos night would have been reported clean
+        either way.
+
+        Traffic goes *both* ways on purpose. Receiving was never broken; sending was.
+
+        `wifi off <seconds>` restores itself from the handheld's own clock, so a harness that dies here
+        cannot leave a handheld off the grid, and a restart ends the outage too.
+        """
+        slots = {b.slot: b for b in self.hhs}
+        victims = [slots[s] for s in e["victims"] if s in slots]
+        if len(victims) != 1 or not self.present(victims[0]):
+            self.say(f"#{e['n']} skipped: {', '.join(e['victims'])} is not a present handheld")
+            return
+        v = victims[0]
+        if (self.lora_last.get(v.name) or {}).get("fitted") is False:
+            self.say(f"#{e['n']} skipped: {v.name} has no LoRa module")
+            return
+        others = [h for h in self.hhs if h is not v and self.present(h) and h.registered_node is not None]
+        if not others:
+            self.say(f"#{e['n']} skipped: no other registered handheld to exchange messages with {v.name}")
+            return
+
+        window = e["outage_s"]
+        restore_s = min(HH_WIFI_OFF_MAX_S, int(window) + 60)   # the handheld restores it even if this dies
+        e = {**e, "slots": e["victims"], "victims": [v.name]}
+        exp = {**e, "started": self.now_s(), "failover": [], "result": None, "unconfirmed": [],
+               "what": LORA_WHAT[e["kind"]], "window_s": window,
+               "peer_handhelds": [h.name for h in others]}
+        self.experiments.append(exp)
+        self.phase = f"#{e['n']}"
+        self.say(f"#{e['n']} {e['kind']} on {v.name} for {window} s: {exp['what']}")
+        self.event("fault", **{k: val for k, val in e.items() if k != "at_s"})
+        watched = [v] + [h for h in others if (self.lora_last.get(h.name) or {}).get("fitted")]
+        before = self.lora_query(watched)
+        exp["lora_before"] = {n: {k: val for k, val in s.items() if k != "peers"}
+                              for n, s in before.items()}
+        tokens = []
+        try:
+            # Let anything already in flight to or from this handheld finish first. A probe sent by the
+            # ordinary traffic a moment before the window opens would otherwise be resolved as lost in
+            # the first second of it, and counted clean, because the handheld's own "lost its AP" event
+            # has not arrived yet - the first live run blamed exactly one message that way, 0.3 s after
+            # the window opened. Waiting removes the race instead of excusing the finding.
+            self.wait(LORA_HH_SETTLE_S, until=lambda: not any(
+                v.name in (pr["sender"], pr["receiver"]) for pr in self.pending.values()))
+            self.write(v, f"wifi off {restore_s}")
+            if not self.wait(12, until=lambda: v.wifi_off):
+                exp["unconfirmed"].append(f"{v.name} wifi off")
+                self.finding(f"#{e['n']} {v.name}: no [NET] line confirmed Wi-Fi went off, so nothing "
+                             "that follows can be attributed to the radio", n=e["n"], board=v.name)
+            end = time.monotonic() + window
+            while time.monotonic() < end and time.monotonic() < self.deadline:
+                peer = self.rng.choice(others)
+                # Both directions, the sending one first: it is the one that was broken.
+                for sender, receiver in ((v, peer), (peer, v)):
+                    tok = self.handheld_probe(sender=sender, receiver=receiver, kind="direct")
+                    if tok:
+                        tokens.append(tok)
+                    self.wait(min(LORA_HH_PROBE_GAP_S, max(0.0, end - time.monotonic())))
+            # A frame is seconds of airtime: wait for the last ones instead of calling them lost.
+            self.wait(LORA_HH_SETTLE_S, until=lambda: not any(k in self.pending for k in tokens))
+        finally:
+            released = time.monotonic()
+            self.write(v, "wifi on")             # explicit, although the hook restores itself
+            self.phase = None
+        self.event("released", n=e["n"], unconfirmed=exp["unconfirmed"])
+
+        exp["rejoined"] = self.wait(HH_REJOIN_S, until=lambda: v.registered_node is not None)
+        if not exp["rejoined"]:
+            self.finding(f"#{e['n']} {v.name}: did not register with any AP within {HH_REJOIN_S} s of its "
+                         "Wi-Fi coming back", n=e["n"], board=v.name)
+        self.settle(exp, released)
+
+        mine = [pr for pr in self.probes if pr["token"] in tokens]
+        from_v = [pr for pr in mine if pr["sender"] == v.name]
+        to_v = [pr for pr in mine if pr["receiver"] == v.name]
+        exp["probes"] = {
+            "from_victim": {"sent": len(from_v),
+                            "delivered": sum(pr["result"] == "delivered" for pr in from_v)},
+            "to_victim": {"sent": len(to_v),
+                          "delivered": sum(pr["result"] == "delivered" for pr in to_v)},
+            "unresolved": len([k for k in tokens if k in self.pending]),
+        }
+        after = self.lora_query(watched)
+        exp["lora"] = self.lora_delta(before, after)
+        out = (exp["lora"].get(v.name) or {}).get("frames_out")
+        exp["frames_out"] = out
+
+        # The findings this round exists to produce. Deliberately not excused by the victim "losing its
+        # AP": it lost its AP because this round took it away, and carrying its traffic anyway is the claim.
+        if from_v and exp["probes"]["from_victim"]["delivered"] == 0:
+            self.finding(f"#{e['n']} {v.name}: not one of {len(from_v)} messages it sent while on LoRa "
+                         "alone was delivered; the radio received but did not carry", n=e["n"],
+                         board=v.name)
+        if to_v and exp["probes"]["to_victim"]["delivered"] == 0:
+            self.finding(f"#{e['n']} {v.name}: not one of {len(to_v)} messages sent to it while on LoRa "
+                         "alone arrived", n=e["n"], board=v.name)
+        if out == 0 and from_v:
+            self.finding(f"#{e['n']} {v.name}: its LoRa frame count did not move while it sent "
+                         f"{len(from_v)} message(s) with no Wi-Fi, so nothing reached the air",
+                         n=e["n"], board=v.name)
+        if v.wifi_off:
+            self.finding(f"#{e['n']} {v.name}: Wi-Fi is still switched off after the round", n=e["n"],
+                         board=v.name)
+        self.event("lora_round", n=e["n"], probes=exp["probes"], frames_out=out, lora=exp["lora"])
+
     def run_lora_experiment(self, e):
         """A LoRa round. No board is taken out: the AP console's own hooks are used, every one of which
         restores itself from the AP's clock, so a dead harness cannot leave a radio off."""
+        if e["kind"] in LORA_HH_KINDS:
+            return self.run_lora_handheld_experiment(e)
         slots = {b.slot: b for b in self.aps + self.hhs}
         victims = [slots[s] for s in e["victims"] if s in slots]
         if len(victims) != len(e["victims"]) or not all(v.is_ap and self.present(v) for v in victims):
@@ -1332,15 +2365,30 @@ class Chaos:
 
     def run(self):
         self.start()
+        # Which handhelds have a module is read off the boards, not assumed from a board code: `lora`
+        # says so, and a handheld with no module would make the round meaningless.
+        if self.args.lora and self.hhs:
+            self.lora_query(self.hhs)
+        self.args._lora_hhs = [h.slot for h in self.hhs
+                               if (self.lora_last.get(h.name) or {}).get("fitted")]
+        if self.args.lora:
+            self.say("handhelds with a LoRa module: "
+                     + (", ".join(h.name for h in self.hhs if h.slot in self.args._lora_hhs) or "none"))
         plan = make_schedule(random.Random(self.args.seed), len(self.aps), len(self.hhs), self.args)
         print_schedule(plan, self.args)
         self.event("schedule", plan=plan)
         run_start = time.monotonic()
         run_end = run_start + self.args.hours * 3600
         for e in plan:
+            if self.aps_dead():
+                self.say(f"#{e['n']} and later not started: the access points are out of battery")
+                break
             wait_s = e["at_s"] - (time.monotonic() - run_start)
             if wait_s > 0:
                 self.wait(wait_s)
+            if self.aps_dead():
+                self.say(f"#{e['n']} and later not started: the access points are out of battery")
+                break
             budget = e["outage_s"] + self.args.recovery_timeout + (
                 LORA_RECOVERY_S if e["kind"] in LORA_KINDS else 0)
             if time.monotonic() + budget > run_end:
@@ -1375,7 +2423,12 @@ class Chaos:
         lat = sorted(p["latency_s"] for p in clean_ok)
         dirty = [p for p in probes if not p["clean"]]
         fail_s = sorted(f["seconds"] for e in exps for f in e["failover"])
-        rec_s = sorted(e["recovery_s"] for e in exps if e.get("result") == "recovered")
+        # "recovery_s" belongs to a round that took something out and waited for the grid to come back.
+        # The backup and alert rounds take nothing out, so they have no such number - and reading it
+        # unconditionally killed a live run 40 minutes in (KeyError, 2026-10-01), taking the night with
+        # it. A missing measurement is never a reason to lose the report that holds the others.
+        rec_s = sorted(e["recovery_s"] for e in exps
+                       if e.get("result") == "recovered" and e.get("recovery_s") is not None)
         echo_ok = [x for x in self.echoes if x["result"] == "delivered"]
         echo_lat = sorted(x["latency_s"] for x in echo_ok if x["latency_s"] is not None)
         relink = sorted(e["relink_s"] for e in exps if e.get("relink_s") is not None and any(
@@ -1430,6 +2483,7 @@ class Chaos:
             fo = "; ".join(f"{f['handheld']} to AP {f['node']} in {f['seconds']} s" for f in e["failover"]) or ""
             out.append(f"| {e['n']} | {e['started']} | {fault} | {', '.join(e['victims'])} | {e.get('result') or 'running'} "
                        f"| {e.get('relink_s') or ''} | {e.get('recovery_s', '')} | {fo} |")
+        out += self.backup_section()
         out += self.lora_report()
         out += ["", "## Memory", "",
                 "Free heap now and the lowest seen during the run: bytes on APs (status line), KB on handhelds "
@@ -1457,7 +2511,7 @@ class Chaos:
                     "| # | Round | APs | Window (s) | Echoes sent | Crossed fully | Crossings | Cross time "
                     "median/max (s) | LoRa-first frames | Module back (s) | Result |",
                     "|---|---|---|---|---|---|---|---|---|---|---|"]
-            for e in rounds:
+            for e in [x for x in rounds if x["kind"] not in LORA_HH_KINDS]:
                 ec = e.get("echoes", {})
                 ct = e.get("cross_s") or {}
                 back = e.get("peers_back_s")
@@ -1468,6 +2522,25 @@ class Chaos:
                     f"{ct.get('median', '')}/{ct.get('max', '')} | "
                     f"{e.get('frames_first') if e.get('frames_first') is not None else ''} | "
                     f"{back if back is not None else ''} | {e.get('result') or 'running'} |")
+            hh_rounds = [x for x in rounds if x["kind"] in LORA_HH_KINDS]
+            if hh_rounds:
+                out += ["", "### Handheld rounds: a handheld on LoRa alone, sending and receiving", "",
+                        "Its Wi-Fi was switched off for the window, so every message below had to cross on "
+                        "its module. **From it** is the direction that was broken until 2026-09-30 and the "
+                        "one worth reading first: receiving over LoRa worked long before sending did.", "",
+                        "| # | Handheld | Window (s) | Sent from it | Delivered | Sent to it | Delivered | "
+                        "Its LoRa frames out | Rejoined | Result |",
+                        "|---|---|---|---|---|---|---|---|---|---|"]
+                for e in hh_rounds:
+                    pr = e.get("probes") or {}
+                    fv, tv = pr.get("from_victim") or {}, pr.get("to_victim") or {}
+                    out.append(
+                        f"| {e['n']} | {', '.join(e['victims'])} | {e.get('window_s', 0)} | "
+                        f"{fv.get('sent', '')} | {fv.get('delivered', '')} | {tv.get('sent', '')} | "
+                        f"{tv.get('delivered', '')} | "
+                        f"{e.get('frames_out') if e.get('frames_out') is not None else ''} | "
+                        f"{'yes' if e.get('rejoined', True) else 'NO'} | {e.get('result') or 'running'} |")
+                out.append("")
             out += ["", "What each round does: "
                     + "; ".join(f"**{k}** {LORA_WHAT[k]}" for k in LORA_KINDS
                                 if any(e["kind"] == k for e in rounds)), ""]
@@ -1484,10 +2557,17 @@ class Chaos:
                                f"{v('parts_dropped')} | {v('reasm_timeouts')} | {v('seal_fail')} | "
                                f"{v('queue_high')} | {v('queue_dropped')} | {v('retries')} | "
                                f"{v('airtime_ms')} | {v('restarts')} |")
+        out += self.ap_section()
+        out += self.battery_section()
         out += ["", "### Each AP's LoRa module at the end", ""]
         for name, s in self.lora_last.items():
-            peers = ", ".join(f"AP {i} {'up' if p['up'] else 'DOWN'} RSSI {p['rssi']} dBm SNR {p['snr']} "
-                              f"({p['age_ms']} ms ago)" for i, p in sorted(s.get("peers", {}).items()))
+            def peer_text(i, pr):
+                head = f"AP {i} {'up' if pr['up'] else 'DOWN'}"
+                if pr.get("rssi") is None:
+                    return head + " (heard recently; a handheld reports no per-peer figures)"
+                return (head + f" RSSI {pr['rssi']} dBm SNR {pr['snr']} ({pr['age_ms']} ms ago)")
+
+            peers = ", ".join(peer_text(i, pr) for i, pr in sorted(s.get("peers", {}).items()))
             out.append(f"- **{name}**: {s.get('state', 'no answer')}"
                        + (f", address {s['address']} network {s['network']}, SF{s.get('sf')} "
                           f"BW{s.get('bw')} {s.get('power_dbm')} dBm" if s.get("address") is not None else "")
@@ -1574,6 +2654,38 @@ LORA_BLOCK_WANT = {"fitted": True, "off": False, "address": 0, "network": 7, "sf
                    "airtime_ms": 512340, "restarts": 1, "done": True}
 LORA_PEERS_WANT = {1: {"up": True, "rssi": -15, "snr": 8, "age_ms": 4120},
                    2: {"up": False, "rssi": -27, "snr": 10, "age_ms": 91000}}
+# A whole `lora` block as a handheld prints it, taken verbatim from Channi (COM9) on 2026-09-30, the run
+# that proved a LoRa-only handheld can send as well as receive.
+LORA_HH_BLOCK = """grid> lora
+LoRa (D77): module fitted, address 101, network 14
+  module:   RYLR998_REYAX_V1.2.4
+  APs heard: 1 2 
+  last in:  52 s ago, RSSI -21 dBm, SNR 10
+  frames:   4 out, 3 in
+  parts:    4 out, 9 in, 0 dropped, 0 retries
+  refused:  2 by type (not carried over LoRa), 0 could not be opened
+  queue:    0 dropped; reassembly timeouts 0
+  airtime:  2282 ms; module resets 0"""
+
+LORA_HH_BLOCK_WANT = {"fitted": True, "off": False, "connector": True, "configured": True,
+                      "address": 101, "network": 14, "version": "RYLR998_REYAX_V1.2.4",
+                      "heard_age_ms": 52000, "rssi": -21, "snr": 10, "frames_out": 4, "frames_in": 3,
+                      "frames_first": None, "parts_out": 4, "parts_in": 9, "parts_dropped": 0,
+                      "retries": 0, "refused_type": 2, "seal_fail": 0, "queue_dropped": 0,
+                      "reasm_timeouts": 0, "airtime_ms": 2282, "restarts": 0, "done": True}
+LORA_HH_PEERS_WANT = {1: {"up": True, "rssi": None, "snr": None, "age_ms": None},
+                      2: {"up": True, "rssi": None, "snr": None, "age_ms": None}}
+LORA_HH_HEADERS = [
+    ("LoRa (D77): module fitted but switched OFF, address 101, network 14",
+     {"fitted": True, "off": True, "done": False}),
+    ("LoRa (D77): module fitted, not configured yet, address 0, network 14",
+     {"fitted": True, "off": False, "configured": False}),
+    ("LoRa (D77): no module answering, address 101, network 14",
+     {"fitted": False, "done": True}),
+    ("LoRa (D77): this board has no connector for a module",
+     {"fitted": False, "connector": False, "done": True}),
+]
+
 LORA_HEADERS = [
     ("LoRa (D71): fitted and configured [OFF: chaos hook], UART1 rx GPIO4 tx GPIO5 reset wired",
      {"fitted": True, "off": True}),
@@ -1607,6 +2719,28 @@ def check_lora_parser():
             if st.get(k) != v:
                 failures += 1
                 print(f"FAIL lora header {k} in {line!r}: {st.get(k)!r}, want {v!r}")
+    # The same command on a handheld (D77): a different block, the same keys out of it.
+    st, peers = {}, {}
+    for line in LORA_HH_BLOCK.splitlines():
+        parse_lora_line(line, st, peers)
+    for k, want in LORA_HH_BLOCK_WANT.items():
+        if st.get(k) != want:
+            failures += 1
+            print(f"FAIL handheld lora status {k}: {st.get(k)!r}, want {want!r}")
+    if peers != LORA_HH_PEERS_WANT:
+        failures += 1
+        print(f"FAIL handheld lora peers: {peers}, want {LORA_HH_PEERS_WANT}")
+    for line, want in LORA_HH_HEADERS:
+        st = {}
+        if not parse_lora_line(line, st):
+            failures += 1
+            print(f"FAIL handheld lora header not parsed: {line!r}")
+            continue
+        for k, v in want.items():
+            if st.get(k) != v:
+                failures += 1
+                print(f"FAIL handheld lora header {k} in {line!r}: {st.get(k)!r}, want {v!r}")
+
     # Lines that are not part of a status block must fall through to the ordinary parsers.
     for line in ("I (30000) node: [GRID] links 2 handhelds 1 heap 81234 min 74400 time GPS",
                  "I (5000) MSG: [MSG] From 2 (Handheld 2): CX0130-00014",
@@ -1618,9 +2752,14 @@ def check_lora_parser():
 
 
 def check_lora_schedule():
-    """LoRa rounds: only when asked for, only on APs, and the right number of them."""
+    """LoRa rounds: only when asked for, on the right kind of board, and the right number of them.
+
+    The AP-side rounds are typed at an AP console, so their victims must be APs. `lora_handheld` is typed
+    at a handheld and needs a second handheld to carry traffic to, so it must only ever appear when there
+    are at least two - and it must never name an AP.
+    """
     failures = 0
-    for n_aps, n_hhs in ((3, 0), (3, 2), (2, 0), (1, 2)):
+    for n_aps, n_hhs in ((3, 0), (3, 2), (2, 0), (1, 2), (0, 2), (0, 1)):
         for share, want_any in ((0.0, False), (0.4, True), (1.0, True)):
             args = argparse.Namespace(hours=12, min_gap=3, max_gap=15, blackout=False, max_aps_down=2,
                                       scenario="mixed", lora=share > 0, lora_share=share)
@@ -1636,14 +2775,21 @@ def check_lora_schedule():
                     if share == 0.0:
                         failures += 1
                         print(f"FAIL {n_aps} APs seed {seed}: a LoRa round without --lora")
-                    if any(not v.startswith("AP") for v in e["victims"]):
+                    on_hh = e["kind"] in LORA_HH_KINDS
+                    want_prefix = "HH" if on_hh else "AP"
+                    if any(not v.startswith(want_prefix) for v in e["victims"]):
                         failures += 1
-                        print(f"FAIL {e['kind']} seed {seed}: a handheld as a victim {e['victims']}")
+                        print(f"FAIL {e['kind']} seed {seed}: victims {e['victims']} are not all "
+                              f"{want_prefix}")
+                    if on_hh and n_hhs < 2:
+                        failures += 1
+                        print(f"FAIL lora_handheld seed {seed}: scheduled with {n_hhs} handheld(s); it "
+                              "needs a second one to message")
                     want = 2 if e["kind"] in ("lora_only", "lora_blind") else 1
                     if len(set(e["victims"])) != want:
                         failures += 1
-                        print(f"FAIL {e['kind']} seed {seed}: {e['victims']}, want {want} distinct APs")
-                    if n_aps < 2 and e["kind"] in ("lora_only", "lora_blind"):
+                        print(f"FAIL {e['kind']} seed {seed}: {e['victims']}, want {want} distinct board(s)")
+                    if not on_hh and n_aps < 2 and e["kind"] in ("lora_only", "lora_blind"):
                         failures += 1
                         print(f"FAIL {e['kind']} seed {seed}: needs two APs, the grid has {n_aps}")
                     if e["kind"] == "lora_wedge" and e["outage_s"] != 0:
@@ -1652,6 +2798,14 @@ def check_lora_schedule():
                     if e["kind"] != "lora_wedge" and not 90 <= e["outage_s"] <= 300:
                         failures += 1
                         print(f"FAIL {e['kind']} seed {seed}: window {e['outage_s']} s outside 90-300")
+            if want_any and n_aps == 0 and n_hhs >= 2 and "lora_handheld" not in seen:
+                failures += 1
+                print(f"FAIL no AP on USB, {n_hhs} handhelds, share {share}: no handheld LoRa round was "
+                      "scheduled, so a battery-powered grid would get no LoRa coverage at all")
+            if want_any and n_aps == 0 and n_hhs < 2 and seen:
+                failures += 1
+                print(f"FAIL no AP on USB and {n_hhs} handheld: scheduled {sorted(seen)} with nothing "
+                      "that can run")
             if want_any and n_aps >= 2 and not seen:
                 failures += 1
                 print(f"FAIL {n_aps} APs share {share}: no LoRa round was ever scheduled")
@@ -1725,7 +2879,18 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--live", action="store_true", help="open the ports and inject faults (default: print the schedule)")
     ap.add_argument("--self-check", action="store_true", help="check parsers and schedule rules offline, then exit")
+    ap.add_argument("--secrets", default=str(ROOT / "firmware" / "common" / "lg_secrets.h"),
+                    help="this grid's lg_secrets.h, to open the APs' sealed status beacons (D68)")
+    ap.add_argument("--no-ble", action="store_true",
+                    help="do not watch the APs over BLE. Only for a run where no AP is armed: without "
+                         "it a message lost while an AP was restarting is reported as a finding")
     ap.add_argument("--hours", type=float, default=10)
+    ap.add_argument("--until-aps-die", action="store_true",
+                    help="run until every access point has gone silent long enough to call it dead, "
+                         "rather than for --hours. --hours becomes an upper bound")
+    ap.add_argument("--ap-dead-after", type=float, default=10.0, metavar="MIN",
+                    help="minutes of silence from every access point before they count as dead "
+                         "(default 10). A restart takes seconds, so this is about a flat battery")
     ap.add_argument("--seed", type=int, help="schedule seed (default: from the clock, printed so a run can be replayed)")
     ap.add_argument("--devices", nargs="+", help="bench names or device IDs to use (default: every board that answers)")
     ap.add_argument("--aps", type=int, default=3, help="APs assumed by a schedule-only run; a live run counts them")
@@ -1742,6 +2907,10 @@ def main():
                          "AP-to-AP echoes as the traffic. No board is taken out by them")
     ap.add_argument("--lora-share", type=float, default=0.35,
                     help="fraction of experiments that are LoRa rounds when --lora is given")
+    ap.add_argument("--extra-share", type=float, default=0.22,
+                    help="fraction of experiments that take the backup radio away (no_net) or walk the "
+                         "alert sequence announcement -> SOS -> all clear (alerts). no_net is what proves "
+                         "Wi-Fi stands on its own, as it must on a handheld with no module")
     ap.add_argument("--time-recovery", type=float, default=120,
                     help="seconds after a blackout to wait for grid time to come back from a handheld (D53) "
                          "before the PC sets it")
@@ -1754,6 +2923,15 @@ def main():
     ap.add_argument("--quiet-handhelds", action="store_true",
                     help="set handheld volume off for the run and restore it at the end")
     args = ap.parse_args()
+    if args.seed is None:
+        # Random per run, because a night that replays the same schedule stops being a sample of
+        # anything - and recorded, because a finding nobody can reproduce is half a finding.
+        args.seed = secrets.randbelow(100000)
+    if args.until_aps_die:
+        # The schedule still has to be generated against *some* horizon. Make it longer than any battery
+        # could plausibly last, so the run ends because the access points died and not because the plan
+        # ran out of entries.
+        args.hours = max(args.hours, 48.0)
     if args.scenario == "blackout":
         args.blackout = True
     if args.scenario == "lora":

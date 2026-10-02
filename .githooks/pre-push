@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# Refuses a push while anything in docs/TEMPORARY.md is still in the tree.
+#
+# Owner, 2026-09-30: "this will absolutely need to be taken off before we do a push to GitHub or
+# before we do a release." A note in a document is a reminder; this refuses.
+#
+# Installed by `python tools/install_hooks.py`, which points core.hooksPath at this directory.
+# To push anyway - for a branch nobody will release from - set LG_ALLOW_TEMPORARY=1 for that one
+# command. That is deliberately awkward and deliberately visible in the shell history.
+set -e
+
+if [ "${LG_ALLOW_TEMPORARY}" = "1" ]; then
+    echo "pre-push: LG_ALLOW_TEMPORARY=1, so the temporary-code check was skipped." >&2
+    echo "          docs/TEMPORARY.md still lists what has to come out." >&2
+    exit 0
+fi
+
+root=$(git rev-parse --show-toplevel)
+if [ ! -f "$root/tools/check_release.py" ]; then
+    exit 0
+fi
+
+if python "$root/tools/check_release.py" --release; then
+    exit 0
+fi
+
+cat >&2 <<'MSG'
+
+PUSH REFUSED. The tree still contains code that exists only for the bench.
+
+These were taken deliberately and are meant to be removed; docs/TEMPORARY.md says what has to
+become true before each one can go. Remove them, or push with:
+
+    LG_ALLOW_TEMPORARY=1 git push ...
+
+which records in your shell history that you knew.
+MSG
+exit 1

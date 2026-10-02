@@ -43,7 +43,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEVICES = ROOT / "tools" / "bench_devices.json"
-PARTITIONS = ROOT / "firmware" / "common" / "partitions_4mb.csv"
+PARTITIONS_DEFAULT = ROOT / "firmware" / "common" / "partitions_4mb.csv"
 PANIC = re.compile(r"Guru Meditation|abort\(\) was called|assert failed", re.IGNORECASE)
 LGID = re.compile(r"LGID: (LG-[A-Z]-[A-Z0-9]{3}-[0-9A-HJKMNP-TV-Z]{10}|NONE)\s")
 # The ID itself, not merely what follows "LGID: ": a log line tagged LGID would otherwise be read
@@ -176,9 +176,46 @@ def idf(project, target, *extra):
             "-D", f"SDKCONFIG={proj / f'sdkconfig.{target}'}", *extra]
 
 
-def esptool(port, *args, capture=True):
-    return subprocess.run([sys.executable, "-m", "esptool", "--port", port, *args],
+def esptool(port, *args, chip=None, capture=True):
+    """
+    esptool, told which chip it is talking to whenever the caller knows (which is always, since the
+    device map gives every board a target). Detection is not reliable on every board: the E40 on the
+    bench refused `erase-flash` and an identity `write-flash` with no --chip and took both with one
+    (2026-09-29). idf.py always passes the chip, which is why the app flash between those two steps
+    worked while they did not.
+    """
+    chip_args = ["--chip", chip] if chip else []
+    return subprocess.run([sys.executable, "-m", "esptool", *chip_args, "--port", port, *args],
                           capture_output=capture, text=True, cwd=ROOT)
+
+
+SLOW_BAUD = 115200    # every ESP32 bootloader's own rate, and the one a noisy bridge still manages
+
+
+def flash_app(fw, target, d, log):
+    """Flash the application, dropping to 115200 if the default rate will not survive the cable.
+
+    Some USB bridges cannot hold idf.py's default flash rate. The E40 on this bench (Big Pepa, a CH340)
+    fails it every time with `Serial data stream stopped: Possible serial noise or corruption` - four
+    attempts in a row on 2026-10-01 and 10-02 - and then flashes perfectly at 115200, hash verified. The
+    board is not faulty and the firmware is not wrong: the link simply will not run that fast, and
+    nothing in the error says so.
+
+    A board known to need it says `"flash_baud": 115200` in tools/bench_devices.json and goes straight
+    there, because the fast attempt costs a minute and always fails. Any other board tries the default
+    first and falls back once, so a cable that degrades is handled without anyone having to notice.
+    """
+    want = d.get("flash_baud")
+    rates = [want] if want else [None, SLOW_BAUD]
+    for n, baud in enumerate(rates):
+        at = f" at {baud} baud" if baud else ""
+        print(f"  flashing{at}{' (retry)' if n else ''} ...", flush=True)
+        extra = ["-b", str(baud)] if baud else []
+        if run(idf(fw["project"], target, "-p", d["port"], *extra, "flash"), log) == 0:
+            return True, f"flashed{at}"
+        if n + 1 < len(rates):
+            print(f"    that rate did not survive the cable; trying {rates[n + 1]} baud", flush=True)
+    return False, f"flash failed:\n    {tail(log)}"
 
 
 def build(fw_name, fw, target):
@@ -272,16 +309,40 @@ def mint_id(role, board, mac, created):
     return f"LG-{role}-{board}-{tail_chars}", nonce
 
 
-def identity_partition():
-    for row in csv.reader(l for l in PARTITIONS.read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")):
+def partitions_for(fw):
+    """
+    The partition CSV a firmware project actually builds with, read from its own sdkconfig.defaults.
+
+    The APs use a layout with OTA slots (D81) in which "lgid" sits at a different offset from the
+    handhelds' layout. Assuming one table for every board would write an AP's identity at the wrong
+    offset and destroy its device ID - on a board that, once it is on battery, has no USB to recover
+    through. So the offset is always read from the table that project builds with.
+    """
+    if fw is None:
+        return PARTITIONS_DEFAULT
+    defaults = ROOT / fw["project"] / "sdkconfig.defaults"
+    if defaults.exists():
+        m = re.search(r'^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="([^"]+)"', defaults.read_text(encoding="utf-8"),
+                      re.MULTILINE)
+        if m:
+            path = (ROOT / fw["project"] / m.group(1)).resolve()
+            if path.exists():
+                return path
+            sys.exit(f"{defaults} names a partition table that does not exist: {path}")
+    return PARTITIONS_DEFAULT
+
+
+def identity_partition(fw=None):
+    table = partitions_for(fw)
+    for row in csv.reader(l for l in table.read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")):
         cells = [c.strip() for c in row]
         if cells and cells[0] == "lgid":
             return cells[3], int(cells[4], 16)
-    sys.exit(f"No lgid partition in {PARTITIONS}")
+    sys.exit(f"No lgid partition in {table}")
 
 
-def write_identity(device, port):
-    offset, size = identity_partition()
+def write_identity(device, port, chip=None, fw=None):
+    offset, size = identity_partition(fw)
     rows = [["key", "type", "encoding", "value"], ["lgid", "namespace", "", ""],
             ["id", "data", "string", device["id"]], ["role", "data", "string", device["role"]],
             ["board", "data", "string", device["board"]], ["created", "data", "u32", str(device["id_created"])]]
@@ -302,7 +363,7 @@ def write_identity(device, port):
                               str(size)], capture_output=True, text=True, cwd=ROOT)
         if gen.returncode != 0:
             return False, "identity image generation failed: " + (gen.stderr or gen.stdout).strip()[-300:]
-        wr = esptool(port, "write-flash", offset, str(bin_path))
+        wr = esptool(port, "write-flash", offset, str(bin_path), chip=chip)
         if wr.returncode != 0:
             return False, "identity write failed"
     return True, "identity written"
@@ -476,18 +537,18 @@ def flash_board(data, d, args, built):
     # 3. Erase (factory reset) when asked.
     if args.erase:
         print("  erasing all flash (settings, boot counter, identity) ...", flush=True)
-        if esptool(d["port"], "erase-flash").returncode != 0:
+        if esptool(d["port"], "erase-flash", chip=target).returncode != 0:
             return False, "erase failed"
 
     # 4. Flash the application.
-    print("  flashing ...", flush=True)
     log = ROOT / fw["project"] / f"flash-{d['name']}.log"
-    if run(idf(fw["project"], target, "-p", d["port"], "flash"), log) != 0:
-        return False, f"flash failed:\n    {tail(log)}"
+    ok, detail = flash_app(fw, target, d, log)
+    if not ok:
+        return False, detail
 
     # 5. Identity partition: for new IDs, after an erase, or when asked to rewrite it from the map.
     if mint or args.erase or args.update_identity:
-        ok, detail = write_identity(d, d["port"])
+        ok, detail = write_identity(d, d["port"], chip=target, fw=fw)
         if not ok:
             return False, detail
         save_map(data)

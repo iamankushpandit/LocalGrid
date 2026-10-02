@@ -86,7 +86,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM29",
+      "port": "COM41",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -98,7 +98,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM28",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -110,7 +110,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM16",
+      "port": "",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -122,7 +122,7 @@
     },
     {
       "name": "hosyond",
-      "port": "COM30",
+      "port": "COM36",
       "role": "H",
       "board": "HY3",
       "firmware": "handheld",
@@ -155,14 +155,15 @@
     },
     {
       "name": "e28",
-      "port": "COM31",
+      "port": "COM30",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
-      "id": "LG-H-E28-XRSRKB0XR4",
+      "id": "LG-H-E28-D4YM93J59B",
       "notes": "LCDWIKI E32R28T-1 2.8in, added 2026-09-18. Prototype roster user 'Handheld 4'. Not yet plugged in: set the port; the first flash mints its ID.",
       "device_index": 4,
-      "id_created": 1789757008
+      "id_created": 1790742102,
+      "id_nonce": "36c7c38ee44e9253"
     },
     {
       "name": "cyd",
@@ -176,18 +177,20 @@
     },
     {
       "name": "e40",
-      "port": "COM33",
+      "port": "COM42",
       "role": "H",
       "board": "E40",
       "firmware": "handheld",
-      "id": "LG-H-E40-85PCGQN48Q",
-      "notes": "LCDWIKI E32R40T 4.0in, added 2026-09-18. Prototype roster user 'Handheld 6'. Not yet plugged in: set the port; the first flash mints its ID.",
+      "id": "LG-H-E40-TQ99HWP16S",
+      "notes": "LCDWIKI E32R40T 4.0in, added 2026-09-18. Prototype roster user 'Handheld 6'. Not yet plugged in: set the port; the first flash mints its ID. Its CH340 cannot hold idf.py's default flash rate: every attempt fails with 'Serial data stream stopped', and 115200 works first time (2026-10-02), so flash_baud pins it there.",
       "device_index": 6,
-      "id_created": 1789757078
+      "id_created": 1790742980,
+      "id_nonce": "a0ea8b33aafa60b3",
+      "flash_baud": 115200
     },
     {
       "name": "c6-alert",
-      "port": "COM8",
+      "port": "",
       "role": "H",
       "board": "C6L",
       "firmware": "handheld",
@@ -198,7 +201,7 @@
     },
     {
       "name": "e28b",
-      "port": "COM32",
+      "port": "COM34",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
