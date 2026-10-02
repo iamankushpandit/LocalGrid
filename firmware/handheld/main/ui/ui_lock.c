@@ -35,7 +35,24 @@ static const char *TAG = "UI";
 #define BAR_LOCK_W        32
 #define BAR_GAP           4
 #define BAR_SPARE         22     /* kept free left of the badge for the talking indicator */
-#define BAR_HOME_W        32     /* the house at the header's left edge */
+#define BAR_HOME_W        32     /* the house at the header's left edge, as it is drawn */
+/*
+ * How wide the house's *touch target* is, which is not how wide the house looks.
+ *
+ * The owner, 2026-10-01: getting home from Messages, Groups or Status "takes a lot of touches ... it's on
+ * a corner and doesn't have a lot of space". He was right, and the numbers said so: the house answered a
+ * 32x30 area - about 4 x 3.5 mm - while the back arrow and the plus beside it on the same header are both
+ * 40 wide. It was the smallest target on the screen, in the corner, on boards whose touch is resistive,
+ * and it is the one every screen needs to reach the launcher.
+ *
+ * Only the target grows. The icon stays where it is and the title still starts at BAR_HOME_W, so nothing
+ * moves on screen; the space this eats into is the title's, which is text and was never touchable. It is
+ * clamped at run time so it can never reach the battery and padlock cluster on the narrowest board.
+ *
+ * The height is already the whole header. Growing downward would start swallowing taps meant for the
+ * first row of a list, and answering the wrong thing is worse than missing - so this grows sideways only.
+ */
+#define BAR_HOME_HIT_W    72
 #define PADLOCK_W         14
 #define PADLOCK_H         18
 
@@ -262,7 +279,8 @@ static struct {
     lg_rect_t all;
     lg_rect_t battery;
     lg_rect_t lock;
-    lg_rect_t home;
+    lg_rect_t home;       /* where the house is drawn */
+    lg_rect_t home_hit;   /* and the larger area that answers for it */
 } s_bar;
 
 int16_t ui_bar_place(int16_t right, int16_t y, int16_t h)
@@ -281,6 +299,22 @@ int16_t ui_bar_place(int16_t right, int16_t y, int16_t h)
 int16_t ui_bar_home(int16_t y, int16_t h)
 {
     s_bar.home = (lg_rect_t){ 0, y, BAR_HOME_W, h };
+    /*
+     * Every caller places the right-hand cluster first (ui_bar_place), so its left edge is known here and
+     * the target can be kept clear of it by a gap. Without that clamp a narrow screen would have the
+     * house answering for the battery.
+     */
+    int16_t w = BAR_HOME_HIT_W;
+    if (s_bar.placed) {
+        int16_t limit = (int16_t)(s_bar.all.x - BAR_GAP);
+        if (w > limit) {
+            w = limit;
+        }
+    }
+    if (w < BAR_HOME_W) {
+        w = BAR_HOME_W;   /* never smaller than the icon it answers for */
+    }
+    s_bar.home_hit = (lg_rect_t){ 0, y, w, h };
     s_bar.home_placed = true;
     return BAR_HOME_W;
 }
@@ -403,7 +437,7 @@ bool ui_bar_touch(int16_t x, int16_t y, bool down)
             s_bar.touching = true;
             if (lg_rect_hit(&s_bar.lock, x, y)) {
                 s_bar.pressed = PRESS_LOCK;
-            } else if (s_bar.home_placed && lg_rect_hit(&s_bar.home, x, y)) {
+            } else if (s_bar.home_placed && lg_rect_hit(&s_bar.home_hit, x, y)) {
                 s_bar.pressed = PRESS_HOME;
             }
             if (s_bar.pressed != PRESS_NONE) {
@@ -420,7 +454,7 @@ bool ui_bar_touch(int16_t x, int16_t y, bool down)
     s_bar.pressed = PRESS_NONE;
     if (was == PRESS_LOCK && lg_rect_hit(&s_bar.lock, x, y)) {
         ui_lock_engage();
-    } else if (was == PRESS_HOME && lg_rect_hit(&s_bar.home, x, y)) {
+    } else if (was == PRESS_HOME && lg_rect_hit(&s_bar.home_hit, x, y)) {
         ESP_LOGI(TAG, "[UI] Home tapped");
         ui_go(NAV_HOME, 0, 0, NULL);   /* the launcher repaints the whole panel */
     } else {

@@ -28,6 +28,15 @@ typedef enum {
     HH_LINK_CONNECTING,     /* joining a node's Wi-Fi and opening the session */
     HH_LINK_REGISTERING,    /* session open, waiting for the node to accept */
     HH_LINK_ONLINE,         /* registered with a node */
+    /*
+     * Reachable over LoRa and not over Wi-Fi (D77, D80). **Reported, never entered**: the service's own
+     * state machine never assigns this, so every `== HH_LINK_ONLINE` test inside the service keeps
+     * meaning what it meant. publish() maps SEARCHING to it when the module is carrying, which is the
+     * only place the distinction matters - a handheld that said "searching" while it was delivering
+     * messages over LoRa, which the bench watched it do on 2026-09-30, was telling its holder the one
+     * thing that was not true.
+     */
+    HH_LINK_LORA,
 } hh_link_t;
 
 typedef struct {
@@ -116,6 +125,15 @@ typedef struct {
     char           name[HH_NAME_MAX];
     int            node;                     /* node registered with or being joined, -1 none */
     char           node_ssid[HH_SSID_MAX];
+    /*
+     * D80: the AP this handheld is reaching over LoRa, -1 when none. Separate from `node` above,
+     * which means an AP there is a Wi-Fi session with or being joined - over LoRa there is no
+     * session, so anything keyed on `node` must keep saying "none". Reported because "on LoRa" by
+     * itself does not say *where* the messages are going, which is the first thing anyone asks.
+     * The name is empty when no beacon has named that AP yet; show the number then.
+     */
+    int            lora_peer;
+    char           lora_peer_ssid[HH_SSID_MAX];
     int8_t         rssi;
     uint8_t        ip[4];
     uint32_t       joins;                    /* registrations since boot */
@@ -141,6 +159,12 @@ typedef struct {
     uint32_t       psram_free;
     uint32_t       psram_min_free;
     uint32_t       positions_version;        /* D65: changes when any position, or this handheld's GPS, changes */
+    /*
+     * D78: this handheld's Wi-Fi is switched off on purpose, so LoRa can be tested in the field.
+     * A screen must show this differently from "no AP in range": the link reads SEARCHING and
+     * `problem` is empty, because nothing is wrong. The radio is stopped, not merely unassociated.
+     */
+    bool           wifi_off;
 } hh_status_t;
 
 /* Starts the service task. On failure the snapshot carries the problem for the screen. */
@@ -157,6 +181,34 @@ void hh_service_scan_now(void);
 
 /* Drops the node session and joins again from a fresh scan. */
 void hh_service_reconnect(void);
+
+/*
+ * D78: switch this handheld's Wi-Fi radio off, so a field test can prove what LoRa carried, or
+ * back on. Kept in NVS, so it survives the restart a field test brings. Safe from any task: it
+ * only posts to the service task's queue, which does the work.
+ *
+ * Switching off stops the radio rather than leaving it scanning, because a station that keeps
+ * scanning still spends the power and still fills the air. The GPS, the battery and anything LoRa
+ * carries keep working; on a handheld with no LoRa module this leaves the device with no radio at
+ * all, which the caller should say out loud before doing it.
+ */
+void hh_service_set_wifi(bool on);
+
+/*
+ * D78: the same switch as a **self-restoring** outage, for a chaos round. It comes back when the
+ * seconds are up even if whatever asked for it never returns, and it is deliberately not saved, so
+ * a restart ends it too. Capped at HH_WIFI_OFF_MAX_S, so a typo cannot take a handheld off the grid
+ * for a day. This is the mirror of the APs' `lora off` and `bb off` hooks; the bare switch above is
+ * the sticky one meant for carrying a handheld into a field.
+ */
+#define HH_WIFI_OFF_MAX_S 3600u
+void hh_service_wifi_off_for(uint32_t seconds);
+
+/* Seconds left of a timed outage: 0 when Wi-Fi is on, or off stickily rather than on a timer. */
+uint32_t hh_service_wifi_off_left_s(void);
+
+/* Whether the Wi-Fi radio is switched off (D78). Safe from any task. */
+bool hh_service_wifi_off(void);
 
 /*
  * Queues a text message. scope is LG_SCOPE_DIRECT (target = device index),
@@ -311,6 +363,44 @@ bool hh_service_gps_info(hh_gps_info_t *out);
 /* Before hh_service_start: the board profile's GPS UART pins, LG_PIN_NONE (-1) for none. With no
  * rx pin, or none of this called, nothing about a GPS runs. */
 void hh_service_set_gps_pins(int rx_gpio, int tx_gpio);
+
+/*
+ * D77: the board profile's LoRa connector, before the service starts. LG_PIN_NONE for a board with
+ * nowhere to wire a module, which is every board but the Freenove FNK0104B today. Setting pins is
+ * not a claim that a module is fitted: the driver looks for one and carries on without it.
+ */
+void hh_service_set_lora_pins(int rx_gpio, int tx_gpio, int rst_gpio);
+
+/* Whether this board has somewhere to wire a LoRa module at all (D77). */
+bool hh_service_lora_connector(void);
+
+/*
+ * D23, D77: what the Status screen shows about the second radio. A screen never includes hh_lora.h
+ * (D27), so this is the whole of what one may know -- the counters behind it stay in the service.
+ *
+ * `heard_s` is UINT32_MAX when no AP has ever been heard on this radio, which reads differently from
+ * "heard a long time ago" and is the difference between a module that is wired wrong and a grid that
+ * is out of range.
+ */
+typedef struct {
+    bool     connector;      /* this board has somewhere to wire a module */
+    bool     fitted;         /* one answered */
+    bool     configured;     /* and took every setting */
+    bool     off;            /* switched off from the console */
+    bool     peer;           /* an AP has been heard recently enough to transmit at */
+    uint16_t address;        /* this handheld's own LoRa address */
+    int8_t   rssi;           /* of the last frame in */
+    int8_t   snr;
+    uint32_t frames_in;
+    uint32_t frames_out;
+    uint32_t heard_s;        /* since the last frame in; UINT32_MAX for never */
+    uint32_t seal_fail;
+    uint32_t refused_type;
+    uint32_t restarts;       /* times a wedged module had to be reset */
+} hh_lora_ui_t;
+
+/* false (and out->fitted false) on a board with no connector or no module. Any task. */
+bool hh_service_lora_ui(hh_lora_ui_t *out);
 
 /*
  * D67: Unix seconds (grid time is UTC) as local wall-clock time in the grid's zone, which the AP

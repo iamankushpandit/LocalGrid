@@ -12,7 +12,9 @@
  *   handheld's own fix, "240 m NE of MAIN" without one, else the coordinates, and how old the
  *   position is past two minutes. It is looked at again each second and repainted only on change.
  * - After a minute untouched, if the setting is on, green characters fall down the panel. The
- *   first touch only dismisses it; the screen underneath is redrawn.
+ *   first touch only dismisses it; the screen underneath is redrawn. A message counts as activity
+ *   too: a banner raised, or the saver woken for one, holds the rain off for the full minute, so a
+ *   notification is never covered before it has been read.
  * - While the handheld is locked (D62), alerts still take the screen and are read as usual, and
  *   afterwards the lock screen comes back; other messages chime and count as unread, with no
  *   banner, and do not wake the saver.
@@ -20,6 +22,7 @@
  * Nothing here is allocated: the rain is fixed arrays, and the banner and alert draw straight to
  * the panel. When one goes away, the screen underneath is redrawn by the router.
  */
+#include "lg_matrix.h"
 #include "ui_overlay.h"
 
 #include <inttypes.h>
@@ -49,7 +52,19 @@ static const char *TAG = "UI";
 #define SAVER_IDLE_MS     60000
 #define RAIN_STEP_MS      70
 #define RAIN_COLS_MAX     30
-#define RAIN_TRAIL        12
+#define RAIN_ROWS_MAX     44     /* the tallest board's rows at this font; the glyph grid is this wide */
+#define RAIN_TRAIL_MIN    7      /* streams are not all the same length in the film, and were here */
+#define RAIN_TRAIL_MAX    16
+/*
+ * How the trail fades behind the head. The film's column is not one colour: the leading glyph is almost
+ * white, the one behind it is the bright green everyone remembers, and the rest falls away to nearly
+ * black. Ours was two colours - a white head and a flat C_ACCENT tail - which is what made it read as a
+ * terminal rather than as the film.
+ *
+ * Only the cells at these offsets are repainted each step, instead of the whole trail: a column repaints
+ * five cells rather than sixteen, which is what keeps a 30-column screen inside the 70 ms tick.
+ */
+#define RAIN_FADE_STOPS   4
 #define CONVS_TRACKED     (LG_MAX_DEVICES + LG_MAX_GROUPS + 1)
 #define ALERT_TEXT_LINES  8
 #define ALERT_WHERE_MS    1000   /* how often the sender's location line is looked at again */
@@ -81,6 +96,15 @@ typedef struct {
 } tracked_t;
 
 typedef enum { OV_NONE, OV_ALERT, OV_SAVER } cover_t;
+
+/*
+ * When the overlay last put something on the screen for the reader to look at: a banner, or waking the
+ * saver for a message. The saver used to count only touch as activity, so a notification that arrived
+ * after the idle minute woke the screen, drew its banner, and was covered again by the rain on the very
+ * next tick - about 40 ms later on the bench. The reader saw the rain stutter and never saw the message.
+ * Counting it as activity is what makes the banner last its fifteen seconds (owner, 2026-09-30).
+ */
+static uint32_t woke_ms;
 
 static struct {
     uint16_t  w;
@@ -123,6 +147,14 @@ static struct {
     int16_t   head[RAIN_COLS_MAX];
     uint8_t   speed[RAIN_COLS_MAX];
     uint8_t   wait[RAIN_COLS_MAX];
+    uint8_t   trail[RAIN_COLS_MAX];                     /* this column's length, RAIN_TRAIL_MIN..MAX */
+    /*
+     * Which glyph is in each cell. Kept rather than recomputed because a cell has to be repainted in a
+     * new colour as the head moves away from it, and picking a fresh glyph every time it fades would
+     * make the whole column churn. With this, a glyph changing in place is something the saver decides
+     * to do - which the film does, and this did not.
+     */
+    uint8_t   glyph[RAIN_COLS_MAX][RAIN_ROWS_MAX];
     uint32_t  rain_ms;
     uint32_t  rnd;
 } s;
@@ -463,21 +495,27 @@ static uint32_t rnd(void)
     return s.rnd;
 }
 
-static void rain_cell(uint8_t col, int16_t row, lg_color_t fg)
+/*
+ * Paint one cell. `fresh` picks a new glyph for it; otherwise it repaints the glyph already there in a
+ * new colour, which is how a trail fades without the column rewriting itself.
+ */
+static void rain_cell(uint8_t col, int16_t row, lg_color_t fg, bool fresh)
 {
-    if (row < 0 || row * s.row_h >= s.h) {
+    if (row < 0 || row >= RAIN_ROWS_MAX || row * s.row_h >= s.h) {
         return;
     }
-    static const char SET[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ<>*+-/|=";
+    if (fresh) {
+        s.glyph[col][row] = (uint8_t)(rnd() % LG_MATRIX_COUNT);
+    }
     lg_box_t b;
     memset(&b, 0, sizeof(b));
     b.rect = (lg_rect_t){ (int16_t)(col * s.col_w), (int16_t)(row * s.row_h), s.col_w, s.row_h };
     b.bg = b.outside = C_BG;
-    b.font = F_SMALL;
+    b.font = &lg_font_matrix_12;   /* the katakana, not the UI font */
     b.fg = fg;
     b.align = LG_ALIGN_CENTER;
     if (fg != C_BG) {
-        b.text[0] = SET[rnd() % (sizeof(SET) - 1u)];
+        snprintf(b.text, sizeof(b.text), "%s", LG_MATRIX_GLYPHS[s.glyph[col][row]]);
     }
     lg_draw_box(&b);
 }
@@ -489,10 +527,12 @@ static void show_saver(uint32_t now)
     lg_draw_scroll_area(0, 0);
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
+    memset(s.glyph, 0, sizeof(s.glyph));
     for (uint8_t i = 0; i < s.cols; i++) {
         s.head[i] = (int16_t)-(int16_t)(rnd() % (uint32_t)(s.h / s.row_h + 1));   /* scattered above */
-        s.speed[i] = (uint8_t)(1u + rnd() % 2u);
+        s.speed[i] = (uint8_t)(1u + rnd() % 3u);
         s.wait[i] = 0;
+        s.trail[i] = (uint8_t)(RAIN_TRAIL_MIN + rnd() % (RAIN_TRAIL_MAX - RAIN_TRAIL_MIN + 1u));
     }
     s.rain_ms = now;
     ESP_LOGI(TAG, "[UI] Screen saver on");
@@ -501,18 +541,50 @@ static void show_saver(uint32_t now)
 static void rain_step(void)
 {
     int16_t rows = (int16_t)(s.h / s.row_h);
+    /*
+     * The ramp, nearly white at the head and almost gone four stops later. Built here rather than as a
+     * table because lg_rgb is an inline function, not a constant expression.
+     */
+    const lg_color_t fade[RAIN_FADE_STOPS] = {
+        lg_rgb(0x7CFFA8),   /* just behind the head: the bright green the film is remembered for */
+        lg_rgb(0x2FBF63),
+        lg_rgb(0x12753A),
+        lg_rgb(0x07331A),   /* nearly out */
+    };
+    static const int16_t at[RAIN_FADE_STOPS] = { 1, 3, 6, 10 };   /* rows behind the head */
+
     for (uint8_t i = 0; i < s.cols; i++) {
         if (++s.wait[i] < s.speed[i]) {
             continue;
         }
         s.wait[i] = 0;
-        rain_cell(i, s.head[i], C_ACCENT);                        /* the old head joins the trail */
-        rain_cell(i, (int16_t)(s.head[i] - RAIN_TRAIL), C_BG);   /* the tail end clears */
         s.head[i]++;
-        rain_cell(i, s.head[i], C_TEXT);                          /* the new head is the bright one */
-        if (s.head[i] - RAIN_TRAIL > rows) {
-            s.head[i] = (int16_t)-(int16_t)(rnd() % 8u);
-            s.speed[i] = (uint8_t)(1u + rnd() % 2u);
+        /* The head itself: a new glyph, and near white, so the stream has a leading edge. */
+        rain_cell(i, s.head[i], C_TEXT, true);
+        /* Behind it, the same glyphs repainted dimmer as they are left behind. */
+        for (uint8_t k = 0; k < RAIN_FADE_STOPS; k++) {
+            if (at[k] < s.trail[i]) {
+                rain_cell(i, (int16_t)(s.head[i] - at[k]), fade[k], false);
+            }
+        }
+        rain_cell(i, (int16_t)(s.head[i] - s.trail[i]), C_BG, false);   /* the tail end clears */
+        /*
+         * And one glyph somewhere in the trail changes without moving. This is the detail that makes the
+         * code look alive rather than scrolled: in the film a character already on screen flickers into
+         * a different one. Done to one column in three per step, so it reads as occasional.
+         */
+        if ((rnd() & 3u) == 0u) {
+            int16_t back = (int16_t)(1 + rnd() % (uint32_t)s.trail[i]);
+            uint8_t k = 0;
+            while (k + 1u < RAIN_FADE_STOPS && at[k + 1] <= back) {
+                k++;
+            }
+            rain_cell(i, (int16_t)(s.head[i] - back), fade[k], true);
+        }
+        if (s.head[i] - s.trail[i] > rows) {
+            s.head[i] = (int16_t)-(int16_t)(rnd() % 12u);
+            s.speed[i] = (uint8_t)(1u + rnd() % 3u);
+            s.trail[i] = (uint8_t)(RAIN_TRAIL_MIN + rnd() % (RAIN_TRAIL_MAX - RAIN_TRAIL_MIN + 1u));
         }
     }
 }
@@ -579,6 +651,7 @@ static void watch(uint32_t now)
     bool locked = ui_lock_active();
     if (s.cover == OV_SAVER && (n_scope == LG_SCOPE_BROADCAST || !locked)) {
         s.cover = OV_NONE;   /* wake the screen for it (locked: only for an alert, the rest has no banner) */
+        woke_ms = now;       /* or the rain covers it again before it has been read */
         ui_redraw_current();
     }
     if (n_scope == LG_SCOPE_BROADCAST) {
@@ -613,6 +686,7 @@ static void watch(uint32_t now)
     s.banner = true;
     s.banner_down = false;
     s.banner_since = now;
+    woke_ms = now;
     draw_banner();
     ESP_LOGI(TAG, "[UI] Notified: %s in %s", who, s.pending_title);
 }
@@ -624,8 +698,10 @@ void ui_overlay_start(uint16_t w, uint16_t h)
     s.w = w;
     s.h = h;
     s.rnd = 0x1F35A2C7u;
-    s.row_h = F_SMALL->line_height;
-    s.col_w = (int16_t)(lg_draw_text_width(F_SMALL, NULL, "W") > 0 ? lg_draw_text_width(F_SMALL, NULL, "W") : 8);
+    /* Sized by the glyph font the rain actually draws with: katakana are not Montserrat's width. */
+    s.row_h = lg_font_matrix_12.line_height;
+    int16_t gw = lg_draw_text_width(&lg_font_matrix_12, NULL, LG_MATRIX_GLYPHS[0]);
+    s.col_w = (int16_t)(gw > 0 ? gw : 8);
     s.cols = (uint8_t)(w / s.col_w > RAIN_COLS_MAX ? RAIN_COLS_MAX : w / s.col_w);
     s.col_w = (int16_t)(w / s.cols);
     alert_layout(0);   /* Read's place is known before any alert; each alert lays itself out again */
@@ -713,7 +789,15 @@ void ui_overlay_tick(uint32_t now, uint32_t last_touch_ms)
         if (s.banner && now - s.banner_since >= BANNER_MS) {
             hide_banner();
         }
-        if (!s.alerts_only && now - last_touch_ms >= SAVER_IDLE_MS && lg_bsp_setting_get_bool("saver", true)) {
+        /*
+         * Idle since the last touch *or* the last thing shown, whichever is more recent. Both are
+         * measured as a difference from now rather than compared with each other, so neither reading
+         * breaks when the millisecond counter wraps.
+         */
+        uint32_t idle_touch = now - last_touch_ms;
+        uint32_t idle_shown = now - woke_ms;
+        uint32_t idle = woke_ms != 0 && idle_shown < idle_touch ? idle_shown : idle_touch;
+        if (!s.alerts_only && idle >= SAVER_IDLE_MS && lg_bsp_setting_get_bool("saver", true)) {
             show_saver(now);
         }
         break;
@@ -773,7 +857,9 @@ bool ui_overlay_touch(int16_t x, int16_t y, bool down)
 
 void ui_overlay_log(uint32_t now_ms, uint32_t last_touch_ms)
 {
-    ESP_LOGI(TAG, "[UI] Overlay: cover %d, banner %d, idle %" PRIu32 " ms, saver setting %s, unread %" PRIu32,
-             (int)s.cover, s.banner, now_ms - last_touch_ms, lg_bsp_setting_get_bool("saver", true) ? "on" : "off",
+    ESP_LOGI(TAG, "[UI] Overlay: cover %d, banner %d, idle %" PRIu32 " ms (shown %" PRIu32 " ms ago), "
+                  "saver setting %s, unread %" PRIu32,
+             (int)s.cover, s.banner, now_ms - last_touch_ms,
+             woke_ms != 0 ? now_ms - woke_ms : 0u, lg_bsp_setting_get_bool("saver", true) ? "on" : "off",
              ui_notify_unread_total());
 }

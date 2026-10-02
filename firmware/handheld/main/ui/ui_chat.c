@@ -97,6 +97,15 @@ static struct {
     bool       urgent;           /* this message goes as an urgent broadcast */
     bool       urgent_locked;    /* urgent is all this handheld may send here */
     bool       confirming;       /* the "send to everyone as urgent?" panel is up */
+    /*
+     * D79: "I'm safe". The alert unit (D66) could always stand its own SOS down; a touchscreen
+     * handheld could raise an urgent broadcast and then had no way to take it back. The key
+     * appears only while this handheld's own SOS is standing, so it is never a puzzle on an
+     * ordinary day, and it asks before it sends, like the urgent key does.
+     */
+    lg_rect_t  safe_key;
+    bool       has_sos;         /* our own urgent broadcast is standing, not yet stood down */
+    bool       confirm_safe;    /* the panel is asking about an all clear, not an urgent broadcast */
     bool       talk_held;        /* the finger is on the talk bar and we are talking */
     uint32_t   talk_up_ms;       /* when the finger left the bar, 0 while it is on it */
     hh_voice_state_t voice;      /* as last drawn */
@@ -468,6 +477,14 @@ static void paint_field(const lg_canvas_t *c, void *ctx)
                       (int16_t)(s.urgent_key.y + (s.urgent_key.h - lg_font_montserrat_16.line_height) / 2),
                       &lg_font_montserrat_16, NULL, ink, LG_SYMBOL_WARNING, strlen(LG_SYMBOL_WARNING));
     }
+    if (s.has_sos) {
+        /* D79: the calm accent, never the urgent key's red: this is the way out of an alarm. */
+        lg_paint_panel(c, &s.safe_key, &s.safe_key, C_BG, C_BG, C_ACCENT, 1, 4);
+        int16_t kw = lg_draw_text_width(&lg_font_montserrat_16, NULL, LG_SYMBOL_OK);
+        lg_paint_text(c, &s.safe_key, (int16_t)(s.safe_key.x + (s.safe_key.w - kw) / 2),
+                      (int16_t)(s.safe_key.y + (s.safe_key.h - lg_font_montserrat_16.line_height) / 2),
+                      &lg_font_montserrat_16, NULL, C_ACCENT, LG_SYMBOL_OK, strlen(LG_SYMBOL_OK));
+    }
     int16_t sx = (int16_t)(s.send.x + (s.send.w - lg_draw_text_width(&lg_font_montserrat_16, NULL, LG_SYMBOL_OK)) / 2);
     lg_paint_text(c, &s.send, sx, (int16_t)(s.send.y + (s.send.h - lg_font_montserrat_16.line_height) / 2),
                   &lg_font_montserrat_16, NULL, s.urgent ? C_ERROR : C_ACCENT, LG_SYMBOL_OK,
@@ -485,9 +502,19 @@ static void draw_field(void)
 #define CONFIRM_LINES 2
 #define CONFIRM_BTN_H 34
 
+/* D79: both defined with the sending code below, and both needed by place() and the panel. */
+static bool sos_standing(void);
+static void send_all_clear_now(void);
+
 static const char *const CONFIRM_TEXT[CONFIRM_LINES] = {
     "This takes over every",
     "screen until it is read.",
+};
+
+/* D79: what an all clear does, in the same two lines the urgent panel uses. */
+static const char *const SAFE_TEXT[CONFIRM_LINES] = {
+    "This stands your SOS",
+    "down on every screen.",
 };
 
 /*
@@ -520,19 +547,22 @@ static void paint_confirm(const lg_canvas_t *c, void *ctx)
 {
     (void)ctx;
     const lg_rect_t *r = &s.confirm;
-    lg_paint_panel(c, r, r, C_SURFACE, C_BG, C_ERROR, 2, 6);
+    /* D79: the same panel asks both questions; an all clear is calm, an urgent broadcast is not. */
+    lg_color_t tone = s.confirm_safe ? C_ACCENT : C_ERROR;
+    lg_paint_panel(c, r, r, C_SURFACE, C_BG, tone, 2, 6);
     int16_t y = (int16_t)(r->y + PAD);
-    centre_text(c, r, r, y, F_TITLE, C_ERROR, "Urgent broadcast");
+    centre_text(c, r, r, y, F_TITLE, tone, s.confirm_safe ? "Tell everyone" : "Urgent broadcast");
     y = (int16_t)(y + F_TITLE->line_height + 4);
     for (int i = 0; i < CONFIRM_LINES; i++) {
-        centre_text(c, r, r, y, F_SMALL, C_TEXT, CONFIRM_TEXT[i]);
+        centre_text(c, r, r, y, F_SMALL, C_TEXT, s.confirm_safe ? SAFE_TEXT[i] : CONFIRM_TEXT[i]);
         y = (int16_t)(y + F_SMALL->line_height);
     }
     lg_paint_panel(c, r, &s.confirm_no, C_SURFACE, C_SURFACE, C_OUTLINE, 1, 4);
-    lg_paint_panel(c, r, &s.confirm_yes, C_ERROR, C_SURFACE, C_ERROR, 1, 4);
+    lg_paint_panel(c, r, &s.confirm_yes, tone, C_SURFACE, tone, 1, 4);
     int16_t btn_y = (int16_t)(s.confirm_no.y + (CONFIRM_BTN_H - F_BODY->line_height) / 2);
     centre_text(c, &s.confirm_no, &s.confirm_no, btn_y, F_BODY, C_TEXT, "Cancel");
-    centre_text(c, &s.confirm_yes, &s.confirm_yes, btn_y, F_BODY, C_ACCENT_INK, "Send");
+    centre_text(c, &s.confirm_yes, &s.confirm_yes, btn_y, F_BODY, C_ACCENT_INK,
+                s.confirm_safe ? "I'm safe" : "Send");
 }
 
 static void draw_confirm(void)
@@ -557,10 +587,13 @@ static void place(bool keyboard)
     s.arrow = (lg_rect_t){ (int16_t)((s.w - ARROW_SIZE) / 2), (int16_t)(s.list.y + (s.list.h - ARROW_SIZE) / 2),
                            ARROW_SIZE, ARROW_SIZE };
     bool has_urgent = s.scope == LG_SCOPE_BROADCAST;
-    int16_t keys_w = (int16_t)(has_urgent ? 72 : 36);
+    s.has_sos = has_urgent && sos_standing();   /* D79: only then is there anything to stand down */
+    int16_t keys_w = (int16_t)(has_urgent ? (s.has_sos ? 108 : 72) : 36);
     s.field = (lg_rect_t){ PAD, input_y, (int16_t)(s.w - 2 * PAD - keys_w), INPUT_H };
     s.send = (lg_rect_t){ (int16_t)(s.w - PAD - 32), input_y, 32, INPUT_H };
     s.urgent_key = (lg_rect_t){ (int16_t)(s.w - PAD - 68), input_y, 32, INPUT_H };
+    s.safe_key = s.has_sos ? (lg_rect_t){ (int16_t)(s.w - PAD - 104), input_y, 32, INPUT_H }
+                           : (lg_rect_t){ 0, 0, 0, 0 };
     place_confirm();
     if (keyboard) {
         ui_kb_open(s.w, s.h, s.input, sizeof(s.input));
@@ -783,6 +816,33 @@ void ui_chat_tick(uint32_t now_ms)
 
 
 /* Hands the text to the service, urgent or not, and clears the field when it was taken. */
+/*
+ * D79: does this handheld have an SOS standing? The newest of our own urgent broadcasts decides,
+ * because an all clear is itself one: if that newest one is the all clear, we have already said we
+ * are safe and the key goes away.
+ */
+static bool sos_standing(void)
+{
+    hh_message_t m;
+    for (size_t i = 0; hh_service_message(i, &m); i++) {
+        if (m.mine && m.urgent && m.scope == LG_SCOPE_BROADCAST) {
+            return !m.all_clear;
+        }
+    }
+    return false;
+}
+
+/* D79: "<name> is safe", the same words the alert unit sends, so the two devices read alike. */
+static void send_all_clear_now(void)
+{
+    hh_status_t st;
+    hh_service_status(&st);
+    char text[HH_TEXT_MAX + 1];
+    snprintf(text, sizeof(text), "%s is safe", st.name[0] != '\0' ? st.name : "Handheld");
+    esp_err_t err = hh_service_send_all_clear(text);
+    ESP_LOGI(TAG, "[UI] All clear: %s", err == ESP_OK ? "queued" : esp_err_to_name(err));
+}
+
 static void send_now(void)
 {
     esp_err_t err = hh_service_send(s.scope, s.target, s.urgent, s.input);
@@ -823,10 +883,14 @@ bool ui_chat_touch(int16_t x, int16_t y, bool down)
             return false;
         }
         s.confirming = false;
-        if (yes) {
+        bool was_safe = s.confirm_safe;
+        s.confirm_safe = false;
+        if (yes && was_safe) {
+            send_all_clear_now();
+        } else if (yes) {
             send_now();
         } else {
-            ESP_LOGI(TAG, "[UI] Urgent broadcast cancelled");
+            ESP_LOGI(TAG, "[UI] %s cancelled", was_safe ? "All clear" : "Urgent broadcast");
         }
         draw_list();   /* the panel covered the list */
         draw_field();
@@ -894,6 +958,10 @@ bool ui_chat_touch(int16_t x, int16_t y, bool down)
     }
     if (s.new_below && lg_rect_hit(&s.arrow, x, y)) {
         scroll_to(max_scroll());   /* tapping the arrow goes to the new message */
+    } else if (s.has_sos && lg_rect_hit(&s.safe_key, x, y)) {
+        s.confirm_safe = true;   /* D79: asked about, like an urgent broadcast is */
+        s.confirming = true;
+        draw_confirm();
     } else if (s.scope == LG_SCOPE_BROADCAST && lg_rect_hit(&s.urgent_key, x, y)) {
         if (!s.urgent_locked) {
             s.urgent = !s.urgent;

@@ -77,6 +77,10 @@ void app_main(void)
 
     /* The service first, so the launcher's first paint already says what is happening. */
     hh_service_set_gps_pins(board != NULL ? board->gps_rx : LG_PIN_NONE, board != NULL ? board->gps_tx : LG_PIN_NONE);
+    /* D77: the LoRa connector, from the same profile. A board with none carries on exactly as now. */
+    hh_service_set_lora_pins(board != NULL ? board->lora_rx : LG_PIN_NONE,
+                             board != NULL ? board->lora_tx : LG_PIN_NONE,
+                             board != NULL ? board->lora_rst : LG_PIN_NONE);
     esp_err_t err = hh_service_start(&identity);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[NET] Network service not started: %s", esp_err_to_name(err));

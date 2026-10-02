@@ -245,6 +245,20 @@ static void refresh(void)
             snprintf(text, sizeof(text), "%s on %s, %02u:%02u", st->name, st->node_ssid, (unsigned)(day / 3600u),
                      (unsigned)(day / 60u % 60u));
             s.subline.fg = st->time_restricted ? C_WARNING : C_ACCENT;
+        } else if (st->link == HH_LINK_LORA) {
+            /*
+             * Not "looking for an AP": it has one, over the other radio, and messages are crossing.
+             * Named, like the Wi-Fi line above it, because which AP is carrying them is the next
+             * question - and on LoRa it may be a different AP from the one Wi-Fi would have chosen.
+             */
+            if (st->lora_peer_ssid[0] != '\0') {
+                snprintf(text, sizeof(text), "%s on LoRa via %s, %02u:%02u", st->name,
+                         st->lora_peer_ssid, (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u));
+            } else {
+                snprintf(text, sizeof(text), "%s on LoRa, %02u:%02u", st->name,
+                         (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u));
+            }
+            s.subline.fg = C_WARNING;
         } else {
             snprintf(text, sizeof(text), "%s", st->problem[0] ? st->problem : "Looking for an AP");
             s.subline.fg = st->problem[0] ? C_ERROR : C_WARNING;

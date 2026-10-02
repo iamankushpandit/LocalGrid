@@ -14,6 +14,7 @@
  */
 #include "hh_battery.h"
 #include "hh_gps.h"
+#include "hh_lora.h"
 #include "hh_mem.h"
 #include "hh_service.h"
 
@@ -93,6 +94,26 @@ static const char *TAG = "NET";
  * AP leave it one at a time, each seeing the move of the one before.
  */
 #define BALANCE_RSSI_DBM      (-70)
+
+/*
+ * Avoiding an AP that just refused this handheld (found by chaos, 2026-09-30).
+ *
+ * D54's balancing adds 1000 - 100 per handheld already attached, so among APs with a good signal the
+ * emptiest wins by a margin that swamps RSSI. That is right until an AP is empty *because* it is
+ * broken - and then it is exactly backwards. Everest ran out of heap, its Wi-Fi refused every
+ * association with reason 5 while its beacon went on advertising 15 free slots, and four handhelds
+ * chose it over Fuji and Denali - both healthier, both with a STRONGER signal - every ten seconds
+ * for the whole run, because it was the emptiest. One AP's memory problem became four handhelds
+ * offline, on a grid whose whole claim is that it has no single point of failure.
+ *
+ * So a refusal or a dropped link costs that AP a while in the wilderness, doubling up to a cap. The
+ * penalty is chosen to lose to any healthy AP (D54's own margin is at most a few hundred) while
+ * staying far above the disqualifiers below it, so an avoided AP that is the ONLY one left is still
+ * chosen - being briefly unwanted must never become being unreachable.
+ */
+#define AVOID_FIRST_MS        15000u
+#define AVOID_MAX_MS          120000u
+#define AVOID_PENALTY_DB      2000
 #define BALANCE_MIN_ONLINE_MS 60000
 #define BALANCE_STAGGER_MS    20000
 #define BALANCE_HOLDOFF_MS    180000
@@ -104,11 +125,23 @@ static const char *TAG = "NET";
 #define BACKOFF_MAX_MS        10000
 #define STA_BEACON_TIMEOUT_S  3
 #define NVS_NAMESPACE         "lghh"
+#define NVS_KEY_WIFI_OFF      "wifi_off"   /* D78: the Wi-Fi switch, in this service's own store */
 
 #define MIN_U32(a, b) ((a) < (b) ? (a) : (b))
 #define MAX_U32(a, b) ((a) > (b) ? (a) : (b))
 
 static const uint8_t s_discriminator[4] = LG_SECRET_DISCRIMINATOR;
+/* D77: seals LoRa frames between this handheld and an AP; never the APs' backbone key. */
+static const uint8_t s_lora_hh_key[32] = LG_SECRET_LORA_HH_KEY;
+
+/*
+ * D77: the board's LoRa connector, from the board profile, before the service starts. Declared here
+ * rather than beside its setter because hh_service_start needs it, and a handheld with no connector
+ * keeps -1 and never starts the driver at all.
+ */
+static struct {
+    int rx, tx, rst;
+} lp = { .rx = -1, .tx = -1, .rst = -1 };
 
 typedef enum {
     EV_SCAN_DONE,
@@ -122,6 +155,7 @@ typedef enum {
     EV_GROUP_EDIT,
     EV_RENAME,
     EV_GPS,          /* D65: the GPS task has a new fix, or lost one; read hh_gps_state */
+    EV_WIFI_SWITCH,  /* D78: value 1 turns this handheld's Wi-Fi on, 0 off so LoRa can be tested */
 } ev_type_t;
 
 typedef struct {
@@ -191,10 +225,29 @@ static struct {
     int       sock;
     int       joining;              /* node being joined or registered with, -1 none */
     int       last_node;
+    uint32_t  avoid_until_ms[HH_MAX_NODES];   /* an AP that refused or dropped us, and until when */
+    uint32_t  avoid_for_ms[HH_MAX_NODES];     /* how long the next avoidance of it lasts */
     int       preferred;
     bool      wifi_associating;     /* esp_wifi_connect called and not yet disconnected */
     bool      expect_disconnect;    /* we asked for the disconnect; its event is not a failure */
     bool      wifi_up;
+    /*
+     * D78: Wi-Fi switched off on purpose, so LoRa can be tested in the field rather than only on a
+     * bench with the backbone broken by hand. Kept in NVS, so it survives the restart that a field
+     * test will certainly involve; `wifi on` on the console is the way back, and so is the
+     * Settings screen. This is not a failure and never sets a problem string: the screen says the
+     * radio is off deliberately, which is a different thing from "no AP in range".
+     */
+    bool      wifi_off;
+    bool      wifi_stopped;         /* esp_wifi_stop has been called and not yet undone */
+    /*
+     * A timed outage for a chaos round: it restores itself when the clock says so, even if
+     * whatever asked for it never comes back, and it is deliberately NOT saved, so a restart
+     * also ends it. 0 means this switch is the sticky field-test one instead.
+     */
+    uint32_t  wifi_off_until_ms;
+    uint32_t  lora_announce_ms;     /* D80: when this handheld last said it is reachable over LoRa */
+    bool      lora_announced;       /* false until the first one, which goes out without waiting */
     bool      send_failed;
     bool      dirty;
     int       tcp_tries;
@@ -688,13 +741,41 @@ static void position_mirror(uint32_t subject)
     xSemaphoreGive(s.lock);
 }
 
+/*
+ * D77: a frame that arrived over LoRa. Called from hh_lora_poll, which the service task drives, so
+ * this is the service task and lg_client stays single-threaded.
+ *
+ * It goes into lg_client_on_frame, the same door a frame off the socket comes through, because a
+ * frame that crossed on LoRa is the same frame that would have crossed on Wi-Fi (D71). Nothing here
+ * treats it as special: routing, duplicate suppression and the sealing of 1:1 messages are the
+ * core's, and they do not care which radio carried it.
+ */
+static void on_lora_frame(const uint8_t *frame, size_t len, uint16_t from_ap)
+{
+    ESP_LOGI("MSG", "[MSG] Frame over LoRa from AP %u, %u bytes", (unsigned)from_ap, (unsigned)len);
+    lg_client_on_frame(&s.client, frame, len);
+}
+
 /* ---- lg_client io (service task only) ---- */
 
 static bool io_send(void *ctx, const uint8_t *frame, size_t len)
 {
     (void)ctx;
-    if (s.sock < 0 || len > LG_FRAME_MAX) {
+    if (len > LG_FRAME_MAX) {
         return false;
+    }
+    /*
+     * D77, D74: offer it to LoRa first, and let the radio's own policy decide. One radio carries at
+     * a time, so this costs no airtime while the session is up -- except for an urgent broadcast, an
+     * SOS or an all clear, which go on both, because finding out the link had died *after* losing an
+     * alert is the failure the second radio exists to prevent.
+     *
+     * `wifi_ok` is this session being open. When it is not, LoRa is the only way out, which is the
+     * case D78's Wi-Fi switch exists to let someone test on purpose.
+     */
+    hh_lora_offer(frame, len, s.sock >= 0 && s.link == HH_LINK_ONLINE);
+    if (s.sock < 0) {
+        return false;   /* nothing to send it down; LoRa may still have taken it above */
     }
     lg_wr16(s.tx, (uint16_t)len);
     memcpy(s.tx + 2, frame, len);
@@ -765,6 +846,12 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         s.last_ping_ms = s.online_since_ms;
         s.last_node = (int)ev->value;
         s.backoff_ms = 0;
+        /* A session that actually works clears the grudge against this AP: the avoidance exists to
+         * route around a broken one, not to remember that it was ever briefly broken. */
+        if ((int)ev->value >= 0 && (int)ev->value < HH_MAX_NODES) {
+            s.avoid_until_ms[(int)ev->value] = 0;
+            s.avoid_for_ms[(int)ev->value] = 0;
+        }
         gp.pos_due = true;   /* D65: our position at registration, from the service loop */
         set_problem("");
         ESP_LOGI("GRID", "[GRID] Registered with node %" PRIu32 " as device %" PRIu32 " (%s)", ev->value, s.device,
@@ -1013,8 +1100,21 @@ static int pick_node(uint32_t now)
             any_time = true;
         }
     }
+    /*
+     * No score floor. `best_score` used to start at -1000, as a "nothing chosen yet" sentinel, and that
+     * quietly became a minimum quality every avoided AP failed: AVOID_PENALTY_DB is 2000, so an AP that
+     * had refused us scored about -1550 (-47 dBm, five handhelds: -47 + 500 - 2000) and was never
+     * chosen, even when it was the only AP on the grid. D84 promises the opposite in as many words -
+     * "an avoided AP that is the only one left is still chosen" - so the guarantee was false.
+     *
+     * Measured on Channi, 2026-10-01, with Fuji the only AP alive: `[NET] Scan found 1 usable node(s)`
+     * every ten seconds for minutes on end, the handheld sitting on LoRa with a usable AP at -47 dBm in
+     * earshot, until the avoidance expired by itself. The penalty is meant to order APs, not to veto
+     * one, so whether anything has been chosen yet is now tracked by `best` alone and the only way to
+     * choose nothing is for every candidate to fail node_usable.
+     */
     int best = -1;
-    int best_score = -1000;
+    int best_score = 0;
     for (int i = 0; i < HH_MAX_NODES; i++) {
         const node_cand_t *c = &s.cand[i];
         if (!node_usable(c, now) || (s.preferred >= 0 && i != s.preferred)) {
@@ -1027,13 +1127,18 @@ static int pick_node(uint32_t now)
         if (c->rssi >= BALANCE_RSSI_DBM) {
             score += 1000 - 100 * others_on(i);   /* good signal: the fewest handhelds wins (D54) */
         }
+        /* ...unless it is empty because it turned us away. Applied after the balancing bonus, on
+         * purpose: this is the correction to that bonus, not a competitor to it. */
+        if (s.avoid_until_ms[i] != 0 && (int32_t)(now - s.avoid_until_ms[i]) < 0) {
+            score -= AVOID_PENALTY_DB;
+        }
         if (any_backbone && !(c->flags & LG_DISC_FLAG_BACKBONE)) {
             score -= 100000;
         }
         if (any_time && !(c->flags & LG_DISC_FLAG_TIME)) {
             score -= 10000 + TIME_PREFER_DB;   /* without grid time only urgent broadcasts go out (D6) */
         }
-        if (score > best_score) {
+        if (best < 0 || score > best_score) {
             best_score = score;
             best = i;
         }
@@ -1042,6 +1147,37 @@ static int pick_node(uint32_t now)
 }
 
 static void drop_link(const char *why, bool retry_now);
+static void apply_wifi_switch(uint32_t now);   /* D78: the Wi-Fi switch, defined with step() */
+
+/*
+ * D78: the Wi-Fi switch lives in this service's own NVS namespace, not in the board-support
+ * settings store, because the service must not include a board-support header (D27). The console
+ * and the screens reach it through hh_service_set_wifi and hh_service_wifi_off.
+ */
+static bool load_wifi_off(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    uint8_t v = 0;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_WIFI_OFF, &v);
+    nvs_close(h);
+    return err == ESP_OK && v != 0;
+}
+
+static void save_wifi_off(bool off)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "[NET] Could not save the Wi-Fi switch; it will be on again after a restart");
+        return;
+    }
+    if (nvs_set_u8(h, NVS_KEY_WIFI_OFF, off ? 1u : 0u) == ESP_OK) {
+        (void)nvs_commit(h);
+    }
+    nvs_close(h);
+}
 static void leave_gracefully(void);
 
 /* Online on an AP with no grid time while another usable AP has it: move, once it has lasted. */
@@ -1134,6 +1270,20 @@ static void drop_link(const char *why, bool retry_now)
 {
     uint32_t now = now_ms();
     bool was_online = s.link == HH_LINK_ONLINE;
+    /*
+     * Which AP this went wrong on, before the fields that say so are cleared below. Every caller of
+     * this is a failure - a refused association, a session that stopped answering, a registration
+     * the AP would not complete - so the AP that was involved has earned a spell of being second
+     * choice. Doubling, capped, and cleared the moment a session with it actually works.
+     */
+    int blame = s.joining >= 0 ? s.joining : s.last_node;
+    if (blame >= 0 && blame < HH_MAX_NODES) {
+        uint32_t span = s.avoid_for_ms[blame] == 0 ? AVOID_FIRST_MS
+                      : MIN_U32(s.avoid_for_ms[blame] * 2u, AVOID_MAX_MS);
+        s.avoid_for_ms[blame] = span;
+        s.avoid_until_ms[blame] = now + span;
+        ESP_LOGW(TAG, "[NET] AP %d passed over for %" PRIu32 " s after this", blame, span / 1000u);
+    }
     if (s.sock >= 0) {
         close(s.sock);
         s.sock = -1;
@@ -1281,6 +1431,8 @@ static void on_scan_done(uint32_t now)
     }
     esp_wifi_clear_ap_list();
     int found = 0;
+    int heard = 0, full = 0, weak = 0;
+    const node_cand_t *named = NULL;   /* the last AP heard by name: the one to blame when only one is */
     for (int i = 0; i < HH_MAX_NODES; i++) {
         node_cand_t *c = &s.cand[i];
         if (!c->valid) {
@@ -1291,6 +1443,20 @@ static void on_scan_done(uint32_t now)
             continue;
         }
         found += node_usable(c, now) ? 1 : 0;
+        /*
+         * Counted separately from `found` so the handheld can say *why* it is not online. An AP that
+         * is heard loud and clear but advertises no room is not "out of range", and telling the owner
+         * it is sends them to move the handheld when the remedy is to free a slot or start another AP.
+         */
+        if (c->ssid[0] != '\0' && now - c->heard_ms <= NODE_FRESH_MS) {
+            heard++;
+            named = c;
+            if (c->free_slots == 0) {
+                full++;
+            } else if (c->rssi < RSSI_FLOOR_DBM) {
+                weak++;
+            }
+        }
         ESP_LOGI(TAG, "[NET] Heard AP %d \"%s\" %d dBm, %u attached, %u free, backbone %s, grid time %s, %" PRIu32
                  " ms ago", i, c->ssid[0] != '\0' ? c->ssid : "(name unknown)", c->rssi, c->clients, c->free_slots,
                  (c->flags & LG_DISC_FLAG_BACKBONE) ? "yes" : "no", (c->flags & LG_DISC_FLAG_TIME) ? "yes" : "no",
@@ -1308,7 +1474,27 @@ static void on_scan_done(uint32_t now)
     }
     s.backoff_ms = s.backoff_ms == 0 ? BACKOFF_FIRST_MS : MIN_U32(s.backoff_ms * 2, BACKOFF_MAX_MS);
     s.next_attempt_ms = now + s.backoff_ms;
-    set_problem(found > 0 && s.preferred >= 0 ? "The chosen AP is not in range" : "No LocalGrid AP in range");
+    char why[HH_PROBLEM_MAX];
+    if (found > 0 && s.preferred >= 0) {
+        snprintf(why, sizeof(why), "The chosen AP is not in range");
+    } else if (heard == 0) {
+        snprintf(why, sizeof(why), "No LocalGrid AP in range");
+    } else if (full == heard) {
+        if (heard == 1 && named != NULL) {
+            /* The name is bounded: HH_PROBLEM_MAX is 72 and an AP name may be 32. */
+            snprintf(why, sizeof(why), "%.16s is in range but full (%u handhelds)",
+                     named->ssid, (unsigned)named->clients);
+        } else {
+            snprintf(why, sizeof(why), "All %d APs in range are full; waiting for room", heard);
+        }
+    } else if (weak == heard) {
+        snprintf(why, sizeof(why), heard == 1 ? "The only AP in range is too weak to use"
+                                              : "Every AP in range is too weak to use");
+    } else {
+        /* Reachable only when an AP is heard but fails node_usable for a reason not named above. */
+        snprintf(why, sizeof(why), "%d AP(s) in range, none of them usable yet", heard);
+    }
+    set_problem(why);
     ESP_LOGI(TAG, "[NET] Scan found %d usable node(s); scanning again in %" PRIu32 " s", found, s.backoff_ms / 1000);
 }
 
@@ -1379,6 +1565,27 @@ static void handle_event(const ev_t *ev, uint32_t now)
     case EV_GPS:
         gps_update();
         break;
+    case EV_WIFI_SWITCH: {
+        bool off = ev->value != 0;
+        uint32_t seconds = (uint32_t)ev->id[0];   /* 0: the sticky field-test switch */
+        if (off == s.wifi_off && (off ? s.wifi_off_until_ms == 0 : true) && seconds == 0) {
+            break;                 /* already there: do not tear a working link down to rebuild it */
+        }
+        s.wifi_off = off;
+        s.wifi_off_until_ms = off && seconds != 0 ? now + seconds * 1000u : 0u;
+        if (s.wifi_off_until_ms == 1u) {
+            s.wifi_off_until_ms = 2u;   /* 0 means "sticky", so never land on it by wrapping */
+        }
+        if (seconds == 0) {
+            save_wifi_off(off);   /* the field switch survives the restart a field test brings */
+        } else {
+            save_wifi_off(false); /* a chaos outage is never remembered: a restart ends it */
+            ESP_LOGW(TAG, "[NET] Wi-Fi off for %" PRIu32 " s (chaos hook); it comes back on its own",
+                     seconds);
+        }
+        apply_wifi_switch(now);
+        break;
+    }
     case EV_RENAME: {
         size_t len = strlen(ev->new_name);   /* hh_service_set_name copied at most LG_NAME_MAX - 1 bytes */
         if (lg_client_set_name(&s.client, (const uint8_t *)ev->new_name, len) != LG_OK) {
@@ -1520,9 +1727,158 @@ static void voice_power(void)
     }
 }
 
+/*
+ * D78: take the Wi-Fi radio down, or bring it back. Called on the service task only.
+ *
+ * The radio is stopped rather than merely left unassociated, because the point is a field test of
+ * LoRa: a station that keeps scanning still spends the power and still fills the air with probe
+ * requests, and "Wi-Fi off" that leaves the radio running would prove nothing about what LoRa
+ * carried. Stopping it is also what makes this a useful battery setting.
+ */
+static void apply_wifi_switch(uint32_t now)
+{
+    if (s.wifi_off && !s.wifi_stopped) {
+        leave_gracefully();        /* let the AP see us go, so presence does not wait for a timeout */
+        if (s.sock >= 0) {
+            close(s.sock);
+            s.sock = -1;
+        }
+        s.rx_fill = 0;
+        s.send_failed = false;
+        lg_client_disconnected(&s.client);
+        s.wifi_associating = false;
+        s.expect_disconnect = true;
+        s.wifi_up = false;
+        s.joining = -1;
+        s.link = HH_LINK_SEARCHING;
+        s.state_since_ms = now;
+        s.problem[0] = '\0';       /* not a fault: the screen says the radio is off on purpose */
+        esp_err_t err = esp_wifi_stop();
+        s.wifi_stopped = true;     /* even on an error: never loop trying to stop it */
+        s.dirty = true;
+        ESP_LOGW(TAG, "[NET] Wi-Fi switched OFF on request (D78); LoRa carries whatever it can%s",
+                 err == ESP_OK ? "" : " (esp_wifi_stop failed, but the station is down)");
+    } else if (!s.wifi_off && s.wifi_stopped) {
+        esp_err_t err = esp_wifi_start();
+        s.wifi_stopped = false;
+        s.expect_disconnect = false;
+        s.last_scan_ms = 0;        /* scan at once rather than waiting out the interval */
+        s.backoff_ms = 0;
+        s.next_attempt_ms = now;
+        s.link = HH_LINK_SEARCHING;
+        s.state_since_ms = now;
+        s.dirty = true;
+        if (err != ESP_OK) {
+            set_problem("Wi-Fi would not start again; restart this handheld");
+            ESP_LOGE(TAG, "[NET] Wi-Fi switched on but esp_wifi_start failed: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "[NET] Wi-Fi switched ON; searching for an AP");
+        }
+    }
+}
+
+/*
+ * D80: tell the APs this handheld is reachable over LoRa, on a timer, while Wi-Fi is not carrying.
+ *
+ * Only then. With a session up an AP already knows far more than this would say, and D74's one
+ * radio at a time means the frame would be refused anyway -- so the check here is not a duplicate of
+ * the policy in hh_lora_offer, it is what keeps a sequence number from being spent to no purpose.
+ *
+ * Why it is sent at all: an AP learns of a handheld the first time that handheld speaks. Without
+ * this, the first thing it ever says is the thing that mattered, and the acknowledgement for it has
+ * to wait for the AP to work out where to send it. HH_LORA_HEARTBEAT_MS is two minutes, which is
+ * slow on purpose (D71: this is a battery, and a radio measured in seconds per frame).
+ *
+ * It is skipped when no AP has been heard recently, because transmitting at nobody is what a
+ * handheld's battery can least afford -- with one exception: the first announcement after the
+ * session goes away is sent regardless, or a handheld carried out of range would never speak first.
+ */
+bool hh_service_lora_ui(hh_lora_ui_t *out);   /* defined below; the radio's own facts */
+
+static void lora_announce(uint32_t now)
+{
+    hh_lora_ui_t l;
+    (void)hh_service_lora_ui(&l);
+    if (!l.fitted || !l.configured || l.off) {
+        /*
+         * Configured, not merely fitted. The module answers about 20 ms before it has taken its
+         * frequency and spreading factor, and a frame offered in that gap is dropped without a
+         * counter - which is exactly what happened to the first announcement on both boards.
+         */
+        return;
+    }
+    if (s.sock >= 0 && s.link == HH_LINK_ONLINE) {
+        s.lora_announced = false;   /* back on Wi-Fi: the next time LoRa is alone, announce at once */
+        return;
+    }
+    /*
+     * How often. Every HH_LORA_HEARTBEAT_MS while an AP is known to be out there; every fourth
+     * interval once one has gone quiet, because transmitting at nobody is what a battery can least
+     * afford.
+     *
+     * But never "not at all". An earlier version skipped entirely while no AP had been heard, which
+     * deadlocks: an AP learns of a handheld only from an announcement, so no peer meant no
+     * announcement meant no peer, for ever. Observed on a board - one announcement at boot and
+     * silence through a whole Wi-Fi-off window. **Having no peer is the case this exists for**, so
+     * a handheld that has never heard an AP announces at the normal rate; the backing off applies
+     * only once one has been heard and then lost, where a slower retry is a fair trade.
+     */
+    uint32_t every = HH_LORA_HEARTBEAT_MS;
+    if (l.heard_s != UINT32_MAX && !l.peer) {
+        every *= 4u;   /* it was there and went quiet: try less often, but keep trying */
+    }
+    if (s.lora_announced && now - s.lora_announce_ms < every) {
+        return;
+    }
+    s.lora_announce_ms = now;
+    s.lora_announced = true;
+    int8_t pct = hh_service_battery_percent();
+    if (lg_client_lora_announce(&s.client, pct < 0 ? (uint8_t)LG_BATTERY_UNKNOWN : (uint8_t)pct)) {
+        ESP_LOGI(TAG, "[MSG] Announced over LoRa (no Wi-Fi session)");
+    }
+}
+
 static void step(uint32_t now)
 {
     voice_power();
+    /*
+     * A timed outage ends itself. Checked before the switch is applied, and on the service task's
+     * own clock, so a chaos run that dies cannot leave this handheld dark (D78).
+     */
+    if (s.wifi_off && s.wifi_off_until_ms != 0 && (int32_t)(now - s.wifi_off_until_ms) >= 0) {
+        s.wifi_off = false;
+        s.wifi_off_until_ms = 0;
+        ESP_LOGW(TAG, "[NET] Wi-Fi back on: the timed outage is over");
+    }
+    apply_wifi_switch(now);
+    /*
+     * Before the return below, not after: with Wi-Fi off, LoRa is the only radio this handheld has,
+     * and that is precisely when it must keep being serviced.
+     */
+    hh_lora_poll(now);
+    lora_announce(now);
+    /*
+     * The outbox is serviced here, above the return, for the same reason the radio is: since D80 the
+     * core retries over LoRa when it has no session, and this is the only place that pass is driven.
+     * It used to sit below, and the comment below used to be true - every branch of the state machine
+     * did scan, join or talk over a socket. It stopped being true the moment the core learned to send
+     * without one, and the bench caught it by arithmetic: a chaos round sent nine messages from a
+     * handheld with no Wi-Fi and its radio counted 21 frames out, which is nine sends plus six
+     * acknowledgements plus its announcements and **no retransmissions at all**. The interval and the
+     * one-message-per-pass cap live in lg_client_tick, so this costs nothing while Wi-Fi is up.
+     */
+    if (now - s.last_tick_ms >= TICK_MS) {
+        s.last_tick_ms = now;
+        lg_client_tick(&s.client);
+    }
+    if (s.wifi_off) {
+        /*
+         * Nothing below this line may run: every branch of the state machine either scans, joins,
+         * or talks over a socket. The GPS, the battery, the outbox above and anything LoRa carries
+         * keep working, because none of them come through here.
+         */
+        return;
+    }
     if (s.send_failed) {
         drop_link("Session send failed", false);
         return;
@@ -1598,11 +1954,7 @@ static void step(uint32_t now)
             s.dirty = true;
         }
     }
-    if (now - s.last_tick_ms >= TICK_MS) {
-        s.last_tick_ms = now;
-        lg_client_tick(&s.client);
-    }
-    position_step(now);
+    position_step(now);   /* the outbox tick is above, so it runs with Wi-Fi off too */
 }
 
 static void publish(void)
@@ -1611,7 +1963,13 @@ static void publish(void)
     xSemaphoreTake(s.lock, portMAX_DELAY);
     hh_status_t *st = &s.status;
     st->version++;
-    st->link = s.link;
+    /*
+     * Searching for Wi-Fi while the second radio is actually carrying is not "searching" to the person
+     * holding it (D23: a handheld shows what it is doing). hh_lora_has_peer() is the honest test - an
+     * access point has been heard recently enough to be worth transmitting at - and it is the same test
+     * the radio itself uses before spending airtime.
+     */
+    st->link = (s.link == HH_LINK_SEARCHING && hh_lora_has_peer()) ? HH_LINK_LORA : s.link;
     snprintf(st->problem, sizeof(st->problem), "%s", s.problem);
     int node = s.link == HH_LINK_ONLINE ? (int)s.client.node : s.joining;
     st->node = node;
@@ -1620,6 +1978,27 @@ static void publish(void)
     if (node >= 0 && node < HH_MAX_NODES) {
         snprintf(st->node_ssid, sizeof(st->node_ssid), "%s", s.cand[node].ssid);
         lg_proto_handheld_ip((uint16_t)node, s.device, st->ip);
+    }
+    /*
+     * Which AP the LoRa link is reaching. The radio keeps a bitmask of APs heard recently and no age
+     * per AP, so the lowest-numbered one is named; with more than one in earshot any of them would be
+     * true. The name comes from that AP's Wi-Fi beacon, which is still arriving even when no session
+     * can be had - a full AP beacons normally - and is left empty if none has named it.
+     */
+    st->lora_peer = -1;
+    st->lora_peer_ssid[0] = '\0';
+    if (st->link == HH_LINK_LORA) {
+        hh_lora_info_t li;
+        hh_lora_info(&li);
+        for (int i = 0; i < 8; i++) {
+            if ((li.peers & (uint8_t)(1u << i)) != 0u) {
+                st->lora_peer = i;
+                if (i < HH_MAX_NODES && s.cand[i].ssid[0] != '\0') {
+                    snprintf(st->lora_peer_ssid, sizeof(st->lora_peer_ssid), "%s", s.cand[i].ssid);
+                }
+                break;
+            }
+        }
     }
     st->rssi = s.rssi;
     st->joins = s.joins;
@@ -1705,6 +2084,7 @@ static void publish(void)
     st->psram_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     st->psram_min_free = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
     st->positions_version = gp.version;
+    st->wifi_off = s.wifi_off;   /* D78: switched off on purpose, not a fault */
     xSemaphoreGive(s.lock);
     s.dirty = false;
     s.last_publish_ms = now;
@@ -1820,6 +2200,17 @@ static esp_err_t wifi_start(void)
         ESP_LOGW(TAG, "[NET] Beacon timeout not shortened");
     }
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    /*
+     * D78: a handheld whose Wi-Fi was switched off keeps it off across the restart a field test
+     * brings. The driver is started and then stopped rather than never started, so the netif, the
+     * event handler and the vendor-IE callback all exist and `wifi on` needs no separate path.
+     */
+    s.wifi_off = load_wifi_off();
+    if (s.wifi_off) {
+        (void)esp_wifi_stop();
+        s.wifi_stopped = true;
+        ESP_LOGW(TAG, "[NET] Wi-Fi is switched off (D78); `wifi on` or Settings brings it back");
+    }
     return ESP_OK;
 }
 
@@ -1907,6 +2298,19 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
     lg_client_init(&s.client, s.device, s.boot, s.e2e.pub, &s.roster, &io);
     load_names();
     snprintf(s.status.name, sizeof(s.status.name), "%s", roster_name(s.device));
+    /*
+     * D77: the second radio. A board with no connector, or a board whose module does not answer,
+     * changes nothing: hh_lora_start returns ESP_ERR_INVALID_ARG for the first and ESP_OK for the
+     * second. The boot counter is already committed to NVS by now, which is what keeps a nonce from
+     * ever repeating.
+     */
+    if (lp.rx >= 0) {
+        esp_err_t lerr = hh_lora_start(lp.rx, lp.tx, lp.rst, s.device, s.boot, s_lora_hh_key,
+                                       s_discriminator, on_lora_frame);
+        if (lerr != ESP_OK && lerr != ESP_ERR_INVALID_ARG) {
+            ESP_LOGW(TAG, "[LORA] Second radio not started: %s", esp_err_to_name(lerr));
+        }
+    }
     if (gp.rx >= 0 && hh_gps_start(gp.rx, gp.tx, gps_notify) != ESP_OK) {
         ESP_LOGW("TIME", "[GPS] No GPS reader; this handheld runs as one without a GPS");
     }
@@ -2160,6 +2564,48 @@ void hh_service_set_gps_pins(int rx_gpio, int tx_gpio)
     gp.tx = tx_gpio;
 }
 
+void hh_service_set_lora_pins(int rx_gpio, int tx_gpio, int rst_gpio)
+{
+    lp.rx = rx_gpio;
+    lp.tx = tx_gpio;
+    lp.rst = rst_gpio;
+}
+
+/*
+ * D23: the radio, for the Status screen. Narrowing hh_lora_info_t rather than passing it through,
+ * because a screen has no business with part counts and airtime -- those belong to the console and
+ * to a chaos report, and a screen that showed them would go stale the moment the driver changed.
+ */
+bool hh_service_lora_ui(hh_lora_ui_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    hh_lora_info_t in;
+    hh_lora_info(&in);
+    out->connector    = in.connector;
+    out->fitted       = in.fitted;
+    out->configured   = in.configured;
+    out->off          = in.off;
+    out->peer         = hh_lora_has_peer();
+    out->address      = in.address;
+    out->rssi         = in.rssi;
+    out->snr          = in.snr;
+    out->frames_in    = in.frames_in;
+    out->frames_out   = in.frames_out;
+    out->heard_s      = in.heard_age_ms == UINT32_MAX ? UINT32_MAX : in.heard_age_ms / 1000u;
+    out->seal_fail    = in.seal_fail;
+    out->refused_type = in.refused_type;
+    out->restarts     = in.restarts;
+    return in.fitted;
+}
+
+bool hh_service_lora_connector(void)
+{
+    return lp.rx >= 0 && lp.tx >= 0;
+}
+
 const char *hh_service_clock_source(void)
 {
     switch (gp.source) {
@@ -2279,4 +2725,40 @@ esp_err_t hh_service_send_all_clear(const char *text)
                        .len = (uint16_t)len };
     memcpy(req.text, text, len);
     return xQueueSend(s.send_queue, &req, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+/* ---- D78: the Wi-Fi switch ---- */
+
+void hh_service_set_wifi(bool on)
+{
+    if (s.queue == NULL) {
+        return;
+    }
+    ev_t ev = { .type = EV_WIFI_SWITCH, .value = on ? 0 : 1 };   /* value: 1 means "off" */
+    (void)xQueueSend(s.queue, &ev, pdMS_TO_TICKS(20));
+}
+
+void hh_service_wifi_off_for(uint32_t seconds)
+{
+    if (s.queue == NULL || seconds == 0) {
+        return;
+    }
+    ev_t ev = { .type = EV_WIFI_SWITCH, .value = 1 };
+    ev.id[0] = seconds > HH_WIFI_OFF_MAX_S ? HH_WIFI_OFF_MAX_S : seconds;
+    (void)xQueueSend(s.queue, &ev, pdMS_TO_TICKS(20));
+}
+
+uint32_t hh_service_wifi_off_left_s(void)
+{
+    uint32_t until = s.wifi_off_until_ms;
+    if (!s.wifi_off || until == 0) {
+        return 0;
+    }
+    uint32_t now = now_ms();
+    return (int32_t)(until - now) > 0 ? (until - now) / 1000u + 1u : 1u;
+}
+
+bool hh_service_wifi_off(void)
+{
+    return s.wifi_off;   /* one bool written by the service task; a stale read is harmless */
 }

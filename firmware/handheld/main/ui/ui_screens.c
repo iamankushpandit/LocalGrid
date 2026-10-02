@@ -503,7 +503,14 @@ static uint32_t settings_build(bool rebuild)
         slist_add(ROW_ACTION, "Which AP", st->preferred_node < 0 ? "automatic" : "fixed", SET_WHICH_AP, 0);
         slist_add(ROW_BUTTON, "Reconnect", NULL, SET_RECONNECT, 0)->style = BTN_MAIN;
         slist_add(ROW_BUTTON, "Look for APs", NULL, SET_SCAN, 0)->style = BTN_PLAIN;
-        snprintf(value, sizeof(value), "%s", st->link == HH_LINK_ONLINE ? st->node_ssid : "not connected");
+        if (st->link == HH_LINK_ONLINE) {
+            snprintf(value, sizeof(value), "%s", st->node_ssid);
+        } else if (st->link == HH_LINK_LORA) {
+            snprintf(value, sizeof(value), "%s, over LoRa (no Wi-Fi)",
+                     st->lora_peer_ssid[0] ? st->lora_peer_ssid : "an AP");
+        } else {
+            snprintf(value, sizeof(value), "not connected");
+        }
         slist_add(ROW_FACT, "Connected to", value, -1, 0);
         slist_add(ROW_FACT, "Grid time", st->grid_time != 0 ? "set" : "not set", -1, 0)->warn = st->grid_time == 0;
         slist_add(ROW_NOTE, NULL, "Grid time is set on any AP's admin page; a handheld never sets it.", -1, 0);
@@ -659,10 +666,10 @@ static struct {
     bool     building;   /* making the rows afresh, rather than comparing with those shown */
     bool     same;       /* comparing: every row so far has the kind and label shown */
     uint8_t  index;
-    uint32_t dirty;      /* comparing: rows whose value changed, one bit each */
+    uint64_t dirty;      /* comparing: rows whose value changed, one bit each */
 } s_stat;
 
-_Static_assert(SLIST_ROWS <= 32, "the Status screen keeps a bit per row");
+_Static_assert(SLIST_ROWS <= 64, "the Status screen keeps a bit per row");
 
 static void stat_put(slist_kind_t kind, const char *label, const char *value, bool warn)
 {
@@ -687,7 +694,7 @@ static void stat_put(slist_kind_t kind, const char *label, const char *value, bo
     }
     snprintf(r->value, sizeof(r->value), "%s", value);
     r->warn = warn;
-    s_stat.dirty |= 1u << i;
+    s_stat.dirty |= (uint64_t)1u << i;
 }
 
 static const char *link_word(hh_link_t link)
@@ -697,6 +704,7 @@ static const char *link_word(hh_link_t link)
     case HH_LINK_CONNECTING:  return "connecting";
     case HH_LINK_REGISTERING: return "registering";
     case HH_LINK_ONLINE:      return "online";
+    case HH_LINK_LORA:        return "on LoRa";
     default:                  return "stopped";
     }
 }
@@ -729,8 +737,21 @@ static void stat_gps(void)
         stat_put(ROW_FACT, "Lock", "no data from the GPS: check its wiring", true);
         return;
     }
+    /*
+     * "Looking for satellites" is the right thing to say while a fix is coming, and the wrong thing to
+     * say when one never will. On 2026-10-01 both Freenove handhelds showed it for eleven hours with a
+     * GPS that could not hear a single satellite well enough to decode it, and the screen read as
+     * patience rather than as a fault. Two tells separate the two cases: a best strength no better than
+     * the ~30 dB-Hz needed to decode an orbit, and more satellites "in view" than can be above any one
+     * horizon (about fourteen) - which means the module is listing the PRNs it is hunting for and
+     * reporting its noise floor against each, so nothing usable is reaching the antenna input.
+     */
+    bool starved = !g.fix && g.used == 0u && g.in_view >= 4u &&
+                   (g.in_view > 14u || (g.best_snr > 0u && g.best_snr <= 31u));
     if (g.fix) {
         snprintf(value, sizeof(value), "yes, %s%s", g.fix_type == 2u ? "2D" : "3D", g.corrected ? " + WAAS" : "");
+    } else if (starved) {
+        snprintf(value, sizeof(value), "no: signal too weak to use, check the antenna");
     } else {
         snprintf(value, sizeof(value), "no, looking for satellites");
     }
@@ -835,13 +856,66 @@ static void stat_location(const hh_status_t *st)
     }
 }
 
+/*
+ * D23, D77: the second radio. Nothing at all on a board with no connector, which is every board but
+ * the Freenove FNK0104B today -- an empty section would read as a fault where there is none.
+ *
+ * On a board that has one but found no module, the one row says exactly that, because "no module
+ * answered" and "a module that hears nothing" are different problems and the screen is where someone
+ * fitting a module finds out which they have.
+ */
+static void stat_lora(void)
+{
+    hh_lora_ui_t l;
+    hh_service_lora_ui(&l);
+    if (!l.connector) {
+        return;
+    }
+    char value[SLIST_VALUE_MAX];
+    stat_put(ROW_SECTION, "LoRa", NULL, false);
+    if (!l.fitted) {
+        stat_put(ROW_FACT, "Module", "none answered: check the wiring", true);
+        return;
+    }
+    if (l.off) {
+        stat_put(ROW_FACT, "Module", "switched off", true);
+    } else if (!l.configured) {
+        stat_put(ROW_FACT, "Module", "fitted, not configured", true);
+    } else {
+        snprintf(value, sizeof(value), "address %u", (unsigned)l.address);
+        stat_put(ROW_FACT, "Module", value, false);
+    }
+    if (l.heard_s == UINT32_MAX) {
+        stat_put(ROW_FACT, "Heard", "no AP yet on this radio", true);
+    } else {
+        char age[16];
+        ui_geo_age_text(l.heard_s, age, sizeof(age));
+        snprintf(value, sizeof(value), "%s ago, %d dBm snr %d", age, l.rssi, l.snr);
+        stat_put(ROW_FACT, "Heard", value, !l.peer);
+    }
+    snprintf(value, sizeof(value), "%lu in, %lu out", (unsigned long)l.frames_in,
+             (unsigned long)l.frames_out);
+    stat_put(ROW_FACT, "Frames", value, false);
+    /* Only when there is something wrong: a row of zeroes every time teaches people to skip it. */
+    if (l.seal_fail != 0 || l.refused_type != 0 || l.restarts != 0) {
+        snprintf(value, sizeof(value), "%lu unsealed, %lu refused, %lu resets",
+                 (unsigned long)l.seal_fail, (unsigned long)l.refused_type,
+                 (unsigned long)l.restarts);
+        stat_put(ROW_FACT, "Trouble", value, true);
+    }
+}
+
 static void stat_rows(void)
 {
     const hh_status_t *st = ui_status();
     char value[SLIST_VALUE_MAX];
     stat_put(ROW_FACT, "Name", st->name, false);
-    stat_put(ROW_FACT, "Link", link_word(st->link), st->link != HH_LINK_ONLINE);
-    stat_put(ROW_FACT, "AP", st->node >= 0 ? st->node_ssid : "--", false);
+    /* On LoRa is not a fault: it is the second radio doing its job, so it is not shown as a warning. */
+    stat_put(ROW_FACT, "Link", link_word(st->link),
+             st->link != HH_LINK_ONLINE && st->link != HH_LINK_LORA);
+    /* On LoRa there is no session, so `node` is -1 while an AP is plainly being reached: name it. */
+    stat_put(ROW_FACT, "AP", st->node >= 0 ? st->node_ssid
+             : st->lora_peer_ssid[0] != '\0' ? st->lora_peer_ssid : "--", false);
     snprintf(value, sizeof(value), "%d dBm", st->rssi);
     stat_put(ROW_FACT, "Signal", value, false);
     snprintf(value, sizeof(value), "%u.%u.%u.%u", st->ip[0], st->ip[1], st->ip[2], st->ip[3]);
@@ -860,6 +934,7 @@ static void stat_rows(void)
     snprintf(value, sizeof(value), "%u", st->n_groups);
     stat_put(ROW_FACT, "Groups", value, false);
     stat_location(st);
+    stat_lora();
     snprintf(value, sizeof(value), "%" PRIu32 " KB", esp_get_free_heap_size() / 1024u);
     stat_put(ROW_FACT, "Free memory", value, false);
     snprintf(value, sizeof(value), "%" PRIu32 " KB", esp_get_minimum_free_heap_size() / 1024u);

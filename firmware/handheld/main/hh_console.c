@@ -20,6 +20,7 @@
 #include "ui_main.h"
 #include "ui_nav.h"
 #include "hh_service.h"
+#include "hh_lora.h"
 #include "lg_bsp_audio.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -53,6 +54,7 @@ static const char *link_word(hh_link_t link)
     case HH_LINK_CONNECTING:   return "CONNECTING";
     case HH_LINK_REGISTERING:  return "REGISTERING";
     case HH_LINK_ONLINE:       return "ONLINE";
+    case HH_LINK_LORA:         return "ON LORA (no Wi-Fi)";
     default:                   return "STOPPED";
     }
 }
@@ -174,6 +176,157 @@ static int cmd_saver(int argc, char **argv)
     return 0;
 }
 
+static int cmd_wifi(int argc, char **argv)
+{
+    bool has_lora = hh_service_lora_connector();
+    if (argc > 1) {
+        bool on = strcmp(argv[1], "on") == 0;
+        if (!on && strcmp(argv[1], "off") != 0) {
+            printf("wifi <on|off [seconds]>, or wifi alone to show the setting\n");
+            return 1;
+        }
+        if (!on && !has_lora) {
+            /*
+             * Said out loud rather than refused: this is a deliberate field-test switch, and a
+             * board with no module is exactly what someone measuring battery life would use.
+             */
+            printf("Warning: this board has no LoRa connector, so Wi-Fi off leaves it "
+                   "with no radio at all.\n");
+        }
+        /*
+         * `wifi off <seconds>` is the self-restoring chaos hook, the mirror of the APs' `lora off`
+         * and `bb off`: capped, forgotten across a restart, and back on its own even if whatever
+         * asked for it never returns. Bare `wifi off` is the sticky field switch.
+         */
+        unsigned long secs = 0;
+        if (!on && argc > 2) {
+            secs = strtoul(argv[2], NULL, 10);
+            if (secs == 0) {
+                printf("wifi off <seconds> needs a number of seconds, or leave it out to stay off\n");
+                return 1;
+            }
+            if (secs > HH_WIFI_OFF_MAX_S) {
+                secs = HH_WIFI_OFF_MAX_S;
+            }
+            hh_service_wifi_off_for((uint32_t)secs);
+            printf("Wi-Fi off for %lu s; it comes back on its own, and a restart also ends it.\n", secs);
+            return 0;
+        }
+        hh_service_set_wifi(on);
+        printf("Wi-Fi switched %s. %s\n", on ? "on" : "off",
+               on ? "Searching for an AP."
+                  : "Kept off across a restart; `wifi on` brings it back.");
+        return 0;
+    }
+    bool off = hh_service_wifi_off();
+    uint32_t left = hh_service_wifi_off_left_s();
+    printf("Wi-Fi: %s (D78)\n", !off ? "on" : left > 0 ? "OFF on a timer" : "OFF on request");
+    if (left > 0) {
+        printf("Back on in %" PRIu32 " s\n", left);
+    }
+    printf("LoRa connector on this board: %s\n", has_lora ? "yes" : "no");
+    if (off && !has_lora) {
+        printf("This handheld has no radio at all right now.\n");
+    }
+    return 0;
+}
+
+static int cmd_lora(int argc, char **argv)
+{
+    hh_lora_info_t li;
+    hh_lora_info(&li);
+
+    if (argc > 1 && strcmp(argv[1], "off") == 0) {
+        unsigned long secs = argc > 2 ? strtoul(argv[2], NULL, 10) : 60ul;
+        if (secs == 0 || secs > HH_LORA_OFF_MAX_S) {
+            secs = secs == 0 ? 60ul : HH_LORA_OFF_MAX_S;
+        }
+        hh_lora_disable((uint32_t)secs);
+        printf("LoRa off for %lu s; it comes back on its own.\n", secs);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "on") == 0) {
+        hh_lora_enable();
+        printf("LoRa on.\n");
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "reset") == 0) {
+        hh_lora_request_reset();
+        printf("Asked the LoRa task to reset and reconfigure the module.\n");
+        return 0;
+    }
+    if (argc > 3 && strcmp(argv[1], "pins") == 0) {
+        /* Bring-up: try a module on other pins without reflashing a board profile. */
+        int rx = (int)strtol(argv[2], NULL, 10);
+        int tx = (int)strtol(argv[3], NULL, 10);
+        esp_err_t err = hh_lora_set_pins(rx, tx);
+        if (err == ESP_ERR_INVALID_ARG) {
+            printf("Those pins cannot be used on this board (PSRAM, USB, or rx and tx the same).\n");
+            return 1;
+        }
+        if (err != ESP_OK) {
+            printf("Could not re-point the port: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        printf("Looking for a module on rx GPIO%d, tx GPIO%d. Watch [LORA]; `lora` shows the result.\n",
+               rx, tx);
+        printf("Nothing is saved: a board profile still decides this at boot.\n");
+        return 0;
+    }
+    if (argc > 2 && strcmp(argv[1], "at") == 0) {
+        /* Bring-up only: the reply is logged at [LORA], because it arrives on the LoRa task. */
+        hh_lora_request_at(argv[2]);
+        printf("Sent to the module; the reply is logged at [LORA].\n");
+        return 0;
+    }
+    if (argc > 1) {
+        printf("lora | lora off [seconds] | lora on | lora reset | lora at <AT command>\n");
+        return 1;
+    }
+
+    if (!li.connector) {
+        printf("LoRa (D77): this board has no connector for a module.\n");
+        return 0;
+    }
+    printf("LoRa (D77): %s%s, address %u, network %u\n",
+           li.fitted ? "module fitted" : "no module answering",
+           li.off ? " but switched OFF" : li.fitted && !li.configured ? ", not configured yet" : "",
+           (unsigned)li.address, (unsigned)li.networkid);
+    if (!li.fitted) {
+        printf("  This handheld uses Wi-Fi alone, exactly as before.\n");
+        return 0;
+    }
+    if (li.version[0] != '\0') {
+        printf("  module:   %s\n", li.version);
+    }
+    printf("  APs heard: ");
+    if (li.peers == 0) {
+        printf("none yet");
+    } else {
+        for (unsigned n = 0; n < 8; n++) {
+            if ((li.peers & (1u << n)) != 0u) {
+                printf("%u ", n);
+            }
+        }
+    }
+    printf("\n");
+    if (li.heard_age_ms == UINT32_MAX) {
+        printf("  last in:  never\n");
+    } else {
+        printf("  last in:  %" PRIu32 " s ago, RSSI %d dBm, SNR %d\n",
+               li.heard_age_ms / 1000u, li.rssi, li.snr);
+    }
+    printf("  frames:   %" PRIu32 " out, %" PRIu32 " in\n", li.frames_out, li.frames_in);
+    printf("  parts:    %" PRIu32 " out, %" PRIu32 " in, %" PRIu32 " dropped, %" PRIu32 " retries\n",
+           li.parts_out, li.parts_in, li.parts_dropped, li.retries);
+    printf("  refused:  %" PRIu32 " by type (not carried over LoRa), %" PRIu32 " could not be opened\n",
+           li.refused_type, li.seal_fail);
+    printf("  queue:    %" PRIu32 " dropped; reassembly timeouts %" PRIu32 "\n",
+           li.queue_dropped, li.reasm_timeouts);
+    printf("  airtime:  %" PRIu32 " ms; module resets %" PRIu32 "\n", li.airtime_ms, li.restarts);
+    return 0;
+}
+
 static int cmd_id(int argc, char **argv)
 {
     (void)argc;
@@ -201,9 +354,12 @@ static int cmd_status(int argc, char **argv)
     printf("  link: %s", link_word(st->link));
     if (st->node >= 0) {
         printf(" on %s (node %d)", st->node_ssid[0] ? st->node_ssid : "node", st->node);
+    } else if (st->link == HH_LINK_LORA && st->lora_peer >= 0) {
+        /* D80: "ON LORA" alone never said which AP was carrying the messages. */
+        printf(" via %s (AP %d)", st->lora_peer_ssid[0] ? st->lora_peer_ssid : "an AP", st->lora_peer);
     }
     printf("\n");
-    if (st->link == HH_LINK_ONLINE || st->link == HH_LINK_REGISTERING) {
+    if (st->link == HH_LINK_ONLINE || st->link == HH_LINK_REGISTERING) {   /* Wi-Fi facts only */
         printf("  signal: %d dBm (%s), address %u.%u.%u.%u\n", st->rssi, signal_word(st->rssi), st->ip[0], st->ip[1],
                st->ip[2], st->ip[3]);
     }
@@ -460,7 +616,7 @@ static int cmd_group(int argc, char **argv)
 static int cmd_send(int argc, char **argv)
 {
     if (argc < 3) {
-        printf("usage: send <device index | group name | all | urgent> <text>\n");
+        printf("usage: send <device index | group name | all | urgent | safe> <text>\n");
         return 1;
     }
     const hh_status_t *st = console_status();
@@ -468,6 +624,14 @@ static int cmd_send(int argc, char **argv)
     uint8_t scope = LG_SCOPE_DIRECT;
     uint32_t target = 0;
     bool urgent = false;
+    /*
+     * D66/D79's all clear had no way in from serial, so "<name> is safe" was the one alert the bench
+     * could never send - and therefore the one chaos could never test, on the path that matters most:
+     * an SOS that nobody can stand down is worse than no SOS. `send safe <text>` fixes that, and it is
+     * a distinct target rather than a flag because it is a different message, not an urgent one with a
+     * bit set: receivers take down this handheld's SOS on it.
+     */
+    bool all_clear = false;
     const char *who = argv[1];
     char *end = NULL;
     long device = strtol(who, &end, 10);
@@ -476,6 +640,9 @@ static int cmd_send(int argc, char **argv)
     } else if (strcmp(who, "all") == 0 || strcmp(who, "urgent") == 0) {
         scope = LG_SCOPE_BROADCAST;
         urgent = strcmp(who, "urgent") == 0;
+    } else if (strcmp(who, "safe") == 0) {
+        scope = LG_SCOPE_BROADCAST;
+        all_clear = true;
     } else {
         int found = -1;
         for (uint8_t i = 0; i < st->n_groups; i++) {
@@ -504,7 +671,8 @@ static int cmd_send(int argc, char **argv)
         memcpy(text + len, argv[i], part);
         len += part;
     }
-    esp_err_t err = hh_service_send(scope, target, urgent, text);
+    esp_err_t err = all_clear ? hh_service_send_all_clear(text)
+                              : hh_service_send(scope, target, urgent, text);
     if (err != ESP_OK) {
         printf("not queued: %s\n", esp_err_to_name(err));
         return 1;
@@ -906,9 +1074,47 @@ static int cmd_gps(int argc, char **argv)
     } else {
         char none[64];
         snprintf(none, sizeof(none), "none heard (not fitted, or check module TXD to GPIO%d)", st.rx_gpio);
-        printf("GPS: %s, %u satellites, %" PRIu32 " sentences, %" PRIu32 " bad checksums\n",
+        printf("GPS: %s, %u satellites used, %" PRIu32 " sentences, %" PRIu32 " bad checksums\n",
                !st.heard ? none : !st.talking ? "silent now (was heard)" : st.fix ? "FIX" : "no fix yet",
                st.sats, st.sentences, st.bad);
+        /*
+         * What the module can *hear*, which is a different question from what it can use, and the one
+         * that tells a working install from a broken one. Printed because the summary without it sent a
+         * real fault the wrong way: on 2026-10-01 both Freenove handhelds reported "no fix yet, 0
+         * satellites" for eleven hours, which reads as "still looking", while the raw NMEA showed the
+         * fault plainly. Satellites used is an outcome; strength is the evidence.
+         */
+        if (st.heard) {
+            printf("GPS: %u in view, %u with a signal, best %u dB-Hz\n",
+                   st.in_view, st.tracked, st.best_snr);
+        }
+        /*
+         * Nothing used, yet a skyful in view, says the module hears carriers and can decode none of them.
+         * That is not a slow fix and waiting does not cure it - both Freenove handhelds sat exactly here
+         * for eleven hours on 2026-10-01 - so it is worth saying plainly.
+         *
+         * Two independent tells, either one enough:
+         *
+         *   Strength. Decoding a satellite's orbit needs around 30 dB-Hz, well above the ~25 it takes to
+         *   notice a carrier, so a best figure at or below about the decode floor explains the lack of a
+         *   fix by itself.
+         *
+         *   Too many in view. No more than about fourteen GPS satellites are ever above one horizon. A
+         *   module claiming twenty-two or twenty-five is not describing the sky; it is listing the PRNs it
+         *   is searching for and reporting its own noise floor against each. That is the signature of no
+         *   usable signal reaching the antenna input at all, and it is far more specific than a weak one.
+         */
+        if (st.heard && !st.fix && st.sats == 0 && st.in_view >= 4 &&
+            (st.in_view > 14 || (st.best_snr > 0 && st.best_snr <= 31))) {
+            printf("GPS: hearing carriers but decoding none, which needs about 30 dB-Hz%s. Waiting will "
+                   "not fix this: check the antenna is seated, has a view of the sky, and that the "
+                   "module's supply is what its own regulator wants (docs/lora.md powers the AP's "
+                   "from 5 V).\n",
+                   st.in_view > 14 ? ", and more satellites in view than can be above any horizon, so "
+                                     "the module is listing what it is searching for rather than what it "
+                                     "can hear"
+                                   : "");
+        }
         if (st.last_unix != 0) {
             printf("GPS: last fix %" PRIu32 ", %" PRIu32 " ms ago", st.last_unix, st.fix_age_ms);
             if (st.has_pos) {
@@ -960,9 +1166,11 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "node",      .help = "node <index> | node auto: choose which node to use",      .func = cmd_node },
         { .command = "scan",      .help = "Scan the grid channel now",                               .func = cmd_scan },
         { .command = "reconnect", .help = "Drop the node session and join again",                    .func = cmd_reconnect },
+        { .command = "wifi",      .help = "wifi [on|off [seconds]]: switch Wi-Fi off to test LoRa (D78)", .func = cmd_wifi },
+        { .command = "lora",      .help = "lora | off [s] | on | reset | at <cmd> | pins <rx> <tx>: the second radio (D77)", .func = cmd_lora },
         { .command = "groups",    .help = "Groups, members, and whether this handheld belongs",      .func = cmd_groups },
         { .command = "group",     .help = "group new <name> <devices> | set <id> <name> <devices> | rm <id> (D52)", .func = cmd_group },
-        { .command = "send",      .help = "send <device|group|all|urgent> <text>: send a message",   .func = cmd_send },
+        { .command = "send",      .help = "send <device|group|all|urgent|safe> <text>: send a message; safe stands down an SOS (D66)", .func = cmd_send },
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
         { .command = "screen",    .help = "screen <home|status|messages|groups|settings>: open that screen", .func = cmd_screen },
