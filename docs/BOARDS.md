@@ -12,7 +12,7 @@ How LocalGrid supports a board, which boards it supports today, and how to add o
 |---|---|---|---|---|---|---|---|---|---|
 | `ELG` | Elegoo ESP32 dev board | ESP32 | AP | none | none | none | none | none | verified |
 | `HY3` | Hosyond 3.2in (LCDWIKI E32R32P) | ESP32 | handheld | ST7789P3 240x320 | XPT2046 resistive | internal DAC, listen-only | GPIO34, 2:1 | none | verified (volume ceiling not set by ear) |
-| `F4B` | Freenove FNK0104B 2.8in | ESP32-S3 | handheld | ILI9341 240x320 | FT6336U capacitive | ES8311 codec, speaker and microphone | GPIO9, 2:1 | GPIO44 RX, GPIO43 TX | verified |
+| `F4B` | Freenove FNK0104B 2.8in | ESP32-S3 | handheld | ILI9341 240x320 | FT6336U capacitive | ES8311 codec, speaker and microphone | GPIO9, 2:1 | GPIO44 RX, GPIO43 TX | verified; LoRa on the IO connector: rx GPIO21, tx GPIO14, reset GPIO2, 3.3 V from the I2C connector (confirmed on a module 2026-09-30) |
 | `C6L` | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 | alert unit (D66) | ST7789 172x320, 34-column gap | none; BOOT button (GPIO9) | none | none | none | untested |
 | `C6T` | Waveshare ESP32-C6-Touch-LCD-1.47 | ESP32-C6 | alert unit (D66) | JD9853 172x320, 34-column gap | AXS5106L capacitive; BOOT button (GPIO9) | none | GPIO0, 3:1 | none | untested |
 

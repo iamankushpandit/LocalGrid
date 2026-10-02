@@ -47,6 +47,30 @@ jobs:
       - name: Layer check
         run: python tools/check_layers.py
 
+      # docs/TEMPORARY.md is the register of what exists only for the bench. This reports it on every
+      # push so it stays visible, and fails outright on a release tag: the owner's rule is that we
+      # cannot release while the concessions made to test resiliency are still in the firmware.
+      - name: Bench concessions still in the tree
+        run: python tools/check_release.py
+
+      # A release tag, and the default branch. The owner's rule (2026-09-30) is that this comes out
+      # "before we do a push to GitHub or before we do a release", so main is held to the same bar
+      # as a tag. Feature branches still only get the report above, because that is where the bench
+      # work happens and it has to be pushable.
+      - name: Release blocker (main and tags)
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: python tools/check_release.py --release
+
+      # The pre-push hook is the first line of this, but it only works where it is installed, and a
+      # clone does not carry git hooks. This fails if the committed hook has been removed or made
+      # unreadable, so the guard cannot quietly disappear from the repository.
+      - name: The push guard is still in the repository
+        run: |
+          test -f .githooks/pre-push || { echo '.githooks/pre-push is missing: a push would no longer be checked'; exit 1; }
+          grep -q 'check_release.py --release' .githooks/pre-push || { echo '.githooks/pre-push no longer runs the release check'; exit 1; }
+          test -f tools/install_hooks.py || { echo 'tools/install_hooks.py is missing'; exit 1; }
+          echo 'push guard present'
+
       # lg_secrets.h holds the grid passphrase and backbone key. It is gitignored; this catches a
       # forced add, which .gitignore does not.
       - name: No secrets in the tree

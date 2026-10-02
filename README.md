@@ -72,13 +72,15 @@ everything took to come back and whether anything was lost.
 **In the 10-hour run of 2026-09-18: 55 faults injected, 55 recovered, none needing a human. The
 backbone re-formed in a median of 3.7 s. No crash, watchdog or brownout the framework had not caused.**
 
-It also found three bugs that code review and unit tests never could:
+It also found five bugs that code review and unit tests never could:
 
 | Bug | Why only chaos found it |
 |---|---|
 | A use-after-free behind a message banner | Every crash report pointed at the memory allocator, in a different thread each time — accurate, and useless. It only triggered when two messages arrived more than 15 s apart. |
 | A restarted access point refusing valid messages | Presence was announced on join but never repeated, so a node that restarted came back knowing nobody. 44 refusals in one night, with no error logged anywhere. |
 | The self-healing promise not being true | With every access point down at once the network lost its time, and the code meant to restore it could never have worked. The test harness had been hiding this by setting the clock itself. |
+| Load balancing preferring the one broken access point | An access point out of memory refused every handheld while advertising free slots. Being empty is what the balancing rule rewards, so four handhelds chose it over two healthier ones with stronger signals — and kept choosing it. Nothing logged an error. |
+| One slow handheld restarting a whole access point | A two-second cap bounded any *single* send, and was read as bounding the core task. Three full sockets in one pass cost six seconds; the watchdog panics at five. Found in the first ten seconds of a run, before a fault was injected. |
 
 **→ [The full story: how it was chaos tested, and what it still cannot find](docs/chaos-engineering.md)**
 · [the run's own report](docs/chaos/2026-09-18-night-run.md)

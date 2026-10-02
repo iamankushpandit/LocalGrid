@@ -43,8 +43,13 @@ Format `LG-<role>-<board>-<10 base32 characters>`, for example `LG-N-ELG-7K3QX9P
 |---|---|---|
 | default | admin setup, boot counter, device ID | nothing except the app |
 | `--update-identity` | admin setup, boot counter, touch calibration, keys, device ID | nothing; the identity partition is rewritten from the map |
-| `--erase` | device ID (rewritten from the map) | admin setup, boot counter, all saved settings |
+| `--erase` | device ID (rewritten from the map) | admin setup, boot counter, all saved settings, **touch calibration** |
 | `--erase --new-id` | nothing | everything, and the old ID is retired |
+
+**An erase takes the touch calibration with it.** On a board with a resistive panel (XPT2046: HY3,
+E28, CYD, E40) the handheld then starts on its calibration screen and waits for someone to tap the
+targets, so it never reaches the launcher on its own. See the verification row below before
+believing a failure.
 
 ## When a board fails
 
@@ -52,7 +57,8 @@ Format `LG-<role>-<board>-<10 base32 characters>`, for example `LG-N-ELG-7K3QX9P
 |---|---|
 | `Another flash.py run (process N) is using the boards` | A run is still going, possibly started by an earlier session in the background. Let it finish, or stop that process if its session is gone. A lock left by a dead run clears itself. |
 | `port COMx has LG-..., expected LG-...` | A different board is on that port. Run `python tools/flash.py --identify` and fix the `port` fields. |
-| `board did not answer 'id'` | It runs firmware older than device IDs, or the port is wrong. If the port is right, add `--trust-port` once. |
+| `board did not answer 'id'` | It runs firmware older than device IDs, or the port is wrong. If the port is right, add `--trust-port` once. A board running another project's firmware (Braino) cannot answer either, and this is the expected way it looks. |
+| `no '[UI] Launcher ready' within 30 s` **after an `--erase`** | Usually **not a fault** on a resistive-touch board: the erase cleared the touch calibration, so the handheld is waiting on its calibration screen. Read the serial log — `[GRID] Registered with node N`, `[TEST] Self test: N checks passed` and `[UI] Touch XPT2046 ready, needs calibration` together mean the flash worked. Calibrate by tapping the targets, and the launcher follows. |
 | `chip ... needs ...` | The board type in the map does not match the hardware on that port. |
 | `build has N warning(s)` | Fix the warnings; builds must be warning-free. |
 | `flash failed` | Another program holds the port, or the board needs BOOT held during connect. |

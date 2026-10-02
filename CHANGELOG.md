@@ -5,6 +5,1077 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The ten-hour run to flat batteries: what it measured, and the one bug that dominated it
+
+Seed 54666, 2026-10-01 20:12 to 2026-10-02 06:33, **10 h 15 min**, ended by the access points running out
+of battery - which is the measurement, not a failure. Six handhelds, three access points on battery, 45
+experiments (36 recovered, **0 not recovered**), 1,159 messages, 202 findings.
+
+**One bug accounts for 182 of the 202 findings**, and for almost all of the lost delivery:
+
+| Period | Clean messages | Delivered |
+|---|---|---|
+| before the outboxes filled | 403 | **401 (99.5%)** |
+| after | 546 | 363 (66.5%) |
+
+That is the `LG_OUT_ACCEPTED` leak written up above: 176 refusals with "outbox full", from **three**
+handhelds (fnk0104b 98, fnk0104b_c 71, hosyond 13 - the last of which has no LoRa module at all), and it
+also explains the eight rounds reporting "not one of N messages it sent while on LoRa alone was
+delivered". That is not a LoRa regression: a handheld that cannot put a message in its outbox cannot send
+it over any radio. **Fixed, and the fix is verified on a board: 2,537 checks, 0 failures.**
+
+**How long a 5000 mAh pack holds an access point, second measurement:**
+
+| AP | This run | The run before | Note |
+|---|---|---|---|
+| **Everest** | **9 h 19 min** | 9 h 38 min | the only one with a GPS |
+| **Fuji** | **12 h 34 min** | 11 h 34 min | |
+| **Denali** | **10 h 59 min** | 12 h 42 min | |
+
+Everest is the shortest both times, by two to three hours, which is the strongest evidence yet that **the
+GPS costs about two hours** - it is the one difference that stayed put while Fuji and Denali swapped
+places between runs. Fuji and Denali differing by 1.5 h in one run and 1.7 h in the other, in opposite
+directions, says the rest is pack variation and not the board.
+
+**What else it found, after the dominant bug is set aside:**
+
+- **3 messages lost with both ends registered**, out of 949 clean - two broadcasts and one 1:1. Too few to
+  show a pattern, and worth watching rather than chasing.
+- **The `no_net` rounds did their job.** Three of the four reported losses with every second radio
+  switched off (4 of 8, 1 of 7, 3 of 5). They ran after the outboxes had filled, so they cannot be read
+  as clean evidence this time - but this is the round that will say whether Wi-Fi stands on its own, and
+  it now exists.
+- **One unjustified fallback**, which is what the audit was built to find: `e28 has had no Wi-Fi session
+  for 50 s with no reason: AP 1 was up with room, and no fault was injected. It has no second radio, so
+  it is simply offline.` It happened at t=35564, when Fuji was the last access point alive and about an
+  hour from flat, so a dying access point is the likelier cause than a repeat of the pick_node veto.
+  **Unconfirmed, and deliberately not claimed as a bug.**
+- **366 messages crossed with an end on the backup, and only 1 of them should not have had to.** That is
+  the number the audit exists to produce, and it says the LoRa fallback was being used honestly.
+- **Alerts went out 9 times each** - announcement, SOS, all clear - with 6 of each delivered and 3 of each
+  refused, every refusal being the outbox bug.
+
+Handheld firmware with all of today's fixes is flashed to five of six handhelds. **e40 is still refusing
+to flash** with CH340 serial noise, as it did yesterday; that is the bench, not the firmware.
+
+### Found by chaos: a handheld went mute again, refusing an SOS, by a road the first fix did not cover
+
+The best thing the new rounds have done so far, and it happened within five hours of arming them. Channi
+stopped being able to send **anything** for eleven minutes - and what it refused was the whole emergency
+path:
+
+```
+t=15979  direct   fnk0104b -> hosyond      refused   outbox full
+t=16196  announce fnk0104b -> e28          refused   outbox full
+t=16202  urgent   fnk0104b -> e28b         refused   outbox full      <- an SOS
+t=16208  safe     fnk0104b -> fnk0104b_c   refused   outbox full      <- standing it down
+```
+
+Its own log agrees: `W (9117154) MSG: [MSG] Not sent (outbox full)`, repeatedly, while it was registered,
+had grid time, and was receiving other people's messages perfectly well.
+
+**Cause: the same leak as before, in a state the first fix does not look at.** That fix ages out messages
+stuck in `LG_OUT_PENDING`. A 1:1 message a node **accepts** leaves PENDING for `LG_OUT_ACCEPTED`, and
+`pick_slot` treated such a slot as busy until the recipient's device confirmed delivery:
+
+```c
+bool reusable = ... || (m->state == LG_OUT_ACCEPTED && m->scope != LG_SCOPE_DIRECT);
+```
+
+So a 1:1 message to a handheld that **cannot confirm** holds a slot for ever. In the run the recipient's
+Wi-Fi was off for a `lora_handheld` round, which is exactly the condition the chaos rounds create:
+
+```
+t=15473, 15514  direct -> Jolly   delivered     (Jolly on Wi-Fi)
+t=15545         direct -> Jolly   lost          (Jolly moved to LoRa)
+t=15569 ...     everything        outbox full   (still mute 11 minutes later)
+```
+
+**Fix, in two tiers.** An accepted 1:1 message now holds its slot for `LG_ACCEPTED_HOLD_S` (120 s, past
+any plausible round trip including LoRa) and after that may be reused when the outbox is full - nothing is
+discarded while there is a free slot, so a confirmation that can arrive still does. And an **urgent
+broadcast or an all clear takes the oldest such slot immediately**, because raising an alarm outranks a
+delivery tick, and nothing is lost that the grid does not already hold: `ACCEPTED` means a node has it.
+The message history is unaffected either way - the handheld keeps its own ring (`ring_update_from_outbox`),
+so only late delivery and read marks for one old message are given up.
+
+Covered by a new scenario, `test_unconfirmed_direct_does_not_gag_the_handheld`, which fills an outbox with
+1:1 messages to a detached device and then checks that a fresh ordinary message is refused, an SOS and an
+all clear are **not**, and an ordinary one succeeds once the hold has passed.
+
+**This needs the owner's eye**, because the second tier changes what a handheld will throw away under
+pressure: an alert may now displace an un-confirmed 1:1 message. That reads as obviously right for a
+distress call and is in the spirit of D66 and D79, but it is a behaviour change rather than a repair, and
+it is recorded here rather than given a decision number nobody agreed to.
+
+Built warning-free for all three handheld targets and for `tests/target`. **`LG_TESTS_RESULT` not yet
+seen**: running it needs a bench board, and the chaos run owns every handheld. It runs the moment the run
+ends, and nothing is claimed about it until then.
+
+### The screen saver now falls in mirrored katakana, like the film it is imitating
+
+Owner, 2026-10-01: the film "also had some of the characters ... in different languages like Japanese or
+Chinese", and ours was "only dropping characters and some special characters". Correct on both counts, and
+the real thing is well documented: Simon Whiteley built the falling code from **half-width katakana**,
+taken from his wife's Japanese cookbook, and **mirrored** them, with a few Latin digits mixed in. Ours was
+dropping `0123456789ABCDEF...<>*+-/|=`, which reads as terminal output.
+
+Three differences from the film, not one, and all three are fixed.
+
+- **The glyphs.** New font `lg_font_matrix_12`: half-width katakana U+FF66-U+FF9D plus the digits, 66
+  glyphs, **every one mirrored**. Built by `tools/build_matrix_font.py`, which follows the emoji font's
+  path exactly - download, instance, subset, convert with lv_font_conv, commit the result - so an ordinary
+  build needs neither Node nor a download. The glyphs come from **Noto Sans JP, SIL Open Font License
+  1.1**, for the same reason the emoji come from Noto Emoji: OFL glyphs may be embedded in a
+  GPL-3.0-or-later firmware and shipped with it, and a system font may not. Mirroring is done with
+  fontTools pens, decomposing each glyph first so composites flip too; `--no-mirror` turns it off.
+- **The fade.** The trail was two colours, a white head and a flat `C_ACCENT` tail. It now runs a white
+  head into four greens - the bright one everyone remembers, then down to nearly black - repainted at four
+  fixed offsets behind the head rather than over the whole trail, so a column repaints five cells a step
+  instead of sixteen and a 30-column screen still fits inside the 70 ms tick.
+- **Mutation.** A glyph already on screen now changes **without moving**, one column in four per step.
+  That is the detail that makes the code look alive rather than merely scrolled, and nothing did it
+  before. It needed the saver to remember which glyph is in which cell (a `uint8_t` grid, 30 x 44), which
+  is also what lets a cell be repainted dimmer without being rewritten.
+
+Streams also vary in length now (7 to 16 rows, per column, re-rolled each time a column restarts) and in
+speed over a slightly wider range, so the columns stop marching in step.
+
+Costs **4 KB** of flash (1019 to 1023 KB on the S3; 33% of the app partition still free). Built
+warning-free for esp32, esp32s3 and esp32c6. Not yet flashed: the chaos run owns every handheld.
+
+### Fixed: getting home took several taps, because the house was the smallest target on the screen
+
+Owner, 2026-10-01: from Messages, Groups or Status, "it takes a lot of touches for it to get to the main
+screen because it's on a corner and doesn't have a lot of space". The measurements agreed:
+
+| Header control | Touch target |
+|---|---|
+| back arrow | 40 x 30 |
+| plus | 40 x 30 |
+| **the house that goes home** | **32 x 30** |
+
+About 4 x 3.5 mm, in a corner, on boards whose touch is resistive - and it is the control every screen
+needs in order to reach the launcher, so it is the one that could least afford to be the smallest.
+
+**The target is now 72 wide; the icon has not moved.** Only the hit rectangle grew, into the space the
+title occupies, which is text and was never touchable: nothing on screen looks different and the title
+still starts at the same place. Both halves of a tap use it, so a finger that lands wide and drifts still
+counts. It is clamped at run time against the battery and padlock cluster's left edge, so on the narrowest
+board (the 172-pixel C6) it settles around 52 rather than reaching them - still a little over half again
+the old size.
+
+It grows sideways only. The house already fills the header's full height, and reaching below it would
+start taking taps meant for the first row of a list: answering the wrong thing is worse than missing.
+
+Built warning-free for esp32, esp32s3 and esp32c6. **Not yet flashed** - the chaos run owns all six
+handhelds, and flashing resets a board, which would both disturb the run and spoil the battery figures it
+exists to measure. It goes on at the end of the run.
+
+### Two harness bugs the new audit flushed out in its first twenty minutes
+
+Both found by starting the run and reading what it said, and both were making the harness lie. The second
+one is the worse of the two, and it probably spoiled earlier nights without anyone noticing.
+
+**A handheld with its radio switched off still counted as having a Wi-Fi session.** `wifi off` set the
+flag and left `registered_node` alone, so the harness went on believing a session existed with the radio
+off. Twelve seconds after switching Jolly's Wi-Fi off it sent Jolly a message *as though it were on
+Wi-Fi*, counted it "both ends registered", and blamed the grid when it did not arrive - two false findings
+in ten minutes, the first of them while LoRa had not finished coming up:
+
+```
+t=547.9  wifi_off      fnk0104b_c
+t=560.0  probe sent    e40 -> fnk0104b_c   receiver_node: 0, receiver_path: "wifi"
+t=574.5  lora_link_up  fnk0104b_c
+t=590.0  FINDING: lost while both were registered
+```
+
+Worse than the false findings: **the new fallback audit keys on that same field**, so it could not see a
+handheld on the backup during a LoRa round at all - blind to 85 of that schedule's 236 rounds, which are
+precisely the ones whose backup use most needs judging. Now the hook clears the session, and a handheld
+whose radio this run switched off is no longer counted as "grid unsteady" for being unregistered, because
+that is the round working rather than the grid failing.
+
+**An access point that restarted stayed "in trouble" for the rest of the run, so the grid was never
+steady again.** `troubled()` compared each access point's boot counter against `baseline`, which is the
+first reading of the run and never moves. The first restart therefore poisoned that access point
+permanently, `unsteady()` counts a BLE-troubled access point as a reason not to inject, and every
+remaining experiment would have been skipped. Caught because experiments #1 and #2 were refused five
+minutes apart with **the identical boot numbers** - the same restart reported twice as if still happening:
+
+```
+#1 not started: grid still not steady: Everest (over BLE): boot 906 -> 907 (power-on or reset); ...
+#2 not started: grid still not steady: Everest (over BLE): boot 906 -> 907 (power-on or reset); ...
+```
+
+That is a bad bug in a tool whose whole job is to restart things: a night of chaos restarts access points
+on purpose, and arming their own chaos (D85) restarts all three, so **arming them guaranteed that nothing
+would ever be tested**. A restart now counts as trouble only while it is recent (`AP_RESTART_GRACE_S`,
+120 s - long enough to rejoin the backbone and announce health), judged from when that boot counter was
+first *seen* rather than against the baseline, which has to stay put because the report differences
+restarts and brownouts against it for the whole run.
+
+**Cost of finding both: two restarts of the run, about 25 minutes of battery.** Worth it against a night
+that would have produced a confident report about nothing. The first twenty minutes also measured
+something real while all this was going on: 24 of 24 messages delivered, two D54 roams ("Moving to an AP
+with fewer handhelds"), and a grid-wide event at t=503 where all six handhelds lost their session within
+six seconds across all three access points and every one re-registered within five, **losing no
+messages** - D53's self-healing holding under a whole-grid disturbance rather than being claimed.
+
+### Chaos now refuses to be fooled by a backup radio
+
+The owner's conclusion from the `pick_node` bug, in his words: *"if it is using a backup we need to make
+sure that there was a good reason to use the backup"*, because *"in some of these handhelds, we won't
+have those radios"*. The run reported that night as a success - every message arrived, carried by LoRa -
+while a handheld sat unable to hold a Wi-Fi session. Four changes, so that cannot happen quietly again.
+
+**Every fallback is judged, not just counted.** A handheld with no Wi-Fi session is sampled every 10 s,
+and the harness asks whether Wi-Fi *could* have worked: is its radio switched off by this run (D78), is
+it under an injected fault, is an AP in trouble on its own, is any AP up at all, is every AP full? If
+none of those explains it, the fallback is **unjustified** and becomes a finding after 45 s - long enough
+that an honest rejoin or roam is never blamed. The finding says so in the terms that matter: *"A handheld
+with no backup radio would be off the grid for this long."* Every episode, justified or not, is filed in
+`events.jsonl` (`fallback_began`, `fallback_ended`) and tabulated in a new report section, **"Did
+anything lean on the backup, and did it need to?"**, so the justified ones can be told apart rather than
+drowning the real ones.
+
+**Every message records the path it took.** Each probe now carries `sender_path` and `receiver_path`
+(`wifi` or `backup`) and, when an end was on the backup, `wifi_possible` and `backup_reason` - written at
+send time so the log can be analysed afterwards without re-deriving any of it. The report counts how many
+messages crossed on the backup and how many of those **should not have had to**.
+
+**A new `no_net` round takes the safety net away.** It switches LoRa off on every handheld that has a
+module, for a window, which makes those handhelds behave exactly like the ones that will ship without
+one - and then a Wi-Fi fault has nowhere to hide, because nothing can carry the traffic for it. Any loss
+during the window is reported as what a module-less handheld would have suffered. `lora off <seconds>`
+restores itself from the handheld's own clock, so a harness that dies mid-round cannot leave a handheld
+without its second radio.
+
+**A new `alerts` round walks the emergency path end to end**: announcement, SOS, and the all clear that
+stands it down, in that order, from one handheld - because the three are a sequence and D86's re-stamping
+applies across it. While grid time is unset the round sends only the urgent pair, since an announcement
+is refused by D6 and counting correct behaviour as a failure would manufacture findings.
+
+Both new rounds take no board out and break no link, so the AP-count rules do not apply to them; they are
+scheduled at `--extra-share` (default 0.22), at parity with each other. `--self-check` passes (46 parser
+samples, 34 LoRa status checks, 600 schedules), and `--scenario lora` still yields only LoRa rounds.
+
+**Also, so the alert round could exist: `send safe <text>` on the handheld console.** D66/D79's all clear
+had no way in from serial, which made it the one alert this bench could never send - and therefore the one
+chaos could never test, on the path where it matters most, since an SOS nobody can stand down is worse
+than no SOS. Verified on the boards: Jolly sent `to everyone URGENT [sent, delivered 4]` and Channi logged
+`from Jolly (device 9) to everyone URGENT [received]`.
+
+Handheld firmware built warning-free for esp32, esp32s3 and esp32c6, and flashed to five of the six
+handhelds on USB. **e40 is out of the next run**: it failed to flash with CH340 serial noise and then
+stopped answering `id` at all, which is the bench, not this change.
+
+### Fixed: a handheld refused to use the only AP on the grid, and D84 said it would not
+
+The best finding of the day, and it came out of asking a reporting question. Chasing *why* the console
+showed a vague "1 AP(s) in range, none of them usable yet", the log said something that should have been
+impossible:
+
+```
+[NET] Heard AP 1 "Fuji" -47 dBm, 5 attached, 1 free, backbone no, grid time yes, 94 ms ago
+[NET] Scan done: 10 records, 1 usable node(s)
+[NET] Scan found 1 usable node(s); scanning again in 10 s     <- every ten seconds, for minutes
+[NET] Joining Fuji (node 1, -47 dBm) as 192.168.4.101         <- only once the avoidance expired
+```
+
+One usable AP, and `pick_node` chose nothing. **`best_score` started at -1000 as a "nothing chosen yet"
+sentinel, and that silently became a minimum quality that every avoided AP fell through:**
+`AVOID_PENALTY_DB` is 2000, so Fuji scored `-47 + (1000 - 100 x 5 attached) - 2000 = -1547`, below the
+sentinel, and `best` was left at -1.
+
+**D84 promises the exact opposite**, in as many words: *"the avoidance penalty stays far above the
+backbone and grid-time disqualifiers, so an avoided AP that is the only one left is still chosen."* The
+decision was right and the code did not implement it. The consequence is the worst kind for this project:
+a handheld that had been refused once would **not try the only AP on the grid again for up to two
+minutes** (AVOID_MAX_MS), while sitting there with that AP at -47 dBm. On a one-AP grid - which is what a
+night of chaos and two flat batteries leaves - that is a handheld off Wi-Fi for no reason.
+
+The penalty is meant to *order* APs, not to veto one. Whether anything has been chosen is now tracked by
+`best` alone (`best < 0 || score > best_score`), so the only way to choose no AP is for every candidate
+to fail `node_usable`. Built warning-free for all three handheld targets and flashed to both Freenove
+boards; both came up `ONLINE on Fuji`, `problem: none`.
+
+**What it says about the testing, which matters more than the fix.** Nothing was logged as an error -
+every part did what it was told, exactly as D84's own finding said of the bug before it. The handheld
+even had a working LoRa fallback, so from the outside it looked fine, and the D80 fallback *hid* the
+fault: messages kept crossing, so nothing looked broken. Chaos runs never caught it because they measure
+whether messages arrive, and they did. It took reading one log line that disagreed with arithmetic.
+A grid of three APs also hides it: the veto only bites when the avoided AP is the last one standing.
+
+### Fixed: "on LoRa" now says which AP, and a full AP is no longer reported as out of range
+
+Both found by the owner looking at two handhelds sitting on LoRa and asking the two obvious questions:
+why are they not on Wi-Fi, and which AP are they even talking to.
+
+**Why they were on LoRa** turned out to be the grid behaving correctly. Only one AP was alive - the
+other two were brownout-looping on bench USB - and `nodes` on both handhelds showed `Fuji ... RSSI -45
+... ATTACHED 4`. Fuji was at the heap ceiling the capacity enforcement now holds it to, so it refused
+them (`registrations since boot: 0`) and they fell back to the second radio. Refused cleanly, still
+reachable, not locked out: the capacity limit and the D80 fallback both did their job. Nothing to fix
+there - but both of the handheld's answers *about* it were wrong.
+
+- **"ON LORA (no Wi-Fi)" never named the AP.** The handheld knew all along: the radio keeps a bitmask of
+  APs heard recently. The snapshot now carries that AP and its name (`lora_peer`, `lora_peer_ssid`),
+  separate from `node`, which must keep meaning "an AP there is a Wi-Fi session with" - over LoRa there
+  is none. The console prints `link: ON LORA (no Wi-Fi) via Fuji (AP 1)`, the home screen's one line
+  reads `Channi on LoRa via Fuji`, Settings says `Fuji, over LoRa (no Wi-Fi)`, and Status's **AP** row
+  names it instead of showing `--`. Verified on COM9 by taking Wi-Fi away with `wifi off 180`.
+- **`problem: No LocalGrid AP in range` was false, and sent the owner the wrong way.** Fuji was in range
+  at -45 dBm; it had no room. The old text came from counting only *usable* APs, and `node_usable`
+  requires `free_slots > 0`, so a heard-but-full AP counted as absent. "Move the handheld" is the
+  remedy for out of range; "free a slot or start another AP" is the remedy for this, and the handheld was
+  recommending the first. It now counts APs heard by name separately from usable ones and says which
+  case it is: `Fuji is in range but full (4 handhelds)`, or that every AP in range is full, or too weak,
+  or that none is usable yet. The AP name is bounded to 16 characters because `HH_PROBLEM_MAX` is 72 and
+  a name may be 32 - caught by `-Werror=format-truncation`, not by me.
+
+Handheld built warning-free for all three targets (esp32, esp32s3, esp32c6) and flashed to both Freenove
+boards.
+
+### Diagnosed: the two handheld GPS modules hear nothing usable, and the screen said "looking"
+
+The owner asked why the two Freenove handhelds, antennas at a window, never lock, while Everest locks
+with its antenna indoors away from one - **the same model of module on both**. That comparison is what
+made it solvable: a module that works on one board and not another is not a sky problem.
+
+What the handhelds' own NMEA says, read off COM9:
+
+```
+$GPGSV,6,1,22,01,,,25,02,,,25,03,,,25,04,,,25
+$GPGSV,6,2,22,05,,,25,06,,,26,07,,,25,08,,,25
+$GPGSV,6,3,22,09,,,25,10,,,25,11,,,25,12,,,25
+$GPGGA,201455.00,,,,,0,00,99.99,,,,,,
+```
+
+- **Twenty-two satellites "in view", PRNs 1 through 13 consecutively, all at 25 dB.** No more than about
+  fourteen GPS satellites are ever above one horizon, and half of those PRNs were below it. This is not a
+  sky view: the module is listing the PRNs it is **searching for** and reporting its own noise floor
+  against each. Real signal would make some PRNs stand out; none do.
+- **Empty elevation and azimuth on every one**, so it has never decoded an orbit for any of them.
+- **The digital side is perfect**: 246,255 sentences and 1 bad checksum. UART, pin and baud are right.
+- **It is not a cold start.** Measured across the day: 147,290 sentences, later 246,255 - about **eleven
+  hours of uninterrupted reception**, never one satellite used. Waiting is not the missing ingredient,
+  which was the first theory and was wrong.
+
+Nothing in the firmware is at fault and nothing in it can fix it; the board profile is right
+(`gps_rx = 44`, D65).
+
+**Supply is ruled out.** The first suspicion was that the AP feeds its module 5 V (`docs/lora.md`: "VIN
+(5 V) ... it has its own regulator") while a handheld fed it 3.3 V, which would leave the digital core
+running and the RF front end starved - exactly the symptom. The owner checked, and the board profile
+agrees: the FNK0104B's 4-pin UART connector carries RXD, TXD, GND and **5 V**, and 5 V is the *only*
+supply pin it has, which is why the 3.3 V RYLR998 had to be powered from the I2C connector instead. So
+both get the same supply. That pin cannot be measured from firmware either - the one supply ADC in the
+profile is GPIO9 on the battery rail - so it would take a meter, and there is no longer a reason to.
+
+**Measured instead: what the handheld's own radios cost its GPS.** One port held open so the board was
+never reset, `gps` sampled every 15 s, LoRa alternated on and off three times, 30 samples per state:
+
+| Board | LoRa | satellites in view, mean (range) | best dB-Hz, mean (max) |
+|---|---|---|---|
+| **Channi** | on | 8.6 (2-19) | **24.2 (28)** |
+| **Channi** | off | 10.0 (4-17) | **27.4 (31)** |
+| **Jolly** | on | 23.0 (23-23) | 29.7 (30) |
+| **Jolly** | off | 23.0 (23-23) | 29.4 (30) |
+
+- **LoRa costs Channi about 3 dB**, repeatably: mean best 24.2 against 27.4, peak 28 against 31. At this
+  margin that is the whole answer for that board, because decoding an orbit takes about 30: with LoRa
+  transmitting Channi cannot reach the floor, with it off it only just touches it. The RYLR998's antenna
+  is centimetres from the GPS antenna on these boards and transmits 22 dBm. **Everest carries LoRa too
+  (D71) and locks**, so proximity and a marginal antenna together are the problem, not LoRa by itself.
+- **A first, badly-shaped version of this test claimed LoRa tripled the satellites in view** (about 3 to
+  about 9). It switched LoRa off once, part way through, so anything drifting over those minutes looked
+  like the result; alternating cut the difference to 8.6 against 10.0. The strength difference survived
+  and the count difference did not. Recorded because the wrong answer was the more exciting one.
+- **The two boards do not share one fault.** Jolly shows no LoRa sensitivity at all, and reports exactly
+  23 in view in every one of 60 samples - a search list that never varies is not a receiver watching a
+  changing sky. Channi's count moves between 2 and 19, which is a receiver doing something real.
+- **Neither sustains 30 dB-Hz, so neither will lock as installed**, and the remaining work is physical:
+  a real view of the sky rather than a window (the dominant term, and the only one worth doing first),
+  distance between the GPS and LoRa antennas on Channi, and for Jolly a **swap** with Everest's
+  known-good module to say whether the fault is its module or its antenna.
+
+**Not a blocker for chaos.** GPS feeds handheld position (D65) and is a time source the grid does not
+depend on (Everest and D63 cover time). Messaging, Wi-Fi and LoRa - what the runs test - are unaffected.
+What cannot be tested until this is fixed is anything built on a handheld knowing where it is: the
+position in an urgent alert, and distance and direction on Status.
+
+### Fixed: a handheld now says when a fix is never coming
+
+The fault above was invisible for eleven hours because both places that report GPS described an outcome
+and not the evidence.
+
+- **The console `gps`** said `no fix yet, 0 satellites` - which reads as "still looking". It now also
+  prints what the module *hears*: `21 in view, 21 with a signal, best 25 dB-Hz`, the numbers that were
+  already kept for the Status screen and never shown here. Verified on COM9.
+- **Both now name the fault** when nothing is used, four or more are in view, and either the best
+  strength is no better than the ~30 dB-Hz needed to decode an orbit, or **more satellites are in view
+  than can be above any horizon**. The second tell is the specific one, and it is what caught these two
+  (21, 22 and 25 in view). The console prints what to check; the Status **Lock** row stops saying
+  "looking for satellites" and says `no: signal too weak to use, check the antenna` (D23 - the handheld
+  reports its own state on its own screen, and the owner read this fault off that screen first).
+
+### Measured (how long a 5000 mAh pack holds an access point, and it is not what I estimated)
+
+Run to the batteries' end on 2026-09-30/10-01, three access points on battery, no cable, handhelds on USB
+faulting themselves and each access point attacking itself over BLE.
+
+| AP | Time discharging | Note |
+|---|---|---|
+| **Everest** | **9 h 38 min** | the only one with a GPS receiver |
+| **Fuji** | **11 h 34 min** | |
+| **Denali** | **12 h 42 min** | its pack gauge still read 25% an hour before it died |
+
+- **The estimate was wrong by three to five times.** 28-45 h came from typical-current figures; the answer
+  is 9½-12½. This is the whole argument for running it rather than calculating it.
+- **A GPS costs about two hours** - but **pack-to-pack variation was about an hour by itself** (Fuji
+  against Denali, same board, same firmware, same share of the load), so one board each cannot separate
+  the two cleanly. Swapping the packs between boards and running again would.
+- **The pack gauge is badly non-linear**: Denali's last quarter lasted an hour, its first three quarters
+  eleven. It must not be read as "a quarter of the runtime left".
+- **It is a floor, not the battery's life**: the figure is how long the access point kept beaconing, and
+  these boards do not report their own charge - which is the gap that made this harder than it needed to
+  be, since the owner had to look at a flashing light to tell which pack was failing.
+- **Load balancing is exonerated.** Over 6,660 snapshots with all three alive the attachments split
+  **33 / 34 / 33**, and after Everest died the two survivors took its orphans **3.00 against 3.02** (D54).
+
+### Found at the end of the night: advertised capacity is advice, not a limit
+
+The most actionable finding after the muteness, and the same root cause as Fuji's panic.
+
+- **Denali advertised `0 free` and accepted a fifth handheld anyway**, then **dropped every session at
+  once** - twice in forty minutes, all four or five handhelds reporting `Session receive error` on it
+  within 200 ms, its heap floor at 0 KB. It never restarted: boot 897 throughout, uptime past nine hours.
+  So where Fuji **died** of heap exhaustion, Denali **sheds the entire grid** and survives.
+- **Cause.** `build_discovery` advertises what the heap can honour (fixed earlier the same night: 4.5 KB
+  per station, 10 KB floor), but `sessions.c` still accepts up to `LG_PROTO_MAX_STATIONS` (15). The
+  advertised figure steers a handheld's *choice* and refuses it nothing, so a handheld that tries anyway
+  gets in - and the access point then cannot serve what it accepted.
+- **Fix, and it is better defined than "do memory work":** refuse a session beyond what the heap can
+  honour, so a handheld gets a clean refusal and looks elsewhere instead of joining a grid that then drops
+  everyone. **Not implemented - it changes how many handhelds an access point will serve, which is the
+  owner's call.**
+- **Also measured, as the consequence of the honest advert:** with one access point left, four handhelds
+  attached and **two were plainly offline with nowhere to go**. That is the right failure - visible, and
+  far better than an access point taking all six and dying - and it says the real ceiling is **four
+  handhelds per access point on these boards, not fifteen**.
+
+### Fixed (a handheld went permanently mute, and chaos is the only reason we know)
+
+The worst thing this project has found, and nothing in a full day of work on this exact code caught it.
+
+- **What the night saw.** Round 15 on Jolly: **9 of 9 inbound delivered, 0 of 9 outbound**, with the radio
+  plainly healthy - 11 frames out, 0 dropped, 0 seal failures, all three access points heard. The frames
+  never reached the air: `[MSG] Not sent (outbox full)`, twenty-seven times. It was **still mute twenty
+  minutes after rejoining Wi-Fi**, registered, online, good signal, screen showing nothing wrong.
+- **Three correct decisions, interacting.** A message stays `LG_OUT_PENDING` until something acknowledges
+  it; D6 refuses a message more than `LG_TIME_TOLERANCE_S` from the access point's clock, and a
+  retransmission must reuse that stamp, so past that window it can **never** be accepted by any path; so
+  each such message held its outbox slot for ever. Sixteen slots, and then the handheld could send nothing
+  at all - **including an SOS** - until it was restarted.
+- **Keeping it served nobody**: undeliverable, and holding it disabled the device. A pending message past
+  the tolerance plus the re-stamp margin is now failed with `LG_ACK_REJ_TIME` - the reason the sender
+  would have been given anyway - and its slot comes back. An alert is exempt while it still has a re-stamp
+  left (D86), and ages out like anything else once they are spent.
+- **Two scenarios reproduce it**: an outbox filled to the brim stays filled while the messages are fresh,
+  frees itself once they are provably stale, and the handheld can send again; and an alert is not aged out
+  while D86 can still give it a new identity.
+- **One of them had to overturn a test written earlier the same night.** `test_restamping_is_bounded`
+  asserted that an alert with its re-stamps spent **stays pending** - the leak, written down as intended
+  behaviour. The suite caught the change, which is the clearest argument for having written it.
+- **2525 checks, 0 failures** on an F4B. All six handhelds reflashed and the night restarted with the fix,
+  with `outbox full` added to what the run watches for.
+- **Why chaos found it and reading did not.** It needs hours of a handheld going in and out of Wi-Fi range
+  with messages that are never acknowledged - sixteen of them, in the right order, across a window longer
+  than two minutes. No unit test would have been written for that, and no amount of staring at
+  `lg_client.c` suggested it. The night produced it in under three hours.
+
+### Added (a run that ends when the batteries do, and a schedule that is different every night)
+- **`--until-aps-die`**: the run goes until every access point has been silent for `--ap-dead-after`
+  minutes (default 10) and then stops, instead of stopping on a clock. `--hours` becomes an upper bound,
+  raised to at least 48 so the plan never runs out before the batteries do. Owner, 2026-10-01: run it
+  until the APs have no battery left, and since they cannot measure their own charge, take silence as
+  death.
+- **Ten minutes, because a restart takes seconds.** An access point that reboots - its own chaos, or a
+  crash - is quiet for a few seconds and comes back; nothing short of a flat battery keeps a 500 ms beacon
+  silent for ten minutes. A long wait between experiments also gives up as soon as they are declared
+  dead, so a run does not sit out a 15-minute gap after the thing it was testing has gone.
+- **A battery section in the report**, from each access point's own last uptime before it went quiet, with
+  the honest caveat that this is **a floor on the battery's life, not the battery's life**: it is how long
+  the access point kept beaconing, and these boards cannot report their charge. Restarts during the run
+  are listed beside it, because a restart resets that uptime and would otherwise read as a short battery.
+- **The seed is random per run and printed.** It was already drawn from the clock when not given, but
+  never recorded, so a night could not be replayed - `Seed None` in the header. Now a random seed is
+  chosen, used and printed, which is both halves of what was asked: different every night, reproducible
+  afterwards.
+
+### Fixed (an access point with no status frame read as one with no backbone)
+- **`links` was `len(health.links or [])`, which is 0 when no sealed health frame has arrived yet.** Zero
+  links and "it has not said anything yet" are different claims, and conflating them marked every access
+  point as having lost its backbone in the first seconds of a run - which `troubled()` would have read as
+  a fault in progress and `unsteady()` as a grid that never settles, so nothing would ever have been
+  injected. Caught in the first line of live output - `0 link(s), None handheld(s)` - before it could
+  spend a night on it.
+- Missing health is now `None` and reported as **"heard, but no fresh status frame from it"**, which is its
+  own kind of trouble and says so, rather than borrowing the words for a different one.
+
+### Added (a chaos night can test the whole system again, with the access points on battery)
+- **The harness was blind to the access points once they left their cables, and I offered that as a
+  limitation to live with.** The owner's answer was that it is not one: chaos is supposed to test
+  everything, and a night that cannot fault the handhelds is not testing the leg we had just fixed. The
+  obstacle was real but not fundamental - the APs *do* attack themselves when armed over BLE (D82, D85),
+  and the problem was that this side could not **see** them, so it would have reported a message lost to
+  an AP restart as a finding against the grid. A wrong finding is worse than a missing one.
+- **`BleEyes`: the harness now listens to the same sealed status beacon the dashboard reads** (D68),
+  on a thread, using grid_watch's own decoder. It takes no port, joins no Wi-Fi, carries no message and
+  never holds a BLE address (D21, D25, D70). Three things change because of it:
+  - **Attribution.** `active_faults()` counts an AP whose beacon says it is in trouble - a backbone link
+    short of its peers, a boot counter that moved, a beacon gone quiet - exactly as it counts a board the
+    harness is holding in reset. A probe in flight during an AP's own fault is no longer "clean".
+  - **Steady state.** With no AP on USB, an AP short of a link or freshly restarted means the grid is not
+    back yet, instead of the gate having nothing to look at.
+  - **The report.** A new section accounts for every AP: heard, boot, links, handhelds, and the restarts
+    and brownouts that happened *during the run*, with the honest note that a restart may well be the AP
+    breaking itself on purpose and only its journal can say which.
+- **`--no-ble`** turns it off, for a run where nothing is armed, and says plainly what that costs.
+- **Found by running it, again.** The first attempt heard nothing: `grid_watch.listen` *awaits*
+  `stop.wait()`, and a `threading.Event`'s `wait()` is not awaitable, so the listener died on its first
+  pass. It was caught only because the harness reported "no AP was heard" as a **finding** rather than
+  carrying on as though it could see - and it now prints the listener's own error with it. Verified live:
+  Everest heard 1.3 s in, with boot, links, handhelds and brownout count, and all three in the report.
+
+### Fixed (an overnight run over BLE would have ended whenever the laptop dozed)
+- **`chaos_ble.py` never asked Windows to stay awake.** The dead-man window is the safety property of a
+  wireless run - nobody renews it, the run stops (D83) - and that makes a sleeping laptop
+  indistinguishable from a laptop that was carried off, which is correct. It also means a ten-hour night
+  would have ended quietly at whenever the machine dozed, with nothing in the morning to say why beyond a
+  journal that stops early. `tools/chaos.py` has held sleep off since its first night run; the BLE path
+  needed the same and did not have it. Released on the way out, so a finished run leaves the power
+  settings as it found them.
+- **A failed renewal no longer ends the run silently.** One miss is survivable - the window is minutes
+  wide - so the loop now reports the failure, keeps trying, and says roughly how long the window has left
+  if they keep failing. Before, a single bad BLE connection at 2 a.m. would have dropped out of the loop
+  and left the access points to disarm themselves with no explanation.
+
+### Added (the chaos journal records what the second radio carried) — TEMPORARY, part of T1
+- **A chaos night could show that the grid survived an ESP-NOW outage and not that LoRa carried it.** The
+  journal recorded which fault happened; the D68 beacon carries heap, restarts and brownouts. Neither
+  carried a LoRa counter, so with the access points on battery the central claim of a LoRa night was the
+  one thing the evidence could not reach.
+- **Three records, so the 16-byte layout does not change**: `CHAOS_EV_LORA_FIRST`, `_OUT` and `_IN`.
+  **FIRST is the one to read** - it is the firmware's own "N of them arrived here first", frames that came
+  over LoRa before Wi-Fi had delivered them, so a rising count across a backbone-off window is the second
+  radio doing the grid's work and a flat one is the grid having stopped instead of healed.
+- **Written where the evidence is**: just before each fault, again two seconds after the outage it caused
+  should have lifted, and every `CHAOS_LORA_EVERY_S` (300 s) while armed so a quiet stretch still has a
+  baseline. A ten-hour armed night costs about 360 of the 4095 records, and the 60-fault budget at most
+  another 360.
+- **An access point with no module writes nothing** rather than a row of zeros, because a zero would read
+  as "carried nothing" when the truth is "has no radio".
+- **`chaos_ble.py journal` now says what it means**, pairing the snapshots either side of each fault:
+  `backbone off 120 s | LoRa first +15 out +31 in +29 | LoRa carried the grid while ESP-NOW was down`.
+  Exercised offline against all four shapes it has to report honestly - carried, did not carry, the radio
+  moving frames while supposedly off, and a restart that loses the snapshot after it.
+
+### Verified on the boards (both access point fixes are live, and on battery)
+- All three access points flashed by cable and returned to battery: **42 status frames verified, 0 failed**.
+- **The capacity fix is visibly working.** Earlier tonight Fuji advertised `1 attached, 6 free`; it now
+  advertises `2 attached, 3 free`, Denali the same, and Everest - which carries the GPS and the clock, so
+  has least heap - offers `1 attached, 2 free`. Thirteen slots across the grid for six handhelds,
+  recomputed as heap falls, and **no single access point is invited to take all six** the way Fuji was
+  when it panicked.
+
+### Added (D86: an alert too old to be accepted is said again under a new id) — owner's decision
+- **The owner's answer to the two-minute conflict, asked and given on 2026-09-30:** "go with possibly
+  twice for urgent and SOS". A message delayed past `LG_TIME_TOLERANCE_S` could never be delivered,
+  because D6's clock check compares the message's stamp to the access point's clock and a retransmission
+  must reuse that stamp. For an urgent broadcast, an SOS or an all clear, arriving twice beats not
+  arriving.
+- **A new sequence number as well as a new stamp, and that is not a detail.** An access point
+  deduplicates on (author, boot, seq) before it ever looks at the clock, and the AEAD nonce comes from
+  the same triple - so reusing the sequence with a fresh grid time would be both invisible to the access
+  point and a nonce reuse, which is the one thing this project does not do. The new id is precisely why
+  the recipient may see the alert twice, and that is the trade that was chosen rather than a side effect.
+- **Ordinary messages are untouched.** 1:1 and group text keeps its identity however old it gets, so
+  nobody sees a chat message twice. A scenario fails if that stops being true.
+- **Bounded at three re-stamps**, after which the alert stays pending with its last id instead of
+  re-stamping for ever; and `LG_TIME_RESTAMP_MARGIN_S` (30 s) keeps a re-stamped frame from spending what
+  is left of its window in the air - seconds, over LoRa - and being refused for the same reason as the
+  copy it replaced.
+- Three scenarios in `tests/target/main/test_messaging.c`: the alert is re-stamped and then crosses where
+  its old stamp could not; the chat message keeps its id however old; re-stamping stops at the cap.
+
+### Measured (the retry works, and the asymmetry was never the radio)
+
+The same chaos round, same seed, same boards, same 197 s window, three times - the only change between
+the second and third being that the retry pass actually runs:
+
+| | First run | Re-run (10 s resend, tick still skipped) | Tick fixed |
+|---|---|---|---|
+| Delivered **from** the LoRa-only handheld | 6/9 | 6/9 | **9/9** |
+| Delivered **to** it | 8/9 | 6/7 | 8/9 |
+| Its LoRa frames on the air | 21 | 21 | **28** |
+
+- **Outbound went from two thirds to all nine**, and the frame count is the proof it is real rather than
+  luck: seven more frames on the air, which is the retransmissions appearing where there had been none.
+  The first two columns are identical in both numbers, which is what a guard that silently skips the
+  retry looks like from the outside.
+- **The explanation held.** The 66%-against-83% asymmetry was not a directional radio: a message *to* the
+  handheld was retried for free by the sending handheld's 3 s Wi-Fi resend, each resend making an access
+  point transmit again, while a message *from* it had one attempt and four stacked gates - three in
+  `lg_core`, one in `hh_service` - between it and a second.
+- Honest reading of the remaining 8/9 inbound: one loss in nine on a path that already had retries, which
+  is the per-attempt loss rate showing through, not a regression.
+- **The latency distribution is the signature, and the whole retry chain is visible in it.** A cluster at
+  **1.3 s** (first attempt), five messages at **11.34-11.94 s** (the +10 s second attempt) and one at
+  **22.53 s** (the third). That last one lost two frames in a row and still arrived. Every one of those
+  six would have been a silent loss this morning, and a message that arrives eleven seconds late instead
+  of never is the whole point on a radio with no link-layer acknowledgement.
+- **A second benefit, unlooked for: the clock refusals mostly went away too**, from **six in the first run
+  to one**. A retry that fires at 10 s lands inside D6's two-minute tolerance; the 30 s one fired outside
+  it. So the pacing fix removed most of the staleness problem as a side effect, and D86 covers what is
+  left for alerts.
+
+### Fixed (a fourth gate: the outbox was not serviced at all while a handheld was on LoRa)
+- **The retry that was supposed to fix the loss rate never ran.** `hh_service`'s service pass returns
+  early when `s.wifi_off` is set, above the line that calls `lg_client_tick()` - so with Wi-Fi off, the
+  one thing that drives the outbox was skipped. Three gates in `lg_core` had been opened to let a
+  LoRa-only handheld send; this is the same bug one layer out, in the firmware.
+- **The comment above that return was true when it was written** - "every branch of the state machine
+  either scans, joins, or talks over a socket" - and stopped being true the moment the core learned to
+  send without a session. That is the shape of all four of these: a guard that was correct for Wi-Fi,
+  left in place while the thing underneath it changed.
+- **Caught by arithmetic, not by reading.** The 10 s resend predicted that outbound delivery would climb
+  towards the inbound rate. A re-run on the same seed gave the same **6/9 outbound and the same 21 LoRa
+  frames out** - and 21 is exactly nine sends plus six acknowledgements plus the announcements, with no
+  room for a single retransmission. A prediction that failed was more useful than the fix that looked
+  right: the counters said the retry had never reached the air.
+- The tick moved above the return, where the radio is already serviced for the same reason. The interval
+  and the one-message-per-pass cap live in the core, so this costs nothing while Wi-Fi is up.
+
+### Found by the first real chaos run of the handheld LoRa leg (2026-09-30, access points on battery)
+
+Three rounds, every one recovered in 0.2 s, **84 of 100 messages delivered**, median latency 1.1 s and
+p95 1.7 s. The rounds themselves, each switching one handheld's Wi-Fi off and messaging it both ways:
+
+| Round | From it | To it | Its LoRa frames out |
+|---|---|---|---|
+| 1 (Jolly, 197 s) | 6/9 | 8/9 | 21 |
+| 2 (Channi, 184 s) | 6/8 | 5/8 | 19 |
+| 3 (Jolly, 293 s) | 8/13 | 12/13 | 28 |
+| **Total** | **20/30 (66%)** | **25/30 (83%)** | 68 |
+
+- **The radios carry, and they are not lossless.** 75% overall at 1.1 s median, with **no local drops at
+  all** - no queue drops, no reassembly timeouts, nothing refused by type on either side. The frames were
+  simply not heard. Nothing acknowledges at the LoRa link layer, so the answer is retries, which is why
+  `LG_RESEND_LORA_MS` came down to 10 s in the same session.
+- **Outbound from a handheld is consistently lossier than inbound to it**, 66% against 83%, on both
+  boards and in every round - and the two directions are not retried alike, which looks like the whole
+  of it. A message *to* the LoRa-only handheld is sent by a **registered** handheld, whose outbox resends
+  every 3 s over Wi-Fi; each resend makes the access point transmit over LoRa again, so an inbound
+  message quietly gets several attempts, all of them inside the two-minute clock tolerance. A message
+  *from* it had one attempt and then a 30 s wait, and by the time that fired the stamp was old enough to
+  be refused (above). So the asymmetry is not the radio being directional: it is **one side having
+  retries and the other not**.
+- That makes a prediction worth testing rather than asserting: with the resend at 10 s and one message
+  per tick, the outbound rate should move towards the inbound one. The same seed was re-run on the same
+  boards to find out, which is the only way this stops being a story.
+
+### Found by the same run: a message that waits more than two minutes can never be delivered
+
+- **Six messages came back `Refused by the AP (time)`**, every one of them in the seconds after Wi-Fi
+  returned, retrying something queued while the handheld was on LoRa.
+- **Two correct rules that contradict each other.** D6 says a handheld more than two minutes off its
+  access point may send only urgent broadcasts, enforced by `time_ok()`:
+  `absdiff(ap_clock, frame.grid_time) <= LG_TIME_TOLERANCE_S` (120 s). And a retransmission **must** reuse
+  its original grid time, because identity and the AEAD nonce are built from it. So a message stamped
+  during an outage is refused on every later attempt, for ever, and the stamp can only get older.
+- **The implementation is stricter than the decision.** D6 is about *a handheld whose clock is wrong*;
+  `time_ok()` measures *how old a message is*. A handheld with a perfectly correct clock has its
+  three-minute-old message refused. An access point cannot tell the two apart from the frame alone.
+- **Owner's decision, asked and not taken here**, because it changes a numbered decision and both
+  branches are defensible: after two minutes, should a message arrive **possibly twice** or **not at
+  all**? Re-stamping a message nothing has acknowledged makes it deliverable and risks a duplicate if an
+  access point silently accepted the first copy; keeping the stamp guarantees no duplicate and no
+  delivery. The recommendation on the table is *possibly twice, at least for urgent and SOS* - a
+  duplicate alert is an annoyance and a missing one is the failure the radio exists to prevent - or, if
+  D6 is to stand untouched, raising the tolerance to cover a realistic outage.
+- **One thing this already explains:** the 10 s retry interval is not only about latency. It is the only
+  interval that fits *inside* the two-minute tolerance, so attempts two and three can still be accepted
+  where a 30 s retry's third attempt would already be refused.
+
+### Fixed (a handheld said "searching" while it was delivering messages over LoRa)
+- **The one thing on the screen that was not true.** With Wi-Fi off and LoRa carrying, `status` reported
+  `link: SEARCHING` and the launcher said "Looking for an AP" - while messages were crossing in 1.3 s and
+  acknowledgements were coming back. D80 gave the *grid* a third presence state; the handheld had none
+  for its own link, so the device in someone's hand understated what it was doing (D23).
+- **`HH_LINK_LORA`, reported and never entered.** The service's own state machine never assigns it, so
+  every `== HH_LINK_ONLINE` test inside the service keeps meaning exactly what it meant and none of the
+  23 of them had to be re-reasoned. `publish()` - the single place the UI is told the link state - maps
+  SEARCHING to it when `hh_lora_has_peer()` is true, which is the same test the radio itself uses before
+  spending airtime on a transmission.
+- The console says `ON LORA (no Wi-Fi)`, the status screen says `on LoRa` and **does not mark it a
+  warning**, because the second radio doing its job is not a fault; Settings says "over LoRa, no Wi-Fi"
+  where it used to say "not connected"; and the launcher says "<name> on LoRa" instead of "Looking for an
+  AP".
+
+### Fixed (a notification was covered by the screen saver before it could be read)
+- **Reported by the owner, 2026-09-30:** a message arriving while the screen saver was running was not
+  shown. The overlay *did* wake for it - `s.cover = OV_NONE`, banner drawn, bell rung - and then the
+  saver covered it again on the very next tick, about 40 ms later on the bench:
+
+  ```
+  I (20602710) UI: [UI] Notified: Channi in Channi
+  I (20602750) UI: [UI] Screen saver on
+  ```
+
+- **Only touch counted as activity.** The saver fired on `now - last_touch_ms >= SAVER_IDLE_MS`, and a
+  message is not a touch, so once the idle minute had passed the rain came back immediately and kept
+  coming back. The reader saw the rain stutter and never saw the message - the notification was
+  delivered, sounded, counted as unread, and invisible.
+- **Showing something now counts too.** A banner raised, or the saver woken for a message, records
+  `woke_ms`, and the saver waits for the longer of the two to go quiet. Both are measured as a
+  difference from now rather than compared with each other, so neither reading breaks when the
+  millisecond counter wraps. The banner therefore lasts its full fifteen seconds, and the idle minute
+  restarts from the moment the message appeared rather than from the last finger.
+- The overlay's log line now says how long ago something was last shown, beside how long since the last
+  touch, so the next person can see which clock is holding the rain off.
+- **Measured before and after, on the same grid, by accident.** `e40` would not take a flash twice over
+  (serial noise on its CH340), so it ran the old firmware through a chaos run beside five reflashed
+  boards - a controlled comparison nobody had to arrange:
+
+  | Board | Firmware | Notifications | Covered by the saver | How soon |
+  |---|---|---|---|---|
+  | e40 | old | 5 | 5 | **80-90 ms** |
+  | e28b, hosyond | fixed | 14 | 8 | 59,850 ms |
+  | fnk0104b | fixed | 11 | 0 | - |
+
+  On the old firmware a message was on screen for a **twelfth of a second**. On the fixed one the rain
+  returns after the full idle minute, as intended, long after the banner has had its fifteen seconds.
+
+### Found on the bench (an access point panicked at six handhelds while advertising room for fifteen)
+- **Fuji crashed on battery with no fault injected.** At 21:20:46 on 2026-09-30 its boot counter went
+  1029 -> 1030 and its beacon reported `crash (panic)`. Its brownout counter did not move, so this was
+  not the supply, and nothing had been injected: the run that was going at the time never started an
+  experiment.
+- **What the beacon timeline shows, at 5 s resolution.** Handhelds piled onto one access point as they
+  re-registered, and its heap floor was already on the floor when they did:
+
+  ```
+  21:20:20  Everest hh4 heap 1KB | Fuji hh4 heap 0KB | Denali hh0 heap 0KB
+  21:20:35  Everest hh0 heap 1KB | Fuji hh6 heap 0KB | Denali hh0 heap 0KB
+  21:20:46  Everest hh0 heap 1KB | Fuji b1030 hh0 heap 27KB  <- panicked and restarted
+  21:21:31  Everest hh4 heap 0KB | Fuji hh2 heap 18KB
+  ```
+
+  Fuji held **all six handhelds** fifteen seconds before it died, while Everest shed its own to zero.
+- **The numbers give the real capacity.** Fresh after the restart Fuji had 27 KB free with no handheld
+  and 18 KB with two, so a session costs roughly **4.5 KB**. Six sessions is about 27 KB, which is all
+  of it. Meanwhile `LG_PROTO_MAX_STATIONS` is **15**
+  ([lg_proto_config.h:17](firmware/common/lg_proto_config.h:17)) and that is what an access point
+  advertises room for. **It invites fifteen and panics at six** - and because it advertises the room,
+  D54's load balancing steers handhelds *towards* the access point least able to hold them.
+- This is the capacity question in a concrete form rather than an estimate: it is the owner's decision
+  what an access point must carry, and the choice is now between raising the real capacity and lowering
+  the advertised one. Nothing has been tuned away.
+- **No serial log exists for it**, because the access points are on battery. The reset reason in the D68
+  beacon is the whole of the evidence, which is exactly the observability gap already recorded: a panic
+  on battery is visible and not diagnosable.
+- **The advertised capacity is re-measured, because that is how the AP talked itself into dying.** The
+  free-slot byte is already heap-aware - it was fixed once, from the flat `15 - clients` to
+  `(heap - DISC_HEAP_FLOOR) / DISC_HEAP_PER_STATION` - but the per-station figure was **3 KB against a
+  measured 4.5 KB**, and that error compounds with every handheld admitted. Six were admitted. The floor
+  was **6 KB, below the 13 KB an AP needs to keep offering its BLE admin link**, so an AP could advertise
+  room right up to the point where the only remote way to reach it was gone - on battery, gone for good.
+  Now 4608 and 10240.
+- **What that means, stated rather than tuned away: an AP honestly advertises three or four handhelds.**
+  Not fifteen, not six. Raising the real number is a memory problem in the per-session buffers, not an
+  advertising one, and how many an access point must carry stays the owner's decision.
+- **Not yet on the boards.** The access points are on battery with no cable, so this is built and waiting
+  for either a cable or an over-the-air upload (D81, itself never yet exercised).
+
+### Fixed (two bugs in the new chaos round, both found by running it)
+- **The grid could never be called steady with the access points on battery**, so no fault was ever
+  injected. `unsteady()` required every handheld to be registered with an AP *the run holds a port on*,
+  and on battery there are none, so the condition was unsatisfiable while the grid was in fact healthy.
+  With no AP on USB a handheld being registered at all is now the evidence used - it is evidence about
+  the same thing, since an AP had to accept it.
+- **`handhelds with a LoRa module: none`, with two of them fitted and working.** The `lora` status block
+  was parsed only `if (b.is_ap)`, from before handhelds had one (D77), so no handheld ever reported a
+  module and the round that needs one was never scheduled. The two blocks are told apart by their own
+  headers, so parsing both on every board cannot confuse them.
+- **The round measured its own clock wrong and reported a total failure that had not happened.** It
+  called `handheld_probe(self.now_s(), ...)`, and the parameter that reached was the probe's `mono`
+  stamp - which `probe_tick` compares against `time.monotonic()`. Seconds-since-the-run-started is a
+  much smaller number, so every aimed probe looked older than the 30 s deadline on the next tick and
+  was resolved as **lost 0.1 s after it was sent**. The round then stated "not one of 9 messages it
+  sent while on LoRa alone was delivered", which is exactly the sentence it exists to produce, while
+  the board's own log showed messages arriving and a delivery receipt coming back over LoRa.
+  **A measurement bug that reads like the failure it was written to catch is worse than no test**, and
+  the only reason it was caught is that the probe records disagreed with the serial log. The clock is
+  no longer a parameter: `handheld_probe` takes `time.monotonic()` itself, so no caller can hand it
+  another one.
+- **In-flight messages are no longer blamed on the round.** A probe sent by the ordinary traffic a
+  moment before the window opened was resolved as lost inside it and counted clean, because the
+  handheld's own "lost its AP" event had not arrived yet. The round now waits for anything in flight to
+  or from the victim to land before it takes the Wi-Fi away.
+- Every one of these was found by running the round rather than by reading it, which is the argument
+  for running it - and two of the four were the round's own fault, which is the argument for reading
+  what it reports against the boards rather than believing it.
+
+### Fixed (the LoRa radios could receive a message but not send one - the bug that mattered most)
+- **A handheld reachable only over LoRa could originate nothing except "I am here".** Found on the
+  bench, not by chaos: with Channi's Wi-Fi switched off (D78), a message sent *to* it arrived over
+  LoRa, was decoded and was shown on screen - and its own reply never reached the air. **One frame
+  went out in 150 seconds, and that one was the announcement.** The reply sat in the outbox and left
+  over Wi-Fi 70 s later, the instant a session came back, which is the one outcome that looks like
+  success in a message list and is a total failure of the second radio.
+- **Three gates in `lg_core`, each right for a socket and wrong for a radio.** `send_frame()` refused
+  before building anything unless `connected`; the first attempt happened only `if (c->registered)`;
+  and `lg_client_tick()` returned early unless registered, so nothing was ever retried either. A
+  handheld on LoRa has no session and never will - it is not a backbone peer (D77) - so on that radio
+  "not connected" is the **normal** state and precisely when speaking matters. The announcement had
+  already been carved out of the second gate when it hit the same wall; the carve-out should have been
+  the clue that the gates themselves were in the wrong place.
+- **The frame is now offered to `io.send` whether or not there is a session**, and the glue decides
+  what a radio carries, which is where that belongs (D74's one-radio-at-a-time, D77's allow-list).
+  `send_frame()` still returns false unless a session took it, so the message stays `PENDING` and
+  keeps its stored `(boot, seq, grid time)`: a later Wi-Fi attempt at something LoRa already delivered
+  is a duplicate the grid drops **by identity**, not a second message. Reusing those three fields is
+  load-bearing, and a scenario fails if it stops happening.
+- **An attempt made with no session cannot reject the message** (`transmit_ex(..., may_reject)`). A
+  missing peer key means "not learned yet", which before registration is the normal state, so
+  rejecting there would fail a message for the one reason about to stop being true.
+- **`LG_RESEND_LORA_MS` = 10 s, one message per tick, oldest first.** One LoRa attempt is not a
+  delivery - nothing acknowledges at the link layer - but `LG_RESEND_MS` is 3 s, tuned for a socket: a
+  full 16-slot outbox retried that fast would offer five messages a second to a radio that carries about
+  one every three (D74). The first guess was a 30 s interval, and the bench showed it was the wrong
+  shape of guard: a chaos round measured **13 of 15 messages delivered at a median 1.3 s**, so the air
+  was not the constraint, while the two that dropped waited the full thirty seconds for a second
+  attempt. The rate is now bounded by `LG_RESEND_LORA_MAX_PER_TICK` (one), which holds the offer rate
+  the same whether one message is waiting or sixteen, so the interval is free to be short: a single loss
+  costs ten seconds instead of thirty. Oldest sequence number first, which is the order a socket would
+  have sent them in.
+- **Verified on the boards, 2026-09-30.** Channi with Wi-Fi off for 110 s, sending to Jolly:
+  `[MSG] Sent to device 9` -> Jolly shows `from Channi (device 1): reply over LoRa please` -> and
+  `[MSG] Frame over LoRa from AP 1, 45 bytes` / `[MSG] Delivered to the other handheld` back on
+  Channi. **A 2.7 s round trip over LoRa at SF9, acknowledgement included**, with Wi-Fi not returning
+  for another 48 s. No duplicate arrived when it did.
+- **`tests/target`: 2421 checks, 0 failures** on an F4B, including the dedup property above and a
+  guard that a handheld with **no** module behaves exactly as before - the offer is made, because the
+  core cannot know whether a radio is there and must not guess, nothing carries it, and the message
+  waits instead of failing.
+- **The simulator gained the second radio** (`sim_lora`), modelling what an AP's glue does in the same
+  order as `firmware/node/main/lora.c`: mark the device reachable over LoRa *first*, so an
+  acknowledgement built while handling the frame already has a path, then hand the frame over on a
+  session named by the device rather than by a socket. Writing it exposed that the first version of
+  these scenarios was wrong in an instructive way: a handheld must **announce** before the grid can
+  reach it, and until it has, a message to it is correctly refused rather than sent down a path
+  nobody knows about.
+
+### Verified on battery (the brownouts, and what the bench supply was really doing)
+- **A LoRa burst with all three APs on battery: zero brownouts, zero restarts.** 18 urgent broadcasts
+  from three handhelds in 160 s - urgent frames cross LoRa unconditionally (D74), so every AP had its
+  radio on air - against a lifetime baseline of 28, 7 and 24 brownouts. 182 consecutive health
+  snapshots, no boot counter moved. On the USB bench the same APs browned out 28 times per AP in 18
+  seconds. **The supply was the fault, not the firmware and not the radio.**
+- Honest limits of that run: 18 frames in 160 s is a moderate burst, not the heaviest the radio can
+  be given, and **urgent broadcasts are the wrong instrument** - they are loud on every screen, as the
+  owner found out. The right heavy-LoRa load is an AP with its ESP-NOW backbone down, which puts the
+  grid's ordinary traffic (~35 messages a minute) onto LoRa silently.
+- Denali stopped beaconing for **14 s** during the burst, with no restart. Worth watching: BLE adverts
+  starving while LoRa transmits would make a chaos run harder to observe exactly when it matters.
+- **Battery life watch started.** All three APs came up on battery at **19:51 on 2026-09-30** (from
+  the uptime in the first health snapshot), each on a 5000 mAh pack at 100%. Health is sampled every
+  5 s; an AP counts as dead when it stops beaconing and does not come back, which is distinguishable
+  from a restart because a restart moves the boot counter.
+
+### Added (D85: chaos armed from the phone over BLE, behind the admin password) — TEMPORARY
+- **This was asked for and not built, and that was my error.** The owner asked for a chaos run startable from the phone without USB, said plainly that it breaks earlier decisions and that this was acceptable while the bench cannot power its own APs, and had already answered the scope question with "the APs alone". D83 answered with Wi-Fi control and recorded that BLE was "deliberately not" used. The reasoning was sound; applying it against an explicit instruction was not mine to do. D83's BLE paragraph is struck through in place rather than quietly edited, so the reversal is legible.
+- **Four opcodes on the D70 admin link** — `OP_CHAOS_GET`, `OP_CHAOS_ARM`, `OP_CHAOS_DISARM`, `OP_CHAOS_LOG` — the only opcodes on that link that change anything. **No new crypto:** `OP_LOGIN` already proves the admin password with an HMAC over a random 32-byte challenge keyed by the stored hash, inside a channel sealed with K_link, so these inherit real authentication. Every guard from D82 and D83 is unchanged: arming is refused unless the firmware is a chaos build, refused when the grid has no time (the deadline could not otherwise be enforced), the window is capped and **stops itself when nobody renews it**, and the fault budget stays counted in flash.
+- **`tools/chaos_ble.py`**: `status`, `arm <minutes>`, `arm <minutes> --renew-for <minutes>`, `disarm`, `journal`, from this laptop over BLE. It finds APs by their D68 status beacon — not by the admin link's service UUID, which is a GATT service and is not in the advertisement at all.
+- Verified on a board: an AP running the chaos build answers `OP_CHAOS_GET` with **"log in first"**, which proves both that the opcode exists (an absent one answers "unknown request") and that it is password-gated.
+
+### Fixed (`chaos_ble.py` armed whichever AP was loudest, whatever it was told)
+- **`--ap` could not select an access point.** It matched its argument against the advertised BLE
+  name, and an AP advertises none, so every name matched nothing and the tool fell back to the
+  strongest signal without saying so. "Arm one AP first and watch it through a fault" was the plan
+  for the first run on battery, and the tool could not do it. On this bench the loudest AP was
+  **Fuji**, the one with a 0 KB heap floor and a watchdog crash as its last reset — the worst of the
+  three to pick by accident.
+- **An AP is now identified by its AP index**, read from the discovery payload in the clear (byte 7)
+  and from the sealed status frame's header when only that arrives, and named from
+  `tools/bench_devices.json`: `--ap Denali` and `--ap 2` both work. Scanning uses a detection
+  callback rather than `discover()`, because the status frame rides in the **scan response** and only
+  the callback hands both parts over. Verified against the three APs on battery: `Denali` -> AP 2,
+  `0` -> Everest, an unknown name refused with what was heard.
+- **The choice is checked again on the sealed link**, where `HELLO_OK` states the AP index: a
+  mismatch between the advert and the link refuses the command rather than arming the wrong access
+  point. An advert is not proof of who answered.
+- With no `--ap` the tool now **prints every AP it heard** and says that it is taking the strongest,
+  instead of arming one silently. Addresses stay unprinted and unlogged (D21).
+
+### Fixed (the BLE link was never reachable on this bench, for a reason nothing reported)
+- **Every AP beaconed and refused every BLE connection.** D70 only advertises connectably above `ADV_MIN_HEAP` (13312 bytes) and these APs run at 8–13 KB once handhelds attach, so the admin link — and therefore any BLE chaos control — could not be reached at all. Nothing logged this: the status beacon keeps going either way, so from the laptop it looks exactly like an AP that is present and simply will not talk.
+- **A chaos build no longer starts the web server** (`CONFIG_LG_NODE_CHAOS_NO_WEB`, on by default with chaos). Its task stack alone is 6 KB and nobody is on the AP's Wi-Fi during a BLE-driven run on battery. Measured on Denali: heap went from **8–18 KB to 21–30 KB**, and 13 KB minimum with three handhelds attached — comfortably clear of the floor. Turn the option off to keep D83's Wi-Fi arming in a chaos build instead.
+- **`web_admin_init()`**, split out of `web_admin_start()`. The two mutexes the snapshot and its emitter need were created inside the server start, so skipping the server left them NULL and the AP panicked on the first publish — a boot loop every 1.1 s, which is what the board did the first time I tried this. The BLE link reads that same snapshot through the same emitter, so the state has to exist without the server.
+
+### Added (a push is refused, not only a release)
+- **`.githooks/pre-push`** runs `tools/check_release.py --release` and **stops `git push`** while anything in `docs/TEMPORARY.md` is still in the tree. The owner's rule: this comes out "before we do a push to GitHub or before we do a release". Install with **`python tools/install_hooks.py`** (git does not carry hooks through a clone, so this sets `core.hooksPath`). One bypass, `LG_ALLOW_TEMPORARY=1 git push`, deliberately awkward and visible in shell history.
+- **T5 added to the register** and to the checker, which now lists the four BLE opcodes by name rather than trusting a comment. CI holds the default branch to the same bar as a release tag, and fails if the committed hook is removed or stops running the check.
+
+### Fixed (the bench came back, and the first ten seconds of chaos found a restart loop)
+- **An AP could restart itself out of the grid whenever several handhelds joined at once.** `SEND_WAIT_MS` bounds how long *one* handheld may hold up the core task, at 2 s, and that was read as bounding the task. It does not: a pass can send to every session, so three full sockets cost 6 s, and the task watchdog panics at 5 s. Everest did exactly that — `[UP] 2 s`, then **nothing for 5.7 s**, two sessions closing with `send failed` two seconds apart, and `task_wdt: lg_core` aborting right after the second. The per-send cap was never the dangerous number; the missing per-pass one was.
+- **`sess_pass_begin()` gives each core pass a shared 2 s send budget**, reset beside the watchdog feed it protects. Once it is gone, a frame that has not started going out is **dropped and the session kept** — the same trade the voice path already makes (D61) — rather than waited for. Closing would punish one handheld for how slow another was, and a dropped message costs one message where a watchdog panic costs every handheld on that AP. Worst case is now the budget plus one frame that must finish, 4 s, inside the 5 s watchdog. Two new counters, `budget_drops` and `slowest_pass_ms`, so the trade is visible rather than silent.
+- **Three of the admin page's routes were never registered on a running AP.** `config.max_uri_handlers` was written down as 12 beside a table that had grown to 15, so the server registered the first twelve, logged `no slots left` three times at warning level, and served an admin page whose newest endpoints did not exist — which is to say **D83's chaos arming and journal were absent from every AP** while present in the tree, and `tools/check_release.py` went on reporting T2 as present because the routes were all there in the source. The limit is now counted from the table, a route that fails to register is logged at **error** level, and a board confirmed the warnings are gone.
+- **`tools/chaos.py` died with a segmentation fault before injecting anything** when a port it was not using could not be opened. Closing a port while its reader thread sits in `read()` takes the process down, and no `try/except` around the close can catch it; `close_all()` stopped every reader first, but a port released *during discovery* had no way to stop just its own. Each board now owns a stop flag that `release_port` sets and joins before the handle goes. Found by one board on this bench whose CH340 answers `PermissionError`.
+- **`tools/sync_ports.py --write` crashed with `NameError: MAP`** — it had imported `save_map` and then not used it. Reporting worked, so the bug sat in the one path that changes anything.
+- **`tools/check_release.py` printed one row backwards.** Its last row warns when the README has *stopped* calling this a prototype, the opposite polarity from the concession rows, and it used the same present/gone wording — so a README that correctly does say prototype was reported as `gone`. Caught by reading the tool's own output instead of trusting its exit code.
+
+### Added (D84: an AP advertises the room its memory can honour)
+- **The free-slot byte in the discovery beacon was room in the table, not room in the AP.** It was `LG_PROTO_MAX_STATIONS - clients`, and that constant is **15** — the SoftAP limit — where the memory-limited figure on these boards is **two or three**. Every AP advertised roughly five times its real capacity, and a handheld's choice of AP and D54's balancing are both built on that number.
+- It is now derived from free heap: a 6 KB floor the AP keeps for itself, about 3 KB for each further handheld, both measured on this bench, never more than the table allows. **An AP with no handhelds at all still offers at least one slot** — if every AP were honest enough to advertise zero at the same moment, `node_usable` would reject all of them and strand every handheld, which is a worse failure than the thrashing this prevents.
+- Deliberately two lines of defence with the handheld-side avoidance below: the beacon is an estimate and will sometimes be wrong, and the avoidance cannot help a handheld that has not tried yet.
+
+### Fixed (D54's load balancing made a broken AP the most attractive one)
+- **An AP that refuses every handheld is the emptiest AP on the grid, and D54 rewards emptiness.** Everest ran out of heap, its Wi-Fi refused every association with reason 5 (`ASSOC_TOOMANY`) while its beacon advertised "0 attached, 15 free" — true of its own tables, a lie about what it could do — and the balancing score made it the first choice of four of six handhelds, over Fuji and Denali, which were healthier *and stronger*: 948 against 860 and 856. They were refused, waited ten seconds, and chose it again, for the whole run. **The emptier it got, the more attractive it became.** One AP's memory problem became four handhelds offline, on a grid whose first claim is that it has no single point of failure — and nothing logged an error, because every part was behaving as designed.
+- **A handheld now passes over an AP that refused or dropped it**, doubling from 15 s to a 2-minute cap, cleared the moment a session with it actually works. The penalty is sized to lose to any healthy AP while staying far above the backbone and grid-time disqualifiers, so an avoided AP that is the **only** one left is still chosen: being briefly unwanted must never become being unreachable. Applied after D54's bonus rather than beside it, because it is the correction to that bonus.
+- What this says about D54, written into `docs/chaos-engineering.md`: load balancing must never be the whole of a choice, because **"empty" and "broken" look identical from the outside**.
+
+### Fixed (a stack overflow in the core task, with no fault injected)
+- **`lg_core` overflowed its 8 KB stack** during a chaos run — `***ERROR*** A stack overflow in task lg_core has been detected`, a different crash from the watchdog above. The path is deep and every level carries a kilobyte of `LG_FRAME_MAX`: a backbone frame arrives and is decrypted, is forwarded (building a new frame), may be handed to a handheld (building another), and the sealing at the bottom is mbedtls's PSA AEAD, whose own frames are not small.
+- **The frame buffer in `backbone.c`'s `handle_rx` is now static**, matching what `lora.c`'s `deliver()` already does and for the same reason — only the core task reaches it and it is not re-entrant — which takes a kilobyte off the deepest part of that path. The stack goes to 10 KB rather than 12 KB as a result. It is still 2 KB of heap an AP has little of, and that trade is deliberate: a stack overflow is not something to leave in place to protect a memory figure.
+
+### Measured on the bench (after the three fixes above)
+- **Everest went from crashing repeatedly to flat and stable.** Before: heap decaying to 3 KB, minimum free **400 bytes**, task-watchdog panics and a stack overflow with no fault injected. After: 199 s with no crash of any kind, heap flat at 10 KB, minimum free **5796 bytes**, largest block 6912, links 2. Breaking the watchdog loop is what stopped the join storm that was destroying the heap — the crashes were the cause of the memory collapse as much as a symptom of it.
+- **All three APs: zero crashes** across a full run where the previous run crashed AP 0 three times.
+
+### Known, not yet fixed (the shortage underneath all of it)
+- **Everest runs out of memory, and it is the only AP with a GPS.** It boots with 14–16 KB free against 22 KB on Fuji and Denali — a 1 KB UART buffer plus the GPS work — and then decays to 3 KB with a minimum of 400 bytes, where the other two sit flat at 18 KB with a minimum of 6–9 KB from t=81 s to t=488 s. It is not a leak in `gps.c`, which allocates nothing per sentence; it looks like a vicious circle — less headroom, so lwIP cannot allocate, so sends return `EAGAIN`, so the core task waits, so the watchdog fires, so it restarts and every handheld piles back on. The send-budget fix above breaks the watchdog link in that chain; **it does not create the missing memory.**
+- What is left is a genuine trade-off about what an AP must carry: Wi-Fi AP, ESP-NOW, BLE (D68 and D70), LoRa, a web server and a GPS on one ESP32. That is the owner's call about the product, not something to tune away quietly, so it is recorded here rather than guessed at.
+
+### Added (D80: a handheld says it is reachable over LoRa before it needs to)
+- **`lg_client_lora_announce`**, and the handheld sends one every two minutes while Wi-Fi is not carrying. `lg_client_ping` refuses unless `connected`, which is right for a socket and wrong for this radio: on LoRa there is no session and never will be (D77), so "not connected" is the normal state and exactly when speaking matters. Without this an AP learns of a handheld the first time it speaks — so the first thing it ever says is the thing that mattered, and the acknowledgement waits on the AP working out where to send it.
+- **PING and PONG join D77's allow-list**, and nothing else does. PING is the smallest frame in the protocol, the AP already answers PONG (so the handheld learns the path works both ways), and it carries the battery the status beacon shows (D68). It asserts nothing about the grid, which is the test every type on that list has to pass — the refusals are the ones where an AP would have to *trust a handheld*.
+- **Skipped when no AP has been heard recently**, because transmitting at nobody is what a battery can least afford; the first announcement after a session goes away is sent regardless, or a handheld carried out of range would never speak first.
+- **The Status screen shows the radio** (D23): module and address, when an AP was last heard with RSSI and SNR, frames in and out, and a trouble row **only when there is trouble**, because a row of zeroes every time teaches people to skip it. A board with no connector shows nothing at all; one with a connector and no module says so, since "no module answered" and "a module that hears nothing" are different faults. `hh_lora_ui_t` is narrowed from the driver's own counters so a screen never includes `hh_lora.h` (D27).
+- **`SLIST_ROWS` 32 → 40.** Status with a GPS fitted already reached 29 rows, and the LoRa section would have overflowed a table whose overflow is an out-of-range shift on the dirty-row mask. That mask is now 64 bits wide with the assertion to match.
+
+### Added (handheld LoRa is alive on real hardware)
+- **The Freenove's LoRa pins were wrong, and not merely unconfirmed.** The profile proposed GPIO40/41/42; **GPIO40 and 41 are the micro-SD CMD and D1, and GPIO42 is the WS2812 LED**, none of which is exposed on any connector. They looked free because this profile has no SD card and no LED — the mistake was choosing pins the *profile* did not use rather than pins the *board* did not use, and the only symptom was one line saying no module was found, which is indistinguishable from no module being fitted. I read that line as a fact about the hardware and told the owner no module was present. It was.
+- **Confirmed on a module** (owner's wiring): the board's second 4-pin **IO** connector carries IO2, IO3, IO14, IO21 — module TXD → **GPIO21**, module RXD → **GPIO14**, reset → **GPIO2**, with 3.3 V and GND taken from the **I2C** connector because the UART connector's only supply pin is 5 V and this is a 3.3 V part drawing ~140 mA transmitting. GPIO3 is left spare on purpose: it is an ESP32-S3 strapping pin the chip samples at boot, and a module announcing itself at power-up would drive it at the worst moment. The GPS keeps the UART connector (D65) unchanged.
+- On a board: `[LORA] Module on UART2 (rx GPIO21, tx GPIO14), address 101` then `Configured RYLR998_REYAX_V1.2.4: 868500000 Hz, 22 dBm`, on **both** Freenove handhelds (addresses 101 and 109).
+
+### Fixed (the announcement deadlocked, and the first one was always wasted)
+- **A handheld that had never heard an AP would never announce itself.** The guard skipped announcing whenever no peer was known, to save airtime — but an AP learns of a handheld *only* from an announcement, so no peer meant no announcement meant no peer, for ever. Observed on a board: one announcement at boot, then silence through a whole Wi-Fi-off window. **Having no peer is the case this exists for.** A handheld that has never heard an AP now announces at the normal rate; the backing off (every fourth interval) applies only once an AP has been heard and then gone quiet.
+- **It also announced before the module was configured.** The RYLR998 answers about 20 ms before it has taken its frequency and spreading factor, and a frame offered in that gap is dropped with no counter — which is what happened to the first announcement on both boards. It now waits for `configured`, not merely `fitted`.
+- Verified over a 280 s Wi-Fi-off window: announcements at 2.3 s, 122.3 s and 242.3 s, and `[LORA] Link up to AP 2, RSSI -13 dBm, SNR 11` — a handheld and an access point on the same radio for the first time.
+
+### Known, not yet fixed (handheld to AP is one-way)
+- **An AP's frame reaches a handheld; a handheld's does not reach an AP.** The handheld sent 3 frames (1527 ms of airtime, `frames 3 out`) and received one from Everest; both APs report `nothing received yet` with `parts in 0` — zero at the raw `+RCV` level, so their modules heard nothing at all. Not a configuration mismatch: both sides report network 14, 868500000 Hz, SF9 BW125 CR4/5, and the APs have broadcast reception on, which is what `AT+SEND=0` needs. The handheld's module plainly works in both directions with the ESP32 (it takes AT commands and returns `+OK`). Next: watch an AP's raw AT stream during a handheld transmission, and check whether an AP busy with its own backbone traffic is simply not listening when the handheld speaks.
+
+### Added (`lora pins <rx> <tx>`: finding a module without reflashing a guess)
+- A board profile's LoRa pins are a guess until a module has answered on them, and the only symptom of a wrong guess is one line saying no module was found — **indistinguishable from no module being fitted**, which is exactly the wrong conclusion to draw. The new console command re-points the LoRa UART at runtime and makes the driver look again: the ESP32-S3 routes any UART through the GPIO matrix, so pins are a property of an open port rather than of the install, and the reader task already looks on every pass (that is how a module plugged in later is noticed).
+- Refuses pins the board must never drive — GPIO33–37 are the Freenove's octal PSRAM and 19/20 are USB — because driving those is a crash or a dead console, not a bad reading. Saves nothing: a board profile still decides this at boot.
+
+### Not yet verified
+- **The Freenove boards do have RYLR998 modules fitted (owner, 2026-09-30); the firmware cannot find them.** An earlier entry in this file said no handheld had a module, which was wrong — it restated a log line (`No module on GPIO40/41`) as a fact about the hardware. What is established: the profile's proposed GPIO40/41/42 were never confirmed on a module; the board's only 4-pin UART connector is GPIO44/43, the ESP32-S3's U0TXD/U0RXD, which is why the board brings them out; while the GPS held GPIO43 the LoRa port was **refused** it (`GPIO 43 is not usable, maybe used by others`), so that pairing had never actually been tried. Giving the connector to LoRa with the GPS switched off made the pins genuinely free, and **no module answered AT at 115200 in either wiring order**; an eleven-pair sweep of the board's free header pins found nothing either. The GPS keeps the connector, because giving it up bought nothing. What remains to check is physical: which pins the module's TXD and RXD actually reach, and what feeds its power pin — the connector's fourth pin is 5 V and a RYLR998 is a 3.3 V part.
+- **No handheld has a LoRa module fitted** *(wrong, and twice corrected: the modules were fitted and the pins were wrong. Kept so the correction is legible.)* The Freenove logs `No module on GPIO40/41` and every other board has no connector, so the announcement, the Status rows and the whole handheld side of D77/D80 are verified by compilation and by the simulator only. The APs' radios are real and linked (addresses 1, 2, 3, peers seen both ways).
+- **The chaos endpoints are registered but have not been called.** Testing them means joining the grid's Wi-Fi from this laptop, which is the owner's network connection to decide about; the bug that mattered — that they were not registered at all — is fixed and confirmed on a board.
+
+### Added (D81: an access point can be reflashed over Wi-Fi, because it is losing its cable)
+- **`POST /api/update` on the admin page each AP already serves.** The bench cannot power the access points: 28 brownouts per AP in 18 s, every one after `heap_init` and before Wi-Fi is initialised, so they are moving to battery and their serial cable goes away with the bench. Without this an AP on battery has frozen firmware until it is physically carried back — with none of the LoRa work yet proven on a radio, that is the wrong thing to be certain about.
+- The image is taken in **1 KB chunks** rather than buffered whole, because an AP has 40-something KB of heap and a node image is over a megabyte. `esp_ota_end` validates before anything becomes bootable, so a truncated upload is refused rather than bricking the board.
+- **Rollback is on** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`): a new image must reach `esp_ota_mark_app_valid_cancel_rollback()` or the bootloader puts the previous one back. This is what makes a remote flash survivable — an image that crashes before Wi-Fi is up would otherwise be unrecoverable on a board nobody can reach.
+- **A new 4 MB OTA partition layout** (`firmware/common/partitions_4mb_ota.csv`): `otadata`, then `ota_0` and `ota_1`, which **moves `lgid` to 0x320000**. `tools/flash.py` now resolves each project's CSV from its own `sdkconfig.defaults` instead of a hardcoded offset — it would otherwise have written identities where the old layout kept them and destroyed the device IDs D75 exists to protect.
+
+### Added (D82 and D83: chaos without a cable, and a journal for what it did)
+- **An AP can break itself** (`chaos_self.c`, `CONFIG_LG_NODE_CHAOS`, off by default): it takes its own backbone down, takes its own LoRa down, and restarts itself. `tools/chaos.py` injects every fault from the PC side of a serial port, so on battery the framework could still *watch* the grid but could not *cause* anything.
+- **The fault budget is counted in NVS and written before each fault**, not in RAM — a restart is one of the faults, so a counter in memory would let an AP restart its own chaos run forever.
+- **Deterministic, not random:** the schedule comes from (compiled-in seed, AP index, boot counter) through a plain LCG rather than the hardware RNG, so a chaos night is replayable from its report, and seeding by AP index keeps the three APs from taking themselves out at the same moment.
+- **Armed over the network with a dead-man window** (`POST /api/chaos`): the window is an absolute deadline in **grid time kept in NVS**, capped per arming, and **arming is refused when the grid has no time** — without a clock the deadline cannot be enforced and the AP could not promise to stop. Losing contact therefore *ends* a run rather than sustaining it. Deliberately not on BLE: D70 says a watcher can never take part, and Wi-Fi plus the admin password is two secrets where BLE would be one.
+- **A 64 KB `chaoslog` journal** of packed 16-byte records (D49), read back through `GET /api/chaoslog`. Its **read path is in every AP build**, because a run ends by putting an ordinary image back over the air and that is exactly when it is read. It is begun only on the first boot of a run, never on the restart a fault causes, or the evidence from before the restart would be erased; the count is recovered by scanning for the first still-erased slot; and the last slot records that the journal *filled* rather than another fault, so "the run ended" is distinguishable from "the evidence ran out".
+- **`tools/check_release.py` and `docs/TEMPORARY.md`:** every one of these concessions is registered with why it exists, what it costs, and what must become true before it comes out, and the checker **fails on a release tag** while any of it is in the tree. CI reports it on every push. A note in a document is a reminder; this refuses.
+- **`docs/chaos-engineering.md` retracts its own claim.** That document said the control surface "exists only on the physical USB cable". It does not any more, and the section now says so, why it changed, and the honest accounting: the chaos endpoints grant no capability D81's upload did not already grant — an uploaded image can do anything chaos can — they lower the effort, which matters for accidental misuse rather than for attackers.
+
+### Fixed (my own release checker printed one row backwards)
+- `check_release.py`'s last row warns if the README has stopped calling this a prototype, which is the opposite polarity from the concession rows above it: findings there mean "still present". It printed that row with the same present/gone wording, so a README that correctly **does** say prototype was reported as `gone`. It now reads `ok` or `WARNING`. Caught by reading the tool's own output rather than trusting that it passed.
+
+### Not yet verified (D81, D82, D83)
+- **None of it has run on hardware.** Two of the three APs still brown out before Wi-Fi initialises, so no image has been uploaded over the air, no fault has been injected, and no journal record has been written. What is verified is that it compiles and that the chaos strings are absent from an ordinary image.
+- **Chaos cannot cut its own power**, so a battery run loses the power-out fault the USB harness had. That is a real reduction in coverage, not a detail.
+- **A wireless run is less informative than a USB one.** All three bugs the ten-hour night run found came out of serial logs. The journal is a partial replacement, not an equal one.
+
+### Added (the AP side: a handheld's LoRa frame is opened, checked, and answered)
+- **`deliver()` routes on the outer header's key-epoch byte** before any AEAD work: the backbone writes 0 there and a handheld writes 1. That is not only cheaper — handing a handheld's frame to `lgbb_open` would fail authentication and be counted as a **seal failure**, so the admin page would have shown a climbing fault count for perfectly ordinary traffic.
+- **`deliver_from_handheld`** opens the frame with the handheld key, refuses anything not from a handheld, applies D77's allow-list (this is the side that must not be talked into rewriting the grid), and hands it to the core as a session frame with a pre-set `session_device` — which is what lets a handheld with no Wi-Fi session be heard at all. It marks presence **before** handling the frame, so an acknowledgement produced while handling it already has somewhere to go.
+- **`lg_node_mark_lora_reachable`**, with two deliberate refusals to act: a handheld that already holds a Wi-Fi session here stays ONLINE, because that says more than reachable-over-LoRa and hearing it on the radio must not quietly downgrade a working session; and one already known this way announces nothing, so hearing it repeatedly costs no airtime. `lg_node_presence_state` is the read-only query the glue uses to pick a transport — which is why the core needed no new send callback and stayed portable.
+- **`lora_offer_handheld` and `queue_sealed_hh`** seal with the handheld key rather than the backbone key, because a handheld cannot open a backbone-sealed frame and must never be sent one. Both the send policy (D74) and the allow-list are applied before any airtime is spent: an AP should not spend a second of it sending a handheld something the handheld's own side would refuse to open.
+- **`io_to_client` picks the transport from the same presence state the core used** — a session over Wi-Fi as before, the radio for a handheld known only over LoRa. One door, two transports.
+
+### Fixed
+- `firmware/node/main/CMakeLists.txt` did not compile `firmware/common/lg_lora_hh.c`, so the node failed to **link** (not compile) once `lora.c` started using the sealing layer. Files under `firmware/common` are pulled in per project: a project that includes the header must also build the source.
+
+### Not yet verified
+- **Nothing above has moved a byte over a radio.** It is verified by compilation and by the simulated D80 scenarios, which exercise the core's presence and delivery logic — not the AT layer, not the part framing over a real module, and not the pins. No RYLR998 has been fitted to a handheld, and the F4B's LoRa pins (GPIO 40, 41, 42) are still proposed from that board's free pins rather than confirmed.
+- **`deliver_from_handheld` itself has no test.** The simulator has no LoRa transport, so the AP's open/allow-list/mark path is untested glue; the `lglh_*` layer beneath it is covered by `test_lora_hh.c`, and the presence behaviour above it by `test_messaging.c`, but the seam between them is not.
+
+### Added (D80: a handheld reachable only over LoRa has its own presence state)
+- **`LG_PRES_LORA` = 2 in `PRESENCE_UPDATE`.** When an AP hears a handheld over LoRa (D77) that handheld has no Wi-Fi session, so calling it ONLINE would tell every other handheld it could be reached that way and send traffic down a path that cannot carry it; recording nothing instead would mean no acknowledgement ever goes back and the sender never learns its SOS landed. The third state says what is true: alive, reachable, and only over LoRa. The record's length is unchanged, and `node` still says which AP heard it, so a reply knows where to hand the frame.
+- **The core decides *that* a device is reachable; the glue decides *which transport*.** `io.to_client` stays the one door and the firmware reads the same presence state to pick a session or the radio, so `lg_core` gained no new callback and stays portable. A new `is_local_reachable` is used by direct delivery, by the **broadcast fanout** (an urgent broadcast or SOS reaching a handheld out of Wi-Fi range is the whole reason the radio exists), and by the 1:1 validation that had been refusing such a message before delivery was ever reached. Airtime is not decided in the core: the send policy in the glue (D74) carries alerts always and ordinary traffic only when Wi-Fi cannot.
+- **Voice deliberately still requires `LG_PRES_ONLINE`**, because one 100 ms frame is seconds of airtime (D71). A test asserts voice *stops* once a handheld is LoRa-only, so widening that later fails loudly rather than quietly flooding the radio.
+- **Five scenarios in `test_messaging.c`**: the wire format (length unchanged, state 2 round-trips, 0 and 1 still decode, 3 and 0xFF still refused, wrong length still refused); a 1:1 message two hops to a LoRa-only handheld, asserting the acknowledgement comes back and the plaintext never crossed the backbone; an urgent broadcast and a group message, which take a different branch from direct delivery; a duplicated backbone delivering once and still acknowledging; and voice refused. **2342 checks, 0 failures on the bench** (up from 2266).
+
+### Fixed (the new tests caught the change being incomplete)
+- Widening delivery alone did nothing for 1:1 text: `lg_node.c` refused a direct message with `LG_ACK_REJ_OFFLINE` when the recipient was not exactly ONLINE, and that check runs *before* delivery. Broadcasts worked throughout because they never pass through it — so without the tests this would have shipped as "an SOS broadcast reaches an out-of-range handheld but a direct message to them is refused", with a clean compile the whole way.
+
+### Changed
+- **`lg_presence_dec` accepts state 2 and still refuses anything above it.** This makes D80 a **breaking wire change: every AP and handheld in a grid must be reflashed together.** A device built before it does not read state 2 as "not online" — it rejects the whole presence record as malformed and keeps no presence for that handheld at all, so a half-updated grid loses presence records rather than merely losing the new state. Close to normal here, since the grid's secrets are compiled in and every board is already built from one tree, but worth knowing before a partial flash.
+
+### Fixed (esptool was left to guess the chip, and on one board it guessed wrong)
+- **Every `tools/flash.py` esptool call now names the chip.** The wrapper passed no `--chip` and relied on auto-detection. On the E40 (LCDWIKI E32R40T) that detection is not reliable: `--erase` failed twice with `erase failed`, and once the erase had been done by hand the run then failed with `identity write failed`. The app flash *between* those two steps succeeded every time, because it goes through `idf.py`, which always passes the chip — which is what pointed at the wrapper. Running the same erase by hand with `--chip esp32` worked first time, and with the fix the identity write succeeded immediately. The device map already records a target for every board, so there was never a reason to guess. The chip-*detection* call is deliberately left without `--chip`.
+- This was a latent trap on any board with marginal detection, not a quirk of one: it could leave a board erased and half-provisioned, reported as a failure whose message named the wrong step.
+
+### Added (finding what is on the bench, rather than trusting the map)
+- **`tools/sync_ports.py`** asks every serial port for its device ID and rewrites only the `port` hints in `tools/bench_devices.json` to match. Ports on this bench shuffle whenever the hub is reseated or a native-USB board resets, and a stale hint is what sends a flash run at whichever board now holds that number — which is how a board came to carry another's identity (D75). It reuses `flash.py`'s own `query_id()` and `save_map()`, never invents a map entry for an unknown ID, and clears the hint for a board that answered nowhere. A port that answers nothing is reported as such, which is how a board running another project's firmware looks.
+- Recorded in the `flash` skill: **an `--erase` takes the touch calibration with it.** On a resistive panel (XPT2046: HY3, E28, CYD, E40) the handheld then waits on its calibration screen and never reaches the launcher by itself, so `flash.py` reports `no '[UI] Launcher ready' within 30 s` for a board that is working perfectly. The failure table now says how to tell that apart from a real fault: `[GRID] Registered with node N`, `[TEST] Self test: N checks passed` and `[UI] Touch XPT2046 ready, needs calibration` together mean the flash worked.
+
+### Added (the handheld Wi-Fi switch has a self-restoring form, for chaos)
+- **`wifi off <seconds>`** on a handheld is a chaos hook in the APs' own style: capped at an hour so a typo cannot take a handheld off the grid for a day, deliberately **not** saved, so a restart ends it too, and back on by itself on the service task's own clock even if whatever asked for it never returns. A bare `wifi off` stays the sticky field-test switch that survives a reboot. The first version of D78 had only the sticky form, which would have let a chaos run that died leave a handheld dark — the same mistake `lora off` and `bb off` were built to avoid.
+- This is a fault the framework could not previously inject: **losing a handheld's network without resetting the handheld.** `docs/chaos-engineering.md` records the new hook, the deliberate split between its two forms, and — in "What it still cannot find" — the gap it does **not** close: LoRa rounds still only break the link between access points, because that is the only place LoRa runs. The handheld side has its key, its pins and its tests but no driver, so the framework cannot yet ask whether a handheld out of Wi-Fi range still reached the grid.
+
+### Fixed (the first run of the new suite on a board caught the test, not the code)
+- `test_lora_hh.c` built a `LG_T_MSG_ACK` with `LG_SCOPE_SYSTEM`, but `lg_env_decode` requires a message acknowledgement to be 1:1, so the frame was invalid and `lglh_type_allowed` refused it exactly as it should. The test was wrong and the production code was right. Also fixed in the same suite: an all clear now carries `LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR`, as `hh_service_send_all_clear` actually builds it (D66, D79). Verified on the bench: **2266 checks, 0 failures, min free heap 27608 bytes** on the Hosyond. The compile had been clean and said nothing about either — which is the argument for D25.
+
+### Changed
+- **The LoRa radio settings and the address plan have one home.** They lived only in `firmware/node/main/lora.h`, which the handheld firmware cannot include (D27), so the handheld header first copied all seven of them. Two copies means a handheld silently on a different channel from the grid after a one-sided edit — a bug found on a field trip, not at a desk. They now live in `firmware/common/lg_lora_wire.h`, the file both firmwares already compile; `lora.h` keeps its own macro names, defined from the shared ones, so no AP code changed.
+- `tools/bench_devices.json`: the Hosyond's port hint corrected from COM30 to COM36, where the board actually answered.
+
+### Added (D79: a handheld can mark itself safe)
+- **"I'm safe" on the touchscreen handhelds.** The alert unit (D66) could always stand its own SOS down, and `hh_service_send_all_clear()` had existed in the handheld service all along — but `ui_unit.c` was its only caller, so a touchscreen handheld could raise an urgent broadcast and then had no way on any screen to take it back. It could show an incoming ALL CLEAR and not send one, which left a person able to fire an SOS and no way but the serial console to stand it down. The broadcast conversation now carries an **I'm safe** key beside the urgent key. It appears only while this handheld's own urgent broadcast is standing (the newest of our own urgent broadcasts decides, and an all clear is itself one, so saying it once puts the key away), it asks first in the same confirm panel the urgent key uses — in the calm accent rather than the alarm red, reading "This stands your SOS down on every screen." — and it sends "<name> is safe", the same words the alert unit sends, so the two kinds of device read alike on everyone else's screen.
+
+### Added (D78: a handheld can switch its Wi-Fi off, to test LoRa in the field)
+- **`wifi [on|off]` on the handheld console.** The radio is **stopped**, not merely left unassociated: a station that keeps scanning still spends the power and still fills the air with probe requests, so "Wi-Fi off" that left it running would prove nothing about what LoRa had carried. The setting is kept in NVS, so it survives the restart a field test brings, and it is not a fault: the status snapshot carries `wifi_off` and the link reads SEARCHING with an empty `problem`, so a screen can say the radio is off on purpose rather than "no AP in range". Switching off leaves the GPS, the battery and anything LoRa carries running; on a board with no LoRa connector the console says out loud that this leaves the handheld with no radio at all, and does it anyway, because that is also how you measure idle battery life.
+- The switch lives in the service's **own** NVS namespace rather than the board-support settings store, because `tools/check_layers.py` correctly refused the first attempt: the handheld service must not include a board-support header (D27). The board's LoRa pins reach the service the same way the GPS pins do, from the board profile through `hh_main`.
+
+### Changed
+- **D78 revises D72's voice-note ceiling for LoRa only**: about 10 seconds, not 30. The bench had already measured that D72 could not ship as written — with the 6 KB reassembly and send slots on, APs that ran at 22-28 KB free fell to 9-12 KB and MAIN reached 0 — so a LoRa note is capped at roughly 1.5 KB at Codec2 1200 bit/s, 12 parts, about 11 s of airtime and ~3 KB of slots on an AP. Over Wi-Fi the note is still the full 30 s. Live push-to-talk over LoRa remains impossible and is not attempted (D71). D72's licence blocker is cleared: Codec2 is LGPL-2.1 and D76 made LocalGrid GPL-3.0-or-later, which carries it. **None of the voice-note work is built yet** — this entry records the decision and the measurement behind it.
+
+### Added (D77: handhelds get LoRa, sealed by a key of their own — foundation)
+- **The key question D71 left open is answered.** A handheld does not hold the APs' backbone key, so nothing could seal a handheld's LoRa frame. `tools/gen_secrets.py` now derives `LG_SECRET_LORA_HH_KEY` = HKDF-SHA256(backbone key, `"lg-lora-hh"`), 32 bytes, held by handhelds and APs alike and deliberately **not** the backbone key: a handheld image that leaks exposes the handheld LoRa path and nothing else. `--update` adds it to an existing `lg_secrets.h` without touching the keys already there, so the bench grid does not have to be re-keyed; the generator's HKDF is now a general function and every derived value is declared in one table.
+- **`firmware/common/lg_lora_hh.c`**, the sealing layer, portable C11 over `lg_core` and `lg_crypto` only. Same 12-byte outer header shape as the backbone's, used as both AEAD nonce and associated data, with the **key-epoch byte separating the two key domains on the air** (0 backbone, 1 handheld): an AP feeds every LoRa payload to both readers, and a frame sealed with one key can never authenticate under the other. The sender field carries a kind bit, so handheld 3 and AP 3 keep separate nonce and replay spaces. Its own replay window, its own counters, and no allocation anywhere.
+- **A closed list of what a handheld may send over LoRa**, checked by the AP on every frame it opens: position, presence, short text (which carries an SOS, an urgent broadcast and an all clear) and a message acknowledgement. Registration, grid state, groups, names and time are refused however well sealed, because they are what an AP would otherwise have to *trust a handheld about* and every handheld holds this one key. Live voice is refused twice over, by this list and by the send policy.
+- **`tests/target/main/test_lora_hh.c`**, a new suite with no radio needed: the seal round trip, a replay caught, a tampered tag counted as an authentication failure, a frame from the other key domain recognised as *not mine* without counting a fault (so the admin page does not cry wolf on ordinary backbone traffic), our own identity coming back at us treated as malformed (D75), a handheld and an AP of the same index not retiring each other's frames, and every allowed and refused message type. The handheld's on-screen test report (D23) gains the row, which its hardcoded suite count would otherwise have silently dropped.
+- **The board profile carries LoRa pins**: `lora_rx`, `lora_tx`, `lora_rst` on every profile. Only the Freenove FNK0104B (F4B) names them — the one family with a second free UART, the RAM for LoRa beside a GPS, and the S3's GPIO matrix. GPIO 40, 41 and 42 are proposed from that board's free pins and **not yet confirmed on a module**. The APs keep choosing theirs by AP index, because all three run the same board.
+
+### Changed
+- **`firmware/node/main/lora_wire.{c,h}` moved to `firmware/common/lg_lora_wire.{c,h}`.** It was already portable C11 with no radio in it, but it sat inside the node project where the handheld firmware could not reach it. Both firmwares and `tests/target` now compile the one file; no behaviour changed.
+
 ### Fixed (the diagram showed a LoRa antenna on MAIN but no LoRa link to it)
 - The drawing had one orange arc, from the westmost access point to the eastmost, sweeping below everything, while three access points carried a LoRa antenna symbol. MAIN had a module and no link, so the arc read as decoration. It now draws the actual topology: MAIN links over LoRa to both outer access points, and those two link to each other, so the three arcs and the three antenna symbols agree. The label says "LoRa: the three APs that carry a module link to each other directly", and MAIN's own label is "GPS + LoRa" rather than "GPS + LoRa fitted", which read as not working.
 - **Labels no longer sit under the lines.** The new LoRa arcs leave MAIN downwards instead of sideways, clearing the label block, and every floating label ("MAIN", "GPS + LoRa", "watching over BLE", the GPS and LoRa captions) is drawn with a dark halo so a link passing behind it cannot eat the words.

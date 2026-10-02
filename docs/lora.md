@@ -68,6 +68,51 @@ the pins by AP index, so each board is flashed with the same build.
 Both LoRa wirings use UART1; MAIN's GPS keeps UART2. On MAIN the two radios share only power and
 ground.
 
+**A GPS on a handheld is wired the same way, and is fed 5 V** (D65). On the Freenove FNK0104B the
+4-pin UART connector carries RXD, TXD, GND and **5 V** - 5 V is the only supply pin it has, which is
+also why the RYLR998, a 3.3 V part, takes its power from the I2C connector instead. So a handheld's
+GPS gets the same supply the AP's does, and a handheld that will not lock while the AP does is **not**
+a supply difference between the two.
+
+### When a GPS never locks
+
+Read `gps` on the console, which reports what the module *hears* and not only what it used:
+
+```
+GPS: no fix yet, 0 satellites used, 246255 sentences, 1 bad checksums
+GPS: 21 in view, 21 with a signal, best 25 dB-Hz
+```
+
+- **Sentences arriving with no bad checksums means the wiring, pin and baud are all correct.** That part
+  of the install is proved; the problem is upstream of the UART, in the antenna or what reaches it.
+- **Decoding a satellite's orbit needs about 30 dB-Hz**, well above the ~25 it takes merely to notice a
+  carrier. A best figure stuck in the twenties never becomes a fix, however long it is left - measured on
+  both Freenove handhelds across eleven hours of uninterrupted reception on 2026-10-01.
+- **More than about fourteen "in view" is not a sky view.** No more horizon holds that many GPS
+  satellites. A module claiming twenty-two is listing the PRNs it is searching for and reporting its own
+  noise floor against each, which means nothing usable is reaching it at that moment.
+- The firmware says all of this itself now: the console names the fault, and the Status screen's **Lock**
+  row says `no: signal too weak to use, check the antenna` rather than "looking for satellites".
+
+**The handheld's own LoRa module costs it about 3 dB**, measured on Channi on 2026-10-01 by holding one
+port open, sampling `gps` every 15 s and alternating `lora on` and `lora off 200` three times, 30 samples
+each: best strength averaged **24.2 dB-Hz with LoRa on and 27.4 with it off**, peaking at 28 against 31.
+At this margin that is decisive, because decoding an orbit takes about 30. The RYLR998's antenna sits
+centimetres from the GPS antenna on these boards and transmits 22 dBm. It is not LoRa alone, though:
+**MAIN carries LoRa too (D71) and locks**, so it takes a marginal antenna *and* a close transmitter.
+
+Alternate the switch rather than throwing it once. A first version of that test switched LoRa off a
+single time part way through and appeared to show it tripling the satellites in view; alternating showed
+the count barely moved and only the strength did. Anything that drifts over a few minutes - the satellites
+themselves included - imitates a one-way switch perfectly.
+
+What is left to check is physical, in this order: **a view of the sky** (the dominant term, and a window
+gives only a narrow slice of it plus reflections off the glass and frame), **the antenna seated** in its
+connector, and **distance between the GPS and LoRa antennas**. `lora off <seconds>` and
+`wifi off <seconds>` measure the last of those for free, before anyone reaches for a meter. For a module
+or antenna still suspected after that, the decisive test is a **swap** with one known to work.
+
+
 **Powering both.** The GPS is happy on 5 V because it has its own regulator. The RYLR998 must have
 3.3 V, and it draws over 100 mA while transmitting, on the same regulator that feeds the ESP32's
 own Wi-Fi bursts. These boards already record brownouts (17 to 27 each on the bench), so put a
@@ -267,6 +312,60 @@ When handhelds get modules, the module is optional there in exactly the way it i
 handheld with no module behaves as it does today, and the grid never assumes a handheld can be
 reached that way. An AP must therefore keep working with any mixture - some handhelds with a
 module, some without, some whose module has just died.
+
+## A handheld on LoRa alone, measured (2026-09-30)
+
+The handhelds have modules now, and the leg they add is the one the radio exists for: a handheld out of
+Wi-Fi range still reaching the grid. Measured on the bench with all three access points on **battery**,
+no serial cable to any of them, and one handheld's Wi-Fi switched off with `wifi off <seconds>` (D78).
+
+| | |
+|---|---|
+| Message out and acknowledgement back | **2.7 s** |
+| One-way delivery, median | **1.3 s** (1.0-2.0 s) |
+| From Wi-Fi off to an access point answering on LoRa | 1.5-4.7 s |
+| A 12-byte 1:1 message, sealed and on the air | 45-60 bytes, 1 part |
+| RSSI / SNR, bench distances | -21 to -41 dBm, SNR 7-10 |
+| **Delivery per attempt** | **about three quarters** |
+| **Delivery with retries working** | **9 of 9 outbound** (same round, same seed, same boards) |
+| A message recovered by a retry, end to end | 11.3-11.9 s (second attempt), 22.5 s (third) |
+
+That last figure is the important one and the least comfortable. Nothing acknowledges at the LoRa link
+layer, so a frame that is not heard is simply gone until something sends it again. Over two chaos rounds,
+34 messages to and from a handheld with no Wi-Fi: **25 delivered**. The firmware's own counters agree -
+about 20 frames out per round, no queue drops, no reassembly timeouts - so nothing was refused or
+dropped locally. They were not heard.
+
+The answer is retries, and the first attempt at pacing them was wrong in an instructive way. A 30-second
+resend was chosen to keep a full 16-slot outbox from flooding a radio that carries roughly one message
+every three seconds (D74). But the measurement above shows the air was not the constraint at all - a
+message crossed in 1.3 s - while a dropped one waited the full thirty seconds, which for an SOS is the
+wrong trade by a wide margin. The rate is now bounded by **messages per pass** rather than by the
+interval: one re-offer per tick, oldest sequence first, every 10 s
+(`LG_RESEND_LORA_MS`, `LG_RESEND_LORA_MAX_PER_TICK`). The offer rate is then the same whether one message
+is waiting or sixteen, and the interval is free to be short.
+
+The retry chain is visible in the latency distribution rather than inferred from it: a cluster at
+**1.3 s** (first attempt), five messages at **11.3-11.9 s** (the +10 s second attempt) and one at
+**22.5 s** (the third). That last one lost two frames in a row and still arrived; before tonight it was a
+silent loss.
+
+It took four gates to let that retry happen, and the fourth was the instructive one. Three were in
+`lg_core` (refuse to build a frame without a session, attempt only when registered, retry only when
+registered). The fourth was in `hh_service`, which returns early when Wi-Fi is off - above the line that
+drives the outbox. So the retry was written, built, flashed, and never ran. It was caught by arithmetic:
+the round reported the same 6 of 9 as before **and the same 21 frames on the air**, and 21 is exactly nine
+sends plus six acknowledgements plus the announcements, leaving no room for a retransmission. With the
+tick moved above the return, the same round delivered **9 of 9** and the air carried **28** frames.
+
+That also settles what the 66%-outbound against 83%-inbound asymmetry was, and it was not a directional
+radio. A message *to* a LoRa-only handheld is sent by a **registered** handheld, whose outbox resends
+every 3 s over Wi-Fi; each resend makes an access point transmit over LoRa again, so inbound quietly had
+several attempts all along. Outbound had one. One side had retries and the other did not.
+
+**What is still true after it:** a handheld cannot know whether LoRa works until it has already lost
+Wi-Fi, because an access point learns the path only from an announcement and answers only one. Losing
+that single frame costs up to one announcement interval before anything can be delivered to it.
 
 ## Memory, measured (2026-09-20)
 

@@ -95,21 +95,64 @@ device has its own command line** (D28).
 All of them sit on a workbench, each plugged into a laptop by cable, and any of them can be given
 commands and read back from. A handheld can be told to send a text to another handheld. An access
 point can be asked who is currently online, or how much memory it has left, or to switch its LoRa
-radio off for two minutes; any device can be asked for its supply voltage. All of that was built just
+radio off for two minutes. A **handheld** can be told to switch its own Wi-Fi off for a set number of
+seconds (D78) — added so the second radio can be tested in a field rather than only on a bench with
+the backbone broken by hand, and useful here as a fault the framework could not previously inject:
+losing a handheld's network without resetting the handheld. Any device can be asked for its supply
+voltage. All of that was built just
 to make development bearable — but it meant a full control and observability surface already existed
 across every node, with no new hardware and no changes to the firmware.
 
-**This is not a backdoor, and the boundaries are deliberate:**
+**The boundary moved, and this section used to claim otherwise.** It said the control surface
+"exists only on the physical USB cable". That stopped being true on 2026-09-30, and pretending
+otherwise would be the worst of both worlds, so here is what changed and why.
 
-- The console exists **only on the physical USB cable**. It is not reachable over Wi-Fi, LoRa,
-  Bluetooth, or the network, so using it means physically holding the board.
-- It **cannot change anything grid-wide**. The network name, the admin password and permissions
-  change only through the admin page, behind a salted PBKDF2 password hash with login lockout.
+The access points brown out on the bench's USB supply — 28 per AP in 18 seconds, every one of them
+after `heap_init`, before Wi-Fi is even initialised — so they are moving to battery power, which takes
+their serial cable away. Two things followed:
+
+- **An AP can be reflashed over Wi-Fi** through the admin page (D81), because a board on battery
+  otherwise has frozen firmware until it is physically carried back.
+- **A chaos run can be armed over Wi-Fi** (D83), because the framework's faults all came from the PC
+  side of a serial port that no longer exists.
+
+So the boundary is now **the admin password, not the cable**. It is worth being precise about what
+that did and did not change: an attacker with that password could already replace the entire firmware
+the moment D81 landed, and a firmware can do anything chaos can. The chaos endpoints therefore grant
+no new *capability* — they lower the *effort* from "build and upload an image" to "click a button",
+which matters for accidental misuse rather than for attackers.
+
+**What still holds the line:**
+
+- **Chaos is not in an ordinary build at all.** `CONFIG_LG_NODE_CHAOS` is off by default, and a
+  production AP contains no chaos code to reach — verified by the absence of its strings in the image,
+  not merely by a runtime flag.
+- **Two secrets, not one.** Being on the AP's network needs the grid's WPA2 passphrase; logging in
+  needs the admin password, behind a salted PBKDF2 hash with login lockout.
+- **The armed window closes by itself.** A run continues only while something keeps renewing it, so
+  losing contact *ends* a run instead of sustaining it — the inverse of a watchdog, and the protection
+  that matters most for a battery-powered AP with no cable.
+- **The fault budget is bounded and counted in flash**, so it cannot be raised over the network, and a
+  restart — which is one of the faults — cannot reset it.
 - A device that **cannot prove its identity refuses every command** except "who are you" (D75).
-- The radio-off commands **restore themselves on a timer**, so a crashed test harness cannot leave
-  the network degraded.
 
-The cable gives one more thing: control of each board's reset line. A brief pulse is a crash and
+**And it is temporary, with a blocker rather than a promise.** Every concession above is in
+[docs/TEMPORARY.md](TEMPORARY.md) with what must become true before it comes out, and
+`tools/check_release.py` fails on a release tag while any of it is still in the tree. The owner's rule:
+we do not leave the prototype phase with the backdoors we opened to test resiliency. The condition for
+removing most of it is simply a bench that can hold ten devices on USB without collapsing.
+
+What is *not* removed but hardened is the firmware upload: OTA is worth keeping, and the gap is that
+an AP will accept any image. The fix is signed images, which the release blocker also demands.
+- The radio-off commands **restore themselves on a timer**, so a crashed test harness cannot leave
+  the network degraded. The handheld's Wi-Fi switch has both forms, deliberately told apart: `wifi
+  off <seconds>` is the self-restoring one, capped at an hour and forgotten across a restart, while
+  a bare `wifi off` is sticky and survives a reboot — that one is for carrying a handheld into a
+  field, and a chaos run must never use it.
+
+The cable, **where there still is one**, gives one more thing: control of each board's reset line.
+The handhelds stay on USB (owner, 2026-09-30) so this still applies to them; the access points do not,
+and a self-chaos build restarts itself instead (D82), which is the same fault by a different means. A brief pulse is a crash and
 instant restart. Holding it down means the device is simply gone for as long as it is held. One
 honest caveat: holding reset is not identical to a true power cut, because the chip's always-on
 memory survives it — which is precisely why the full-blackout scenario below matters.
@@ -148,7 +191,7 @@ Three properties keep it from being merely destructive:
   and every held board released with its reset lines low on any exit — including a crash or a
   Ctrl-C. It also takes the flashing lock, so nobody can reflash a board mid-run.
 
-## Three bugs it found
+## Seven bugs: five it found, one it found by reading the same log, and one it would have missed entirely
 
 ### One: a use-after-free the crash reports could never point to
 
@@ -222,7 +265,168 @@ immediately. A GPS on one access point later gave the network a real time source
 all (D63). And the framework now reports where time came back from after every blackout; a blackout
 that recovers from nothing is a recorded failure.
 
+### Four: a slow handheld could restart the whole access point
+
+The bench came back on 2026-09-30 — new power supplies, zero brownouts on all three APs, all nine
+boards answering on USB — and the very first chaos run found this in its first ten seconds, before
+it had injected a single fault.
+
+`SEND_WAIT_MS` bounds how long **one** handheld may hold up the core task: two seconds, on a
+non-blocking socket, which is the right shape. It was read as bounding the task. It does not. A pass
+can send to every session, so three handhelds with full sockets cost six seconds, and the task
+watchdog panics at five.
+
+Everest printed `[UP] 2 s`, then nothing at all for 5.7 seconds — two sessions closing with
+`send failed` two seconds apart — and then `task_wdt: lg_core` aborted it. It restarted, the
+handhelds piled back on, and it did it again. **The per-send cap was never the dangerous number; the
+missing per-pass one was**, and no amount of staring at `write_frames` would show it, because
+`write_frames` is correct in isolation.
+
+The fix is a budget the whole pass shares (`sess_pass_begin`), reset next to the watchdog feed it
+exists to protect. When it runs out, a frame that has not started going out is dropped and the
+session is kept — the trade the voice path already makes (D61) — because a dropped message costs one
+message, and a watchdog panic costs every handheld on that AP.
+
+This is the fourth bug found the same way as the first three: **in a serial log, from a board, under
+load nobody would produce by hand.** It is also a reminder of what the wireless run in D83 gives up.
+
+### And one the run found by refusing to start: three endpoints that did not exist
+
+While reading the same boot log: `httpd_register_uri_handler: no slots left`, three times.
+`max_uri_handlers` was written down as 12 beside a route table that had grown to 15, so every AP was
+serving an admin page **without D83's chaos arming or its journal** — the three newest routes, at the
+end of the array, silently dropped. Nothing failed and nothing was refused. `tools/check_release.py`
+went on reporting the concession as present, correctly, because the routes were all there in the
+source; the feature was missing only on the hardware. The limit is now counted from the table and a
+route that fails to register is an error-level log.
+
+### Five: the load balancing made a broken access point the most attractive one
+
+This is the one worth reading twice, because every part of it was working as designed.
+
+D54 balances handhelds across APs: among every AP heard at a good signal, add 1000 and subtract 100
+for each handheld already attached, so the emptiest wins by a margin that deliberately swamps RSSI.
+Sound rule. Then Everest ran out of heap — its Wi-Fi began refusing every association with reason 5
+(`ASSOC_TOOMANY`) while its beacon went on advertising **"0 attached, 15 free"**, which was true of
+its own tables and a lie about what it could do.
+
+So Everest was the emptiest AP on the grid, and the balancing rule did exactly what it was told:
+
+| AP | signal | attached | score |
+|---|---|---|---|
+| Everest | **-52 dBm** (weakest) | 0 (because it refuses everyone) | **948** |
+| Fuji | -40 dBm (strongest) | 1 | 860 |
+| Denali | -44 dBm | 1 | 856 |
+
+Four of six handhelds chose Everest over two healthier APs with **stronger** signals, were refused,
+waited ten seconds, and chose Everest again. For the whole run. `hosyond` did it fourteen times in
+the log. **The emptier it got, the more attractive it became** — and it got emptier by failing.
+
+Nothing logged an error. Every component was correct in isolation: the beacon reported its own
+tables honestly, the scoring implemented D54 faithfully, and the retry backoff did what backoff does.
+The bug lived in the space between them, and it turned one AP's memory problem into four handhelds
+offline — on a network whose first claim is that it has no single point of failure.
+
+The fix is small and belongs on the handheld: an AP that refuses or drops this handheld is passed
+over for a while, doubling from 15 s to a 2-minute cap, cleared the moment a session with it actually
+works. The penalty is sized to lose to any healthy AP while staying far above the disqualifiers, so
+an avoided AP that is the **only** one left is still chosen — being briefly unwanted must never
+become being unreachable.
+
+What this says about D54: load balancing must never be the whole of a choice, because "empty" and
+"broken" look identical from the outside. **Liveness has to beat tidiness.**
+
+And there was a second half to it, in the beacon rather than the scoring. The free-slot byte was
+`LG_PROTO_MAX_STATIONS - clients` — room in the table, nothing about whether the AP could serve it.
+That constant is 15, the SoftAP limit, where the memory-limited figure on these boards is two or
+three, so **every AP advertised about five times its real capacity** and the number both the
+balancing and the handhelds' choice rest on was never true. An AP now derives it from free heap: a
+6 KB floor for itself, about 3 KB per further handheld, both measured here, never more than the table
+allows — with the one floor that an AP holding no handhelds always offers at least one slot, because
+if every AP were honest enough to advertise zero at the same moment, `node_usable` would reject all
+of them and strand the grid. Both halves are recorded as D84.
+
+Measured afterwards, on the same board that had been crashing: **minimum free heap 5796 bytes where
+it had been 400**, flat at 10 KB for the whole window, and no crash of any kind on any AP through a
+full run. The crashes were as much a cause of the memory collapse as a symptom of it — each restart
+brought every handheld back at once, and that storm was what emptied the heap.
+
+### Six: the second radio could receive a message and could not send one — and chaos would never have said so
+
+The handhelds' LoRa modules worked, in one direction. On 30 September 2026, with one handheld's Wi-Fi
+switched off, a message sent *to* it arrived over LoRa, was decoded, was shown on its screen and sounded
+its notification. Its own reply never reached the air. **One frame went out in 150 seconds, and that one
+was the announcement.** The reply waited in the outbox and left over Wi-Fi seventy seconds later, the
+moment a session came back — which in a message list looks exactly like success.
+
+The cause was three gates in `lg_core`, each of them correct for a socket: refuse to build a frame unless
+`connected`, attempt the first send only `if (registered)`, and retry nothing unless registered. A
+handheld on LoRa has no session and never will, because it is not a backbone peer (D77), so on that radio
+"not connected" is the normal state and precisely the moment speaking matters. The announcement had
+already been carved out of the first gate when it hit the same wall; that carve-out should have been read
+as evidence that the gates were in the wrong place, and was not.
+
+**The part that matters for this document is how it was found: by hand, not by chaos.** Every LoRa round
+the framework had took ESP-NOW away *between access points*, which exercises the access points' radios
+and never touches a handheld's. A chaos night would have reported a clean grid for as long as the bug
+existed, and the report would have been true about everything it measured.
+
+The round that closes it is `lora_handheld`: switch one handheld's Wi-Fi off for a window, then send
+messages **in both directions** and require delivery. Both directions matters — receiving was never
+broken. It is typed at a handheld, not an access point, which also makes it the only LoRa round that can
+run while the access points are on battery with no cable; a run with no access point on USB now says so
+and carries on rather than refusing to start. The findings it raises are deliberately *not* excused by
+the victim "having lost its access point": it lost it because the round took it away, and carrying its
+traffic anyway is the entire claim under test.
+
+After the fix, on the boards: a message sent with Wi-Fi off reached the other handheld, and the
+acknowledgement came back over LoRa — **a 2.7-second round trip at SF9** — with Wi-Fi not returning for
+another forty-eight seconds, and no duplicate when it did.
+
+### Seven: a handheld would not use the only access point on the grid, and the backup hid it
+
+The best finding so far, and the one the framework **did not** find. It came out of chasing a vague line
+in a console report, and it changed how the harness judges success.
+
+A handheld sat on LoRa with a usable access point at -47 dBm in earshot. The log said something that
+should have been arithmetically impossible:
+
+```
+[NET] Heard AP 1 "Fuji" -47 dBm, 5 attached, 1 free, backbone no, grid time yes, 94 ms ago
+[NET] Scan done: 10 records, 1 usable node(s)
+[NET] Scan found 1 usable node(s); scanning again in 10 s     <- every ten seconds, for minutes
+```
+
+One usable access point, and the chooser picked nothing. `best_score` started at `-1000` as a "nothing
+chosen yet" sentinel, and that had quietly become a **minimum quality** every avoided access point fell
+through: the avoidance penalty is 2000, so Fuji scored `-47 + (1000 - 100 x 5 attached) - 2000 = -1547`,
+below the sentinel, and no access point was ever returned. D84 promises the opposite in as many words —
+*"an avoided access point that is the only one left is still chosen"* — so the decision was right and the
+code did not implement it. A handheld refused once would not retry **the only access point on the grid**
+for up to two minutes.
+
+**Why no chaos run caught it.** Nothing logged an error; every part did as it was told. And the handheld
+had a working second radio, so its messages kept arriving — the run measured delivery, delivery was fine,
+and the fault was invisible. The backup did not merely fail to reveal the bug: it **concealed** it. Worse,
+the veto only bites when the avoided access point is the last one standing, so a healthy three-access-point
+bench hides it too.
+
+That is a gap in how a run judges success, not only a gap in the code, and it matters because **not every
+handheld will carry a second radio**. So the harness now asks a different question. Every stretch a
+handheld spends with no Wi-Fi session is sampled and judged: was its radio switched off on purpose, is it
+under an injected fault, is an access point in trouble, is any access point up, is every one full? If none
+of those explains it, the fallback is **unjustified** and becomes a finding after 45 seconds — whether or
+not a single message was lost. Every message now records the path it took (`wifi` or `backup`) and whether
+Wi-Fi was available at the time, so a run can be analysed afterwards instead of re-derived. And a new
+`no_net` round **switches the second radio off on every handheld that has one**, which makes them behave
+like the ones that will ship without it: a Wi-Fi fault then has nothing to hide behind.
+
+The lesson generalises past this bug. **A fallback that works is indistinguishable from a system that does
+not need one, unless the test asks.** Any redundancy worth having deserves a round that takes it away.
+
 ## What the numbers say
+
+The runs are kept as evidence: [2026-09-18, ten hours on the bench](chaos/2026-09-18-night-run.md) and [2026-10-01, ten hours to flat batteries](chaos/2026-10-01-night-run.md) - the second one on battery, with the backup audit and the `no_net` and `alerts` rounds, and the night that found the outbox leak that refused an SOS.
 
 From [the 10-hour run of 2026-09-18](chaos/2026-09-18-night-run.md) — three access points, three
 handhelds, seed 1172352511:
@@ -254,7 +458,19 @@ Worth stating plainly, because the gaps are as informative as the findings:
   radio range on one desk. No geometry, no distance, no roaming.
 - **Faults never overlap.** The steady-state gate deliberately excludes cascading failure, which is
   the mode that takes real systems down.
+- **The access points' own faults do not reach the handhelds.** A chaos build attacks itself (D82) and
+  everything it does is to an access point. Nothing it does makes a *handheld* use its module, because a
+  handheld only reaches for LoRa when its own Wi-Fi session has gone. That gap is now covered by a round
+  typed at the handheld instead (`lora_handheld`, below), but the asymmetry is worth keeping in mind: a
+  self-attacking access point can never test the device in someone's hand.
 - **Leaks are not detected.** Heap is reported as the lowest value seen, not as a trend.
+- **A chaos run cannot yet prove that LoRa carried anything between access points.** The journal
+  records which fault happened and the BLE beacon carries heap, restarts and brownouts — neither
+  carries a LoRa counter. So after a backbone-off fault on a battery-powered access point the run can
+  say "the grid did not fall over" and cannot say "LoRa carried it". That is the difference between
+  resilience as a fact and resilience as a statement, and it is the next thing to close on the access
+  point side: the counters already exist in the firmware (`frames out N in N`), they are simply not in
+  anything a laptop can read without a cable.
 - **No asserted thresholds.** Recovery times are read after the run rather than declared before it
   and failing the run, and results are not yet kept as a baseline between runs.
 
@@ -283,7 +499,7 @@ first real measurement of the ranges the site currently only estimates.
 
 ## What this says about testing
 
-All three bugs share a shape. The symptom appeared far from the cause. The failure was silent. And
+All five bugs share a shape. The symptom appeared far from the cause. The failure was silent. And
 the guarantee that was written down was not the guarantee the code implemented.
 
 None were findable by code review or unit tests, because none of them are wrong in isolation — they
