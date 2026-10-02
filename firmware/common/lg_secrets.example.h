@@ -11,3 +11,7 @@
 
 /* HKDF-SHA256(backbone key, "lg-disc"), 4 bytes. Handhelds use this and never the backbone key. */
 #define LG_SECRET_DISCRIMINATOR { 0, 0, 0, 0 }
+
+/* HKDF-SHA256(backbone key, "lg-lora-hh"), 32 bytes. Seals LoRa frames between a handheld and an
+ * AP (D77). Both hold it, and it is never the backbone key. */
+#define LG_SECRET_LORA_HH_KEY { 0 }

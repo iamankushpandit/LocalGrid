@@ -187,6 +187,24 @@ void lg_node_init(lg_node_t *n, uint16_t self, uint32_t boot, lg_roster_t *roste
  */
 void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint8_t *frame, size_t len);
 
+/*
+ * D80: an AP heard `device` over LoRa (D77) and can reach it that way, with no Wi-Fi session. Marks
+ * it LG_PRES_LORA here and announces that, so the grid knows it is alive and where to route a reply
+ * without ever claiming it can take Wi-Fi traffic.
+ *
+ * Called on the core task by the AP's radio glue, after the frame has authenticated. A handheld that
+ * already holds a Wi-Fi session on this AP is left ONLINE, because that says more; a handheld already
+ * known this way is left alone, so hearing it repeatedly announces nothing and costs no airtime.
+ */
+void lg_node_mark_lora_reachable(lg_node_t *n, uint32_t device);
+
+/*
+ * D80: what this AP believes about `device` - an lg_presence_state_t, or LG_PRES_OFFLINE for a device
+ * it has never heard of. The firmware glue reads this to choose a transport, which is the whole
+ * reason the core needs no new send callback for the radio.
+ */
+uint8_t lg_node_presence_state(const lg_node_t *n, uint32_t device);
+
 /* The session for device closed or timed out. */
 void lg_node_on_session_closed(lg_node_t *n, uint32_t device);
 

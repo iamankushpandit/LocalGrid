@@ -1,5 +1,5 @@
 /*
- * lora_wire.h - the parts of the LoRa backbone (D71) that need no radio.
+ * lg_lora_wire.h - the parts of the LoRa backbone (D71) that need no radio.
  *
  * Portable C11 over lg_core headers only, so tests/target exercises every one of them on a board
  * with no module fitted: base64, the part header, reassembly, the send policy and its bounded
@@ -77,6 +77,36 @@ extern "C" {
 
 _Static_assert(LORA_PAYLOAD_MAX >= 6144u, "the owner's ceiling is 6 KB");
 _Static_assert(LORA_PART_HDR + LORA_SLICE_MAX == LORA_PART_RAW_MAX, "a part fills one AT+SEND");
+
+/* ---- the radio, and the address plan (D71, D77) ---------------------------------------------
+ *
+ * One source of truth for both firmwares. An AP and a handheld that disagree on any of these are
+ * on different channels and neither ever hears the other, which is a bug you find on a field trip
+ * rather than at a desk -- so they live here, in the file both sides already compile, and not in
+ * two headers that cannot include each other (D27).
+ *
+ * Band: 868.5 MHz is the European licence-free LoRa band. A 915 MHz region changes this one number
+ * (and only this one) before flashing every board in the grid.
+ */
+#define LG_LORA_BAND_HZ      868500000u
+#define LG_LORA_UART_BAUD    115200u     /* the RYLR998 leaves the factory at this rate */
+/* AT+PARAMETER: spreading factor 9, bandwidth 125 kHz (code 7), coding rate 4/5 (code 1),
+ * preamble 12 -- the module's own default, and required while the network ID is left at 18. */
+#define LG_LORA_SF           9
+#define LG_LORA_BW_CODE      7
+#define LG_LORA_CR_CODE      1
+#define LG_LORA_PREAMBLE     12
+#define LG_LORA_POWER_DBM    22          /* AT+CRFOP, 0..22 */
+
+/*
+ * The address plan. Address 0 is the broadcast address and nothing else: the bench proved on
+ * 2026-09-20 that a module cannot be both a broadcast target and a private one, so no AP sits
+ * there. APs are 1 + index; a handheld is 100 + its device number (D71 settled this before
+ * handhelds had modules, so D77 needed no change to it).
+ */
+#define LG_LORA_ADDR_BROADCAST   0u
+#define LG_LORA_ADDR_AP(i)       ((uint16_t)((i) + 1u))
+#define LG_LORA_ADDR_HANDHELD(d) ((uint16_t)(100u + (d)))
 
 /* ---- base64 ---- */
 

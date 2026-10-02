@@ -77,6 +77,25 @@ static bool is_local_online(const lg_node_t *n, const lg_presence_entry_t *p)
     return p != NULL && p->state == LG_PRES_ONLINE && p->node == n->self;
 }
 
+/*
+ * D80: attached to this AP by any transport - a Wi-Fi session, or only LoRa (D77). Delivery uses
+ * this; anything that needs the throughput of a real session keeps using is_local_online, which is
+ * why voice still demands LG_PRES_ONLINE (one 100 ms frame is seconds of airtime, D71).
+ *
+ * The core does not know or care which radio the glue will use: io.to_client is the one door, and
+ * the glue picks the transport from the same presence state.
+ */
+static bool is_local_reachable(const lg_node_t *n, const lg_presence_entry_t *p)
+{
+    return p != NULL && (p->state == LG_PRES_ONLINE || p->state == LG_PRES_LORA) && p->node == n->self;
+}
+
+/* D80: an AP other than this one has it, by either transport, so a frame can be handed over. */
+static bool is_remote_reachable(const lg_presence_entry_t *p)
+{
+    return p != NULL && (p->state == LG_PRES_ONLINE || p->state == LG_PRES_LORA);
+}
+
 static void env_from_node(lg_node_t *n, lg_env_t *e, uint8_t type, uint8_t scope, uint32_t target)
 {
     memset(e, 0, sizeof(*e));
@@ -473,17 +492,18 @@ static void deliver_direct(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
                            const uint8_t *frame, size_t len, uint16_t from_node)
 {
     lg_presence_entry_t *p = presence_find(n, e->target);
-    if (is_local_online(n, p)) {
+    if (is_local_reachable(n, p)) {
+        /* D80: over its session, or over LoRa. The glue reads the same presence state to choose. */
         n->io.to_client(n->io.ctx, e->target, frame, len);
         n->stats.delivered_local++;
         note_out(n, e->type, e->scope, len);
         return;
     }
-    if (p == NULL || p->state != LG_PRES_ONLINE) {
-        n->traffic.unknown_recipient++;   /* no AP has announced this device as online */
+    if (!is_remote_reachable(p)) {
+        n->traffic.unknown_recipient++;   /* no AP has announced this device as reachable at all */
     }
     if (from_node == LG_NODE_NONE) {
-        if (p != NULL && p->state == LG_PRES_ONLINE && n->io.is_neighbor != NULL &&
+        if (is_remote_reachable(p) && n->io.is_neighbor != NULL &&
             n->io.is_neighbor(n->io.ctx, p->node) && n->io.backbone_unicast != NULL) {
             n->io.backbone_unicast(n->io.ctx, p->node, frame, len);
             n->stats.forwarded++;
@@ -508,7 +528,14 @@ static void deliver_fanout(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
         if (e->scope == LG_SCOPE_GROUP && !lg_roster_is_member(r, dev, (uint16_t)e->target)) {
             continue;
         }
-        if (is_local_online(n, presence_find(n, dev))) {
+        /*
+         * D80: a handheld reachable only over LoRa is included here, because this is the path a
+         * broadcast takes and an urgent broadcast or SOS reaching a handheld that is out of Wi-Fi
+         * range is the whole reason the second radio exists. What it costs in airtime is not
+         * decided here: the glue applies the send policy (D74), which carries alerts always and
+         * ordinary traffic only when Wi-Fi cannot.
+         */
+        if (is_local_reachable(n, presence_find(n, dev))) {
             n->io.to_client(n->io.ctx, dev, frame, len);
             n->stats.delivered_local++;
             note_out(n, e->type, e->scope, len);
@@ -577,8 +604,13 @@ static uint8_t validate_text(lg_node_t *n, const lg_env_t *e, const uint8_t *bod
     }
 
     if (e->scope == LG_SCOPE_DIRECT) {
-        const lg_presence_entry_t *p = presence_find(n, e->target);
-        if (p == NULL || p->state != LG_PRES_ONLINE) {
+        /*
+         * D80: reachable over LoRa counts as reachable. Without this a 1:1 message to a handheld
+         * that is out of Wi-Fi range is refused here, before delivery is ever reached, so widening
+         * deliver_direct alone would have changed nothing for text. Broadcasts never came through
+         * this branch, which is why they worked while 1:1 did not.
+         */
+        if (!is_remote_reachable(presence_find(n, e->target))) {
             return LG_ACK_REJ_OFFLINE;      /* no store-and-forward in the prototype */
         }
     }
@@ -1012,6 +1044,52 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
     default:
         break;  /* unknown or not client-originated: ignored */
     }
+}
+
+/*
+ * D80: an AP heard this handheld over LoRa (D77) and can reach it that way. Called from the AP's
+ * radio glue, on the core task, once the frame has authenticated.
+ *
+ * It does NOT make the handheld ONLINE: a handheld reachable only over LoRa cannot take Wi-Fi
+ * traffic, and saying otherwise would have the whole grid routing to a path that cannot carry it.
+ *
+ * A handheld that already has a Wi-Fi session here is left exactly as it is. That is the case where
+ * both radios can reach it, and ONLINE is the better answer of the two -- so hearing it on LoRa must
+ * not quietly downgrade a working session.
+ */
+uint8_t lg_node_presence_state(const lg_node_t *n, uint32_t device)
+{
+    if (n == NULL) {
+        return LG_PRES_OFFLINE;
+    }
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+        const lg_presence_entry_t *p = &n->presence[i];
+        if (p->in_use && p->device == device) {
+            return p->state;
+        }
+    }
+    return LG_PRES_OFFLINE;
+}
+
+void lg_node_mark_lora_reachable(lg_node_t *n, uint32_t device)
+{
+    if (n == NULL || device == 0 || lg_roster_user(n->roster, device) == NULL) {
+        return;   /* not a device this grid knows: nothing to announce about it */
+    }
+    lg_presence_entry_t *p = presence_get(n, device);
+    if (p == NULL) {
+        return;   /* the table was full; presence_get counted it */
+    }
+    if (p->state == LG_PRES_ONLINE && p->node == n->self) {
+        return;   /* it has a session here: ONLINE already says more than LoRa-reachable does */
+    }
+    if (p->state == LG_PRES_LORA && p->node == n->self) {
+        return;   /* already known this way: say nothing, so hearing it often costs no airtime */
+    }
+    p->state = LG_PRES_LORA;
+    p->node  = n->self;
+    flood_presence(n, p);
+    notify_local_clients(n, p, device);
 }
 
 void lg_node_on_session_closed(lg_node_t *n, uint32_t device)

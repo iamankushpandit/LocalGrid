@@ -22,6 +22,12 @@ extern "C" {
 #define LG_FRAME_MAX            1024u        /* envelope + body on any Phase 1 link */
 #define LG_TTL_DEFAULT          3u           /* backbone hop limit */
 #define LG_TIME_TOLERANCE_S     120u         /* owner rule: device clock vs node clock */
+/*
+ * How much of that tolerance an alert keeps in hand when it is re-stamped (D86). A frame re-stamped at
+ * the very edge of the window would spend what is left of it in the air - seconds, over LoRa - and the
+ * access point would refuse it for the same reason as the one it replaced.
+ */
+#define LG_TIME_RESTAMP_MARGIN_S  30u
 #define LG_AEAD_TAG_LEN         16u          /* ChaCha20-Poly1305 tag */
 #define LG_PUBKEY_LEN           32u          /* X25519 public key */
 #define LG_DIRECT_BODY_MAX      (LG_TEXT_MAX + LG_AEAD_TAG_LEN)

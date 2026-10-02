@@ -75,7 +75,25 @@ typedef struct {
 
 /* PRESENCE_UPDATE: node -> nodes (flood), node -> client. */
 #define LG_PRESENCE_LEN (11u + LG_PUBKEY_LEN)
-typedef enum { LG_PRES_OFFLINE = 0, LG_PRES_ONLINE = 1 } lg_presence_state_t;
+/*
+ * LG_PRES_LORA (D80) is a handheld an AP has heard over LoRa (D77) and can reach that way, with no
+ * Wi-Fi session. It is deliberately NOT ONLINE: a handheld that is only reachable by LoRa cannot
+ * take Wi-Fi traffic, and a grid that called it ONLINE would be telling every other handheld it
+ * could. Everything that asks "can I reach this device over Wi-Fi" compares `== LG_PRES_ONLINE` and
+ * so answers no, which is correct; what routes to it is the LoRa address in the AP's own table.
+ *
+ * `node` still says which AP heard it, so a reply knows which AP to hand the frame to.
+ *
+ * A record with this state is REFUSED by a device built before it, not read as offline, because
+ * lg_presence_dec has always rejected a state above the highest it knows. Every board in one grid
+ * must therefore run the same build -- which is already true of this prototype, since the grid's
+ * secrets are compiled in.
+ */
+typedef enum {
+    LG_PRES_OFFLINE = 0,
+    LG_PRES_ONLINE  = 1,
+    LG_PRES_LORA    = 2,
+} lg_presence_state_t;
 typedef struct {
     uint32_t device;
     uint16_t node;

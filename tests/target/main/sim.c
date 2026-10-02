@@ -36,6 +36,18 @@ static void n_to_client(void *ctx, uint32_t device, const uint8_t *frame, size_t
             return;
         }
     }
+    /*
+     * D80: no session, so the glue reads the presence state and reaches for the radio instead. The
+     * core asked for one device by number through the one door it has; which transport carries it is
+     * decided out here, exactly as firmware/node/main/lora.c decides it on an AP.
+     */
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        sim_client_t *c = &s->clients[i];
+        if (c->lora_node == sn->index && c->client.device == device) {
+            enqueue(s, SIM_EV_TO_CLIENT, sn->index, i, frame, len);
+            return;
+        }
+    }
 }
 
 static void n_unicast(void *ctx, uint16_t node, const uint8_t *frame, size_t len)
@@ -154,6 +166,16 @@ static bool c_send(void *ctx, const uint8_t *frame, size_t len)
 {
     sim_client_t *c = ctx;
     if (c->node < 0) {
+        /*
+         * No session. The core offers anyway since D80, because the glue may have a second radio,
+         * and the glue is what knows (D74, D77). Both halves are modelled: the offer is counted, a
+         * LoRa path carries it if this handheld has one, and the answer is false either way - no
+         * session took it, which is what the core is being told and all it may conclude.
+         */
+        c->offers_detached++;
+        if (c->lora_node >= 0) {
+            enqueue(c->sim, SIM_EV_TO_NODE, c->index, c->lora_node, frame, len);
+        }
         return false;
     }
     enqueue(c->sim, SIM_EV_TO_NODE, c->index, c->node, frame, len);
@@ -289,6 +311,7 @@ sim_t *sim_create(void)
         c->sim = s;
         c->index = i;
         c->node = -1;
+        c->lora_node = -1;   /* no second radio unless a scenario asks for one */
         lg_roster_init_prototype(&c->roster);
         seed_groups(&c->roster);
         uint32_t device = c->roster.users[i].device;
@@ -342,12 +365,23 @@ bool sim_pump(sim_t *s)
             sim_client_t *c = &s->clients[ev.a];
             if (c->node == ev.b) {
                 lg_node_on_session_frame(&s->nodes[ev.b].node, &c->session_device, ev.data, ev.len);
+            } else if (c->lora_node == ev.b) {
+                /*
+                 * What an AP does with a handheld frame that arrived on LoRa, in the same order
+                 * (firmware/node/main/lora.c, D77 and D80): mark it reachable that way *first*, so
+                 * that anything the core sends back while handling the frame - an acknowledgement
+                 * above all - already has a path, and then hand the frame over on a session named
+                 * by the device rather than by a socket.
+                 */
+                lg_node_mark_lora_reachable(&s->nodes[ev.b].node, c->client.device);
+                c->lora_session = c->client.device;
+                lg_node_on_session_frame(&s->nodes[ev.b].node, &c->lora_session, ev.data, ev.len);
             }
             break;
         }
         case SIM_EV_TO_CLIENT: {
             sim_client_t *c = &s->clients[ev.b];
-            if (c->node == ev.a) {
+            if (c->node == ev.a || c->lora_node == ev.a) {
                 lg_client_on_frame(&c->client, ev.data, ev.len);
             }
             break;
@@ -385,6 +419,11 @@ void sim_attach(sim_t *s, int client, int node)
     c->session_device = 0;
     lg_client_connected(&c->client);
     (void)sim_pump(s);
+}
+
+void sim_lora(sim_t *s, int client, int node)
+{
+    s->clients[client].lora_node = node;
 }
 
 void sim_detach(sim_t *s, int client)

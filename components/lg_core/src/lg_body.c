@@ -139,7 +139,7 @@ bool lg_presence_dec(const uint8_t *in, size_t len, lg_presence_t *v)
     v->epoch  = lg_rd32(in + 6);
     v->state  = in[10];
     memcpy(v->pubkey, in + 11, LG_PUBKEY_LEN);
-    return v->state <= LG_PRES_ONLINE;
+    return v->state <= LG_PRES_LORA;   /* D80: OFFLINE, ONLINE, or reachable over LoRa */
 }
 
 bool lg_name_valid(const uint8_t *text, size_t len)

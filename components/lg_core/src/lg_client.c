@@ -94,7 +94,7 @@ static void base_env(lg_client_t *c, lg_env_t *e, uint8_t type, uint8_t scope, u
 
 static bool send_frame(lg_client_t *c, lg_env_t *e, const uint8_t *body, size_t len)
 {
-    if (!c->connected || c->io.send == NULL) {
+    if (c->io.send == NULL) {
         return false;
     }
     uint8_t buf[LG_FRAME_MAX];
@@ -102,7 +102,26 @@ static bool send_frame(lg_client_t *c, lg_env_t *e, const uint8_t *body, size_t 
     if (flen < 0) {
         return false;
     }
-    return c->io.send(c->io.ctx, buf, (size_t)flen);
+    /*
+     * D77, D80: offered even with no session, and the answer still means "a session took it".
+     *
+     * The refusal used to be the first thing here, on `!c->connected`. That is right for a socket
+     * and wrong for the second radio, in exactly the way it was already wrong for the announcement
+     * (lg_client_lora_announce, and the note above it). A handheld whose Wi-Fi has gone has no
+     * session and never will on LoRa - it is not a backbone peer (D77) - so refusing here left a
+     * handheld on LoRa alone able to *receive* a message and an SOS while able to originate nothing
+     * but "I am here": no reply, no acknowledgement, no position. Measured on the bench on
+     * 2026-09-30: 150 s with Wi-Fi off, one frame on the air, and that one was the announcement.
+     *
+     * What a radio actually carries stays the glue's decision - D74's one radio at a time, D77's
+     * allow-list - which is where it belongs. The core's part was only to stop hiding the frame from
+     * it. The return value is deliberately unchanged: false unless a session carried it, so the
+     * message stays PENDING in the outbox and keeps its stored (boot, seq, grid time). A later Wi-Fi
+     * attempt at a frame LoRa already delivered is then a duplicate the grid drops by identity, not
+     * a second message - which is why reusing those three fields is load-bearing here.
+     */
+    bool taken = c->io.send(c->io.ctx, buf, (size_t)flen);
+    return c->connected && taken;
 }
 
 /* ---- names (D50) --------------------------------------------------------- */
@@ -277,6 +296,32 @@ void lg_client_disconnected(lg_client_t *c)
     c->registered = false;
 }
 
+/*
+ * The announcement over LoRa (D77, D80). Deliberately does not go through send_frame, whose first
+ * act is to refuse when `connected` is false -- see the header for why that gate is right for a
+ * socket and wrong for this radio.
+ */
+bool lg_client_lora_announce(lg_client_t *c, uint8_t battery)
+{
+    if (c == NULL || c->io.send == NULL) {
+        return false;
+    }
+    if (battery > 100u) {
+        battery = LG_BATTERY_UNKNOWN;
+    }
+    uint8_t body[LG_PING_LEN];
+    size_t blen = lg_ping_enc(battery, body);
+    lg_env_t e;
+    base_env(c, &e, LG_T_PING, LG_SCOPE_SYSTEM, 0);
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, buf, sizeof(buf));
+    if (flen < 0) {
+        return false;
+    }
+    (void)c->io.send(c->io.ctx, buf, (size_t)flen);
+    return true;   /* offered: on a handheld io.send reports the socket, which is the thing missing */
+}
+
 void lg_client_ping(lg_client_t *c, uint8_t battery)
 {
     if (!c->connected) {
@@ -307,7 +352,86 @@ bool lg_client_time_restricted(const lg_client_t *c)
     return !c->grid_time_known || c_local_time(c) == 0;
 }
 
-static void transmit(lg_client_t *c, size_t i)
+/*
+ * D86: is this an alert, and has it waited long enough that an access point would refuse it for the
+ * clock rule? Only an urgent broadcast, an SOS or an all clear qualifies - they carry LG_FLAG_URGENT or
+ * LG_FLAG_ALL_CLEAR - and only while there is a clock to compare against.
+ *
+ * The threshold is deliberately short of LG_TIME_TOLERANCE_S: a frame re-stamped at the very edge would
+ * spend its remaining margin in the air and on the access point's queue, and arrive just as stale as
+ * the one it replaced.
+ */
+static bool alert_is_too_old(const lg_client_t *c, const lg_out_msg_t *m)
+{
+    if ((m->flags & (LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR)) == 0u || m->restamps >= LG_RESTAMP_MAX) {
+        return false;
+    }
+    uint32_t now = c_local_time(c);
+    if (now == 0u || m->grid_time == 0u || now < m->grid_time) {
+        return false;   /* no clock, or a stamp from the future: not something to act on here */
+    }
+    return (now - m->grid_time) > (LG_TIME_TOLERANCE_S - LG_TIME_RESTAMP_MARGIN_S);
+}
+
+/*
+ * A pending message that no access point will ever accept again is failed and its slot freed.
+ *
+ * Found by a chaos night on 2026-10-01, and it is the worst thing the project has found: a handheld
+ * went **permanently mute** - `[MSG] Not sent (outbox full)` twenty-seven times, still refusing to send
+ * twenty minutes after it had rejoined Wi-Fi and while looking perfectly healthy on screen. The chain:
+ *
+ *   1. A message nothing acknowledges stays LG_OUT_PENDING for ever; nothing aged it out.
+ *   2. D6 refuses a message whose grid time is more than LG_TIME_TOLERANCE_S from the access point's,
+ *      and a retransmission must reuse that stamp - so past that window it can never be accepted.
+ *   3. Such a message therefore held its outbox slot for ever.
+ *   4. There are LG_OUTBOX_SIZE slots. After that the handheld cannot send anything at all, **including
+ *      an SOS**, until it is restarted.
+ *
+ * Keeping it served nobody: it could not be delivered, and holding it disabled the device. So it is
+ * failed with the reason the sender would have been given anyway, which both tells the person and frees
+ * the slot. An alert is exempt while it still has a re-stamp left (D86), because it is about to be given
+ * a new identity and a fresh stamp; once those are spent it ages out like anything else rather than
+ * silently filling the outbox.
+ *
+ * The threshold is the tolerance plus the same margin a re-stamp keeps, so a message that is merely in
+ * flight is never thrown away.
+ */
+static bool give_up_on_stale(lg_client_t *c, lg_out_msg_t *m)
+{
+    uint32_t now = c_local_time(c);
+    if (now == 0u || m->grid_time == 0u || now < m->grid_time) {
+        return false;   /* no clock, or a stamp from the future: not something to judge age by */
+    }
+    if ((now - m->grid_time) <= (uint32_t)(LG_TIME_TOLERANCE_S + LG_TIME_RESTAMP_MARGIN_S)) {
+        return false;
+    }
+    if ((m->flags & (LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR)) != 0u && m->restamps < LG_RESTAMP_MAX) {
+        return false;   /* D86 is about to give it a new id; it is not stale yet */
+    }
+    m->state = LG_OUT_REJECTED;
+    m->reject_reason = LG_ACK_REJ_TIME;
+    return true;
+}
+
+/* D86: a new id and a new stamp, so the grid may accept it. The text is untouched. */
+static void restamp(lg_client_t *c, lg_out_msg_t *m)
+{
+    m->seq       = next_seq(c);
+    m->grid_time = c_local_time(c);
+    m->restamps++;
+    m->delivered_mask = 0;
+    m->delivered_count = 0;
+    m->read_mask = 0;
+    m->read_count = 0;
+}
+
+/*
+ * `may_reject` is false for an attempt made with no session (D80). A missing peer key means "not
+ * learned yet", and before registration it is the normal state, so rejecting the message there would
+ * fail a message for the one reason that is about to stop being true. With a session it is a real
+ * refusal and is reported as one.
+ */
+static void transmit_ex(lg_client_t *c, size_t i, bool may_reject)
 {
     lg_out_msg_t *m = &c->outbox[i];
     lg_env_t e;
@@ -324,6 +448,9 @@ static void transmit(lg_client_t *c, size_t i)
     if (m->scope == LG_SCOPE_DIRECT) {
         const lg_peer_t *p = peer_find(c, m->target);
         if (p == NULL || !p->has_key || c->io.seal == NULL) {
+            if (!may_reject) {
+                return;   /* stays PENDING: no session yet, so no key yet is not a refusal */
+            }
             m->state = LG_OUT_REJECTED;
             m->reject_reason = LG_ACK_REJ_UNKNOWN_TARGET;   /* no key for this person yet */
             emit(c, LG_CEV_OUTBOX, (uint32_t)i);
@@ -349,7 +476,40 @@ static void transmit(lg_client_t *c, size_t i)
     m->last_tx_ms = c_now_ms(c);
 }
 
-static int pick_slot(const lg_client_t *c)
+static void transmit(lg_client_t *c, size_t i)
+{
+    transmit_ex(c, i, true);
+}
+
+/*
+ * Is this slot finished with, so a new message may take it?
+ *
+ * `urgent` is the second chance an alert gets. A 1:1 message waiting to be confirmed is held because a
+ * delivery tick is worth something - but it is worth less than being able to raise an alarm, and a
+ * handheld whose outbox is full of them cannot send anything at all. So an ordinary message waits
+ * LG_ACCEPTED_HOLD_S before it may take such a slot, and an urgent one or an all clear takes the oldest
+ * immediately. Nothing is lost that was not already delivered to the grid: ACCEPTED means a node has it.
+ */
+static bool slot_spent(const lg_client_t *c, const lg_out_msg_t *m, bool urgent)
+{
+    if (m->state == LG_OUT_DELIVERED || m->state == LG_OUT_READ || m->state == LG_OUT_REJECTED) {
+        return true;
+    }
+    if (m->state != LG_OUT_ACCEPTED) {
+        return false;   /* EMPTY is handled by the caller; PENDING is still trying */
+    }
+    if (m->scope != LG_SCOPE_DIRECT) {
+        return true;    /* group and broadcast count deliveries as they come; they never hold a slot */
+    }
+    if (urgent) {
+        return true;
+    }
+    uint32_t now = c_local_time(c);
+    return now != 0u && m->grid_time != 0u && now > m->grid_time &&
+           (now - m->grid_time) > LG_ACCEPTED_HOLD_S;
+}
+
+static int pick_slot(const lg_client_t *c, bool urgent)
 {
     int best = -1;
     for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
@@ -359,9 +519,7 @@ static int pick_slot(const lg_client_t *c)
     }
     for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
         const lg_out_msg_t *m = &c->outbox[i];
-        bool reusable = m->state == LG_OUT_DELIVERED || m->state == LG_OUT_READ || m->state == LG_OUT_REJECTED ||
-                        (m->state == LG_OUT_ACCEPTED && m->scope != LG_SCOPE_DIRECT);
-        if (reusable && (best < 0 || m->seq < c->outbox[best].seq)) {
+        if (slot_spent(c, m, urgent) && (best < 0 || m->seq < c->outbox[best].seq)) {
             best = (int)i;
         }
     }
@@ -402,7 +560,9 @@ int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t
         return LG_ERR_DENIED;
     }
 
-    int slot = pick_slot(c);
+    /* An alert may take a slot an ordinary message must wait for: see slot_spent. */
+    bool alert = (flags & (LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR)) != 0u;
+    int slot = pick_slot(c, alert);
     if (slot < 0) {
         return LG_ERR_FULL;
     }
@@ -418,9 +578,16 @@ int lg_client_send_text(lg_client_t *c, uint8_t scope, uint32_t target, uint16_t
     m->len       = (uint16_t)len;
     memcpy(m->text, text, len);
 
-    if (c->registered) {
-        transmit(c, (size_t)slot);
-    }
+    /*
+     * D77, D80: attempted whether or not this handheld is registered. A handheld on LoRa alone is
+     * unregistered by definition - registration is one of the types that radio refuses, because an
+     * AP would have to trust a handheld about it - so gating the first attempt on `registered` meant
+     * a message typed with Wi-Fi down reached no radio at all. It waited in the outbox and left over
+     * Wi-Fi the moment a session returned, which the bench measured as a 70-second silence on
+     * 2026-09-30. The attempt cannot reject the message (see transmit_ex) and cannot lose it: the
+     * slot stays PENDING until something acknowledges it.
+     */
+    transmit_ex(c, (size_t)slot, c->registered);
     emit(c, LG_CEV_OUTBOX, (uint32_t)slot);
     return slot;
 }
@@ -909,14 +1076,70 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
 
 void lg_client_tick(lg_client_t *c)
 {
-    if (!c->registered) {
+    uint32_t now = c_now_ms(c);
+    /*
+     * D77, D80: a handheld with no session retries too, because one LoRa attempt is not a delivery -
+     * the radio is lossy and nothing acknowledges at the link layer. It retries far more slowly.
+     * LG_RESEND_MS is 3 s, tuned for a socket; a full outbox retried that fast would offer five
+     * messages a second to a radio that carries about one every three (D74), and the glue's bounded
+     * queue would spend the airtime dropping them - in front of the alert this radio exists for.
+     * LG_RESEND_LORA_MS is the same mechanism at a cadence the air can hold.
+     */
+    uint32_t every = c->registered ? LG_RESEND_MS : LG_RESEND_LORA_MS;
+    if (c->registered) {
+        for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+            lg_out_msg_t *m = &c->outbox[i];
+            if (m->state != LG_OUT_PENDING) {
+                continue;
+            }
+            if (now - m->last_tx_ms >= every) {
+                if (alert_is_too_old(c, m)) {
+                    restamp(c, m);   /* D86 */
+                    emit(c, LG_CEV_OUTBOX, (uint32_t)i);
+                }
+                transmit(c, i);
+            }
+            if (give_up_on_stale(c, m)) {
+                emit(c, LG_CEV_OUTBOX, (uint32_t)i);   /* the slot is free and the sender is told */
+            }
+        }
         return;
     }
-    uint32_t now = c_now_ms(c);
+    /*
+     * With no session, at most LG_RESEND_LORA_MAX_PER_TICK of them, oldest first. The outbox is not in
+     * order, so the oldest is the smallest sequence number among those due - the same ordering the grid
+     * would have seen had they gone out over a socket, and the one a reader expects.
+     */
+    for (unsigned sent = 0; sent < LG_RESEND_LORA_MAX_PER_TICK; sent++) {
+        int oldest = -1;
+        for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+            const lg_out_msg_t *m = &c->outbox[i];
+            if (m->state != LG_OUT_PENDING || now - m->last_tx_ms < every) {
+                continue;
+            }
+            if (oldest < 0 || m->seq < c->outbox[oldest].seq) {
+                oldest = (int)i;
+            }
+        }
+        if (oldest < 0) {
+            return;
+        }
+        if (alert_is_too_old(c, &c->outbox[oldest])) {
+            restamp(c, &c->outbox[oldest]);   /* D86 */
+            emit(c, LG_CEV_OUTBOX, (uint32_t)oldest);
+        }
+        transmit_ex(c, (size_t)oldest, false);
+    }
+    /*
+     * Aged out last, and over every slot rather than only the one just sent: the outbox filling is what
+     * takes a handheld off the air, and it fills with messages this pass would otherwise never look at
+     * again. After the attempt, not before, so an alert that has just been given a new stamp (D86) is
+     * never judged on the old one - which is the ordering the first version of this got wrong, and a
+     * scenario caught.
+     */
     for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
-        lg_out_msg_t *m = &c->outbox[i];
-        if (m->state == LG_OUT_PENDING && now - m->last_tx_ms >= LG_RESEND_MS) {
-            transmit(c, i);
+        if (c->outbox[i].state == LG_OUT_PENDING && give_up_on_stale(c, &c->outbox[i])) {
+            emit(c, LG_CEV_OUTBOX, (uint32_t)i);
         }
     }
 }

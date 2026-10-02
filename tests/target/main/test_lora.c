@@ -11,7 +11,7 @@
 
 #include "lg_envelope.h"
 #include "lg_test.h"
-#include "lora_wire.h"
+#include "lg_lora_wire.h"
 
 #define PEER_ONE  (LORA_PEER_AP | 1u)
 #define PEER_TWO  (LORA_PEER_AP | 2u)

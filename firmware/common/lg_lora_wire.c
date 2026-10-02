@@ -1,5 +1,5 @@
-/* lora_wire.c - the radio-independent half of the LoRa backbone (D71). See lora_wire.h. */
-#include "lora_wire.h"
+/* lg_lora_wire.c - the radio-independent half of the LoRa backbone (D71). See lg_lora_wire.h. */
+#include "lg_lora_wire.h"
 
 #include <string.h>
 

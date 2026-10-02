@@ -31,6 +31,63 @@ extern "C" {
 #define LG_INBOX_SIZE           32u
 #endif
 #define LG_RESEND_MS            3000u
+/*
+ * The same resend, for a handheld that has no session and is reaching the grid over LoRa (D77, D80).
+ * Slower than the socket's 3 s, because LoRa at SF9 carries roughly one message every three seconds
+ * (D74) and a full 16-slot outbox retried that fast would offer more than the air can hold.
+ *
+ * 30 s was the first guess and the bench showed it was the wrong shape of guard. Measured on
+ * 2026-09-30, a handheld on LoRa alone delivered 13 of 15 messages with a median latency of **1.3 s** -
+ * the air was not the constraint - but the two it dropped waited the full 30 s for a second attempt,
+ * which for an SOS is the wrong trade by a wide margin. The rate is bounded here instead by
+ * LG_RESEND_LORA_MAX_PER_TICK: one message per pass, oldest first, so the offer rate is the same
+ * whether one message is waiting or sixteen, and a single loss costs ten seconds rather than thirty.
+ */
+#define LG_RESEND_LORA_MS       10000u
+
+/*
+ * How many pending messages one tick may re-offer with no session. One, because the bound that matters
+ * on a radio is messages per second on the air, not per message in the outbox: without this a full
+ * outbox at a 10 s interval would offer 1.6 a second at a radio carrying well under one, and the glue's
+ * bounded queue would spend the airtime dropping frames in front of what someone is waiting for (D74).
+ */
+#define LG_RESEND_LORA_MAX_PER_TICK  1u
+
+/*
+ * D86: an alert that has waited too long to be accepted is sent again under a new id.
+ *
+ * An access point refuses a message whose grid time is more than LG_TIME_TOLERANCE_S from its own
+ * (D6), and a retransmission must otherwise reuse its stamp, so a message delayed past that window can
+ * never be delivered - the stamp only gets older. For an urgent broadcast, an SOS or an all clear the
+ * owner chose the other trade (2026-09-30): **arriving possibly twice beats not arriving**. Ordinary
+ * messages are unchanged and still keep their identity, so nobody sees a chat message twice.
+ *
+ * Re-stamping means a new sequence number as well as a new grid time, and that is not optional: the id
+ * is (author, boot, seq), an access point deduplicates on it before it ever looks at the clock, and the
+ * nonce is built from it - so reusing the sequence with a different grid time would be both invisible
+ * and a nonce reuse. A new id is exactly why the recipient may see it twice.
+ *
+ * Bounded, because an alert nothing can deliver must not re-stamp for ever: at most
+ * LG_RESTAMP_MAX times, after which it stays pending with its last id and the sender is told.
+ */
+/*
+ * How long an accepted 1:1 message may keep its outbox slot while it waits for the other handheld to
+ * confirm delivery - after which, and only when the outbox is full, its slot may be taken.
+ *
+ * Found by chaos on 2026-10-01, and it is the muteness bug again in a state the first fix did not cover.
+ * A 1:1 message that a node ACCEPTS leaves LG_OUT_PENDING, so the stale age-out never looks at it, and
+ * pick_slot held its slot until the recipient's device confirmed. When the recipient cannot confirm -
+ * its Wi-Fi was off for a LoRa round - every message to it holds a slot for ever. Channi filled its
+ * outbox this way and went mute for eleven minutes, refusing an announcement, an urgent broadcast and
+ * an all clear with "outbox full" - the same end state as before, reached by a different road.
+ *
+ * Two minutes is past any plausible round trip, including a LoRa one, so a confirmation that has not
+ * arrived by then is not coming. Losing it costs a delivery tick on one old message; keeping it costs
+ * the handheld its voice.
+ */
+#define LG_ACCEPTED_HOLD_S  120u
+
+#define LG_RESTAMP_MAX          3u
 #define LG_CLIENT_DEDUP_SLOTS   LG_MAX_DEVICES
 
 typedef enum {
@@ -52,6 +109,7 @@ typedef struct {
     uint32_t seq;
     uint32_t grid_time;        /* fixed per message id; see lg_e2e_aad */
     uint32_t last_tx_ms;
+    uint8_t  restamps;         /* D86: times this alert has been given a new id to beat the clock rule */
     uint32_t delivered_mask;   /* bit i: roster user i confirmed delivery */
     uint16_t delivered_count;
     uint32_t read_mask;        /* bit i: roster user i reported reading it */
@@ -173,6 +231,27 @@ void lg_client_disconnected(lg_client_t *c);
  * the battery in percent (0..100; anything else is sent as LG_BATTERY_UNKNOWN), which the AP shows
  * in its BLE status beacon (D68). */
 void lg_client_ping(lg_client_t *c, uint8_t battery);
+
+/*
+ * D77, D80: the same PING, built and handed to io.send even though this handheld has no session.
+ *
+ * Why it cannot just be lg_client_ping. That one refuses unless `connected`, which is right for a
+ * socket: a keepalive with no session is a keepalive to nobody. The LoRa path has no session at all
+ * and never will - a handheld is not a backbone peer (D77) - so on the radio "not connected" is the
+ * normal state and exactly when speaking matters. An AP that hears any frame from a handheld marks
+ * it reachable over LoRa (D80); without something sent periodically, it learns that only when the
+ * handheld already has something to say, which for an SOS is one round trip too late.
+ *
+ * PING is what it sends rather than a new type: it is the smallest frame in the protocol, the AP
+ * already answers PONG (so a handheld learns the path works in both directions), and it carries the
+ * battery the AP's status beacon shows (D68). Nothing about the grid is asserted, so an AP need
+ * trust a handheld about nothing here - which is the property D77's allow-list exists to keep.
+ *
+ * Returns whether a frame was built and offered to io.send, NOT whether it was carried: on a
+ * handheld io.send reports the socket, and this frame is deliberately being sent when there is none.
+ * Costs one sequence number per call, so call it on a timer of minutes, not seconds (D71: airtime).
+ */
+bool lg_client_lora_announce(lg_client_t *c, uint8_t battery);
 
 void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len);
 

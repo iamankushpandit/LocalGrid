@@ -36,6 +36,10 @@ static const lg_board_t BOARDS[] = {
         .supply_sense = LG_PIN_NONE,   /* no divider on this dev board; wire one to an ADC1 pin to measure */
         .gps_rx = LG_PIN_NONE,
         .gps_tx = LG_PIN_NONE,
+        /* D77: no LoRa module connector. */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
     },
     {
         /* LCDWIKI E32R32P, sold as Hosyond 3.2in. ST7789P3, BGR (measured: red and blue
@@ -74,6 +78,10 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 2000,
         .gps_rx = LG_PIN_NONE,   /* UART0 is this board's console, and no free connector carries a UART */
         .gps_tx = LG_PIN_NONE,
+        /* D77: no free UART for a LoRa module on this board (the GPS note above says why). */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
     },
     {
         /* Freenove FNK0104B. ILI9341 with TFT_eSPI's ILI9341_2 sequence, BGR, inversion
@@ -120,8 +128,45 @@ static const lg_board_t BOARDS[] = {
         /* D65: the 4-pin "UART" connector (RXD, TXD, GND, 5V). The console is USB-Serial-JTAG, so
          * these are free: board RXD is GPIO44 (the GPS module's TXD goes here), board TXD GPIO43.
          * The owner wired a GT-U7 here on device 1. */
+        /*
+         * D65: the 4-pin "UART" connector (RXD, TXD, GND, 5V). The console is USB-Serial-JTAG, so
+         * these are free: board RXD is GPIO44 (the GPS module's TXD goes here), board TXD GPIO43.
+         * The owner wired a GT-U7 here on device 1.
+         *
+         * 2026-09-30: the owner reports a RYLR998 also connected on both Freenove boards. GPIO43/44
+         * are the ESP32-S3's U0TXD and U0RXD, which is why this connector exists, and two peripherals
+         * cannot share them - while the GPS held GPIO43 the LoRa port was refused it ("GPIO 43 is not
+         * usable, maybe used by others"). The connector was handed to LoRa to test that, with the GPS
+         * switched off so the pins were genuinely free, and **no module answered AT at 115200 in
+         * either wiring order**. So the GPS keeps the connector, because giving it up bought nothing.
+         * Where the RYLR998 actually is remains open; `lora pins <rx> <tx>` on the handheld console
+         * re-points the port at runtime, so a candidate can be tested in seconds without a reflash.
+         */
         .gps_rx = 44,
         .gps_tx = 43,
+        /*
+         * D77: a RYLR998 on its own UART, alongside the GPS above. **Confirmed on a module**
+         * (owner's wiring, 2026-09-30): the board's second 4-pin "IO" connector carries IO2, IO3,
+         * IO14 and IO21, and the module's TXD goes to GPIO21 (so the ESP32 receives there), its RXD
+         * to GPIO14, its reset to GPIO2. Power is 3.3 V and GND from the **I2C** connector, because
+         * the UART connector's only supply pin is 5 V and this is a 3.3 V part drawing about 140 mA
+         * while transmitting; leave that connector's SCL and SDA alone. Never power it without its
+         * antenna, and put 100-470 uF across its 3.3 V close to the module - that rail also feeds
+         * the display and the audio codec.
+         *
+         * These pins were GPIO40/41/42 until a module was actually asked. That was wrong, and not
+         * merely unconfirmed: **GPIO40 and 41 are the micro-SD CMD and D1, and GPIO42 is the WS2812
+         * LED**, none of which is exposed on any connector. They looked free because this profile
+         * has no SD card and no LED - the mistake was choosing pins the *profile* did not use rather
+         * than pins the *board* did not use, and the only symptom was one line saying no module was
+         * found. `lora pins <rx> <tx>` on the handheld console now settles that in seconds.
+         *
+         * GPIO3 is deliberately left spare: it is an ESP32-S3 strapping pin the chip samples at
+         * boot, and a module announcing itself at power-up would be driving it at the worst moment.
+         */
+        .lora_rx = 21,
+        .lora_tx = 14,
+        .lora_rst = 2,
     },
     {
         /* LCDWIKI / Hosyond E32R28T-1 (ESP32-32E, classic ESP32), 2.8in, one USB-C. ILI9341 on
@@ -164,6 +209,10 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 2000,
         .gps_rx = LG_PIN_NONE,   /* UART0 is the console; Braino documents no free UART connector */
         .gps_tx = LG_PIN_NONE,
+        /* D77: no free UART for a LoRa module on this board (the GPS note above says why). */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
     },
     {
         /* ESP32-2432S028 "cheap yellow display", the dual-USB (USB-C and micro-USB) variant with
@@ -206,6 +255,10 @@ static const lg_board_t BOARDS[] = {
         .supply_sense = LG_PIN_NONE,
         .gps_rx = LG_PIN_NONE,   /* UART0 is the console; Braino documents no free UART connector */
         .gps_tx = LG_PIN_NONE,
+        /* D77: no free UART for a LoRa module on this board (the GPS note above says why). */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
     },
     {
         /* LCDWIKI E32R40T (ESP32-32E, classic ESP32), 4.0in, one USB-C. ST7796 at 320x480
@@ -250,6 +303,10 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 2000,
         .gps_rx = LG_PIN_NONE,   /* UART0 is the console; Braino documents no free UART connector */
         .gps_tx = LG_PIN_NONE,
+        /* D77: no free UART for a LoRa module on this board (the GPS note above says why). */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
     },
     /*
      * The alert and distress unit (D66): Waveshare's two 1.47in ESP32-C6 boards. They share a name
@@ -311,6 +368,10 @@ static const lg_board_t BOARDS[] = {
         .supply_sense = LG_PIN_NONE,
         .gps_rx = LG_PIN_NONE,
         .gps_tx = LG_PIN_NONE,
+        /* D77: no LoRa module connector. */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
         .n_buttons = 1,
         .buttons = {
             { .gpio = 9, .active_low = true, .pull_up = true,
@@ -359,6 +420,10 @@ static const lg_board_t BOARDS[] = {
         .supply_divider_milli = 3000,
         .gps_rx = LG_PIN_NONE,
         .gps_tx = LG_PIN_NONE,
+        /* D77: no LoRa module connector. */
+        .lora_rx = LG_PIN_NONE,
+        .lora_tx = LG_PIN_NONE,
+        .lora_rst = LG_PIN_NONE,
         .n_buttons = 1,
         .buttons = {
             { .gpio = 9, .active_low = true, .pull_up = true,

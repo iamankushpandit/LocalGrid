@@ -60,6 +60,16 @@ typedef struct {
     sim_t      *sim;
     int         index;
     int         node;             /* attached node, -1 when detached */
+    /*
+     * D77, D80: the second radio, as the firmware glue presents it. -1 is a handheld with no LoRa
+     * module, which is what every scenario that does not ask for one gets. When it is set, a frame
+     * the core offers while detached reaches that AP, and `offers_detached` counts the offers either
+     * way - including the ones nothing carried, which is the number that catches the core refusing
+     * to offer at all.
+     */
+    int         lora_node;
+    uint32_t    lora_session;     /* the AP's session for it, named by device, not by socket */
+    uint32_t    offers_detached;
     uint32_t    session_device;   /* node-side session state */
     uint32_t    clock;            /* this handheld's wall clock */
     uint32_t    messages;
@@ -110,5 +120,7 @@ void   sim_destroy(sim_t *s);
 void   sim_link(sim_t *s, int a, int b, bool up);
 void   sim_attach(sim_t *s, int client, int node);
 void   sim_detach(sim_t *s, int client);
+/* Gives this handheld a LoRa path to `node` while it is detached, or -1 to take it away (D77, D80). */
+void   sim_lora(sim_t *s, int client, int node);
 bool   sim_pump(sim_t *s);
 bool   sim_captured_contains(const sim_t *s, const char *needle);

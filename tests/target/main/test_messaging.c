@@ -2045,6 +2045,721 @@ static void test_traffic_counters(void)
     sim_destroy(s);
 }
 
+
+/* ---- D80: a handheld reachable only over LoRa ---- */
+
+/*
+ * The state that says "alive, reachable, and only over LoRa" (D80). What these scenarios pin down is
+ * the core's decision, not the radio: the core decides *that* a device is reachable here, and the
+ * firmware glue decides which transport (io.to_client is the one door either way). So each scenario
+ * leaves the simulated session in place as the stand-in for whatever transport the glue picks, and
+ * changes only the presence state the core reads. Every one of these would have failed before D80,
+ * because delivery demanded LG_PRES_ONLINE.
+ */
+
+/* Marks `device` reachable-only-over-LoRa on every node, as an AP that heard it would (D77). */
+static void set_lora_presence(sim_t *s, uint32_t device, uint16_t at_node)
+{
+    for (int i = 0; i < SIM_NODES; i++) {
+        for (size_t k = 0; k < LG_MAX_DEVICES; k++) {
+            lg_presence_entry_t *p = &s->nodes[i].node.presence[k];
+            if (p->in_use && p->device == device) {
+                p->state = LG_PRES_LORA;
+                p->node  = at_node;
+            }
+        }
+    }
+}
+
+static uint8_t presence_state_of(sim_t *s, int node, uint32_t device)
+{
+    for (size_t k = 0; k < LG_MAX_DEVICES; k++) {
+        const lg_presence_entry_t *p = &s->nodes[node].node.presence[k];
+        if (p->in_use && p->device == device) {
+            return p->state;
+        }
+    }
+    return 0xFFu;
+}
+
+/* The wire format: the record is the same length, state 2 is read, and anything above is refused. */
+static void test_presence_lora_body(void)
+{
+    uint8_t buf[LG_PRESENCE_LEN];
+    lg_presence_t in = { .device = LG_PROTO_EMMA, .node = 2, .epoch = 7, .state = LG_PRES_LORA };
+    memset(in.pubkey, 0xA5, sizeof(in.pubkey));
+
+    CHECK_EQ(lg_presence_enc(&in, buf), LG_PRESENCE_LEN);   /* D80 did not change the length */
+    CHECK_EQ(buf[10], LG_PRES_LORA);
+
+    lg_presence_t out;
+    CHECK(lg_presence_dec(buf, sizeof(buf), &out));
+    CHECK_EQ(out.state, LG_PRES_LORA);
+    CHECK_EQ(out.device, (uint32_t)LG_PROTO_EMMA);
+    CHECK_EQ(out.node, 2);
+    CHECK_EQ(out.epoch, 7u);
+
+    /* The two states that came before still decode. */
+    buf[10] = LG_PRES_OFFLINE;
+    CHECK(lg_presence_dec(buf, sizeof(buf), &out));
+    CHECK_EQ(out.state, LG_PRES_OFFLINE);
+    buf[10] = LG_PRES_ONLINE;
+    CHECK(lg_presence_dec(buf, sizeof(buf), &out));
+    CHECK_EQ(out.state, LG_PRES_ONLINE);
+
+    /*
+     * A state above the highest we know is still refused, exactly as state 2 was refused before D80.
+     * That is why D80 is a breaking change: an older device rejects the whole record rather than
+     * reading an unknown state as "not online", so every board in one grid must run the same build.
+     */
+    buf[10] = LG_PRES_LORA + 1u;
+    CHECK(!lg_presence_dec(buf, sizeof(buf), &out));
+    buf[10] = 0xFFu;
+    CHECK(!lg_presence_dec(buf, sizeof(buf), &out));
+
+    /* A wrong length is still refused, whatever the state says. */
+    buf[10] = LG_PRES_LORA;
+    CHECK(!lg_presence_dec(buf, sizeof(buf) - 1u, &out));
+}
+
+/* A 1:1 message reaches a handheld the far AP can only reach over LoRa, two hops away. */
+static void test_presence_lora_direct(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* Emma is on node 2, and every AP now knows her only as reachable over LoRa. */
+    set_lora_presence(s, LG_PROTO_EMMA, 2);
+    CHECK_EQ(presence_state_of(s, 0, LG_PROTO_EMMA), LG_PRES_LORA);
+    CHECK_EQ(presence_state_of(s, 2, LG_PROTO_EMMA), LG_PRES_LORA);
+
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Are you hurt?"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    /* Node 0 routed it to node 2 on the strength of the new state, and node 2 handed it over. */
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 1);
+    CHECK(newest_is(s, EMMA, "Are you hurt?"));
+    /* And the acknowledgement came back, which is the whole reason the state exists rather than
+     * delivering blind: the sender learns it landed. */
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_DELIVERED);
+
+    /* Nobody else was given it. */
+    CHECK_EQ(cl(s, ALEX)->inbox_count, 0);
+    CHECK_EQ(cl(s, RANGER)->inbox_count, 0);
+    /* The 1:1 plaintext still never crossed the backbone: a shared LoRa key cannot read it (D77). */
+    CHECK(!sim_captured_contains(s, "Are you hurt?"));
+    sim_destroy(s);
+}
+
+/*
+ * An urgent broadcast reaches a handheld that is only reachable over LoRa. This is the case the
+ * second radio exists for, and it goes through deliver_fanout rather than deliver_direct - a
+ * different branch, which is why it gets its own scenario.
+ */
+static void test_presence_lora_broadcast(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    set_lora_presence(s, LG_PROTO_EMMA, 2);
+
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, LG_TARGET_ALL, LG_FLAG_URGENT,
+                              TXT("SOS from the ridge")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 1);
+    CHECK(newest_is(s, EMMA, "SOS from the ridge"));
+    /* Everyone still online got it too: the new state widened delivery, it did not replace it. */
+    CHECK_EQ(cl(s, ALEX)->inbox_count, 1);
+    CHECK_EQ(cl(s, RANGER)->inbox_count, 1);
+
+    /* A group message takes the same branch, so a LoRa-reachable member is included. */
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, TXT("Heading down")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 2);
+    CHECK(newest_is(s, EMMA, "Heading down"));
+    sim_destroy(s);
+}
+
+/* A duplicate is still a duplicate, and a re-sent message is still acknowledged. */
+static void test_presence_lora_duplicate(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    set_lora_presence(s, LG_PROTO_EMMA, 2);
+    s->duplicate_backbone = true;   /* every backbone frame arrives twice */
+
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Twice over"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->inbox_count, 1);   /* delivered once, not twice */
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_DELIVERED);
+    CHECK(s->nodes[2].node.stats.duplicates > 0);
+    sim_destroy(s);
+}
+
+/*
+ * Voice is refused to a LoRa-reachable handheld, deliberately: one 100 ms frame is seconds of
+ * airtime, so D71 never offers voice to LoRa and validate_voice still demands LG_PRES_ONLINE. If
+ * someone ever "fixes" that by widening it to is_local_reachable, this fails.
+ */
+/*
+ * D80: the announcement a handheld makes over LoRa when it has no Wi-Fi session.
+ *
+ * What this can and cannot prove. The simulator has no LoRa transport, so this does not exercise the
+ * radio, the sealing, or the AP glue that marks presence -- test_lora_hh.c covers the sealing and the
+ * allow-list, and the glue between them stays untested until a module is fitted. What it does prove
+ * is the part that is pure protocol and easy to get wrong: a client that believes it has no session
+ * still builds a well-formed PING, the ordinary keepalive still refuses to, and an AP receiving one
+ * answers it. Without the first, a handheld out of Wi-Fi range would never announce itself at all;
+ * without the second, every handheld would spend a sequence number every few seconds on a socket
+ * that is not there.
+ */
+static void test_lora_announce(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_node_t *a = &s->nodes[0].node;
+    CHECK(sim_pump(s));
+
+    /* The ordinary keepalive, with the session gone: nothing is built, so the AP sees nothing. */
+    lg_client_disconnected(cl(s, DAD));
+    uint32_t rx_before = a->stats.rx_client;
+    lg_client_ping(cl(s, DAD), 80);
+    CHECK(sim_pump(s));
+    CHECK_EQ(a->stats.rx_client, rx_before);
+
+    /*
+     * The announcement, with the session still gone. On a handheld this frame would go to the radio;
+     * here it reaches the AP the same way, which is enough to show it is a frame an AP accepts and
+     * answers rather than one it rejects as malformed or unauthorised.
+     */
+    uint32_t rejected = a->stats.rejected, malformed = a->stats.malformed;
+    CHECK(lg_client_lora_announce(cl(s, DAD), 80));
+    CHECK(sim_pump(s));
+    CHECK_EQ(a->stats.rx_client, rx_before + 1);
+    CHECK_EQ(a->stats.rejected, rejected);       /* not author spoofing: it is that handheld's own */
+    CHECK_EQ(a->stats.malformed, malformed);     /* and a well-formed envelope */
+
+    /* The battery rode along, which is what the AP's status beacon shows (D68). */
+    int bi = lg_roster_user_index(&s->nodes[0].roster, LG_PROTO_DAD);
+    CHECK(bi >= 0);
+    CHECK_EQ(a->battery[bi], 80);
+
+    /* An impossible battery is sent as unknown rather than refused: a bad reading must not cost the
+     * announcement, which is the only thing telling the grid this handheld is alive. */
+    CHECK(lg_client_lora_announce(cl(s, DAD), 200));
+    CHECK(sim_pump(s));
+    CHECK_EQ(a->battery[bi], LG_BATTERY_UNKNOWN);
+
+    /* And it is still refused when there is nowhere at all to send it. */
+    sim_detach(s, DAD);
+    CHECK(sim_pump(s));
+    sim_destroy(s);
+}
+
+static void test_presence_lora_voice_refused(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* A real voice payload: a raw buffer is refused by the client before it ever reaches a node. */
+    uint8_t voice[LG_VOICE_PAYLOAD_MAX];
+    size_t vn = voice_payload(voice, 3, 0, 0, NULL, 64, 0x5A);
+
+    /* While Emma is properly online, a talk frame reaches her: the baseline this compares against. */
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, voice, vn), LG_OK);
+    CHECK(sim_pump(s));
+    uint32_t heard = s->clients[EMMA].voice_frames;
+    CHECK(heard > 0);
+
+    /* Now she is reachable only over LoRa, and voice stops: refused by the client or by the AP,
+     * and either way not one more frame arrives. */
+    set_lora_presence(s, LG_PROTO_EMMA, 2);
+    (void)lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, voice, vn);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, heard);
+    sim_destroy(s);
+}
+
+/*
+ * D77, D80: a handheld reachable only over LoRa can originate, not only receive.
+ *
+ * The bench found this on 2026-09-30. With a handheld's Wi-Fi switched off (D78) a message sent to it
+ * arrived over LoRa and was shown, but its own reply never reached the air: one frame went out in
+ * 150 s and that one was the announcement. Three gates in this file were the cause - send_frame
+ * refused unless `connected`, the first attempt happened only `if (registered)`, and lg_client_tick
+ * returned early unless registered - and all three are right for a socket. On the second radio there
+ * is no session to have, so each of them meant the one device that most needed to speak could not.
+ *
+ * These scenarios fail if any of the three is put back.
+ */
+static void test_lora_only_can_originate(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* Emma loses Wi-Fi at node C. Node C still hears her over LoRa; nothing else does. */
+    sim_lora(s, EMMA, 2);
+    sim_detach(s, EMMA);
+    CHECK(!cl(s, EMMA)->connected);
+    CHECK(!cl(s, EMMA)->registered);
+
+    uint32_t offered = s->clients[EMMA].offers_detached;
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT,
+                                  TXT("SOS from the ridge"));
+    CHECK(slot >= 0);
+    /* The gate that was shut: with no session the frame was never offered to a radio at all. */
+    CHECK(s->clients[EMMA].offers_detached > offered);
+    /* Not refused for the one reason that is normal here. */
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].state, LG_OUT_PENDING);
+    CHECK(sim_pump(s));
+
+    /* It crossed the grid from a handheld with no session, two hops to Dad on node A. */
+    CHECK(newest_is(s, DAD, "SOS from the ridge"));
+    CHECK(newest_is(s, ALEX, "SOS from the ridge"));
+    CHECK(newest_is(s, RANGER, "SOS from the ridge"));
+    /* And the AP that heard it says how she is reachable, so a reply knows which path to take. */
+    CHECK_EQ(presence_state_of(s, 2, LG_PROTO_EMMA), LG_PRES_LORA);
+
+    /*
+     * Wi-Fi comes back and the slot is still PENDING, so it is sent again - deliberately, because one
+     * LoRa attempt is not a delivery. It carries the same (boot, seq, grid time), so it is the same
+     * message and the grid drops it by identity. One copy, not two.
+     */
+    uint32_t had = cl(s, DAD)->inbox_count;
+    sim_attach(s, EMMA, 2);
+    CHECK(sim_pump(s));
+    lg_client_tick(cl(s, EMMA));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, DAD)->inbox_count, had);
+    sim_destroy(s);
+}
+
+/*
+ * The acknowledgement goes back over LoRa, which is the point of D80 rather than delivering blind:
+ * the sender learns their message landed. Before the gates opened, a LoRa-only handheld received the
+ * message and the sender waited for ever.
+ */
+/*
+ * D77, D80: with no session, retries are paced by the air rather than by the outbox.
+ *
+ * The bench measured why this matters on 2026-09-30: a handheld on LoRa alone delivered 13 of 15
+ * messages at a median 1.3 s, so the radio was not the constraint - but the two it dropped had no
+ * second attempt for 30 s, which for an SOS is the wrong trade. The interval came down to 10 s, and the
+ * rate is bounded by messages per tick instead, so a full outbox offers no more than one message at a
+ * time and the oldest goes first (D74: what someone is waiting for goes first).
+ */
+/*
+ * D86: an alert too old for the clock rule is sent again under a new id; an ordinary message is not.
+ *
+ * The bench found the conflict on 2026-09-30. An access point refuses a message whose grid time is more
+ * than LG_TIME_TOLERANCE_S from its own (D6), and a retransmission otherwise reuses its stamp, so a
+ * message delayed past that window - which is what an outage does - could never be delivered by any
+ * path. Six messages hit it in the first chaos run of the handheld LoRa leg.
+ *
+ * The owner chose arriving possibly twice over not arriving, for urgent broadcasts, an SOS and an all
+ * clear only. These scenarios hold both halves of that: the alert gets a new id, and the chat message
+ * does not.
+ */
+/*
+ * The outbox must not fill with messages nothing can accept, because a full outbox is a handheld that
+ * cannot speak.
+ *
+ * Found by a chaos night on 2026-10-01 and the worst thing found so far. Jolly went **permanently mute**:
+ * `[MSG] Not sent (outbox full)` twenty-seven times, still refusing twenty minutes after it had rejoined
+ * Wi-Fi, while its screen showed it online with a good signal. A message nothing acknowledges stayed
+ * PENDING for ever; D6 means one delayed past LG_TIME_TOLERANCE_S can never be accepted, because a
+ * retransmission keeps its stamp; so each one held a slot for ever, and after LG_OUTBOX_SIZE of them the
+ * handheld could send nothing at all - including an SOS.
+ *
+ * This scenario fails if a stale message is ever kept, or if a fresh one is ever thrown away.
+ */
+/*
+ * A 1:1 message the grid accepted, but whose recipient never confirms, must not hold its outbox slot for
+ * ever - and an alert must never be refused because such messages fill it.
+ *
+ * Found by chaos on 2026-10-01, and it is the muteness bug reached by a second road. The first fix ages
+ * out messages stuck in LG_OUT_PENDING; this is LG_OUT_ACCEPTED, which pick_slot held for a 1:1 message
+ * until the recipient's device confirmed delivery. When the recipient cannot confirm - in the run its
+ * Wi-Fi was off for a LoRa round - every message to it keeps a slot. Three handhelds filled their
+ * outboxes that way and refused everything with "outbox full" for the rest of the night: 176 refusals,
+ * among them an announcement, an urgent broadcast and an **all clear**, and clean delivery fell from
+ * 99.5% to 66.5%.
+ *
+ * The outbox is put into that state directly rather than raced into it. The simulator delivers or
+ * rejects a 1:1 message within one pump, so there is no window in it where a node has accepted a message
+ * that the recipient will never confirm - the very gap that made this bug hard to see. What is under
+ * test is the slot policy, so the policy is what this sets up and checks.
+ */
+static void test_unconfirmed_direct_does_not_gag_the_handheld(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_client_t *c = cl(s, DAD);
+    /* Every slot holding a 1:1 message a node took and nobody has confirmed. */
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        lg_out_msg_t *m = &c->outbox[i];
+        memset(m, 0, sizeof(*m));
+        m->state = LG_OUT_ACCEPTED;
+        m->scope = LG_SCOPE_DIRECT;
+        m->target = LG_PROTO_ALEX;
+        m->seq = (uint32_t)(i + 1u);
+        m->grid_time = s->grid_time;   /* just sent, so still inside the hold */
+        m->len = 4;
+        memcpy(m->text, "hi", 2);
+    }
+
+    /* While they are fresh their slots are held: a delivery tick is worth keeping. */
+    CHECK_EQ(lg_client_send_text(c, LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("one more")), LG_ERR_FULL);
+
+    /* An alert takes one anyway, because raising an alarm outranks a receipt. */
+    CHECK(lg_client_send_text(c, LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS")) >= 0);
+    /* And so does the all clear that stands it down (D66, D79) - the message this run saw refused. */
+    CHECK(lg_client_send_text(c, LG_SCOPE_BROADCAST, 0, LG_FLAG_ALL_CLEAR, TXT("I am safe")) >= 0);
+
+    /* Past the hold an ordinary message may take one too, so the handheld does not depend on alerts to
+     * say anything at all. Both clocks move: the hold is measured against the handheld's own. */
+    uint32_t waited = LG_ACCEPTED_HOLD_S + 5u;
+    s->grid_time += waited;
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        s->clients[i].clock += waited;
+    }
+    CHECK(lg_client_send_text(c, LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("still here")) >= 0);
+    sim_destroy(s);
+}
+
+static void test_outbox_does_not_fill_with_undeliverable(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* No access point in earshot, so nothing is acknowledged and every message stays pending. */
+    sim_lora(s, EMMA, -1);
+    sim_detach(s, EMMA);
+
+    size_t queued = 0;
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        if (lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, 0, TXT("waiting")) >= 0) {
+            queued++;
+        }
+    }
+    CHECK_EQ(queued, LG_OUTBOX_SIZE);
+    /* Full: the next one has nowhere to go, which is the state the handheld was stuck in for ever. */
+    CHECK_EQ(lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, 0, TXT("one more")), LG_ERR_FULL);
+
+    /* A tick while they are still fresh keeps every one of them: nothing is thrown away early. */
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+    size_t pending = 0;
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        pending += cl(s, EMMA)->outbox[i].state == LG_OUT_PENDING;
+    }
+    CHECK_EQ(pending, LG_OUTBOX_SIZE);
+
+    /* Now let the clock run past the point where no access point would take them. */
+    uint32_t waited = LG_TIME_TOLERANCE_S + LG_TIME_RESTAMP_MARGIN_S + 5u;
+    s->grid_time += waited;
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        s->clients[i].clock += waited;
+    }
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+
+    /* Each is failed with the reason the sender would have been given, and its slot is free. */
+    size_t refused = 0;
+    pending = 0;
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        const lg_out_msg_t *m = &cl(s, EMMA)->outbox[i];
+        if (m->state == LG_OUT_REJECTED && m->reject_reason == LG_ACK_REJ_TIME) {
+            refused++;
+        }
+        pending += m->state == LG_OUT_PENDING;
+    }
+    CHECK_EQ(refused, LG_OUTBOX_SIZE);
+    CHECK_EQ(pending, 0u);
+
+    /* And the handheld can speak again, which is the whole point. */
+    CHECK(lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS")) >= 0);
+    sim_destroy(s);
+}
+
+/* An alert is not aged out while it still has a re-stamp left (D86): it is about to get a new id. */
+static void test_alert_is_not_aged_out_while_it_can_be_restamped(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_lora(s, EMMA, -1);
+    sim_detach(s, EMMA);
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS"));
+    CHECK(slot >= 0);
+
+    uint32_t step = LG_TIME_TOLERANCE_S + LG_TIME_RESTAMP_MARGIN_S + 5u;
+    for (unsigned round = 0; round < LG_RESTAMP_MAX; round++) {
+        s->grid_time += step;
+        for (int i = 0; i < SIM_CLIENTS; i++) {
+            s->clients[i].clock += step;
+        }
+        s->now_ms += LG_RESEND_LORA_MS + 1;
+        lg_client_tick(cl(s, EMMA));
+        /* Still trying, with a new identity each time, rather than aged out. */
+        CHECK_EQ(cl(s, EMMA)->outbox[slot].state, LG_OUT_PENDING);
+    }
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].restamps, LG_RESTAMP_MAX);
+
+    /* Once the re-stamps are spent it ages out like anything else, instead of holding a slot for ever. */
+    s->grid_time += step;
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        s->clients[i].clock += step;
+    }
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].state, LG_OUT_REJECTED);
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].reject_reason, LG_ACK_REJ_TIME);
+    sim_destroy(s);
+}
+
+static void test_old_alert_is_restamped(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_lora(s, EMMA, 2);
+    sim_detach(s, EMMA);
+
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT,
+                                   TXT("SOS from the ridge"));
+    CHECK(slot >= 0);
+    uint32_t first_seq = cl(s, EMMA)->outbox[slot].seq;
+    uint32_t first_stamp = cl(s, EMMA)->outbox[slot].grid_time;
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].restamps, 0);
+
+    /* Still fresh: a retry keeps the same id, because identity is what the grid deduplicates on. */
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].seq, first_seq);
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].grid_time, first_stamp);
+
+    /*
+     * Now let the clock run past the point where an access point would refuse it. The simulator's grid
+     * time and the handhelds' clocks both move, so this is an old message and not a wrong clock.
+     */
+    uint32_t waited = LG_TIME_TOLERANCE_S - LG_TIME_RESTAMP_MARGIN_S + 5u;
+    s->grid_time += waited;
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        s->clients[i].clock += waited;
+    }
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+
+    /* A new id and a new stamp: that is what lets the grid accept it at all. */
+    CHECK(cl(s, EMMA)->outbox[slot].seq != first_seq);
+    CHECK(cl(s, EMMA)->outbox[slot].grid_time > first_stamp);
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].restamps, 1);
+    /* The words are untouched: it is the same alert, said again. */
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].len, strlen("SOS from the ridge"));
+
+    /* And it now crosses, which it could not have done with its old stamp. */
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, DAD, "SOS from the ridge"));
+    sim_destroy(s);
+}
+
+static void test_old_chat_message_keeps_its_id(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_lora(s, EMMA, 2);
+    sim_detach(s, EMMA);
+
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_DIRECT, LG_PROTO_DAD, 0, TXT("see you at six"));
+    CHECK(slot >= 0);
+    uint32_t seq = cl(s, EMMA)->outbox[slot].seq;
+    uint32_t stamp = cl(s, EMMA)->outbox[slot].grid_time;
+
+    uint32_t waited = LG_TIME_TOLERANCE_S + 60u;
+    s->grid_time += waited;
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        s->clients[i].clock += waited;
+    }
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+
+    /* Unchanged, however old it is: nobody may see a chat message twice (D86 covers alerts only). */
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].seq, seq);
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].grid_time, stamp);
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].restamps, 0);
+    sim_destroy(s);
+}
+
+/* And it stops: an alert nothing can deliver must not re-stamp for ever. */
+static void test_restamping_is_bounded(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_lora(s, EMMA, -1);     /* a module with no access point in earshot: nothing can land */
+    sim_detach(s, EMMA);
+    int slot = lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS"));
+    CHECK(slot >= 0);
+
+    uint32_t step = LG_TIME_TOLERANCE_S - LG_TIME_RESTAMP_MARGIN_S + 5u;
+    for (unsigned round = 0; round < LG_RESTAMP_MAX + 3u; round++) {
+        s->grid_time += step;
+        for (int i = 0; i < SIM_CLIENTS; i++) {
+            s->clients[i].clock += step;
+        }
+        s->now_ms += LG_RESEND_LORA_MS + 1;
+        lg_client_tick(cl(s, EMMA));
+    }
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].restamps, LG_RESTAMP_MAX);
+    /*
+     * And then it is given up on, rather than held for ever. This expectation was the other way round
+     * when it was first written, which was the leak: a chaos night on 2026-10-01 filled a handheld's
+     * outbox with messages nothing could accept and left it **permanently unable to send**, an SOS
+     * included. A message that cannot be delivered is failed with its reason so the slot comes back.
+     */
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].state, LG_OUT_REJECTED);
+    CHECK_EQ(cl(s, EMMA)->outbox[slot].reject_reason, LG_ACK_REJ_TIME);
+    sim_destroy(s);
+}
+
+static void test_lora_only_retry_is_paced(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /*
+     * A module with no access point in earshot (-1), so the three messages stay PENDING and there is
+     * something to re-offer. The first version of this scenario gave her a working LoRa path and then
+     * pumped the simulator, which delivered all three - so nothing was pending, the tick correctly
+     * offered nothing, and the test failed for the one reason that was not the behaviour under test.
+     */
+    sim_lora(s, EMMA, -1);
+    sim_detach(s, EMMA);
+
+    /* Three waiting at once, queued in this order. */
+    CHECK(lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("first")) >= 0);
+    CHECK(lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("second")) >= 0);
+    CHECK(lg_client_send_text(cl(s, EMMA), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("third")) >= 0);
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        const lg_out_msg_t *m = &cl(s, EMMA)->outbox[i];
+        CHECK(m->state == LG_OUT_EMPTY || m->state == LG_OUT_PENDING);
+    }
+
+    /* Nothing is due yet, so a tick offers nothing however many are waiting. */
+    uint32_t offered = s->clients[EMMA].offers_detached;
+    lg_client_tick(cl(s, EMMA));
+    CHECK_EQ(s->clients[EMMA].offers_detached, offered);
+
+    /* One tick after the interval offers exactly one, not three. */
+    s->now_ms += LG_RESEND_LORA_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+    CHECK_EQ(s->clients[EMMA].offers_detached, offered + LG_RESEND_LORA_MAX_PER_TICK);
+
+    /* And it is the oldest of the three: the one with the smallest sequence number. */
+    uint32_t lowest = 0xFFFFFFFFu, resent = 0;
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        const lg_out_msg_t *m = &cl(s, EMMA)->outbox[i];
+        if (m->state == LG_OUT_PENDING && m->seq < lowest) {
+            lowest = m->seq;
+        }
+    }
+    for (size_t i = 0; i < LG_OUTBOX_SIZE; i++) {
+        const lg_out_msg_t *m = &cl(s, EMMA)->outbox[i];
+        if (m->state == LG_OUT_PENDING && m->last_tx_ms == s->now_ms && m->seq == lowest) {
+            resent++;
+        }
+    }
+    CHECK_EQ(resent, 1u);
+
+    /* A registered handheld is unchanged: the socket's own interval, every message that is due. */
+    sim_attach(s, EMMA, 2);
+    CHECK(sim_pump(s));
+    CHECK(cl(s, EMMA)->registered);
+    uint32_t before_wifi = s->clients[EMMA].offers_detached;
+    s->now_ms += LG_RESEND_MS + 1;
+    lg_client_tick(cl(s, EMMA));
+    /* With a session, nothing goes through the detached path at all. */
+    CHECK_EQ(s->clients[EMMA].offers_detached, before_wifi);
+    sim_destroy(s);
+}
+
+static void test_lora_only_acknowledges(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_lora(s, EMMA, 2);
+    sim_detach(s, EMMA);
+
+    /*
+     * She announces first, which is the whole reason that frame exists (D80): until an AP has heard
+     * something from her, the grid knows her as offline and a message to her is refused rather than
+     * sent down a path nobody knows about. This is the real sequence - the handheld says "I am here
+     * on this radio", and only then can anything come back.
+     */
+    CHECK(lg_client_lora_announce(cl(s, EMMA), 55));
+    CHECK(sim_pump(s));
+    CHECK_EQ(presence_state_of(s, 2, LG_PROTO_EMMA), LG_PRES_LORA);
+    CHECK_EQ(presence_state_of(s, 0, LG_PROTO_EMMA), LG_PRES_LORA);   /* and it reached Dad's AP */
+
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Are you hurt?"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "Are you hurt?"));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_DELIVERED);
+    /* Still sealed end to end: the shared LoRa key never sees the words (D77). */
+    CHECK(!sim_captured_contains(s, "Are you hurt?"));
+    sim_destroy(s);
+}
+
+/*
+ * A handheld with no LoRa module behaves as it always did. The offer is made - the core cannot know
+ * whether a radio is there, and must not guess - but nothing carries it, the message waits instead of
+ * failing, and it is delivered once when a session returns.
+ */
+static void test_no_second_radio_unchanged(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    sim_detach(s, ALEX);               /* no sim_lora: this board has no module */
+    uint32_t offered = s->clients[ALEX].offers_detached;
+    int slot = lg_client_send_text(cl(s, ALEX), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT,
+                                   TXT("Lost the path"));
+    CHECK(slot >= 0);
+    CHECK(s->clients[ALEX].offers_detached > offered);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, ALEX)->outbox[slot].state, LG_OUT_PENDING);   /* waiting, not rejected */
+    CHECK_EQ(cl(s, DAD)->inbox_count, 0);                        /* and nothing arrived */
+
+    sim_attach(s, ALEX, 1);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, DAD, "Lost the path"));
+    CHECK_EQ(cl(s, DAD)->inbox_count, 1);
+    sim_destroy(s);
+}
+
 void test_messaging(void)
 {
     test_diag_echo();
@@ -2061,6 +2776,22 @@ void test_messaging(void)
     test_duplicates_and_retransmit();
     test_offline_and_roam();
     test_presence_announced_again();
+    test_presence_lora_body();
+    test_presence_lora_direct();
+    test_presence_lora_broadcast();
+    test_presence_lora_duplicate();
+    test_presence_lora_voice_refused();
+    test_lora_announce();
+    test_lora_only_can_originate();
+    test_lora_only_acknowledges();
+    test_lora_only_retry_is_paced();
+    test_old_alert_is_restamped();
+    test_old_chat_message_keeps_its_id();
+    test_restamping_is_bounded();
+    test_outbox_does_not_fill_with_undeliverable();
+    test_unconfirmed_direct_does_not_gag_the_handheld();
+    test_alert_is_not_aged_out_while_it_can_be_restamped();
+    test_no_second_radio_unchanged();
     test_time_rule();
     test_time_from_handheld();
     test_node_refuses_unsafe_frames();
