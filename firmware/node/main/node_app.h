@@ -7,6 +7,14 @@
  */
 #pragma once
 
+/*
+ * The longest a fault may take a radio out for, wherever the fault came from. Every fault hook
+ * restores itself from the access point's own clock, and this cap is what makes that promise
+ * useful: a tool that dies, a laptop that closes or a link that drops cannot leave an access point
+ * deaf for longer than this. The console (`bb off`, `lora off`) and the BLE fault opcode share it.
+ */
+#define LG_FAULT_MAX_S 3600u
+
 #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"

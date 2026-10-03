@@ -304,6 +304,11 @@ async def run_all(args, key, auth):
     async def do_disarm(s):
         return gw.decode_chaos_status(await s.ask(gw.OP_CHAOS_DISARM, gw.OP_CHAOS, b""))
 
+    async def do_fault(s):
+        """D90: one fault, now. The AP restores itself from its own clock, so this needs no renewing."""
+        return gw.decode_fault_ok(
+            await s.ask(gw.OP_FAULT, gw.OP_FAULT_OK, gw.fault_body(args.kind, args.seconds)))
+
     names = gw.bench_ap_names()
 
     async def each(what, fn):
@@ -321,6 +326,14 @@ async def run_all(args, key, auth):
             except Exception as e:
                 print(f"  {who}: {what} FAILED ({type(e).__name__}: {e})")
         return out
+
+    if args.command == "fault":
+        done = await each(f"fault {args.kind}", do_fault)
+        for ap in sorted(done):
+            d = done[ap]
+            how = f"for {d['seconds']} s, restores itself" if d["seconds"] else "done"
+            print(f"  {names.get(ap, 'AP ' + str(ap))} (AP {ap}): {d['kind']} {how}")
+        return 0 if len(done) == len(aps) else 1
 
     if args.command in ("status", "disarm", "journal"):
         if args.command == "journal":
@@ -394,6 +407,16 @@ async def main_async(args):
         async def do(s):
             return gw.decode_chaos_status(await s.ask(gw.OP_CHAOS_DISARM, gw.OP_CHAOS, b""))
         show(await talk(device, key, auth, do, which_ap))
+        return 0
+
+    if args.command == "fault":
+        # D90: one fault, now. The AP restores itself from its own clock, so nothing here renews it.
+        async def do(s):
+            return gw.decode_fault_ok(
+                await s.ask(gw.OP_FAULT, gw.OP_FAULT_OK, gw.fault_body(args.kind, args.seconds)))
+        d = await talk(device, key, auth, do, which_ap)
+        how = f"for {d['seconds']} s, restores itself" if d["seconds"] else "done"
+        print(f"AP {which_ap}: {d['kind']} {how}")
         return 0
 
     if args.command == "journal":
@@ -472,7 +495,11 @@ async def main_async(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["status", "arm", "disarm", "journal"])
+    ap.add_argument("command", choices=["status", "arm", "disarm", "journal", "fault"])
+    ap.add_argument("--kind", choices=sorted(gw.FAULT_KINDS), default="backbone",
+                    help="for 'fault': which radio to take out, or 'restart' (default backbone)")
+    ap.add_argument("--seconds", type=int, default=60,
+                    help="for 'fault': how long the radio stays off; it restores itself (default 60)")
     ap.add_argument("minutes", nargs="?", type=int, default=15,
                     help="window length for 'arm', in minutes (default 15)")
     ap.add_argument("--ap", metavar="WHICH",

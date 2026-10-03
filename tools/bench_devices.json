@@ -98,7 +98,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM28",
+      "port": "COM29",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -201,7 +201,7 @@
     },
     {
       "name": "e28b",
-      "port": "COM34",
+      "port": "COM33",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",

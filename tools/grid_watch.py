@@ -253,6 +253,7 @@ LINK_REPLY_PREFIX = "4c470003"
 OP_HELLO, OP_LOGIN, OP_GET_STATUS, OP_GET_HISTORY, OP_GET_TRAFFIC = 0x01, 0x02, 0x03, 0x04, 0x05
 # D85, temporary (docs/TEMPORARY.md T5): the only opcodes on this link that change anything.
 OP_CHAOS_GET, OP_CHAOS_ARM, OP_CHAOS_DISARM, OP_CHAOS_LOG = 0x06, 0x07, 0x08, 0x09
+OP_FAULT, OP_FAULT_OK = 0x0A, 0x8A   # D90: one fault, now, named by the laptop (TEMPORARY T6)
 OP_SESSION = 0x80                # the one unsealed message: the session both nonces are built from
 OP_HELLO_OK, OP_LOGIN_OK, OP_STATUS, OP_HISTORY, OP_TRAFFIC = 0x81, 0x82, 0x83, 0x84, 0x85
 OP_CHAOS, OP_CHAOS_LOG_DATA = 0x86, 0x89
@@ -263,7 +264,8 @@ OP_NAMES = {OP_SESSION: "SESSION", OP_HELLO: "HELLO", OP_LOGIN: "LOGIN", OP_GET_
             OP_HISTORY: "HISTORY", OP_TRAFFIC: "TRAFFIC", OP_ERROR: "ERROR",
             OP_LOGIN_FAIL: "LOGIN_FAIL",
             OP_CHAOS_GET: "CHAOS_GET", OP_CHAOS_ARM: "CHAOS_ARM", OP_CHAOS_DISARM: "CHAOS_DISARM",
-            OP_CHAOS_LOG: "CHAOS_LOG", OP_CHAOS: "CHAOS", OP_CHAOS_LOG_DATA: "CHAOS_LOG_DATA"}
+            OP_CHAOS_LOG: "CHAOS_LOG", OP_CHAOS: "CHAOS", OP_CHAOS_LOG_DATA: "CHAOS_LOG_DATA",
+            OP_FAULT: "FAULT", OP_FAULT_OK: "FAULT_OK"}
 
 # The chaos journal, as the AP packs it (D49, firmware/node/main/chaos_log.h).
 CHAOS_REC_LEN = 16
@@ -274,6 +276,23 @@ CHAOS_EVENTS = {0: "boot", 1: "armed", 2: "renewed", 3: "disarmed", 4: "expired"
                 # Wi-Fi had, so a rising count across a backbone-off window is LoRa doing the work.
                 10: "LoRa first", 11: "LoRa out", 12: "LoRa in"}
 CHAOS_LORA_EVENTS = (10, 11, 12)
+
+
+# D90: the faults an access point will perform on request, and the byte each is named by on the link.
+FAULT_KINDS = {"backbone": 1, "lora": 2, "lora-reset": 3, "restart": 4}
+FAULT_NAMES = {v: k for k, v in FAULT_KINDS.items()}
+
+
+def fault_body(kind, seconds):
+    """kind is a FAULT_KINDS name; seconds is how long the radio stays off (ignored for reset/restart)."""
+    return bytes([FAULT_KINDS[kind]]) + int(seconds).to_bytes(2, "little")
+
+
+def decode_fault_ok(body):
+    if len(body) != 3:
+        raise ValueError(f"FAULT_OK is 3 bytes, got {len(body)}")
+    return {"kind": FAULT_NAMES.get(body[0], f"kind {body[0]}"),
+            "seconds": int.from_bytes(body[1:3], "little")}
 
 
 def decode_chaos_status(body):

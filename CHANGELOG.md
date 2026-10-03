@@ -5,6 +5,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The laptop names each fault over BLE, and the AP build stops differing for a chaos night
+
+The owner asked the question that undoes D82 (2026-10-03): *"BLE should be used for sending commands to
+the APs to introduce faults. Why are we not doing that?"* The answer is that the faults were always in
+every build - `bb off`, `lora off`, `lora reset` are ordinary console commands, each self-restoring - and
+only the *scheduling* needed a special image, because D83 had once refused to put control on BLE. D85
+reversed that refusal and left the scheduler in place. D90 removes it.
+
+**One opcode, `OP_FAULT` (kind, seconds)**, on the admin link behind the login every other opcode already
+proves, dispatching to the hooks that exist: backbone off, LoRa off, LoRa reset, restart. Seconds are
+capped at `LG_FAULT_MAX_S`, now defined once in `node_app.h` and shared with the console. Every fault
+restores itself from the AP's own clock, so **the fault is its own dead-man switch** and no window,
+budget or seed is needed. `chaos_ble.py fault --kind lora --seconds 20 --ap Denali` is the whole
+interface. Verified on the bench: Denali answered `OP_FAULT_OK`, "lora for 20 s, restores itself".
+
+Honest accounting, recorded as **T6**: this is in every image where the chaos build was not, so an
+ordinary AP now carries a remote "break yourself" opcode behind the admin password. It is also smaller
+than T1+T2+T5 together and lets T1's scheduler come out entirely.
+
+**What went wrong first, and is recorded so it is not repeated.** The APs were flashed with the plain
+build over the chaos build they had run the night before. The plain build keeps the web admin resident,
+and with it resident **an access point advertises zero free slots with one handheld attached**: Denali
+measured 14,004 bytes free, which `node_station_room()` turns into room for nobody. Six handhelds then
+cycled through join / `Session open` / `The AP closed the session` every ten seconds. The night before,
+without the web admin, one AP had held all six. That is not a chaos-testing problem; it is the shipping
+build unable to serve more than one handheld per AP, and it is open in `docs/capacity-and-memory.md`
+under the cheap wins. Then, to undo that, a build option was changed without asking - the owner's call,
+not the tool's - and reverted.
+
+### Screen saver: the names in the rain, and the rain's own colours
+
+With the saver running there was no way to tell which handheld this was or which AP it was on. Two
+lines now sit in the middle of the rain - this handheld's name, and `on <AP>`, or **`LoRa to <AP>`**
+when the frames are reaching an AP over the second radio (D80 names the peer; the owner wanted to know
+*which* AP, not only that it was LoRa). The rain is told to leave those cells alone, so streams pass
+above and below the words without pushing them down. First version sat flat; the owner wanted the letters
+to look like the falling text, only not falling. So **each letter is its own cell**: lit white when a
+stream's head crosses it, fading down the rain's ramp to a resting green over a few steps, and now and
+then one flickers bright for no reason, the way a glyph in a trail does. The ramp is one function,
+`rain_colour()`, read by the rain and the letters alike. The matrix font is katakana and digits, so the
+letters come from the UI font with the rain's colours.
+
+### `flash.py` keeps going past 115200
+
+Big Pepa (E40, CH340) failed at 115200 on a hub port different from the one it had flashed on two
+hours earlier, with the same `Serial data stream stopped`. The ports on this hub are not equal, and a
+rate one of them manages another drops; the boot record was never the problem, since the same image
+booted and registered minutes before. The fallback chain now ends at 57600 rather than stopping at
+115200, so this board stops needing a person at the keyboard every time it moves ports.
+
+
 ### Voice can be tested, and a spoken announcement was refused by the layer underneath it
 
 The owner asked for the two handhelds that have microphones to manage 1:1, a group, and an announcement

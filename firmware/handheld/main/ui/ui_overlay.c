@@ -65,6 +65,9 @@ static const char *TAG = "UI";
  * five cells rather than sixteen, which is what keeps a 30-column screen inside the 70 ms tick.
  */
 #define RAIN_FADE_STOPS   4
+#define LABEL_CHARS_MAX   40     /* letters per label line: HH_NAME_MAX plus room for "LoRa to " */
+#define LABEL_REST        2      /* the ramp stop a label letter settles at: readable, plainly green */
+#define LABEL_DECAY_STEPS 3      /* rain steps between one stop and the next on the way down */
 #define CONVS_TRACKED     (LG_MAX_DEVICES + LG_MAX_GROUPS + 1)
 #define ALERT_TEXT_LINES  8
 #define ALERT_WHERE_MS    1000   /* how often the sender's location line is looked at again */
@@ -155,6 +158,34 @@ static struct {
      * to do - which the film does, and this did not.
      */
     uint8_t   glyph[RAIN_COLS_MAX][RAIN_ROWS_MAX];
+    /*
+     * The two names held still in the middle of the rain (owner, 2026-10-03: with the saver running
+     * there was no way to tell which handheld this is or which AP it is on). The rain is told to
+     * leave these cells alone, so the streams pass above and below the words without pushing them
+     * down - the letters never move, everything else keeps going past them.
+     */
+    char      who[HH_NAME_MAX];
+    char      ap[HH_SSID_MAX + 12];
+    lg_rect_t who_rect;
+    lg_rect_t ap_rect;
+    int16_t   label_c0, label_c1, label_r0, label_r1;   /* the cells the rain must not touch */
+    bool      label_on;
+    /*
+     * Each letter on its own (owner, 2026-10-03: the names sat flat while the rain around them
+     * flashed and faded; they should look like the falling text, only not falling). A letter is lit
+     * white when a stream's head crosses it, fades down the rain's own ramp to a resting green, and
+     * now and then one flickers bright for no reason, the way a glyph in a trail does.
+     */
+    struct {
+        int16_t x;            /* pixel x of this letter */
+        uint8_t w;            /* its width in the UI font */
+        uint8_t off, len;     /* its bytes within s.who or s.ap (UTF-8) */
+        uint8_t c0, c1;       /* the rain columns it spans */
+        uint8_t lvl;          /* 0 white head .. LABEL_REST, the colour it is showing now */
+    } lchar[2][LABEL_CHARS_MAX];
+    uint8_t   nchar[2];
+    int16_t   lrow0[2], lrow1[2];   /* the rain rows each line occupies */
+    uint8_t   label_tick;
     uint32_t  rain_ms;
     uint32_t  rnd;
 } s;
@@ -504,6 +535,17 @@ static void rain_cell(uint8_t col, int16_t row, lg_color_t fg, bool fresh)
     if (row < 0 || row >= RAIN_ROWS_MAX || row * s.row_h >= s.h) {
         return;
     }
+    if (s.label_on && (int16_t)col >= s.label_c0 && (int16_t)col <= s.label_c1 &&
+        row >= s.label_r0 && row <= s.label_r1) {
+        /*
+         * A word is here. Painting nothing is what makes the stream appear to pass behind it: the head
+         * keeps counting down the column and reappears below, and the glyph that would have been drawn
+         * here is simply never drawn. Clearing a tail is skipped for the same reason - nothing of the
+         * rain was ever put in these cells, so there is nothing to clear, and the words stay put
+         * without being repainted every frame.
+         */
+        return;
+    }
     if (fresh) {
         s.glyph[col][row] = (uint8_t)(rnd() % LG_MATRIX_COUNT);
     }
@@ -520,6 +562,8 @@ static void rain_cell(uint8_t col, int16_t row, lg_color_t fg, bool fresh)
     lg_draw_box(&b);
 }
 
+static void saver_label_tick(void);   /* defined with the rain, used as the saver opens */
+
 static void show_saver(uint32_t now)
 {
     s.banner = false;
@@ -535,21 +579,215 @@ static void show_saver(uint32_t now)
         s.trail[i] = (uint8_t)(RAIN_TRAIL_MIN + rnd() % (RAIN_TRAIL_MAX - RAIN_TRAIL_MIN + 1u));
     }
     s.rain_ms = now;
-    ESP_LOGI(TAG, "[UI] Screen saver on");
+    s.label_on = false;
+    s.who[0] = s.ap[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
+    saver_label_tick();
+    ESP_LOGI(TAG, "[UI] Screen saver on: %s %s", s.who, s.ap);
+}
+
+/*
+ * The rain's ramp, nearly white at the head and almost gone four stops later, as a function because
+ * lg_rgb is inline and cannot sit in a static table. Level 0 is the head; 1..RAIN_FADE_STOPS are the
+ * trail. The rain and the label letters both read their colours from here, which is what makes the
+ * letters look like part of the rain rather than printed over it.
+ */
+static lg_color_t rain_colour(uint8_t lvl)
+{
+    switch (lvl) {
+    case 0:  return C_TEXT;             /* the head: near white */
+    case 1:  return lg_rgb(0x7CFFA8);   /* just behind it: the bright green the film is remembered for */
+    case 2:  return lg_rgb(0x2FBF63);
+    case 3:  return lg_rgb(0x12753A);
+    default: return lg_rgb(0x07331A);   /* nearly out */
+    }
+}
+
+static uint8_t utf8_len(uint8_t lead)
+{
+    return lead < 0x80u ? 1u : lead < 0xE0u ? 2u : lead < 0xF0u ? 3u : 4u;
+}
+
+/* One letter, in the colour its level says. */
+static void label_char_paint(uint8_t line, uint8_t i)
+{
+    const char *src = line == 0u ? s.who : s.ap;
+    const lg_rect_t *lr = line == 0u ? &s.who_rect : &s.ap_rect;
+    lg_box_t b;
+    memset(&b, 0, sizeof(b));
+    b.rect = (lg_rect_t){ s.lchar[line][i].x, lr->y, s.lchar[line][i].w, lr->h };
+    b.bg = b.outside = C_BG;
+    b.font = &lg_font_montserrat_16;
+    b.fg = rain_colour(s.lchar[line][i].lvl);
+    b.align = LG_ALIGN_CENTER;
+    uint8_t n = s.lchar[line][i].len;
+    if (n >= sizeof(b.text)) {
+        n = (uint8_t)(sizeof(b.text) - 1u);
+    }
+    memcpy(b.text, src + s.lchar[line][i].off, n);
+    b.text[n] = '\0';
+    lg_draw_box(&b);
+}
+
+/*
+ * Lay the two names out letter by letter and paint them at rest.
+ *
+ * Not in the matrix font: that font is katakana and digits (tools/build_matrix_font.py), so it cannot
+ * spell "Denali". The UI font carries the letters; the ramp above carries the look. Each letter is
+ * measured on its own because the font is proportional, and each remembers which rain columns it
+ * spans, so a stream can find the letters it is passing through.
+ */
+static void saver_label_paint(void)
+{
+    const lg_font_t *font = &lg_font_montserrat_16;
+    int16_t lh = font->line_height;
+    int16_t gap = (int16_t)(lh / 3);
+    int16_t total = (int16_t)(lh * 2 + gap);
+    int16_t y = (int16_t)((s.h - total) / 2);
+    s.who_rect = (lg_rect_t){ 0, y, (int16_t)s.w, lh };
+    s.ap_rect  = (lg_rect_t){ 0, (int16_t)(y + lh + gap), (int16_t)s.w, lh };
+
+    /* The cells to keep the rain out of: the union of the two lines, in whole cells. */
+    int16_t top = s.who_rect.y, bot = (int16_t)(s.ap_rect.y + s.ap_rect.h - 1);
+    s.label_r0 = (int16_t)(top / s.row_h);
+    s.label_r1 = (int16_t)(bot / s.row_h);
+    s.label_c0 = 0;
+    s.label_c1 = (int16_t)(s.cols - 1);
+    s.label_on = true;
+    s.lrow0[0] = (int16_t)(s.who_rect.y / s.row_h);
+    s.lrow1[0] = (int16_t)((s.who_rect.y + lh - 1) / s.row_h);
+    s.lrow0[1] = (int16_t)(s.ap_rect.y / s.row_h);
+    s.lrow1[1] = (int16_t)((s.ap_rect.y + lh - 1) / s.row_h);
+
+    lg_draw_fill(&s.who_rect, C_BG);   /* whatever the last names were, gone before the new ones */
+    lg_draw_fill(&s.ap_rect, C_BG);
+
+    for (uint8_t line = 0; line < 2u; line++) {
+        const char *src = line == 0u ? s.who : s.ap;
+        char one[5];
+        uint8_t n = 0;
+        int16_t width = 0;
+        /* First pass: cut the string into letters and measure each. */
+        for (size_t off = 0; src[off] != '\0' && n < LABEL_CHARS_MAX; ) {
+            uint8_t len = utf8_len((uint8_t)src[off]);
+            memcpy(one, src + off, len);
+            one[len] = '\0';
+            int16_t w = lg_draw_text_width(font, NULL, one);
+            s.lchar[line][n].off = (uint8_t)off;
+            s.lchar[line][n].len = len;
+            s.lchar[line][n].w = (uint8_t)(w > 255 ? 255 : w < 1 ? 1 : w);
+            s.lchar[line][n].lvl = LABEL_REST;
+            width = (int16_t)(width + s.lchar[line][n].w);
+            off += len;
+            n++;
+        }
+        s.nchar[line] = n;
+        /* Second pass: centre the run, and note the rain columns under each letter. */
+        int16_t x = (int16_t)((s.w - width) / 2);
+        for (uint8_t i = 0; i < n; i++) {
+            s.lchar[line][i].x = x;
+            int16_t c0 = (int16_t)(x / s.col_w), c1 = (int16_t)((x + s.lchar[line][i].w - 1) / s.col_w);
+            s.lchar[line][i].c0 = (uint8_t)(c0 < 0 ? 0 : c0);
+            s.lchar[line][i].c1 = (uint8_t)(c1 >= s.cols ? s.cols - 1 : c1);
+            x = (int16_t)(x + s.lchar[line][i].w);
+            label_char_paint(line, i);
+        }
+    }
+}
+
+/* A stream's head has just moved to `row` in column `col`: light the letters it is passing through. */
+static void saver_label_touch(uint8_t col, int16_t row)
+{
+    if (!s.label_on) {
+        return;
+    }
+    for (uint8_t line = 0; line < 2u; line++) {
+        if (row < s.lrow0[line] || row > s.lrow1[line]) {
+            continue;
+        }
+        for (uint8_t i = 0; i < s.nchar[line]; i++) {
+            if (col >= s.lchar[line][i].c0 && col <= s.lchar[line][i].c1 && s.lchar[line][i].lvl != 0u) {
+                s.lchar[line][i].lvl = 0;   /* the head: white, exactly as the glyph it displaced would be */
+                label_char_paint(line, i);
+            }
+        }
+    }
+}
+
+/*
+ * Once a step: lit letters fade back down the ramp, and now and then one flickers bright on its own.
+ * The flicker is the detail that makes the words part of the rain rather than a sign in front of it -
+ * in the film a character already on screen changes without moving, and these cannot change, so they
+ * brighten instead.
+ */
+static void saver_label_animate(void)
+{
+    if (!s.label_on) {
+        return;
+    }
+    bool decay = (++s.label_tick % LABEL_DECAY_STEPS) == 0u;
+    for (uint8_t line = 0; line < 2u; line++) {
+        for (uint8_t i = 0; i < s.nchar[line]; i++) {
+            if (decay && s.lchar[line][i].lvl < LABEL_REST) {
+                s.lchar[line][i].lvl++;
+                label_char_paint(line, i);
+            }
+        }
+    }
+    if ((rnd() & 7u) == 0u) {
+        uint8_t line = (uint8_t)(rnd() & 1u);
+        if (s.nchar[line] != 0u) {
+            uint8_t i = (uint8_t)(rnd() % s.nchar[line]);
+            if (s.lchar[line][i].lvl >= LABEL_REST) {
+                s.lchar[line][i].lvl = 1;   /* bright green, not the head: a flicker, not a strike */
+                label_char_paint(line, i);
+            }
+        }
+    }
+}
+
+/* Reads the names, and repaints only when one of them has changed - a roam, or a rename. */
+static void saver_label_tick(void)
+{
+    const hh_status_t *st = ui_status();
+    char who[HH_NAME_MAX];
+    char ap[HH_SSID_MAX + 12];
+    snprintf(who, sizeof(who), "%s", st->name[0] != '\0' ? st->name : "This handheld");
+    if (st->link == HH_LINK_ONLINE && st->node >= 0 && st->node_ssid[0] != '\0') {
+        snprintf(ap, sizeof(ap), "on %s", st->node_ssid);
+    } else if (st->link == HH_LINK_LORA) {
+        /*
+         * D80: on LoRa there is no session, so "on <AP>" would be the one thing that is not true - but
+         * the owner still wants to know *which* AP the frames are reaching (2026-10-03), and the
+         * snapshot says. The name is empty until a beacon has named that AP; show the number then.
+         */
+        if (st->lora_peer >= 0 && st->lora_peer_ssid[0] != '\0') {
+            snprintf(ap, sizeof(ap), "LoRa to %s", st->lora_peer_ssid);
+        } else if (st->lora_peer >= 0) {
+            snprintf(ap, sizeof(ap), "LoRa to AP %d", st->lora_peer);
+        } else {
+            snprintf(ap, sizeof(ap), "%s", "LoRa, no AP yet");
+        }
+    } else {
+        snprintf(ap, sizeof(ap), "%s", "no AP");
+    }
+    if (strcmp(who, s.who) == 0 && strcmp(ap, s.ap) == 0) {
+        return;
+    }
+    snprintf(s.who, sizeof(s.who), "%s", who);
+    snprintf(s.ap, sizeof(s.ap), "%s", ap);
+    saver_label_paint();
 }
 
 static void rain_step(void)
 {
     int16_t rows = (int16_t)(s.h / s.row_h);
+    saver_label_tick();
     /*
      * The ramp, nearly white at the head and almost gone four stops later. Built here rather than as a
      * table because lg_rgb is an inline function, not a constant expression.
      */
     const lg_color_t fade[RAIN_FADE_STOPS] = {
-        lg_rgb(0x7CFFA8),   /* just behind the head: the bright green the film is remembered for */
-        lg_rgb(0x2FBF63),
-        lg_rgb(0x12753A),
-        lg_rgb(0x07331A),   /* nearly out */
+        rain_colour(1), rain_colour(2), rain_colour(3), rain_colour(4),
     };
     static const int16_t at[RAIN_FADE_STOPS] = { 1, 3, 6, 10 };   /* rows behind the head */
 
@@ -561,6 +799,7 @@ static void rain_step(void)
         s.head[i]++;
         /* The head itself: a new glyph, and near white, so the stream has a leading edge. */
         rain_cell(i, s.head[i], C_TEXT, true);
+        saver_label_touch(i, s.head[i]);   /* and if a letter is there, the letter lights instead */
         /* Behind it, the same glyphs repainted dimmer as they are left behind. */
         for (uint8_t k = 0; k < RAIN_FADE_STOPS; k++) {
             if (at[k] < s.trail[i]) {
@@ -587,6 +826,7 @@ static void rain_step(void)
             s.trail[i] = (uint8_t)(RAIN_TRAIL_MIN + rnd() % (RAIN_TRAIL_MAX - RAIN_TRAIL_MIN + 1u));
         }
     }
+    saver_label_animate();
 }
 
 /* ---- the new-message watch ---- */

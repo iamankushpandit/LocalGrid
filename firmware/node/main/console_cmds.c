@@ -17,7 +17,7 @@
 #include "sdkconfig.h"
 
 /* No chaos hook may take a radio out for longer than this, whatever was typed. */
-#define CHAOS_MAX_S 3600ul
+#define CHAOS_MAX_S ((unsigned long)LG_FAULT_MAX_S)
 
 static int post(node_cmd_type_t type, uint32_t value, const char *text)
 {

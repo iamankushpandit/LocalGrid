@@ -136,6 +136,43 @@ claim that nothing on this link writes.
 **How to check it is gone.** `python tools/check_release.py --release` passes, and
 `grep -c OP_CHAOS firmware/node/main/ble_link.c` finds nothing.
 
+### T6 — One fault on request, over BLE (D90)
+
+**What.** One opcode on the BLE admin link, `OP_FAULT` (kind, seconds): backbone off, LoRa off, LoRa
+reset, or restart, performed now, by the access point that receives it. It replaces the self-scheduler
+of T1 as the way a chaos night reaches an access point that has no cable.
+
+**Why.** The owner asked why the firmware was being changed for chaos at all when BLE could simply
+carry the fault commands (2026-10-03). The faults were never the special part - `bb off`, `lora off`
+and `lora reset` are ordinary console commands in every build, each self-restoring - and only the
+scheduling needed a special image, because D83 had once refused BLE control. D85 reversed that refusal
+and left the scheduler in place. With the laptop naming each fault there is nothing autonomous on the
+device, so the seed, the NVS budget and the dead-man window have nothing left to protect.
+
+**What it costs.** This is in **every** image. The chaos build at least kept its code out of an
+ordinary access point; this puts a remote "break yourself" opcode behind the admin password on every
+one. It is a smaller surface than T1, T2 and T5 together, and a wider one than a build flag.
+
+**Guards it has while it stays.** The same login as every other opcode on the link: `OP_LOGIN` is an
+HMAC over a random 32-byte challenge keyed by the stored password hash, and every chunk is sealed with
+`K_link`. Seconds are capped at `LG_FAULT_MAX_S` (3600), defined once in `node_app.h` and shared with
+the console, so the two cannot disagree. **Every fault is its own dead-man switch:** the radio comes back
+on the access point's own clock whether or not the laptop is still there. The allow-list is three radios
+and a restart; nothing here reads a message or changes a setting.
+
+**What must be true to remove it.** The same as T1: a bench that can hold every device on USB
+reliably, so `tools/chaos.py` can type the faults at a serial port again - or a harness that can cut
+power per device, which this opcode cannot do either.
+
+**How to remove.** Delete `do_fault`, `fault_restart_cb` and the `FAULT_*` enum from
+`firmware/node/main/ble_link.c`, `OP_FAULT` and `OP_FAULT_OK` from its opcode enum, the login gate and
+the dispatch switch; delete `OP_FAULT`, `fault_body` and `decode_fault_ok` from `tools/grid_watch.py`
+and the `fault` command from `tools/chaos_ble.py`; and take `chaos.py`'s BLE fault path out with them.
+`LG_FAULT_MAX_S` stays: the console hooks still need the cap.
+
+**How to check it is gone.** `python tools/check_release.py --release` passes, and
+`grep -c OP_FAULT firmware/node/main/ble_link.c` finds nothing.
+
 ### T4 — The handhelds' Wi-Fi switch is sticky (D78)
 
 **What.** `wifi off` with no seconds survives a restart.

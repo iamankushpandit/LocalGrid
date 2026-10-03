@@ -90,6 +90,17 @@ def check_t5_ble_chaos():
     return found
 
 
+def check_t6_ble_fault():
+    """
+    T6: an access point must not perform a fault on request over BLE at release (D90).
+
+    The opcode that replaced T1's self-scheduler. In every image, which is why it is checked by
+    opcode name in the link source rather than by a build option.
+    """
+    link = read("firmware/node/main/ble_link.c")
+    return ["the OP_FAULT opcode on the BLE admin link"] if "OP_FAULT" in link else []
+
+
 def check_prototype_wording():
     """
     A release also means the README and the site stop calling this a prototype. If that wording is
@@ -104,6 +115,7 @@ CHECKS = [
     ("T2", "chaos armed over the network", check_t2_chaos_over_network),
     ("T3", "firmware upload accepts unsigned images", check_t3_unsigned_ota),
     ("T5", "chaos armed over BLE", check_t5_ble_chaos),
+    ("T6", "a fault on request over BLE", check_t6_ble_fault),
     ("--", "README still calls this a prototype", check_prototype_wording),
 ]
 

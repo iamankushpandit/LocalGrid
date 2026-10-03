@@ -190,6 +190,7 @@ def esptool(port, *args, chip=None, capture=True):
 
 
 SLOW_BAUD = 115200    # every ESP32 bootloader's own rate, and the one a noisy bridge still manages
+SLOWER_BAUD = 57600   # when even that drops bytes: a hub port that is worse than the last one was
 
 
 def flash_app(fw, target, d, log):
@@ -203,10 +204,17 @@ def flash_app(fw, target, d, log):
 
     A board known to need it says `"flash_baud": 115200` in tools/bench_devices.json and goes straight
     there, because the fast attempt costs a minute and always fails. Any other board tries the default
-    first and falls back once, so a cable that degrades is handled without anyone having to notice.
+    first and falls back, so a cable that degrades is handled without anyone having to notice.
+
+    The chain does not stop at 115200. On 2026-10-03 Big Pepa failed *at* 115200 on a different hub
+    port from the one it had flashed on two hours earlier, with the same error - the ports on this
+    hub are not equal, and a rate that one of them manages another drops. So the last step is half
+    that again. The owner's complaint was fair: this board has needed a person at the keyboard every
+    time it moved ports, and the fix for that is a tool that keeps going, not a note that says 115200.
     """
     want = d.get("flash_baud")
-    rates = [want] if want else [None, SLOW_BAUD]
+    rates = [want, SLOWER_BAUD] if want else [None, SLOW_BAUD, SLOWER_BAUD]
+    rates = [r for i, r in enumerate(rates) if r not in rates[:i]]   # a pinned 57600 is not tried twice
     for n, baud in enumerate(rates):
         at = f" at {baud} baud" if baud else ""
         print(f"  flashing{at}{' (retry)' if n else ''} ...", flush=True)
