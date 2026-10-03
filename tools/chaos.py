@@ -1936,37 +1936,50 @@ class Chaos:
                  + (f" for {seconds} s" if seconds else "") + " (over BLE)")
         self.event("fault", **{k: v for k, v in exp.items() if k not in ("at_s", "failover")})
         before = {a: dict(self.eyes.aps().get(a) or {}) for a in aps} if self.eyes else {}
+        acked = []
         for a in aps:
             ack = self.ble_fault(a, kind, seconds or 60)
             if ack is None:
-                exp["unconfirmed"].append(f"{names.get(a, a)} not acknowledged")
-        # Confirm from the beacons, not from the acknowledgement: a restart moves the boot counter and a
-        # backbone-off drops the link count. An AP that says yes and does nothing is the finding here.
-        def took(a):
-            row = self.eyes.aps().get(a) if self.eyes else None
-            if not row or not before.get(a):
-                return False
-            if kind == "restart":
-                return row["boot"] is not None and row["boot"] != before[a].get("boot")
-            return row["links"] is not None and before[a].get("links") is not None and row["links"] < before[a]["links"]
-        if not self.wait(75, until=lambda: all(took(a) for a in aps)):
-            for a in aps:
-                if not took(a):
-                    exp["unconfirmed"].append(f"{names.get(a, a)} {kind}: the beacons never showed it")
-                    self.finding(f"#{e['n']} {names.get(a, a)} acknowledged a {kind} fault and the beacons "
-                                 f"never showed it", n=e["n"], board=names.get(a, str(a)))
+                # No answer, or a refusal. The usual reason on this bench is an access point still on
+                # firmware without OP_FAULT (Everest, 2026-10-03): the run says so, and it is not blamed on
+                # the beacons, which cannot show a fault that was never performed.
+                exp["unconfirmed"].append(f"{names.get(a, a)} did not acknowledge the fault")
+                self.finding(f"#{e['n']} {names.get(a, a)} did not acknowledge a {kind} fault over BLE - "
+                             f"firmware without OP_FAULT, or out of range", n=e["n"], board=names.get(a, str(a)))
+            else:
+                acked.append(a)
+        # Confirmation. A restart shows in the beacons - the boot counter moves - and an AP that said yes
+        # and did not restart is a finding. A backbone-off does *not* show for a short window: D74 calls a
+        # link down only after three missed keepalives, about three minutes, so an 18 s outage is over
+        # before any beacon could reflect it. For that one the acknowledgement is the confirmation; what
+        # the outage did to the traffic is what the probes measure.
+        if kind == "restart" and acked:
+            def restarted(a):
+                row = self.eyes.aps().get(a) if self.eyes else None
+                return bool(row and before.get(a) and row["boot"] is not None and row["boot"] != before[a].get("boot"))
+            if not self.wait(75, until=lambda: all(restarted(a) for a in acked)):
+                for a in acked:
+                    if not restarted(a):
+                        exp["unconfirmed"].append(f"{names.get(a, a)} restart: the beacons never showed it")
+                        self.finding(f"#{e['n']} {names.get(a, a)} acknowledged a restart and its boot counter "
+                                     f"never moved", n=e["n"], board=names.get(a, str(a)))
         if seconds:
             self.wait(seconds)
         released = time.monotonic()
         self.event("released", n=e["n"], unconfirmed=exp["unconfirmed"])
-        if self.wait(self.args.recovery_timeout, until=self.ble_backbone_whole):
-            exp["recovery_s"] = round(time.monotonic() - released, 1)
-            exp["result"] = "recovered"
-            self.say(f"#{e['n']} backbone whole again {exp['recovery_s']} s after release")
+        if not acked:
+            exp["result"] = "done"   # nothing was taken out, so there is nothing to recover from
+        elif kind == "restart":
+            if self.wait(self.args.recovery_timeout, until=self.ble_backbone_whole):
+                exp["recovery_s"] = round(time.monotonic() - released, 1)
+                exp["result"] = "recovered"
+                self.say(f"#{e['n']} backbone whole again {exp['recovery_s']} s after release")
+            else:
+                exp["result"] = "not recovered"
+                self.finding(f"#{e['n']} backbone not whole {self.args.recovery_timeout} s after "
+                             f"{', '.join(victims)} came back", n=e["n"])
         else:
-            exp["result"] = "not recovered"
-            self.finding(f"#{e['n']} backbone not whole {self.args.recovery_timeout} s after "
-                         f"{', '.join(victims)} came back", n=e["n"])
+            exp["result"] = "done"   # a backbone-off restores itself; the beacons cannot time it (D74)
         self.phase = ""
 
     def start_ble_eyes(self):

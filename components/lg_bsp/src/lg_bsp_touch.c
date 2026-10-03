@@ -147,7 +147,22 @@ static uint16_t xpt_sample(uint8_t cmd)
     uint8_t tx[3] = { cmd, 0, 0 };
     uint8_t rx[3] = { 0 };
     spi_transaction_t tr = { .length = 24, .tx_buffer = tx, .rx_buffer = rx };
-    if (spi_device_polling_transmit(s_xpt, &tr) != ESP_OK) {
+    /*
+     * Hold the bus for the poll. On the E40 this controller shares the display's SPI host, and the
+     * panel is driven by esp_lcd with queued DMA transactions from another task. A polling transaction
+     * started while one of those is in flight trips the driver's own assertion - `spi_intr
+     * spi_master.c:1022 (host->cur_cs == DEV_NUM_MAX)` - and the handheld restarts: Big Pepa did, on
+     * its own, four minutes into a run on 2026-10-03, mid-message. Acquiring the bus waits for the
+     * display's transaction to finish and keeps the ISR from starting another until the poll is done.
+     * On a board whose touch has its own host there is nothing to wait for and this costs nothing.
+     * Bounded: a display that will not yield in 50 ms loses one touch sample, not the UI task.
+     */
+    if (spi_device_acquire_bus(s_xpt, pdMS_TO_TICKS(50)) != ESP_OK) {
+        return 0;
+    }
+    esp_err_t err = spi_device_polling_transmit(s_xpt, &tr);
+    spi_device_release_bus(s_xpt);
+    if (err != ESP_OK) {
         return 0;
     }
     return (uint16_t)(((((uint16_t)rx[1] << 8) | rx[2]) >> 3) & 0x0FFF);

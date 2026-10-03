@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A handheld whose touch shares the display's SPI bus could restart itself mid-message
+
+Found by the ten-minute harness run that verified the BLE fault path: Big Pepa restarted on its own four
+minutes in, right after `Delivered to the other handheld`, with the SPI driver's own assertion -
+`spi_intr spi_master.c:1022 (host->cur_cs == DEV_NUM_MAX)`. On the E40 the XPT2046 sits on the panel's
+SPI host (`BOARDS.md`: "touch on the display bus"), the panel is driven by esp_lcd with queued DMA
+transactions from the drawing task, and the touch task polled the controller with
+`spi_device_polling_transmit` from another task. A poll that starts while a display transaction is in
+flight is the collision the assertion guards against. The poll now holds the bus
+(`spi_device_acquire_bus`, bounded at 50 ms) for the few microseconds it needs, which waits for the
+panel's transaction and keeps the interrupt from starting another; a board whose touch has its own host
+waits for nothing. The heavier drawing of the animated saver labels made the race more frequent, which is
+how it surfaced after weeks of not.
+
+
 ### The admin page runs only while asked for, and an access point has room for its handhelds again
 
 The capacity failure recorded below is fixed at its cause rather than around it. With the HTTP server
