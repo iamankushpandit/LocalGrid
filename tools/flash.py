@@ -242,7 +242,33 @@ def flash_pieces_no_stub(fw, target, d, log):
                 break
             if attempt == 3:
                 return False, f"{label} did not write in three tries:\n    {tail(log)}"
-    return True, f"flashed in pieces without the stub at {baud} baud"
+    # Read the boot record back and compare, because on this board "Hash of data verified" has twice
+    # been followed by the ROM printing `invalid header: 0x20000269` at 0x1000. Whatever the mechanism,
+    # the only check that matters is the one the ROM makes: are the first bytes of flash the bootloader
+    # image. If they are not, write the boot record again - by hand that has cured it every time.
+    head = [p for p in boot if p[1].startswith("bootloader")]
+    if head:
+        offset, image = head[0]
+        want = (build / image).read_bytes()[:64]
+        flat = [x for pair in boot for x in pair]
+        for attempt in range(1, 4):
+            got_path = build / "bootloader_readback.bin"
+            proc = subprocess.run(
+                [sys.executable, "-m", "esptool", "--chip", target, "--port", d["port"], "--baud", baud,
+                 "--no-stub", "read-flash", offset, "64", str(got_path)],
+                cwd=build, capture_output=True, text=True)
+            got = got_path.read_bytes() if proc.returncode == 0 and got_path.exists() else b""
+            if got == want:
+                break
+            print(f"  the boot record reads back wrong ({got[:4].hex() or 'unreadable'}, want {want[:4].hex()});"
+                  f" writing it again ({attempt}) ...", flush=True)
+            subprocess.run(
+                [sys.executable, "-m", "esptool", "--chip", target, "--port", d["port"], "--baud", baud,
+                 "--no-stub", "--before", "default-reset", "--after", "hard-reset", "write-flash", *flat],
+                cwd=build, capture_output=True, text=True)
+        else:
+            return False, "the boot record never read back as written; the board will not boot"
+    return True, f"flashed in pieces without the stub at {baud} baud, boot record read back as written"
 
 
 def flash_app(fw, target, d, log):

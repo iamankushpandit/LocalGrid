@@ -62,7 +62,12 @@ makes it write without the stub, in two pieces with retries, instead of handing 
 board esptool had hash-verified twice that the ROM then refused with `invalid header: 0x20000269`: the
 application's failed first attempt had left the already-verified bootloader unreadable. Whatever a failed
 ROM-loader write does to its neighbours, the last thing written and verified is the thing the ROM reads
-first, so the 29 KB boot record goes last.
+first, so the 29 KB boot record goes last - **and is then read back and compared.** Twice more the
+ROM printed `invalid header: 0x20000269` after esptool had reported the boot record verified. Those bytes
+are not a corrupted copy of our bootloader (`e9 03 02 20 ...`); they are a different image's header
+(two segments, QIO), so what the ROM was finding at 0x1000 was stale content that a write reported as
+verified had not actually replaced. The only check that matters is the ROM's own: `flash.py` now reads the
+first 64 bytes of flash back after writing and rewrites the boot record until they are the image's.
 
 
 ### The laptop names each fault over BLE, and the AP build stops differing for a chaos night
