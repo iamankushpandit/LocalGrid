@@ -22,9 +22,11 @@ verified on the bench, not inferred, except where it says otherwise.
    perform; `chaos.py` plans and drives them itself (`--admin-password`). T1, T2, T5 superseded.
 3. **Big Pepa could not be flashed.** Not the port, not power, not the rate: the stub loader fails on this
    board, and an aborted write leaves its bootloader corrupt. `flash_no_stub` writes the application and
-   then the boot record, ROM loader only, with retries - and then **reads the boot record back**, because
-   twice a write esptool called verified left the ROM finding a stale header (`69 02 00 20`, a different
-   image) at 0x1000. The tool rewrites until the first 64 bytes of flash are the image's. Proved end to end.
+   then the boot record, ROM loader only, with retries - and then **verifies by booting**, never by reading
+   flash back: a read-back matched byte for byte while the ROM still looped on `invalid header`, because a
+   reset resets the ESP32 and not the flash chip, and a ROM-loader read leaves the chip in a mode the ROM
+   does not expect. A write leaves it normal, so the last thing the tool does is write, and the board's own
+   ID line within 30 s is the proof; otherwise the boot record is written again. Proved end to end.
 4. **Screen saver** names this handheld and its AP - `LoRa to <AP>` when that is where the frames go - each
    letter lit and fading like a rain glyph, never falling.
 5. **Chase went blank** after a write: held in reset by the port close, released by opening the port

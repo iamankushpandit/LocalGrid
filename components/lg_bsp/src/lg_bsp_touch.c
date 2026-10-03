@@ -155,9 +155,13 @@ static uint16_t xpt_sample(uint8_t cmd)
      * its own, four minutes into a run on 2026-10-03, mid-message. Acquiring the bus waits for the
      * display's transaction to finish and keeps the ISR from starting another until the poll is done.
      * On a board whose touch has its own host there is nothing to wait for and this costs nothing.
-     * Bounded: a display that will not yield in 50 ms loses one touch sample, not the UI task.
+     *
+     * portMAX_DELAY, and only that: the driver accepts no other wait here ("acquire finite time not
+     * supported", and the call fails - which silently killed touch on every XPT board for the twenty
+     * minutes a 50 ms bound was tried). The wait is bounded in practice by one panel transaction,
+     * a few milliseconds, and the drawing task never waits on this one, so there is no cycle to deadlock.
      */
-    if (spi_device_acquire_bus(s_xpt, pdMS_TO_TICKS(50)) != ESP_OK) {
+    if (spi_device_acquire_bus(s_xpt, portMAX_DELAY) != ESP_OK) {
         return 0;
     }
     esp_err_t err = spi_device_polling_transmit(s_xpt, &tr);

@@ -14,9 +14,12 @@ SPI host (`BOARDS.md`: "touch on the display bus"), the panel is driven by esp_l
 transactions from the drawing task, and the touch task polled the controller with
 `spi_device_polling_transmit` from another task. A poll that starts while a display transaction is in
 flight is the collision the assertion guards against. The poll now holds the bus
-(`spi_device_acquire_bus`, bounded at 50 ms) for the few microseconds it needs, which waits for the
-panel's transaction and keeps the interrupt from starting another; a board whose touch has its own host
-waits for nothing. The heavier drawing of the animated saver labels made the race more frequent, which is
+(`spi_device_acquire_bus`) for the few microseconds it needs, which waits for the panel's transaction and
+keeps the interrupt from starting another; a board whose touch has its own host waits for nothing. The
+wait is `portMAX_DELAY` because the driver accepts nothing else - a first version passed a 50 ms bound,
+the call failed with "acquire finite time not supported", and touch silently returned nothing on every
+XPT board until a handheld's log was read. In practice the wait is one panel transaction, and the drawing
+task never waits on the touch task, so there is no cycle. The heavier drawing of the animated saver labels made the race more frequent, which is
 how it surfaced after weeks of not.
 
 
@@ -62,12 +65,14 @@ makes it write without the stub, in two pieces with retries, instead of handing 
 board esptool had hash-verified twice that the ROM then refused with `invalid header: 0x20000269`: the
 application's failed first attempt had left the already-verified bootloader unreadable. Whatever a failed
 ROM-loader write does to its neighbours, the last thing written and verified is the thing the ROM reads
-first, so the 29 KB boot record goes last - **and is then read back and compared.** Twice more the
-ROM printed `invalid header: 0x20000269` after esptool had reported the boot record verified. Those bytes
-are not a corrupted copy of our bootloader (`e9 03 02 20 ...`); they are a different image's header
-(two segments, QIO), so what the ROM was finding at 0x1000 was stale content that a write reported as
-verified had not actually replaced. The only check that matters is the ROM's own: `flash.py` now reads the
-first 64 bytes of flash back after writing and rewrites the boot record until they are the image's.
+first, so the 29 KB boot record goes last - **and the tool then verifies by letting the board boot, never
+by reading flash back.** A read-back was tried: the first 64 bytes matched the image byte for byte and the
+ROM still looped on `invalid header: 0x20000269`. The explanation that fits every observation: a hard
+reset resets the ESP32 and **not the flash chip**, and `read-flash` under the ROM loader leaves the chip in
+a read mode the ROM does not expect at boot, while a write sequence leaves it in normal mode - which is
+why rewriting the boot record by hand recovered the board every single time, and why the aborted stub
+writes had the same effect. So the last thing the tool does to the chip is a write, and the judge is the
+ROM: the board's own ID line must appear within 30 s, or the boot record is written again.
 
 
 ### The laptop names each fault over BLE, and the AP build stops differing for a chaos night
