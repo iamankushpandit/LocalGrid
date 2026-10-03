@@ -5,6 +5,154 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Voice can be tested, and a spoken announcement was refused by the layer underneath it
+
+The owner asked for the two handhelds that have microphones to manage 1:1, a group, and an announcement
+to everyone, and for all three to be tested (2026-10-02). Building the test found that one of the three
+never worked.
+
+**A spoken announcement had to pass five gates and was blocked at four of them.** `lg_client_send_voice`
+was opened to `LG_SCOPE_BROADCAST` and the chat screen offered the talk bar on Everyone, and that was all
+that had been done - every layer under it still refused:
+
+| Where | What it did | Found by |
+|---|---|---|
+| `hh_service_voice_send` | validated against a list of two scopes, so every frame returned `ESP_ERR_INVALID_ARG` | reading the send path |
+| `voice_body_ok` (node) | `return false;   /* never broadcast */` | reading the node before flashing |
+| `voice_body_ok` (node) | then accepted the scope but required `target <= 0xFFFF`, a group id, while a broadcast target is `LG_TARGET_ALL` (`0xFFFFFFFF`) | `tests/target` on a board |
+| `lg_client` on receive | `else { return; }` for any scope but 1:1 and group, so every listener discarded it | `tests/target` on a board |
+
+Each one built with zero warnings, and the first two would have passed any review that trusted the layer
+above. The last two were found only by running the tests on hardware, which is the argument for the
+definition of done rather than for more reading. Every scope list is now the same list.
+
+**Voice had no way in from the serial console, so the chaos harness had never touched it.** The harness
+drives handhelds over their console and nothing there could hold a talk bar down, so every run so far
+reported a grid that carried text and said nothing about whether anyone could be heard on it. Two
+commands now exist:
+
+- `talk <device|group|all> [seconds]` - the microphone, on the two boards that have one.
+- `demo <device|group|all> [seconds]` - **a generated voice**, on any board.
+
+**The generated voice is a buzz in syllables**, not a tone: a fundamental near 110 Hz with its second and
+third harmonics, switched on and off about three times a second with 20 ms edges, and the pitch stepping
+between four values. Speech-shaped on purpose. The frames are IMA ADPCM, a waveform coder that would carry
+anything, but the capture AGC, the sender's noise gate and the listener's gate are all tuned to speech, and
+a flat tone sails through gates that real talk has to open. It is a pure function of a sample counter, so
+the same seconds produce the same samples on every board and on every run.
+
+It also reaches the four handhelds that have a speaker and no microphone. They can never originate a talk
+in use, and now they can originate one in a test, which is the only way the group and announcement paths
+get exercised from more than one sender. The capture task is created on demand on those boards, so the
+~5 KB is spent only when asked for.
+
+**Both ends count frames, so the result is a loss figure rather than a yes or no.** A talk carries no token
+and no acknowledgement, unlike every other thing this harness measures, so it is measured at both ends
+instead and tied together by the talk id:
+
+- sender: `[MSG] Talk ended: talk 3, 50 frame(s), 0 dropped before the AP, 5021 ms`
+- listener: `[MSG] Heard talk 3 from 9: 48 frame(s), 2 missing`
+
+Missing frames are counted from the frame numbers rather than the total, so a stream missing its middle is
+told apart from one cut short.
+
+**A `voice` chaos round drives it and checks who heard it - and who should not have.** It picks a sender
+(preferring one with a microphone), picks 1:1, group, or everyone, talks for 3 to 10 seconds, and then
+compares the listeners against the ones the scope says should have heard it. The negative half is the
+point: a 1:1 talk played by a third handheld, or a group talk played by a non-member, is the voice
+equivalent of reading somebody else's message, and nothing else here would have noticed. Speaker
+capability is read from each board's own boot line rather than a table of board codes.
+
+A handheld with no Wi-Fi is expected to refuse, because D71 keeps voice off LoRa - `drain_voice_queue`
+already enforced that, and the round now records the refusal as correct behaviour instead of a failure.
+The round obeys the quiet hours of D87 like the alert round, because it makes the listeners play audio out
+loud; `--no-voice` turns it off. Nine new parser samples in `--self-check` (55 in all, 0 failures).
+
+**`docs/capacity-and-memory.md` now separates the two voice sizes**, which are different features and
+were being read as one. **Live push-to-talk** is built and is IMA ADPCM: 400 bytes per 100 ms frame, so
+4,000 bytes a second and about 120 KB for thirty seconds. The **voice note of D72** is not built and is
+Codec2 at 1200 bit/s: about 4.5 KB for thirty seconds, which is the figure the table meant and the only
+one small enough to cross LoRa. Conflating them makes the handshake argument look like it applies to live
+talk, which already holds a session for its whole duration and would gain nothing from one.
+
+
+### Push-to-talk: audible, announceable, and no longer wearing a Wi-Fi icon
+
+Four things the owner found by actually using it (2026-10-02).
+
+**It was too quiet, and the microphone forgot every adjustment.** The mic's digital gain defaulted to
+**3 of 7** - +18 dB of an available +42 - tuned so speech at 30 cm sat near -25 dBFS, which is a tidy
+recording level and far too quiet for a small speaker outdoors. Worse, the header said it plainly:
+*"not kept across a reboot"*, so every adjustment died at the next restart, and on a bench that restarts
+handhelds for a living that is the same as having no control at all. Now **full gain by default and kept
+in NVS**. Playback gain starts at **LOUDER on every board**, not one step down on the codec board: a
+person who finds it loud can turn it down, and could not turn it up past this. The soft knee at about
+-4 dBFS still rounds peaks off rather than clipping, so a shout stays speech.
+
+**The talking indicator was a Wi-Fi symbol.** Literally `LG_SYMBOL_WIFI`, so reading it as a Wi-Fi
+indicator was correct. Nothing in this font is a speaker (24 symbols, none of 0xF026-0xF028), so it is
+drawn: a body, a three-step cone, and **two arcs that climb in and out while a voice plays**. A static
+icon says voice exists somewhere; a moving one says sound is coming out of this right now.
+
+**A beep before incoming speech**, the way a push-to-talk radio does it - two quick rising blips,
+deliberately unlike the message bell because it means "listen now" rather than "read later". It plays
+inside the 400 ms prebuffer the stream already waits through, so it **costs no extra delay**.
+
+**Voice can now address everyone (D88).** `lg_client_send_voice` refused it outright - `default: return
+LG_ERR_ARG; /* never broadcast */` - and `hh_voice_ptt_start` took only 1:1 and group. Now broadcast is
+accepted on both, validated on the access point against the **same permission as a written announcement
+(D56)**, and fanned out by the delivery path that already existed for groups. Voice is still never
+offered to LoRa (D71), and because that exclusion is by message type it covers this with no new rule.
+The talk button appears on the Everyone conversation.
+
+**And an announcement is always audible.** The announcement cue and the talk beep now sound through the
+mute, as an urgent broadcast already did (D40). A handheld that silently swallows "the food is ready"
+because its owner muted their message bell has failed at the one job that needed the speaker; muting
+still silences ordinary message cues, which is what people actually mute.
+
+Two limits worth stating. **Mic gain is codec-only** (`#if LG_AUDIO_CODEC_BACKEND`): on a DAC board -
+including the CYD named as the minimum build - there is no digital mic gain at all, so it gets the
+louder playback and not the louder capture. And a handheld on LoRa alone **cannot hear a spoken
+announcement**, because voice never crosses that radio; it gets the alerts and the text and misses the
+speech.
+
+Node, `tests/target` and all three handheld targets build warning-free. **Not flashed and no board test
+yet** - a chaos run owns every handheld.
+
+### A tone you can choose, for messages, announcements and the emergency
+
+Owner, 2026-10-02: "at least three to four tone selections for each one of them ... they don't have to
+be musical but they have to be distinct."
+
+| Cue | Tones |
+|---|---|
+| **Message tone** | Bell (as before), Ping, Knock, Drop |
+| **Announcement** | Rising (as before), Chime, Pips, Horn |
+| **Emergency** | Two-tone (as before), Warble, Siren, **Morse SOS** |
+
+**The emergency four differ in rhythm, not only in pitch**, which is the part that matters: pitch alone
+is what somebody stops hearing after the third night, and a person choosing an emergency tone is
+choosing the one they will not sleep through rather than the one they like. **Morse SOS** is `... --- ...`
+and earns its place by being the one pattern a stranger recognises without being told what the device is.
+
+The first tone in each row is what the handheld has always made, so a device that nobody touches sounds
+exactly as it did. The sent cue is not offered: it is the sound of your own thumb, heard more often than
+all the others together, and it stays one short blip.
+
+Choosing one **plays it**, on the Sound tab and from the console, because nobody can pick a sound from a
+word - "Knock" and "Drop" mean nothing until you have heard them. Kept in NVS beside the volume, so a
+choice survives a reflash (D22).
+
+`tones` on the handheld console shows what each cue is set to and what else it could be, and
+`tones sos "Morse SOS"` sets and plays one. It is there as well as on the screen because a sound is the
+one setting worth checking from the bench: the screen can say "Morse SOS" while the speaker is wired to
+nothing.
+
+Nothing about D40 changes: an urgent broadcast still sounds at full amplitude with the volume off,
+whichever tone is chosen.
+
+Built warning-free for esp32, esp32s3 and esp32c6. Not yet flashed - a chaos run owns every handheld.
+
 ### The ten-hour run to flat batteries: what it measured, and the one bug that dominated it
 
 Seed 54666, 2026-10-01 20:12 to 2026-10-02 06:33, **10 h 15 min**, ended by the access points running out

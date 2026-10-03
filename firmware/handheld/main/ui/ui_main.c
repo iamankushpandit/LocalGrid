@@ -191,29 +191,81 @@ static void show_launcher(void)
  * that conversation also names them in its title. Painted every refresh while it is up, because a
  * screen's own header paint clears the slot.
  */
+/*
+ * The mark itself: a speaker with waves coming out of it, drawn rather than lettered.
+ *
+ * It used to be LG_SYMBOL_WIFI, which was wrong in the way that matters - the owner read it as a Wi-Fi
+ * indicator, because that is what it is. Nothing in this font is a speaker (Montserrat here carries 24
+ * symbols and none of 0xF026-0xF028), so it is drawn from rectangles: a small block for the body, three
+ * stacked steps for the cone, and two arcs to its right.
+ *
+ * The arcs **move**. A static icon says "voice exists somewhere"; one with waves climbing out says
+ * "sound is coming out of this right now", which is the thing a person needs to know before they hear
+ * a stranger's voice. `wave` counts 0, 1, 2 and the arcs light up to it in turn.
+ */
+static uint8_t s_voice_wave;
+
+static void voice_paint(const lg_canvas_t *c, void *ctx)
+{
+    const lg_rect_t *r = (const lg_rect_t *)ctx;
+    lg_color_t fg = (lg_color_t)(uintptr_t)0;   /* replaced below; kept to silence a stale warning */
+    hh_voice_state_t vs;
+    hh_voice_state(&vs);
+    fg = vs.talking ? C_ERROR : C_ACCENT;
+
+    lg_paint_panel(c, r, r, C_BG, C_BG, C_BG, 0, 0);   /* the slot's own background first */
+
+    /* The speaker, centred in the left half of the slot. */
+    int16_t h = r->h, cx = (int16_t)(r->x + 2), cy = (int16_t)(r->y + h / 2);
+    lg_rect_t body = { cx, (int16_t)(cy - 2), 3, 5 };
+    lg_paint_panel(c, r, &body, fg, fg, fg, 0, 0);
+    for (int16_t i = 0; i < 3; i++) {   /* the cone: three steps, taller as they go out */
+        lg_rect_t step = { (int16_t)(cx + 3 + i), (int16_t)(cy - 3 - i * 2), 1, (int16_t)(7 + i * 4) };
+        lg_paint_panel(c, r, &step, fg, fg, fg, 0, 0);
+    }
+    /* Two arcs, lit in turn, so the icon is never still while a voice is coming out. */
+    for (uint8_t k = 0; k < 2u; k++) {
+        if (k > s_voice_wave) {
+            break;
+        }
+        int16_t x = (int16_t)(cx + 8 + k * 3);
+        int16_t half = (int16_t)(4 + k * 3);
+        lg_rect_t arc = { x, (int16_t)(cy - half), 1, (int16_t)(half * 2) };
+        if (arc.x + arc.w <= r->x + r->w) {
+            lg_paint_panel(c, r, &arc, fg, fg, fg, 0, 0);
+        }
+    }
+}
+
 static void voice_mark(void)
 {
     static bool shown;
+    static uint8_t last_wave = 0xFF;
     hh_voice_state_t vs;
     hh_voice_state(&vs);
     bool on = vs.heard != 0 || vs.talking;
     if (!on && !shown) {
         return;
     }
-    shown = on;
     lg_rect_t r = ui_bar_spare_rect();
     if (r.w <= 0) {
         return;
     }
-    lg_box_t b;
-    memset(&b, 0, sizeof(b));
-    b.rect = r;
-    b.bg = b.outside = C_BG;
-    b.font = &lg_font_montserrat_16;
-    b.fg = vs.talking ? C_ERROR : C_WARNING;
-    b.align = LG_ALIGN_CENTER;
-    snprintf(b.text, sizeof(b.text), "%s", on ? LG_SYMBOL_WIFI : "");
-    lg_draw_box(&b);
+    if (on) {
+        s_voice_wave = (uint8_t)((s_voice_wave + 1u) % 3u);
+    }
+    if (on == shown && s_voice_wave == last_wave) {
+        return;   /* nothing has changed: do not repaint the bar for its own sake */
+    }
+    shown = on;
+    last_wave = s_voice_wave;
+    if (!on) {
+        lg_draw_fill(&r, C_BG);   /* gone: leave the slot as it was found */
+        return;
+    }
+    static lg_rect_t slot;
+    slot = r;
+    lg_draw_region(&r, voice_paint, &slot);
 }
 
 static void refresh(void)

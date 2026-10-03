@@ -741,11 +741,24 @@ static bool voice_body_ok(const lg_env_t *e, const uint8_t *body)
                e->body_len >= LG_VOICE_HDR_LEN + LG_AEAD_TAG_LEN &&
                e->body_len <= LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN;
     }
+    /*
+     * A group and an announcement carry the same body: not end-to-end sealed, because there is no one
+     * recipient to seal it to, and a readable voice header so an AP can route the frame without opening
+     * it. The third gate D88 had to pass and the one that was missed - lg_client_send_voice and
+     * hh_service_voice_send were both opened to LG_SCOPE_BROADCAST on 2026-10-02 while this still said
+     * "never broadcast", so an announcement that got past both of those was rejected here as invalid.
+     */
     if (e->scope == LG_SCOPE_GROUP) {
         return (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 && e->target <= 0xFFFFu &&
                lg_voice_hdr_dec(body, e->body_len, NULL);
     }
-    return false;   /* never broadcast */
+    if (e->scope == LG_SCOPE_BROADCAST) {
+        /* An announcement's target is the broadcast constant, not a 16-bit group id: checking it against
+         * the group's range is what silently dropped the first working spoken announcement. */
+        return (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 && e->target == LG_TARGET_ALL &&
+               lg_voice_hdr_dec(body, e->body_len, NULL);
+    }
+    return false;
 }
 
 static uint8_t validate_voice(lg_node_t *n, const lg_env_t *e, const uint8_t *body)
@@ -757,6 +770,11 @@ static uint8_t validate_voice(lg_node_t *n, const lg_env_t *e, const uint8_t *bo
     if (e->scope == LG_SCOPE_DIRECT) {
         if (lg_roster_user(r, e->target) == NULL || e->target == e->origin_id) {
             return LG_ACK_REJ_UNKNOWN_TARGET;
+        }
+    } else if (e->scope == LG_SCOPE_BROADCAST) {
+        /* A spoken announcement, held to the same permission as a written one (D56). */
+        if (!lg_roster_may_announce(r, e->origin_id)) {
+            return LG_ACK_REJ_NOT_ALLOWED;
         }
     } else {
         if (lg_roster_group_index(r, (uint16_t)e->target) < 0) {

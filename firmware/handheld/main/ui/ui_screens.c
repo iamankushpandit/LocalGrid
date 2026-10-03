@@ -471,7 +471,7 @@ void ui_group_edit_touch(int16_t x, int16_t y, bool down)
 
 enum { SET_TAB_GRID, SET_TAB_SOUND, SET_TAB_SCREEN, SET_TAB_DEVICE };
 enum { SET_WHICH_AP = 20, SET_RECONNECT, SET_SCAN, SET_VOLUME, SET_TEST, SET_SAVER, SET_CALIBRATE, SET_NAME,
-       SET_RESTART, SET_TALK };
+       SET_RESTART, SET_TALK, SET_TONE_RECV, SET_TONE_ANN, SET_TONE_URG };
 
 static const char *const SET_TABS[] = { "Grid", "Sound", "Screen", "Device" };
 static const char *const VOLUME_NAMES[LG_VOLUME_STEPS] = { "Off", "Low", "Med", "High" };
@@ -525,9 +525,34 @@ static uint32_t settings_build(bool rebuild)
             r->options = TALK_NAMES;
             r->n_options = LG_TALK_STEPS;
             r->selected = lg_bsp_audio_talk_boost();
+            /*
+             * A tone per cue (owner, 2026-10-02). Choosing one plays it, because nobody can pick a
+             * sound from a word: "Knock" and "Drop" mean nothing until you have heard them, and the
+             * whole reason to offer a choice is that the right one depends on the pocket it is in.
+             */
+            static const struct { const char *label; uint8_t cue; uint8_t action; } TONES[] = {
+                { "Message tone", LG_CUE_RECEIVED, SET_TONE_RECV },
+                { "Announcement", LG_CUE_ANNOUNCE, SET_TONE_ANN },
+                { "Emergency",    LG_CUE_URGENT,   SET_TONE_URG },
+            };
+            for (unsigned i = 0; i < sizeof(TONES) / sizeof(TONES[0]); i++) {
+                uint8_t n = lg_bsp_audio_tone_count((lg_cue_t)TONES[i].cue);
+                if (n < 2u) {
+                    continue;
+                }
+                static const char *names[3][LG_TONE_MAX];
+                for (uint8_t k = 0; k < n; k++) {
+                    names[i][k] = lg_bsp_audio_tone_name((lg_cue_t)TONES[i].cue, k);
+                }
+                r = slist_add(ROW_CHOICE, TONES[i].label, NULL, TONES[i].action, 0);
+                r->options = names[i];
+                r->n_options = n;
+                r->selected = lg_bsp_audio_tone_choice((lg_cue_t)TONES[i].cue);
+            }
             slist_add(ROW_BUTTON, "Test sound", NULL, SET_TEST, LG_CUE_RECEIVED)->style = BTN_MAIN;
             slist_add(ROW_BUTTON, "Test urgent", NULL, SET_TEST, LG_CUE_URGENT)->style = BTN_PLAIN;
-            slist_add(ROW_NOTE, NULL, "A bell when a message arrives, and three notes for an urgent one.", -1, 0);
+            slist_add(ROW_NOTE, NULL, "Emergency tones differ in rhythm, not just pitch: Morse SOS is "
+                                      "the one a stranger recognises.", -1, 0);
             slist_add(ROW_NOTE, NULL, "Off silences the handheld except for urgent broadcasts, which always sound.",
                       -1, 0);
         } else {
@@ -622,6 +647,17 @@ void ui_settings_touch(int16_t x, int16_t y, bool down)
         lg_bsp_audio_set_talk_boost((uint8_t)ev.arg);
         ui_settings_refresh();
         break;
+    case SET_TONE_RECV:
+    case SET_TONE_ANN:
+    case SET_TONE_URG: {
+        lg_cue_t cue = ev.id == SET_TONE_RECV ? LG_CUE_RECEIVED
+                     : ev.id == SET_TONE_ANN  ? LG_CUE_ANNOUNCE : LG_CUE_URGENT;
+        if (lg_bsp_audio_set_tone(cue, (uint8_t)ev.arg) == ESP_OK) {
+            lg_bsp_audio_cue(cue);   /* hear what was chosen, which is the only way to choose */
+        }
+        ui_settings_refresh();
+        break;
+    }
     case SET_TEST:
         (void)lg_bsp_audio_cue((lg_cue_t)ev.arg);
         break;

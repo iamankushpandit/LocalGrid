@@ -67,6 +67,7 @@ static const char *TAG = "BSP";
 #define NVS_NAMESPACE "lgui"
 #define NVS_KEY_MUTE   "mute"   /* the older on/off flag, read once and carried forward */
 #define NVS_KEY_VOLUME "vol"
+#define NVS_KEY_MIC       "mic"
 #define NVS_KEY_TALK   "talkboost"
 
 /* A request is either a cue from the table or one bare tone from the console. */
@@ -106,7 +107,16 @@ typedef struct {
  */
 #define MIC_PGA_REG      0x1A   /* register 0x14: analogue mic input, PGA at +30 dB */
 #define MIC_ADC_VOLUME   0xC8   /* register 0x17: +4.5 dB */
-#define MIC_SCALE_DEFAULT 3     /* register 0x16 low bits: 6 dB a step, 3 is +18 dB */
+/*
+ * Full digital gain, not the middle of the range.
+ *
+ * Owner, 2026-10-02: push-to-talk works but 'it is very hard to hear the other person'. The default
+ * was 3 of 7 (+18 dB of the available +42), chosen so ordinary speech at 30 cm sat near -25 dBFS -
+ * a tidy level for a recording, and far too quiet for a small speaker across a campsite. The soft
+ * knee at TALK_KNEE rounds peaks off rather than clipping them, so the top of the range costs
+ * headroom rather than intelligibility.
+ */
+#define MIC_SCALE_DEFAULT  MIC_SCALE_MAX     /* register 0x16 low bits: 6 dB a step, 3 is +18 dB */
 #define MIC_SCALE_MAX    7
 
 static struct {
@@ -222,17 +232,176 @@ static const seg_t CUE_URGENT[] = {
     { 853, 190, ATTEN_FULL }, { 960, 400, ATTEN_FULL },
 };
 
+/* ---- the alternatives (owner, 2026-10-02) --------------------------------------------------------
+ *
+ * Each set keeps its cue's job and changes its character. A message tone stays short and must not be
+ * mistaken for the announcement; an announcement must not be mistaken for an emergency; an emergency
+ * must carry across a camp and keep working when somebody is used to it.
+ */
+
+/* A message arrived: alternatives to the bell. */
+static const seg_t RECV_PING[] = {        /* one clean blip: the least you can be told something */
+    { 1760, 60, ATTEN_FULL },
+};
+static const seg_t RECV_KNOCK[] = {       /* two low taps, for a pocket rather than a table */
+    { 587, 55, ATTEN_FULL }, { 0, 45, ATTEN_FULL }, { 587, 55, ATTEN_FULL },
+};
+static const seg_t RECV_DROP[] = {        /* a falling pair: "arrived", against the sent cue's rise */
+    { 1319, 70, ATTEN_FULL }, { 880, 110, ATTEN_QUIET },
+};
+
+/* Something for everybody: alternatives to the three rising notes. */
+static const seg_t ANN_CHIME[] = {        /* a doorbell's two notes, falling */
+    { 1319, 160, ATTEN_FULL }, { 988, 260, ATTEN_FULL },
+};
+static const seg_t ANN_PIPS[] = {         /* three flat pips, like a time signal: formal, not musical */
+    { 1047, 90, ATTEN_FULL }, { 0, 90, ATTEN_FULL },
+    { 1047, 90, ATTEN_FULL }, { 0, 90, ATTEN_FULL },
+    { 1047, 90, ATTEN_FULL },
+};
+static const seg_t ANN_HORN[] = {         /* low then high, held: carries through noise and walls */
+    { 440, 200, ATTEN_FULL }, { 659, 320, ATTEN_FULL },
+};
+
+/*
+ * The emergency: four, and they differ in rhythm.
+ *
+ * MORSE is `... --- ...`, and it is here because it is the one pattern a stranger recognises without
+ * being told what the device is - which is the whole point of a distress signal. It is a tone pattern
+ * on the speaker, not a way of sending data: the message itself still crosses the grid as sealed bytes.
+ */
+static const seg_t URG_WARBLE[] = {       /* fast alternation: harder to sleep through than a slow pair */
+    { 1047, 90, ATTEN_FULL }, { 784, 90, ATTEN_FULL }, { 1047, 90, ATTEN_FULL }, { 784, 90, ATTEN_FULL },
+    { 1047, 90, ATTEN_FULL }, { 784, 90, ATTEN_FULL }, { 1047, 90, ATTEN_FULL }, { 784, 90, ATTEN_FULL },
+    { 1047, 90, ATTEN_FULL }, { 784, 90, ATTEN_FULL }, { 1047, 90, ATTEN_FULL }, { 784, 90, ATTEN_FULL },
+    { 1047, 90, ATTEN_FULL }, { 784, 300, ATTEN_FULL },
+};
+static const seg_t URG_SWEEP[] = {        /* a stepped rise, three times over: a siren, not a bell */
+    { 600, 70, ATTEN_FULL }, { 800, 70, ATTEN_FULL }, { 1000, 70, ATTEN_FULL }, { 1250, 160, ATTEN_FULL },
+    { 0, 70, ATTEN_FULL },
+    { 600, 70, ATTEN_FULL }, { 800, 70, ATTEN_FULL }, { 1000, 70, ATTEN_FULL }, { 1250, 160, ATTEN_FULL },
+    { 0, 70, ATTEN_FULL },
+    { 600, 70, ATTEN_FULL }, { 800, 70, ATTEN_FULL }, { 1000, 70, ATTEN_FULL }, { 1250, 400, ATTEN_FULL },
+};
+#define DIT  { 1000, 90, ATTEN_FULL }, { 0, 90, ATTEN_FULL }
+#define DAH  { 1000, 270, ATTEN_FULL }, { 0, 90, ATTEN_FULL }
+static const seg_t URG_MORSE[] = {        /* ... --- ...  twice, with a gap between the letters */
+    DIT, DIT, DIT, { 0, 180, ATTEN_FULL },
+    DAH, DAH, DAH, { 0, 180, ATTEN_FULL },
+    DIT, DIT, DIT, { 0, 400, ATTEN_FULL },
+    DIT, DIT, DIT, { 0, 180, ATTEN_FULL },
+    DAH, DAH, DAH, { 0, 180, ATTEN_FULL },
+    DIT, DIT, DIT,
+};
+#undef DIT
+#undef DAH
+
+/*
+ * The beep before a voice. Two quick rising blips: short enough to fit inside the prebuffer, and
+ * deliberately unlike the message bell, because it means "listen now", not "read this later".
+ */
+static const seg_t CUE_TALK[] = {
+    { 1175, 70, ATTEN_FULL }, { 0, 40, ATTEN_FULL }, { 1568, 90, ATTEN_FULL },
+};
+
 typedef struct {
     const seg_t *segs;
     uint8_t      count;
 } cue_t;
 
-static const cue_t CUES[LG_CUE_COUNT] = {
-    [LG_CUE_SENT]     = { CUE_SENT,     sizeof(CUE_SENT) / sizeof(seg_t)     },
-    [LG_CUE_RECEIVED] = { CUE_RECEIVED, sizeof(CUE_RECEIVED) / sizeof(seg_t) },
-    [LG_CUE_ANNOUNCE] = { CUE_ANNOUNCE, sizeof(CUE_ANNOUNCE) / sizeof(seg_t) },
-    [LG_CUE_URGENT]   = { CUE_URGENT,   sizeof(CUE_URGENT) / sizeof(seg_t)   },
+#define TONE(x) { (x), sizeof(x) / sizeof(seg_t) }
+
+/*
+ * Every cue's tones, the first being what the handheld has always made, so an existing device sounds
+ * exactly as it did until somebody chooses otherwise. A NULL entry is "this cue has no such tone".
+ */
+static const cue_t CUES[LG_CUE_COUNT][LG_TONE_MAX] = {
+    [LG_CUE_SENT]     = { TONE(CUE_SENT) },
+    [LG_CUE_RECEIVED] = { TONE(CUE_RECEIVED), TONE(RECV_PING), TONE(RECV_KNOCK), TONE(RECV_DROP) },
+    [LG_CUE_ANNOUNCE] = { TONE(CUE_ANNOUNCE), TONE(ANN_CHIME), TONE(ANN_PIPS), TONE(ANN_HORN) },
+    [LG_CUE_URGENT]   = { TONE(CUE_URGENT), TONE(URG_WARBLE), TONE(URG_SWEEP), TONE(URG_MORSE) },
+    [LG_CUE_TALK]     = { TONE(CUE_TALK) },
 };
+
+#undef TONE
+
+static const char *const TONE_NAMES[LG_CUE_COUNT][LG_TONE_MAX] = {
+    [LG_CUE_SENT]     = { "Blip" },
+    [LG_CUE_RECEIVED] = { "Bell", "Ping", "Knock", "Drop" },
+    [LG_CUE_ANNOUNCE] = { "Rising", "Chime", "Pips", "Horn" },
+    [LG_CUE_URGENT]   = { "Two-tone", "Warble", "Siren", "Morse SOS" },
+    [LG_CUE_TALK]     = { "Talk beep" },
+};
+
+/* The NVS key per cue; NULL for one nobody chooses, which is also what makes it unsettable. */
+static const char *const TONE_KEYS[LG_CUE_COUNT] = {
+    [LG_CUE_SENT]     = NULL,
+    [LG_CUE_RECEIVED] = "tone_recv",
+    [LG_CUE_ANNOUNCE] = "tone_ann",
+    [LG_CUE_URGENT]   = "tone_urg",
+    [LG_CUE_TALK]     = NULL,
+};
+
+static uint8_t s_tone[LG_CUE_COUNT];   /* loaded once at start, then authoritative */
+
+uint8_t lg_bsp_audio_tone_count(lg_cue_t cue)
+{
+    if ((unsigned)cue >= LG_CUE_COUNT) {
+        return 0;
+    }
+    uint8_t n = 0;
+    while (n < LG_TONE_MAX && CUES[cue][n].segs != NULL) {
+        n++;
+    }
+    return n;
+}
+
+const char *lg_bsp_audio_tone_name(lg_cue_t cue, uint8_t choice)
+{
+    if ((unsigned)cue >= LG_CUE_COUNT || choice >= lg_bsp_audio_tone_count(cue)) {
+        return NULL;
+    }
+    return TONE_NAMES[cue][choice];
+}
+
+uint8_t lg_bsp_audio_tone_choice(lg_cue_t cue)
+{
+    return (unsigned)cue < LG_CUE_COUNT ? s_tone[cue] : 0u;
+}
+
+esp_err_t lg_bsp_audio_set_tone(lg_cue_t cue, uint8_t choice)
+{
+    if ((unsigned)cue >= LG_CUE_COUNT || choice >= lg_bsp_audio_tone_count(cue) ||
+        TONE_KEYS[cue] == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_tone[cue] = choice;
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return ESP_OK;   /* it sounds right now; a store that will not open is not worth refusing for */
+    }
+    nvs_set_u8(nvs, TONE_KEYS[cue], choice);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+    return ESP_OK;
+}
+
+/* Reads the chosen tones at start-up. A key never written leaves the cue as it has always sounded. */
+static void load_tones(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    for (unsigned i = 0; i < LG_CUE_COUNT; i++) {
+        uint8_t stored = 0;
+        if (TONE_KEYS[i] != NULL && nvs_get_u8(nvs, TONE_KEYS[i], &stored) == ESP_OK &&
+            stored < lg_bsp_audio_tone_count((lg_cue_t)i)) {
+            s_tone[i] = stored;
+        }
+    }
+    nvs_close(nvs);
+}
 
 /*
  * The amplifier. Without this the speaker stays silent however right everything else is, and
@@ -926,7 +1095,7 @@ static void play_request(const req_t *r)
     s.out_on = true;
     output_apply();
     if (r->cue < LG_CUE_COUNT) {
-        const cue_t *c = &CUES[r->cue];
+        const cue_t *c = &CUES[r->cue][lg_bsp_audio_tone_choice(r->cue)];
         for (uint8_t i = 0; i < c->count; i++) {
             play_segment(c->segs[i].hz, c->segs[i].ms, atten_for(c->segs[i].atten, r->always));
         }
@@ -1052,6 +1221,16 @@ static void load_volume(void)
             s.volume = LG_VOLUME_OFF;   /* carried over from the older on/off flag */
         }
         nvs_close(nvs);
+        load_tones();   /* the chosen tones, read once and then authoritative */
+#if LG_AUDIO_CODEC_BACKEND
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+            uint8_t mic = 0;
+            if (nvs_get_u8(nvs, NVS_KEY_MIC, &mic) == ESP_OK && mic <= MIC_SCALE_MAX) {
+                s.mic_scale = mic;
+            }
+            nvs_close(nvs);
+        }
+#endif
     } else if (nvs_err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW(TAG, "[AUDIO] Volume setting unreadable (%s); staying loud until it is set again",
                  esp_err_to_name(nvs_err));
@@ -1184,7 +1363,21 @@ esp_err_t lg_bsp_audio_cue(lg_cue_t cue)
         return ESP_ERR_INVALID_ARG;
     }
     /* The emergency exception: urgent is the one cue a quietened handheld still plays. */
-    req_t r = { .cue = (uint8_t)cue, .hz = 0, .ms = 0, .always = cue == LG_CUE_URGENT };
+    /*
+     * An announcement sounds whatever the volume says, as an urgent broadcast does (D40).
+     *
+     * Owner, 2026-10-02: "if there's an announcement and the handhelds have speaker on them, they
+     * should be able to broadcast that announcement. It shouldn't be behind any preference." An
+     * announcement is somebody addressing everyone - the food is ready, we are leaving in ten minutes -
+     * and a handheld that silently swallows it because its owner muted their message bell has failed at
+     * the one job that needed the speaker. The mute still silences ordinary message cues, which is what
+     * people actually mute.
+     *
+     * The talk beep rides on the same rule: it is the warning that a voice is about to come out of the
+     * speaker, so a muted handheld that is about to play speech anyway should still give it.
+     */
+    bool always = cue == LG_CUE_URGENT || cue == LG_CUE_ANNOUNCE || cue == LG_CUE_TALK;
+    req_t r = { .cue = (uint8_t)cue, .hz = 0, .ms = 0, .always = always };
     return enqueue(&r);
 }
 
@@ -1381,6 +1574,17 @@ esp_err_t lg_bsp_audio_mic_gain_set(uint8_t step)
         return ESP_ERR_NOT_SUPPORTED;
     }
     s.mic_scale = step;
+    /*
+     * Kept across a reboot. It was not, and the header said so ("not kept across a reboot; it is for
+     * tuning with `mic level`") - which meant every microphone adjustment was lost at the next restart,
+     * and on a bench that restarts handhelds for a living that is the same as having no control at all.
+     */
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, NVS_KEY_MIC, step);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
     esp_err_t err = ESP_OK;
     if (lock_take(LOCK_WAIT_MS)) {
         if (s.codec_up) {
@@ -1461,7 +1665,13 @@ static uint8_t s_talk = 0xFF;   /* 0xFF: not read from NVS yet */
 
 static uint8_t talk_default(void)
 {
-    return is_codec() ? (uint8_t)LG_TALK_LOUD : (uint8_t)LG_TALK_LOUDER;
+    /*
+     * The loudest, on every board. The codec board used to start one step down on the grounds that it
+     * is the louder of the two; the owner's answer after using it is that neither is loud enough
+     * (2026-10-02). A person who finds it too loud can turn it down, and could not turn it up past
+     * this - so the default belongs at the top.
+     */
+    return (uint8_t)LG_TALK_LOUDER;
 }
 
 uint8_t lg_bsp_audio_talk_boost(void)

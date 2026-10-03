@@ -2541,8 +2541,14 @@ void hh_service_set_voice_io(const hh_voice_io_t *io)
 
 esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len)
 {
-    if ((scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP) || frame == NULL || len == 0 ||
-        len > HH_VOICE_FRAME_MAX) {
+    /*
+     * Broadcast included (D88). It was left out when this was written, so the spoken announcement added
+     * on 2026-10-02 passed lg_client and the chat screen and was then refused here, frame by frame: the
+     * talk bar worked, the counter said every frame was dropped, and nothing was heard. The scope list
+     * is now the same one lg_client_send_voice accepts, which is the only way the two stay in step.
+     */
+    if ((scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP && scope != LG_SCOPE_BROADCAST) ||
+        frame == NULL || len == 0 || len > HH_VOICE_FRAME_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s.voice_queue == NULL) {

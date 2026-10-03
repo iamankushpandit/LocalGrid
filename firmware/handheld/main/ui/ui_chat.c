@@ -575,7 +575,10 @@ static void place(bool keyboard)
     s.keyboard = keyboard;
     int16_t kb_h = keyboard ? (int16_t)(ui_kb_height() + GAP) : 0;
     hh_voice_state(&s.voice);
-    bool talk = !keyboard && s.voice.can_talk && (s.scope == LG_SCOPE_DIRECT || s.scope == LG_SCOPE_GROUP);
+    /* Everyone included: a spoken announcement is the thing people reach for first (D56, D61). */
+    bool talk = !keyboard && s.voice.can_talk &&
+                (s.scope == LG_SCOPE_DIRECT || s.scope == LG_SCOPE_GROUP ||
+                 s.scope == LG_SCOPE_BROADCAST);
     int16_t talk_h = talk ? (int16_t)(TALK_H + GAP) : 0;
     int16_t input_y = (int16_t)(s.h - kb_h - talk_h - INPUT_H - GAP);
     s.talk = talk ? (lg_rect_t){ PAD, (int16_t)(input_y + INPUT_H + GAP), (int16_t)(s.w - 2 * PAD), TALK_H }

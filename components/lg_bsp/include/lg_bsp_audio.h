@@ -33,8 +33,35 @@ typedef enum {
     LG_CUE_RECEIVED,   /* a message arrived */
     LG_CUE_ANNOUNCE,   /* a broadcast everyone should hear: the food is ready */
     LG_CUE_URGENT,     /* an urgent broadcast: the two-tone alert, and it ignores the volume */
+    LG_CUE_TALK,       /* someone is about to be heard: the beep a push-to-talk radio makes first */
     LG_CUE_COUNT,
 } lg_cue_t;
+
+/*
+ * The tones a person may choose between, per cue.
+ *
+ * Owner, 2026-10-02: "at least three to four tone selections for each one of them ... they don't have
+ * to be musical but they have to be distinct." Distinct is what shapes them, and it is why the four
+ * emergency tones differ in **rhythm** rather than only in pitch: pitch alone is what somebody stops
+ * hearing after the third night, and a person choosing an emergency tone is choosing the one they will
+ * not sleep through, not the one they like.
+ *
+ * Only the three cues worth choosing between are selectable. The sent cue is the sound of your own
+ * thumb, heard more often than all the others together, so it stays one short blip and offers nothing.
+ */
+#define LG_TONE_MAX  4u
+
+/* How many tones this cue offers: 1 for a cue that is not selectable. */
+uint8_t lg_bsp_audio_tone_count(lg_cue_t cue);
+
+/* The chosen tone, 0 to count-1. Kept in NVS beside the volume, so it survives a reflash (D22). */
+uint8_t lg_bsp_audio_tone_choice(lg_cue_t cue);
+
+/* Chooses one. Out of range is refused rather than clamped: a bad index is a bad caller, not a taste. */
+esp_err_t lg_bsp_audio_set_tone(lg_cue_t cue, uint8_t choice);
+
+/* Its name, for the settings screen and the console; NULL when there is no such tone. */
+const char *lg_bsp_audio_tone_name(lg_cue_t cue, uint8_t choice);
 
 /*
  * Claims whatever the board can make a sound with. Safe to call on a board that cannot:

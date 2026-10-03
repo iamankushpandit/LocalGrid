@@ -40,8 +40,10 @@ typedef struct {
 esp_err_t hh_voice_start(void);
 
 /*
- * Starts talking to a 1:1 conversation (LG_SCOPE_DIRECT, target = device) or a group
- * (LG_SCOPE_GROUP, target = group id). ESP_ERR_NOT_SUPPORTED on a board with no microphone,
+ * Starts talking to a 1:1 conversation (LG_SCOPE_DIRECT, target = device), a group
+ * (LG_SCOPE_GROUP, target = group id), or everyone (LG_SCOPE_BROADCAST), which is a spoken
+ * announcement and needs the same permission as a written one (D56).
+ * ESP_ERR_NOT_SUPPORTED on a board with no microphone,
  * ESP_ERR_INVALID_STATE while someone else is being played or a talk is already running,
  * ESP_ERR_INVALID_ARG for any other scope.
  */
@@ -49,6 +51,19 @@ esp_err_t hh_voice_ptt_start(uint8_t scope, uint32_t target);
 
 /* Stops talking: the last frame goes out marked as the end. Safe to call when not talking. */
 void hh_voice_ptt_stop(void);
+
+/*
+ * Talks for `seconds` with a generated voice in place of the microphone, then stops by itself.
+ *
+ * Works on a board with no microphone, which is four of the six handhelds on the bench, and says the
+ * same thing every time, so what a listener played can be compared with what was sent. Scope and target
+ * are as hh_voice_ptt_start, including LG_SCOPE_BROADCAST for a spoken announcement.
+ *
+ * This is how voice gets tested at all: the harness drives the handhelds over the serial console, and
+ * nothing there can hold a talk bar down. It is also the first piece of the grid being able to
+ * demonstrate itself without somebody standing over it talking into a board.
+ */
+esp_err_t hh_voice_demo_start(uint8_t scope, uint32_t target, uint8_t seconds);
 
 /* Copies the current state; safe from any task. */
 void hh_voice_state(hh_voice_state_t *out);

@@ -76,6 +76,14 @@ FAULT_GRACE_S = 40             # a restart this soon after an injected fault is 
 QUERY_EVERY_S = 3600           # hourly 'nodes' on APs and 'mem' on handhelds
 # A handheld with no Wi-Fi session is sampled this often, and only a fallback that outlasts the grace
 # period is a finding: joining an AP legitimately takes a few seconds, and a roam takes longer.
+# D87: the hours in which this run may raise an alert that makes a noise. Outside them it raises none,
+# because an announcement or an urgent broadcast sounds on every handheld in the house - and an urgent
+# one sounds even with the volume off (D40), which is exactly what makes it worth testing and exactly
+# what makes it unwelcome at four in the morning. Owner, 2026-10-02: "between nine PM at night to two PM
+# in the afternoon, there should be no audible test."
+AUDIBLE_FROM_H = 14
+AUDIBLE_TO_H = 21
+
 FALLBACK_EVERY_S = 10
 FALLBACK_GRACE_S = 45
 SUMMARY_EVERY_S = 600
@@ -140,6 +148,16 @@ RX = {
     "lora_link_up": re.compile(r"\[LORA\] Link up to AP (\d+), RSSI (-?\d+) dBm, SNR (-?\d+)"),
     "lora_link_down": re.compile(r"\[LORA\] Link down to AP (\d+) \(([^)]*)\)"),
     "lora_gone": re.compile(r"\[LORA\] The module stopped answering"),
+    # Voice (D61, D88). A talk is a stream with no token and no ack, so it is measured at both ends
+    # instead: the sender says how many frames it sent under a talk id, every listener says how many
+    # of them it played under the same id, and the difference is the loss for a real voice. "Talk not
+    # sent" is the refusal a handheld on LoRa must give, because D71 keeps voice off that radio.
+    "voice_caps": re.compile(r"\[MSG\] Push-to-talk: (talk and listen|listen only|off)"),
+    "voice_begin": re.compile(r"\[MSG\] Talking to (everyone|group|device) (\d+)"),
+    "voice_sent": re.compile(r"\[MSG\] Talk ended: talk (\d+), (\d+) frame\(s\), (\d+) dropped before "
+                             r"the AP, (\d+) ms"),
+    "voice_heard": re.compile(r"\[MSG\] Heard talk (\d+) from (\d+): (\d+) frame\(s\), (\d+) missing"),
+    "voice_refused": re.compile(r"\[MSG\] Talk not sent: (.+)"),
 }
 
 # The `lora` status block, as the AP console prints it (firmware/node/main/lora.c, lora_print).
@@ -537,7 +555,7 @@ LORA_KINDS = ("lora_only", "lora_down", "lora_wedge", "lora_blind", "lora_handhe
 # alerts walks the sequence a person actually uses in an emergency: an announcement, an SOS, and the all
 # clear that stands it down. The last of those had never been sent on this bench, because the console had
 # no way to send it until today.
-EXTRA_KINDS = ("no_net", "alerts")
+EXTRA_KINDS = ("no_net", "alerts", "voice")
 LORA_WHAT = {
     "lora_only": "ESP-NOW off on every named AP: anything that still crosses went by LoRa",
     "lora_down": "LoRa off on one AP while Wi-Fi stays up: nothing may be lost and nothing may stall",
@@ -602,6 +620,19 @@ def lora_round(rng, aps, lora_hhs=(), n_hhs=0):
             "outage_s": 0 if kind == "lora_wedge" else lora_window_seconds(rng)}
 
 
+def parse_hours(text):
+    """"HH-HH" into a (from, to) pair of hours; the D87 window by default, "0-0" for all day."""
+    if not text:
+        return (AUDIBLE_FROM_H, AUDIBLE_TO_H)
+    try:
+        lo, hi = (int(x) for x in text.split("-", 1))
+    except ValueError:
+        raise SystemExit(f"--audible-hours wants HH-HH, for example 14-21, not {text!r}")
+    if not (0 <= lo <= 23 and 0 <= hi <= 23):
+        raise SystemExit("--audible-hours wants hours between 0 and 23")
+    return (lo, hi)
+
+
 def make_schedule(rng, n_aps, n_hhs, args):
     """Experiments with planned start offsets, naming victims by slot ("AP1", "HH2"). Slots are filled from the
     discovered boards in AP index and device index order. A live run starts each experiment only once the grid
@@ -634,6 +665,10 @@ def make_schedule(rng, n_aps, n_hhs, args):
                 choices.append("no_net")   # at parity with alerts: this is the one that proves Wi-Fi alone
             if len(hhs) >= 2 and not getattr(args, "no_alerts", False):
                 choices += ["alerts"]
+            # Voice needs one handheld to talk and one to hear, which is the same two as the rest.
+            # It makes the listeners audible, so it obeys the quiet hours (D87) like an alert round.
+            if len(hhs) >= 2 and not getattr(args, "no_voice", False):
+                choices += ["voice"]
             if choices:
                 kind = rng.choice(choices)
                 outage = lora_window_seconds(rng) if kind == "no_net" else 0
@@ -698,6 +733,11 @@ class Board:
         self.id = self.role = self.board = self.index = self.ap_name = None
         self.expected_id = None          # set once discovery is over: a different ID later means a swapped board
         self.groups = {}                 # handheld: group name -> member, from its 'groups' command
+        self.can_hear = None             # from the board's own boot line, not a table: None until said
+        self.can_talk = None
+        self.voice_sent = {}             # talk id -> (frames, dropped, ms), as the sender reported
+        self.voice_heard = {}            # talk id -> (author, played, missing), as this one played it
+        self.voice_refused = None        # the last 'Talk not sent' reason; cleared when a round starts
         self.ser = None
         self.lost_since = None
         self.last_retry = 0.0
@@ -786,6 +826,7 @@ class Chaos:
         self.fallback_log = []       # every finished episode, for the report and events.jsonl
         self.next_fallback = 0.0
         self.no_net_until = 0.0      # while a "no safety net" round has LoRa switched off on purpose
+        self.audible_hours = parse_hours(getattr(args, "audible_hours", None))
         self.time_source = None   # where the grid last got its time from outside itself; see time_source()
         self.link_saves = 0
         self.known_ports = set()
@@ -1114,6 +1155,15 @@ class Chaos:
         elif m := RX["lora_link_down"].search(line):
             b.lora_links.discard(int(m.group(1)))
             self.event("lora_link_down", board=b.name, peer=int(m.group(1)), why=m.group(2))
+        elif m := RX["voice_caps"].search(line):
+            b.can_talk = m.group(1) == "talk and listen"
+            b.can_hear = m.group(1) != "off"
+        elif m := RX["voice_sent"].search(line):
+            b.voice_sent[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        elif m := RX["voice_heard"].search(line):
+            b.voice_heard[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        elif m := RX["voice_refused"].search(line):
+            b.voice_refused = m.group(1)
         elif RX["lora_gone"].search(line):
             self.finding(f"{b.name}: its LoRa module stopped answering", board=b.name)
         elif m := RX["volume"].search(line):
@@ -1293,6 +1343,27 @@ class Chaos:
                 "own charge, so the figure is how long the access point kept beaconing. It is a floor on "
                 "the battery's life, not the battery's life.", ""]
         return out
+
+    def audible_ok(self):
+        """May this run make a noise right now? (D87)
+
+        The window is read from the laptop's own clock, not the grid's: what matters is the hour where
+        the handhelds are, and that is where this laptop is too. `--no-alerts` silences them whatever
+        the hour, and `--audible-hours` moves the window for a run somebody is sitting with.
+        """
+        if self.args.no_alerts:
+            return False
+        lo, hi = self.audible_hours
+        if lo == hi:
+            return True            # an explicit all-day window
+        hour = datetime.datetime.now().hour
+        return lo <= hour < hi if lo < hi else (hour >= lo or hour < hi)
+
+    def quiet_note(self):
+        """Why no alert was raised, in words the report can print."""
+        lo, hi = self.audible_hours
+        return (f"outside the audible hours {lo:02d}:00-{hi:02d}:00 (D87)" if not self.args.no_alerts
+                else "alerts are switched off for this run (--no-alerts)")
 
     def wifi_should_have_worked(self, h):
         """Could this handheld have had a Wi-Fi session right now? Returns (yes, why not).
@@ -1553,10 +1624,13 @@ class Chaos:
         # --no-alerts (a night run): announcements and urgent broadcasts take over every handheld's screen,
         # and urgent ones sound even with the volume off (D40), so only 1:1 and group messages are sent, and
         # none at all while grid time is unset (then urgent is all a handheld may send, D6).
-        if kind is None and self.args.no_alerts and not self.time_set:
+        quiet = not self.audible_ok()
+        if kind is None and quiet and not self.time_set:
+            # Nothing but an urgent broadcast may go out with no grid time (D6), and that is the one
+            # thing the hour forbids, so this pass sends nothing at all.
             return None
         if kind is None:
-            kinds = (["direct"] if self.args.no_alerts
+            kinds = (["direct"] if quiet
                      else ["broadcast", "direct"]) + (["group"] if self.group else [])
             kind = self.rng.choice(kinds) if self.time_set else "urgent"
         # "announce" is a plain broadcast, which is what an announcement is on the wire (D56); it is named
@@ -1890,6 +1964,8 @@ class Chaos:
             return self.run_no_net_experiment(e)
         if e["kind"] == "alerts":
             return self.run_alerts_experiment(e)
+        if e["kind"] == "voice":
+            return self.run_voice_experiment(e)
         if e["kind"] in LORA_KINDS:
             return self.run_lora_experiment(e)
         slots = {b.slot: b for b in self.aps + self.hhs}
@@ -2067,6 +2143,10 @@ class Chaos:
         Driven as its own round rather than left to the random traffic because the three are a sequence,
         and because the all clear is the one alert that had never been tested on this bench at all.
         """
+        if not self.audible_ok():
+            self.say(f"#{e['n']} alerts skipped: {self.quiet_note()}")
+            self.event("skipped", n=e["n"], kind="alerts", why=self.quiet_note())
+            return
         senders = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
         if not senders:
             senders = [h for h in self.hhs if self.present(h)]
@@ -2090,6 +2170,133 @@ class Chaos:
         exp["alerts"] = [{"token": p["token"], "kind": p["kind"], "result": p["result"]} for p in got]
         if not tokens:
             self.finding(f"#{e['n']} {v.name}: not one alert could even be queued", n=e["n"], board=v.name)
+        self.phase = ""
+
+    # ---- voice ----
+
+    def voice_hearers(self, sender, scope, target):
+        """Who must play this talk, and who must not.
+
+        The second half is the point. A 1:1 talk reaching a third handheld, or a group talk reaching
+        somebody who is not in the group, is the voice equivalent of reading someone else's message, and
+        nothing else in this harness would notice it. Speaker capability comes from each board's own boot
+        line rather than a table of board codes, so a board that has been rewired reports itself.
+        """
+        heard_by = [h for h in self.hhs if h is not sender and self.present(h) and h.can_hear is not False]
+        if scope == "all":
+            return heard_by, []
+        if scope == "group":
+            members = [h for h in heard_by if h.groups.get(self.group)]
+            return members, [h for h in heard_by if h not in members]
+        one = [h for h in heard_by if h.index == target]
+        return one, [h for h in heard_by if h not in one]
+
+    def run_voice_experiment(self, e):
+        """Push to talk, end to end, over the three scopes a person has.
+
+        Voice was the one path this harness could not reach: it drives handhelds over their serial console
+        and nothing there could hold a talk bar down, so every run until now reported a grid that carried
+        text and said nothing about whether anybody could be heard on it. `demo` gives it a generated voice
+        of a known length from any board, including the four with no microphone, and both ends count frames
+        under a talk id - so the result is a loss figure per listener rather than a yes or no.
+
+        The owner's requirement, 2026-10-02: the two boards with microphones must manage 1:1, a group and
+        an announcement to everyone, "and that needs to be tested. The group and the announcement."
+        """
+        if not self.audible_ok():
+            self.say(f"#{e['n']} voice skipped: {self.quiet_note()}")
+            self.event("skipped", n=e["n"], kind="voice", why=self.quiet_note())
+            return
+        senders = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
+        if not senders:
+            self.say(f"#{e['n']} skipped: no handheld on the grid to talk")
+            self.event("skipped", n=e["n"], kind="voice", why="no handheld registered")
+            return
+        # A board with a microphone is preferred, because that is the one a person would be holding and
+        # the one the owner asked about; any board can do it, which is how the other four get covered.
+        mic = [h for h in senders if h.can_talk]
+        v = self.rng.choice(mic or senders)
+        scope = e.get("scope") or self.rng.choice(("direct", "group", "all"))
+        target = 0
+        if scope == "group" and not any(h.groups.get(self.group) for h in self.hhs if h is not v):
+            scope = "all"          # nobody else is in the shared group: an announcement tests more
+        if scope == "direct":
+            others = [h for h in self.hhs if h is not v and self.present(h) and h.can_hear is not False]
+            if not others:
+                self.say(f"#{e['n']} skipped: nobody to talk to")
+                self.event("skipped", n=e["n"], kind="voice", why="no listener present")
+                return
+            target = self.rng.choice(others).index
+        who = {"direct": str(target), "group": self.group, "all": "all"}[scope]
+        secs = e.get("talk_s") or self.rng.choice((3, 5, 10))
+
+        expect, forbid = self.voice_hearers(v, scope, target)
+        exp = {**e, "slots": e.get("victims", []), "victims": [v.name], "started": self.now_s(),
+               "failover": [], "result": None, "scope": scope, "talk_s": secs,
+               "what": f"a {secs} s talk to {('everyone' if scope == 'all' else who)}"}
+        self.experiments.append(exp)
+        self.phase = f"#{e['n']}"
+        self.say(f"#{e['n']} voice from {v.name}: {secs} s to "
+                 f"{'everyone' if scope == 'all' else 'group ' + who if scope == 'group' else 'device ' + who}"
+                 f"; expecting {len(expect)} listener(s)")
+        self.event("fault", **{k: val for k, val in exp.items() if k not in ("at_s", "failover")})
+
+        before_sent = dict(v.voice_sent)
+        for h in self.hhs:
+            h.voice_refused = None
+        on_lora = v.registered_node is not None and getattr(v, "on_lora", False)
+        if not self.write(v, f"demo {who} {secs}"):
+            self.finding(f"#{e['n']} {v.name}: the console would not take a talk", n=e["n"], board=v.name)
+            exp["result"] = "done"
+            self.phase = ""
+            return
+        # The talk stops itself, then the listeners' last frames have to drain: PREBUFFER_MS plus the
+        # 1.5 s a listener waits before it decides the END was lost.
+        self.wait(secs + 12, until=lambda: len(v.voice_sent) > len(before_sent))
+        new = [k for k in v.voice_sent if k not in before_sent]
+        if not new:
+            why = v.voice_refused or "no result line from the sender"
+            # D71: voice never goes over LoRa, so a handheld with no Wi-Fi refusing is correct behaviour.
+            if on_lora or (v.voice_refused and "short" in v.voice_refused.lower()):
+                self.say(f"#{e['n']} voice refused, correctly: {why}")
+                exp.update(result="done", refused=why, correct_refusal=True)
+            else:
+                self.finding(f"#{e['n']} {v.name}: talked for {secs} s and reported nothing ({why})",
+                             n=e["n"], board=v.name)
+                exp.update(result="done", refused=why)
+            self.phase = ""
+            return
+        talk_id = new[-1]
+        frames, dropped, ms = v.voice_sent[talk_id]
+        self.wait(4)   # the listeners' END lines trail the sender's by the prebuffer
+        heard = {}
+        for h in self.hhs:
+            if talk_id in h.voice_heard:
+                author, played, missing = h.voice_heard[talk_id]
+                if author == v.index:
+                    heard[h.name] = {"played": played, "missing": missing,
+                                     "share": round(played / frames, 3) if frames else None}
+        silent = [h.name for h in expect if h.name not in heard]
+        extra = [h.name for h in forbid if h.name in heard]
+        exp.update(result="done", frames=frames, dropped=dropped, ms=ms, talk_id=talk_id,
+                   expected=[h.name for h in expect], heard=heard, silent=silent, uninvited=extra)
+        self.say(f"#{e['n']} voice: {frames} frame(s) sent, {dropped} dropped at the sender; "
+                 f"heard by {len(heard)} of {len(expect)}")
+        if frames == 0:
+            self.finding(f"#{e['n']} {v.name}: a {secs} s talk sent no frames at all", n=e["n"], board=v.name)
+        if dropped and frames and dropped >= frames:
+            self.finding(f"#{e['n']} {v.name}: every one of {frames} voice frame(s) was refused before the "
+                         f"AP - the scope is not accepted on the send path", n=e["n"], board=v.name)
+        if extra:
+            self.finding(f"#{e['n']} a {scope} talk from {v.name} was played by {', '.join(extra)}, who was "
+                         f"not addressed", n=e["n"], board=v.name)
+        for name in silent:
+            self.finding(f"#{e['n']} {name} heard nothing of a {scope} talk from {v.name} "
+                         f"({frames} frame(s) sent)", n=e["n"], board=name)
+        for name, got in heard.items():
+            if got["share"] is not None and got["share"] < 0.5:
+                self.finding(f"#{e['n']} {name} played only {got['played']} of {frames} voice frame(s) "
+                             f"({int(got['share'] * 100)}%)", n=e["n"], board=name)
         self.phase = ""
 
     def run_no_net_experiment(self, e):
@@ -2128,7 +2335,10 @@ class Chaos:
             self.wait(8)
             # Ordinary traffic keeps flowing through wait(); add one full alert sequence, because an SOS
             # with no second radio is the case that matters most.
-            self.alert_burst(self.rng.choice([h for h in self.hhs if self.present(h)]))
+            if self.audible_ok():
+                self.alert_burst(self.rng.choice([h for h in self.hhs if self.present(h)]))
+            else:
+                self.say(f"#{e['n']} no alert in this window: {self.quiet_note()}")
             self.wait(max(0.0, window - 30))
         finally:
             for h in have:
@@ -2472,7 +2682,9 @@ class Chaos:
                  "message under test was the AP console's own diagnostic echo (`ping`), flooded AP to AP; "
                  "handhelds appear only as the presence, battery and roaming the APs report."),
                 "", ("Alerts and announcements were not sent (--no-alerts)." if self.args.no_alerts
-                     else "Alerts and announcements were part of the traffic."), ""]
+                     else f"Alerts and announcements were part of the traffic, in the audible hours "
+                          f"{self.audible_hours[0]:02d}:00-{self.audible_hours[1]:02d}:00 only (D87); "
+                          f"rounds that fell outside them were skipped and say so."), ""]
         out += ["## Findings", ""]
         out += [f"- {f['wall']} (t={f['t']} s): {f['text']}" for f in self.findings] or ["None."]
         out += ["", "## Experiments", "", "| # | Start (s) | Fault | Victims | Result | Relink (s) | Steady (s) | Failover |",
@@ -2484,6 +2696,7 @@ class Chaos:
             out.append(f"| {e['n']} | {e['started']} | {fault} | {', '.join(e['victims'])} | {e.get('result') or 'running'} "
                        f"| {e.get('relink_s') or ''} | {e.get('recovery_s', '')} | {fo} |")
         out += self.backup_section()
+        out += self.voice_section()
         out += self.lora_report()
         out += ["", "## Memory", "",
                 "Free heap now and the lowest seen during the run: bytes on APs (status line), KB on handhelds "
@@ -2493,6 +2706,53 @@ class Chaos:
                 f"lowest {b.lowest_heap if b.lowest_heap is not None else 'no sample'}" for b in self.boards]
         out += ["", "Raw serial logs: raw-NN.log per hour. Every event: events.jsonl.", ""]
         (self.out / "summary.md").write_text("\n".join(out), encoding="utf-8")
+
+    def voice_section(self):
+        """Push to talk: what was sent, and what each listener actually played.
+
+        Frames rather than words. The harness cannot hear, so it counts: the sender reports the frames it
+        sent under a talk id and every listener reports how many of them it played under the same id. A
+        talk that reached nobody, or reached somebody who was not addressed, is a finding above; this is
+        the arithmetic behind it.
+        """
+        rounds = [e for e in self.experiments if e["kind"] == "voice"]
+        if not rounds:
+            return []
+        out = ["", "## Voice (D61, D88)", ""]
+        done = [e for e in rounds if e.get("frames") is not None]
+        refused = [e for e in rounds if e.get("correct_refusal")]
+        sent = sum(e["frames"] for e in done)
+        if not done:
+            out += [f"{len(rounds)} round(s), none of which produced a frame count."]
+            if refused:
+                out += [f"{len(refused)} were refused correctly, with no Wi-Fi to carry voice (D71)."]
+            return out + [""]
+        plays = [(name, got) for e in done for name, got in e.get("heard", {}).items()]
+        shares = sorted(got["share"] for _, got in plays if got.get("share") is not None)
+        silent = sum(len(e.get("silent", [])) for e in done)
+        uninvited = sum(len(e.get("uninvited", [])) for e in done)
+        expected = sum(len(e.get("expected", [])) for e in done)
+        out += [f"{len(done)} talk(s), **{sent} frames sent**, heard by {len(plays)} of {expected} listener(s) "
+                f"that should have heard them."]
+        if shares:
+            mid = statistics.median(shares)
+            out += [f"Frames played, as a share of frames sent: median {mid * 100:.0f}%, "
+                    f"worst {min(shares) * 100:.0f}%, best {max(shares) * 100:.0f}%."]
+        if silent:
+            out += [f"**{silent} listener(s) heard nothing at all** of a talk addressed to them."]
+        out += [f"**{uninvited} listener(s) played a talk they were not addressed in.**" if uninvited
+                else "No handheld played a talk it was not addressed in."]
+        if refused:
+            out += [f"{len(refused)} round(s) were refused with no Wi-Fi to carry them, which is D71 working."]
+        out += ["", "| # | from | scope | asked | frames | dropped | heard by | silent |",
+                "|---|---|---|---|---|---|---|---|"]
+        for e in rounds:
+            heard = e.get("heard", {})
+            detail = ", ".join(f"{n} {g['played']}/{e.get('frames', 0)}" for n, g in heard.items()) or "nobody"
+            out += [f"| {e['n']} | {e['victims'][0]} | {e.get('scope', '?')} | {e.get('talk_s', '?')} s | "
+                    f"{e.get('frames', '-')} | {e.get('dropped', '-')} | {detail} | "
+                    f"{', '.join(e.get('silent', [])) or '-'} |"]
+        return out + [""]
 
     def lora_report(self):
         """The LoRa section: what each round proved, and every counter the modules kept."""
@@ -2613,6 +2873,19 @@ SAMPLES = [
      ("offline", "2", "44", "7")),
     ("received_direct", "I (5000) MSG: [MSG] From 1 (Handheld 1): 1:1 boot 44 seq 7, 12 bytes", ("1", "44", "7")),
     ("received_direct", "I (5000) MSG: [MSG] From 2 (Handheld 2) URGENT: 1:1 boot 9 seq 1, 3 bytes", ("2", "9", "1")),
+    # Voice, both ends of it. The sender's talk id is what ties the two together, and the listener's
+    # count is what makes the pair a loss figure instead of a yes or no.
+    ("voice_caps", "I (900) VOICE: [MSG] Push-to-talk: talk and listen", ("talk and listen",)),
+    ("voice_caps", "I (900) VOICE: [MSG] Push-to-talk: listen only", ("listen only",)),
+    ("voice_begin", "I (5000) VOICE: [MSG] Talking to everyone 0 (generated voice)", ("everyone", "0")),
+    ("voice_begin", "I (5000) VOICE: [MSG] Talking to group 1", ("group", "1")),
+    ("voice_begin", "I (5000) VOICE: [MSG] Talking to device 4", ("device", "4")),
+    ("voice_sent", "I (9000) VOICE: [MSG] Talk ended: talk 3, 50 frame(s), 0 dropped before the AP, 5021 ms",
+     ("3", "50", "0", "5021")),
+    ("voice_heard", "I (9400) VOICE: [MSG] Heard talk 3 from 9: 48 frame(s), 2 missing", ("3", "9", "48", "2")),
+    ("voice_heard", "I (9400) VOICE: [MSG] Heard talk 3 from 9: 11 frame(s), 0 missing, no last frame",
+     ("3", "9", "11", "0")),
+    ("voice_refused", "W (5000) MSG: [MSG] Talk not sent: short", ("short",)),
     ("volume", "Volume: medium", ("medium",)),
     ("echo_sent", "Echo sent to 2 link(s): CX0130-00021", ("2", "CX0130-00021")),
     ("echo_not_sent", "Echo not sent (0 links): CX0130-00022", ("0", "CX0130-00022")),
@@ -2918,6 +3191,11 @@ def main():
     ap.add_argument("--probe-interval", type=float, default=45, help="seconds between handheld messages")
     ap.add_argument("--no-set-time", dest="set_time", action="store_false",
                     help="do not set grid time from the PC clock at the start (1:1 and group need it, D6)")
+    ap.add_argument("--audible-hours", metavar="HH-HH",
+                    help="when an alert that makes a noise may be raised (D87); default 14-21, and "
+                         "'0-0' allows them at any hour. --no-alerts silences them whatever this says")
+    ap.add_argument("--no-voice", action="store_true",
+                    help="no push-to-talk rounds (the listeners play the voice out loud)")
     ap.add_argument("--no-alerts", action="store_true",
                     help="never send announcements or urgent broadcasts (they wake every handheld); for night runs")
     ap.add_argument("--quiet-handhelds", action="store_true",

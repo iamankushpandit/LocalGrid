@@ -1763,8 +1763,42 @@ static void test_voice_direct(void)
     CHECK(sim_pump(s));
     CHECK_EQ(s->clients[RANGER].voice_frames, 1);
 
-    /* Arguments the handheld refuses before anything leaves. */
+    /*
+     * A spoken announcement (D88). This used to assert LG_ERR_ARG, because voice could not be aimed at
+     * everyone; it now has to reach every other handheld, and it is held to the announce permission of
+     * D56 rather than a rule of its own. Checked in both directions, because the permission is the only
+     * thing standing between one handheld and every speaker on the grid.
+     */
+    uint32_t keep_announcers = s->clients[DAD].roster.groups.announcers;
+    s->clients[DAD].roster.groups.announcers = LG_ANNOUNCE_EVERYONE;
+    for (size_t i = 0; i < 3u; i++) {
+        s->nodes[i].roster.groups.announcers = LG_ANNOUNCE_EVERYONE;
+    }
+    uint16_t emma_before = s->clients[EMMA].voice_frames;
+    uint16_t ranger_before = s->clients[RANGER].voice_frames;
+    uint16_t alex_before = s->clients[ALEX].voice_frames;
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_BROADCAST, LG_TARGET_ALL, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, (uint16_t)(emma_before + 1u));
+    CHECK_EQ(s->clients[RANGER].voice_frames, (uint16_t)(ranger_before + 1u));
+    CHECK_EQ(s->clients[ALEX].voice_frames, (uint16_t)(alex_before + 1u));
+    CHECK_EQ(s->clients[EMMA].voice_scope, LG_SCOPE_BROADCAST);
+    /* It crosses APs, so a handheld on another one hears it too, and it is not end-to-end sealed:
+     * there is no single recipient to seal it to, so the AP routes it the way it routes a group. */
+    CHECK_EQ(s->clients[ALEX].voice_scope, LG_SCOPE_BROADCAST);
+
+    /* And refused at the handheld when this device may not announce, before anything leaves. */
+    s->clients[DAD].roster.groups.announcers = 1u << RANGER;
+    CHECK(!lg_roster_may_announce(cl(s, DAD)->roster, cl(s, DAD)->device));
     CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_BROADCAST, LG_TARGET_ALL, p, n), LG_ERR_ARG);
+    s->clients[DAD].roster.groups.announcers = keep_announcers;
+    /* Put the listeners' counters back, so the checks further down still read absolute numbers. */
+    s->clients[EMMA].voice_frames = emma_before;
+    s->clients[RANGER].voice_frames = ranger_before;
+    s->clients[ALEX].voice_frames = alex_before;
+    s->clients[EMMA].voice_scope = LG_SCOPE_DIRECT;
+
+    /* Arguments the handheld refuses before anything leaves. */
     CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, 99, p, n), LG_ERR_ARG);
     CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_DAD, p, n), LG_ERR_ARG);
     CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, 77, p, n), LG_ERR_ARG);
@@ -1872,8 +1906,14 @@ static void test_voice_duplicates_and_order(void)
     p[9] = 0;
     len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 9u, LG_SCOPE_DIRECT, LG_PROTO_ALEX, 0, p, n);
     lg_node_on_backbone_frame(&s->nodes[1].node, 0, frame, (size_t)len);   /* 1:1 must be sealed */
-    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 9u, LG_SCOPE_BROADCAST, LG_TARGET_ALL, 0, p, n);
-    lg_node_on_backbone_frame(&s->nodes[1].node, 0, frame, (size_t)len);   /* never broadcast */
+    /*
+     * An announcement is legal since D88, so the malformed case is a *sealed* one: there is no single
+     * recipient to seal a broadcast to, so LG_FLAG_E2E_PAYLOAD on a broadcast cannot be honest and an AP
+     * that routed it would be passing on a body nobody can open.
+     */
+    len = voice_frame(frame, LG_PROTO_DAD, 2, LG_VOICE_SEQ_BIT | 9u, LG_SCOPE_BROADCAST, LG_TARGET_ALL,
+                      LG_FLAG_E2E_PAYLOAD, p, n);
+    lg_node_on_backbone_frame(&s->nodes[1].node, 0, frame, (size_t)len);
     CHECK(sim_pump(s));
     CHECK_EQ(s->nodes[1].node.stats.malformed, bad + 3u);
     CHECK_EQ(s->clients[ALEX].voice_frames, 1);
@@ -1944,7 +1984,9 @@ static void test_voice_refusals(void)
     CHECK_EQ(s->clients[ALEX].voice_refusals, 0);
     CHECK(outbox_empty(cl(s, ALEX)));
     s->now_ms += LG_VOICE_REFUSE_MS;
-    len = voice_frame(frame, LG_PROTO_ALEX, 1, LG_VOICE_SEQ_BIT | 1u, LG_SCOPE_BROADCAST, LG_TARGET_ALL, 0, p, n);
+    /* A sealed announcement: legal scope since D88, impossible body, so still invalid. */
+    len = voice_frame(frame, LG_PROTO_ALEX, 1, LG_VOICE_SEQ_BIT | 1u, LG_SCOPE_BROADCAST, LG_TARGET_ALL,
+                      LG_FLAG_E2E_PAYLOAD, p, n);
     lg_node_on_session_frame(&s->nodes[1].node, &s->clients[ALEX].session_device, frame, (size_t)len);
     CHECK(sim_pump(s));
     CHECK_EQ(s->clients[ALEX].voice_refusals, 1);

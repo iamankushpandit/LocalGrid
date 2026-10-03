@@ -21,6 +21,7 @@
 #include "ui_nav.h"
 #include "hh_service.h"
 #include "hh_lora.h"
+#include "voice/hh_voice.h"
 #include "lg_bsp_audio.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -162,6 +163,82 @@ static int cmd_volume(int argc, char **argv)
     return 0;
 }
 
+/*
+ * tone: which sound each cue makes (owner, 2026-10-02).
+ *
+ *   tone                       what each cue is set to, and what else it could be
+ *   tone <which> <name|index>  choose one, and play it
+ *
+ * Here as well as on the Sound tab because a sound is the one setting worth checking from the bench:
+ * the screen can say "Morse SOS" and the speaker still be wired to nothing.
+ */
+static const struct { const char *name; uint8_t cue; } TONE_CUES[] = {
+    { "message",  LG_CUE_RECEIVED },
+    { "announce", LG_CUE_ANNOUNCE },
+    { "sos",      LG_CUE_URGENT   },
+};
+
+static void tone_show(void)
+{
+    for (unsigned i = 0; i < sizeof(TONE_CUES) / sizeof(TONE_CUES[0]); i++) {
+        lg_cue_t cue = (lg_cue_t)TONE_CUES[i].cue;
+        printf("  %-9s %s   (", TONE_CUES[i].name,
+               lg_bsp_audio_tone_name(cue, lg_bsp_audio_tone_choice(cue)));
+        for (uint8_t k = 0; k < lg_bsp_audio_tone_count(cue); k++) {
+            printf("%s%u %s", k ? ", " : "", k, lg_bsp_audio_tone_name(cue, k));
+        }
+        printf(")\n");
+    }
+}
+
+static int cmd_tones(int argc, char **argv)
+{
+    if (!lg_bsp_audio_available()) {
+        printf("This board has no speaker.\n");
+        return 1;
+    }
+    if (argc == 1) {
+        printf("Tones:\n");
+        tone_show();
+        return 0;
+    }
+    if (argc != 3) {
+        printf("usage: tones [<message|announce|sos> <name or index>]\n");
+        return 1;
+    }
+    lg_cue_t cue = LG_CUE_COUNT;
+    for (unsigned i = 0; i < sizeof(TONE_CUES) / sizeof(TONE_CUES[0]); i++) {
+        if (strcmp(argv[1], TONE_CUES[i].name) == 0) {
+            cue = (lg_cue_t)TONE_CUES[i].cue;
+        }
+    }
+    if (cue == LG_CUE_COUNT) {
+        printf("unknown cue '%s'; one of message, announce, sos\n", argv[1]);
+        return 1;
+    }
+    uint8_t n = lg_bsp_audio_tone_count(cue), want = n;
+    for (uint8_t k = 0; k < n; k++) {
+        if (strcmp(argv[2], lg_bsp_audio_tone_name(cue, k)) == 0) {
+            want = k;
+        }
+    }
+    if (want == n) {
+        char *end = NULL;
+        long v = strtol(argv[2], &end, 10);
+        if (end != argv[2] && *end == '\0' && v >= 0 && v < (long)n) {
+            want = (uint8_t)v;
+        }
+    }
+    if (want == n || lg_bsp_audio_set_tone(cue, want) != ESP_OK) {
+        printf("no such tone '%s' for %s\n", argv[2], argv[1]);
+        tone_show();
+        return 1;
+    }
+    printf("%s is now %s\n", argv[1], lg_bsp_audio_tone_name(cue, want));
+    lg_bsp_audio_cue(cue);   /* and hear it, which is the point */
+    return 0;
+}
+
 static int cmd_saver(int argc, char **argv)
 {
     if (argc > 1) {
@@ -191,7 +268,7 @@ static int cmd_wifi(int argc, char **argv)
              * board with no module is exactly what someone measuring battery life would use.
              */
             printf("Warning: this board has no LoRa connector, so Wi-Fi off leaves it "
-                   "with no radio at all.\n");
+"with no radio at all.\n");
         }
         /*
          * `wifi off <seconds>` is the self-restoring chaos hook, the mirror of the APs' `lora off`
@@ -612,6 +689,97 @@ static int cmd_group(int argc, char **argv)
     return err == ESP_OK ? 0 : 1;
 }
 
+/*
+ * talk and demo: a push to talk from the serial console (owner, 2026-10-02).
+ *
+ *   talk <who> [seconds]   the microphone, on the two boards that have one
+ *   demo <who> [seconds]   a generated voice, on any board
+ *
+ * Voice was the one path the chaos harness could not reach, because the harness drives handhelds over
+ * this console and nothing here could hold a talk bar down. `who` is a device index, a group name, or
+ * "all" for a spoken announcement - the same three scopes a person has, so the same three get tested.
+ *
+ * Neither command waits for the talk to finish: it stops itself after `seconds` and both ends print what
+ * happened ("Talk ended: talk N, ... frame(s)" at the sender, "Heard talk N from ..." at every listener),
+ * which is what the harness reads. A handheld on LoRa refuses, as D71 requires, and says so.
+ */
+static bool voice_target(const char *who, uint8_t *scope, uint32_t *target)
+{
+    const hh_status_t *st = console_status();
+    char *end = NULL;
+    long device = strtol(who, &end, 10);
+    if (end != who && *end == '\0' && device > 0) {
+        *scope = LG_SCOPE_DIRECT;
+        *target = (uint32_t)device;
+        return true;
+    }
+    if (strcmp(who, "all") == 0 || strcmp(who, "everyone") == 0) {
+        *scope = LG_SCOPE_BROADCAST;
+        *target = 0;
+        return true;
+    }
+    for (uint8_t i = 0; i < st->n_groups; i++) {
+        if (strcmp(st->groups[i].name, who) == 0) {
+            *scope = LG_SCOPE_GROUP;
+            *target = st->groups[i].id;
+            return true;
+        }
+    }
+    printf("unknown target '%s'; run 'groups' or 'people', or use 'all'\n", who);
+    return false;
+}
+
+static int talk_cmd(int argc, char **argv, bool generated)
+{
+    const char *name = generated ? "demo" : "talk";
+    if (argc < 2 || argc > 3) {
+        printf("usage: %s <device index | group name | all> [seconds]\n", name);
+        return 1;
+    }
+    uint8_t scope = LG_SCOPE_DIRECT;
+    uint32_t target = 0;
+    if (!voice_target(argv[1], &scope, &target)) {
+        return 1;
+    }
+    unsigned long secs = argc > 2 ? strtoul(argv[2], NULL, 10) : 5ul;
+    if (secs < 1ul || secs > 60ul) {
+        printf("seconds must be 1 to 60 (a talk stops itself after a minute)\n");
+        return 1;
+    }
+    hh_voice_state_t vs;
+    hh_voice_state(&vs);
+    if (!generated && !vs.can_talk) {
+        printf("This board has no microphone. Use 'demo' for a generated voice.\n");
+        return 1;
+    }
+    esp_err_t err = generated ? hh_voice_demo_start(scope, target, (uint8_t)secs)
+                              : hh_voice_ptt_start(scope, target);
+    if (err != ESP_OK) {
+        printf("not started: %s%s\n", esp_err_to_name(err),
+               err == ESP_ERR_INVALID_STATE ? " (already talking, or playing someone)" : "");
+        return 1;
+    }
+    printf("talking to %s for %lu s%s; watch for 'Talk ended' here and 'Heard talk' on the listeners\n",
+           scope == LG_SCOPE_BROADCAST ? "everyone" : scope == LG_SCOPE_GROUP ? "the group" : "that device",
+           secs, generated ? " with a generated voice" : "");
+    if (!generated) {
+        /* The microphone path has no deadline of its own: hold the console for the asked-for time. */
+        vTaskDelay(pdMS_TO_TICKS(secs * 1000ul));
+        hh_voice_ptt_stop();
+    }
+    return 0;
+}
+
+static int cmd_talk(int argc, char **argv)
+{
+    return talk_cmd(argc, argv, false);
+}
+
+static int cmd_demo(int argc, char **argv)
+{
+    return talk_cmd(argc, argv, true);
+}
+
 /* send <device index | group name | all | urgent> <text...> */
 static int cmd_send(int argc, char **argv)
 {
@@ -740,7 +908,7 @@ static int cmd_ui(int argc, char **argv)
         ui_request_cmd(UI_BUTTON, (int)((id << 1) | (strcmp(argv[3], "hold") == 0 ? 1 : 0)), NULL);
     } else {
         printf("usage: ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | "
-               "button <n> <press|hold> | log\n");
+"button <n> <press|hold> | log\n");
         return 1;
     }
     return 0;
@@ -900,7 +1068,7 @@ static int mic_level(uint32_t seconds, int16_t *frame)
         return 1;
     }
     printf("Speak at about 30 cm for %" PRIu32 " s (digital gain +%u dB). Aim for RMS -30 to -18 dBFS, "
-           "peaks below -3.\n", seconds, (unsigned)lg_bsp_audio_mic_gain() * 6u);
+"peaks below -3.\n", seconds, (unsigned)lg_bsp_audio_mic_gain() * 6u);
     int32_t top = 0;
     for (uint32_t f = 0; f < seconds * 10u; f++) {
         int n = lg_bsp_audio_mic_read(frame, MIC_FRAME, MIC_READ_MS);
@@ -1107,12 +1275,12 @@ static int cmd_gps(int argc, char **argv)
         if (st.heard && !st.fix && st.sats == 0 && st.in_view >= 4 &&
             (st.in_view > 14 || (st.best_snr > 0 && st.best_snr <= 31))) {
             printf("GPS: hearing carriers but decoding none, which needs about 30 dB-Hz%s. Waiting will "
-                   "not fix this: check the antenna is seated, has a view of the sky, and that the "
-                   "module's supply is what its own regulator wants (docs/lora.md powers the AP's "
-                   "from 5 V).\n",
+"not fix this: check the antenna is seated, has a view of the sky, and that the "
+"module's supply is what its own regulator wants (docs/lora.md powers the AP's "
+"from 5 V).\n",
                    st.in_view > 14 ? ", and more satellites in view than can be above any horizon, so "
-                                     "the module is listing what it is searching for rather than what it "
-                                     "can hear"
+"the module is listing what it is searching for rather than what it "
+"can hear"
                                    : "");
         }
         if (st.last_unix != 0) {
@@ -1182,6 +1350,9 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "i2cscan",   .help = "Addresses answering on this board's I2C bus",            .func = cmd_i2cscan },
         { .command = "saver",     .help = "saver [on|off]: the screen saver, kept in NVS",         .func = cmd_saver },
         { .command = "volume",    .help = "volume [off|low|medium|high]: notification loudness, kept in NVS", .func = cmd_volume },
+        { .command = "tones",     .help = "tones [<message|announce|sos> <name|index>]: which sound each cue makes", .func = cmd_tones },
+        { .command = "talk",      .help = "talk <device|group|all> [seconds]: push to talk from the microphone", .func = cmd_talk },
+        { .command = "demo",      .help = "demo <device|group|all> [seconds]: the same with a generated voice, any board", .func = cmd_demo },
         { .command = "mem",       .help = "Heap now: free, lowest, largest block",                   .func = cmd_mem },
         { .command = "name",      .help = "name [new name]: show or change this handheld's name",     .func = cmd_name },
         { .command = "reboot",    .help = "Restart this handheld",                                   .func = cmd_reboot },

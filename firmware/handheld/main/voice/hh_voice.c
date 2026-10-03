@@ -78,6 +78,8 @@ static struct {
     QueueHandle_t    rx;
     uint16_t         talk_id;
     uint32_t         rx_dropped;
+    volatile bool    talk_synth;    /* the frames come from synth() rather than the microphone */
+    volatile uint32_t talk_limit_ms;/* the talk stops itself after this long; 0 = until released */
 } v = { .mux = portMUX_INITIALIZER_UNLOCKED };
 
 static uint32_t now_ms(void)
@@ -232,6 +234,73 @@ static void agc(int16_t *pcm, size_t n)
     s_gate = gate_to;
 }
 
+/*
+ * A generated voice, for testing and for the grid demonstrating itself.
+ *
+ * Only two of the handhelds on the bench have a microphone, and a test that needs one can never cover
+ * the other four, nor say the same thing twice. This fills a frame with a **voiced buzz in syllables**
+ * instead: a fundamental around 110 Hz with its second and third harmonics, switched on and off about
+ * three and a half times a second with short attack and release, and the pitch stepping between four
+ * values so successive syllables differ. It is unmistakably artificial and unmistakably speech-shaped.
+ *
+ * Speech-shaped is the point, not decoration. The frames go out as IMA ADPCM, which is a waveform
+ * coder, so anything survives it - but the AGC, the noise gate and the listener's gate are all tuned to
+ * speech, and a flat tone would sail through gates that real talk has to open. A buzz in syllables
+ * exercises them the way a voice does.
+ *
+ * It is a pure function of a sample counter, so the same seconds produce the same samples on every
+ * board and on every run: what arrives can be compared with what was sent.
+ */
+static const int8_t SINE[32] = {
+      0,  24,  48,  70,  90, 106, 118, 125, 127, 125, 118, 106,  90,  70,  48,  24,
+      0, -24, -48, -70, -90,-106,-118,-125,-127,-125,-118,-106, -90, -70, -48, -24,
+};
+
+#define SYNTH_HZ        3                /* syllables a second, near enough */
+#define SYNTH_SYL       (8000u / 4u)     /* samples in one syllable slot: 250 ms */
+#define SYNTH_ON        1600u            /* of which this many carry sound: 200 ms */
+#define SYNTH_EDGE      160u             /* 20 ms of attack and of release, so nothing clicks */
+#define SYNTH_PEAK      7000             /* well inside the ADPCM range, with headroom for the sum */
+
+static uint32_t s_synth_n;               /* samples generated since this talk started */
+
+static inline int32_t synth_sine(uint32_t phase)
+{
+    return SINE[(phase >> 16) & 31u];
+}
+
+static void synth(int16_t *pcm, size_t n)
+{
+    static const uint16_t F0[4] = { 104, 117, 98, 126 };   /* Hz: the pitch steps between syllables */
+    for (size_t i = 0; i < n; i++, s_synth_n++) {
+        uint32_t pos = s_synth_n % SYNTH_SYL;
+        uint32_t syl = s_synth_n / SYNTH_SYL;
+        int32_t env = 0;
+        if (pos < SYNTH_ON) {
+            env = 256;
+            if (pos < SYNTH_EDGE) {
+                env = (int32_t)(pos * 256u / SYNTH_EDGE);
+            } else if (pos >= SYNTH_ON - SYNTH_EDGE) {
+                env = (int32_t)((SYNTH_ON - pos) * 256u / SYNTH_EDGE);
+            }
+        }
+        if (env == 0) {
+            pcm[i] = 0;
+            continue;
+        }
+        /*
+         * The phase is computed from the sample index rather than accumulated, so a dropped frame
+         * never shifts what follows it: sample k always has the same value.
+         */
+        uint32_t f0 = F0[syl & 3u];
+        uint32_t step = (f0 * 32u * 65536u) / 8000u;   /* table entries per sample, 16.16 */
+        uint32_t ph = (uint32_t)(s_synth_n % (8000u * 4u)) * step;
+        int32_t s = synth_sine(ph) * 3 + synth_sine(ph * 2u) * 2 + synth_sine(ph * 3u);
+        int32_t vq = (s * SYNTH_PEAK) / (127 * 6);     /* the three weights sum to 6 */
+        pcm[i] = (int16_t)((vq * env) / 256);
+    }
+}
+
 static size_t pack(const hh_adpcm_state_t *from, uint16_t talk, uint16_t frame, uint8_t flags, uint8_t *out)
 {
     lg_voice_hdr_t h = {
@@ -260,12 +329,15 @@ static void capture_task(void *arg)
         hh_voice_state(&st);
         uint8_t scope = st.talk_scope;
         uint32_t target = st.talk_target;
-        if (lg_bsp_audio_mic_start() != ESP_OK) {
+        bool synthetic = v.talk_synth;
+        uint32_t limit_ms = v.talk_limit_ms;
+        if (!synthetic && lg_bsp_audio_mic_start() != ESP_OK) {
             v.talk_req = false;
             set_talking(false, 0, 0);
             set_problem("The microphone did not start");
             continue;
         }
+        s_synth_n = 0;
         uint16_t talk = ++v.talk_id;
         uint16_t frame = 0;
         hh_adpcm_state_t enc = { 0 };
@@ -273,28 +345,48 @@ static void capture_task(void *arg)
         s_quiet = 0;
         uint32_t started = now_ms();
         uint32_t dropped = 0;
-        ESP_LOGI(TAG, "[MSG] Talking to %s %" PRIu32, scope == LG_SCOPE_GROUP ? "group" : "device", target);
+        ESP_LOGI(TAG, "[MSG] Talking to %s %" PRIu32 "%s",
+                 scope == LG_SCOPE_BROADCAST ? "everyone" : scope == LG_SCOPE_GROUP ? "group" : "device",
+                 target, synthetic ? " (generated voice)" : "");
         while (v.talk_req) {
-            size_t got = 0;
-            while (got < FRAME_SAMPLES && v.talk_req) {
-                int n = lg_bsp_audio_mic_read(pcm + got, FRAME_SAMPLES - got, MIC_WAIT_MS);
-                if (n < 0) {
-                    v.talk_req = false;
-                    set_problem("The microphone stopped");
-                    break;
+            if (synthetic) {
+                /*
+                 * Paced against the clock rather than by a delay per frame, so a slow frame does not
+                 * push the ones behind it: a generated talk sends at the same rate a microphone would,
+                 * which is the rate the AP and the listener's jitter buffer are built for. Sending as
+                 * fast as the CPU can encode would be a flood test, and would prove nothing about voice.
+                 */
+                uint32_t due = started + (uint32_t)(frame + 1u) * 100u;
+                uint32_t now = now_ms();
+                if (due > now) {
+                    vTaskDelay(pdMS_TO_TICKS(due - now));
                 }
-                got += (size_t)n;
+                synth(pcm, FRAME_SAMPLES);
+            } else {
+                size_t got = 0;
+                while (got < FRAME_SAMPLES && v.talk_req) {
+                    int n = lg_bsp_audio_mic_read(pcm + got, FRAME_SAMPLES - got, MIC_WAIT_MS);
+                    if (n < 0) {
+                        v.talk_req = false;
+                        set_problem("The microphone stopped");
+                        break;
+                    }
+                    got += (size_t)n;
+                }
+                if (got < FRAME_SAMPLES) {
+                    break;   /* released mid-frame: that part is dropped, the END below closes the talk */
+                }
+                agc(pcm, FRAME_SAMPLES);
             }
-            if (got < FRAME_SAMPLES) {
-                break;   /* released mid-frame: that part is dropped, the END below closes the talk */
-            }
-            agc(pcm, FRAME_SAMPLES);
             size_t hl = pack(&enc, talk, frame, 0, out);
             hh_adpcm_encode(&enc, pcm, FRAME_SAMPLES, out + hl);
             if (hh_service_voice_send(scope, target, out, hl + FRAME_DATA) != ESP_OK) {
                 dropped++;
             }
             frame++;
+            if (limit_ms != 0 && now_ms() - started >= limit_ms) {
+                v.talk_req = false;   /* a talk of an asked-for length: it stops itself */
+            }
             if (now_ms() - started >= MAX_TALK_MS) {
                 v.talk_req = false;
                 set_problem("Talk stops after a minute; press again to go on");
@@ -302,10 +394,18 @@ static void capture_task(void *arg)
         }
         size_t hl = pack(&enc, talk, frame, LG_VOICE_END, out);
         (void)hh_service_voice_send(scope, target, out, hl);
-        lg_bsp_audio_mic_stop();
+        if (!synthetic) {
+            lg_bsp_audio_mic_stop();
+        }
+        v.talk_synth = false;
+        v.talk_limit_ms = 0;
         set_talking(false, 0, 0);
-        ESP_LOGI(TAG, "[MSG] Talk ended: %u frame(s), %" PRIu32 " dropped before the AP, %" PRIu32 " ms", frame,
-                 dropped, now_ms() - started);
+        /*
+         * The sender's half of the measurement. `talk` identifies the stream, so a listener's count can
+         * be matched to this one and the difference is the loss between a microphone and an ear.
+         */
+        ESP_LOGI(TAG, "[MSG] Talk ended: talk %u, %u frame(s), %" PRIu32 " dropped before the AP, %" PRIu32 " ms",
+                 talk, frame, dropped, now_ms() - started);
     }
 }
 
@@ -359,6 +459,17 @@ static void playback_task(void *arg)
     uint32_t author = 0;
     uint32_t boot = 0;
     uint32_t heard_ms = 0;
+    /*
+     * The listener's half of the measurement. The sender reports how many frames it sent under a talk
+     * id; this reports how many of them were played under the same id, so the pair is a loss figure for
+     * a real voice over a real grid - and for a group or an announcement, one figure per listener.
+     * `gaps` counts the frames that never arrived, found from the frame numbers rather than the count,
+     * so a stream missing its middle is told apart from one cut short.
+     */
+    uint16_t played = 0;
+    uint16_t gaps = 0;
+    uint16_t talk_id = 0;
+    uint16_t last_frame = 0;
     for (;;) {
         TickType_t wait = playing ? pdMS_TO_TICKS(50) : portMAX_DELAY;   /* 50 ms: the silence below fills it */
         if (xQueueReceive(v.rx, f, wait) != pdTRUE) {
@@ -371,7 +482,8 @@ static void playback_task(void *arg)
                 lg_bsp_audio_voice_stop();
                 playing = false;
                 set_heard(0, 0, 0);
-                ESP_LOGI(TAG, "[MSG] Talk from %" PRIu32 " ended without its last frame", author);
+                ESP_LOGI(TAG, "[MSG] Heard talk %u from %" PRIu32 ": %u frame(s), %u missing, no last frame",
+                         talk_id, author, played, gaps);
             }
             continue;
         }
@@ -389,10 +501,23 @@ static void playback_task(void *arg)
             }
             author = f->author;
             boot = f->boot;
+            talk_id = h.talk;
+            played = 0;
+            gaps = 0;
+            last_frame = h.frame;
             s_play_gate = 0;   /* the first word fades in from the silence before it */
             set_heard(author, f->scope, f->target);
             ESP_LOGI(TAG, "[MSG] Hearing device %" PRIu32 " (%s %" PRIu32 ")", author,
-                     f->scope == LG_SCOPE_GROUP ? "group" : "1:1", f->target);
+                     f->scope == LG_SCOPE_GROUP ? "group"
+                     : f->scope == LG_SCOPE_BROADCAST ? "everyone" : "1:1", f->target);
+            /*
+             * A beep before the voice, the way a push-to-talk radio does it (owner, 2026-10-02).
+             * Without it speech simply begins out of a silent handheld, and the first word is spent on
+             * the listener working out that the device is talking to them rather than on what was said.
+             * It goes out before the speaker is opened for the stream, and PREBUFFER_MS is the gap the
+             * frames behind this one are already queueing in - so the alert costs no extra delay.
+             */
+            lg_bsp_audio_cue(LG_CUE_TALK);
             vTaskDelay(pdMS_TO_TICKS(PREBUFFER_MS));   /* the frames behind this one queue up meanwhile */
             if (lg_bsp_audio_voice_start() != ESP_OK) {
                 ESP_LOGW(TAG, "[MSG] The speaker would not open for talk");
@@ -402,12 +527,20 @@ static void playback_task(void *arg)
             }
             playing = true;
         }
+        if (h.frame > last_frame + 1u) {
+            gaps = (uint16_t)(gaps + (h.frame - last_frame - 1u));   /* the ones between did not arrive */
+        }
+        last_frame = h.frame;
         play(f, &h);
+        if (!(h.flags & LG_VOICE_END)) {
+            played++;   /* the END frame carries no audio: counting it would beat the sender by one */
+        }
         if (h.flags & LG_VOICE_END) {
             lg_bsp_audio_voice_stop();
             playing = false;
             set_heard(0, 0, 0);
-            ESP_LOGI(TAG, "[MSG] Talk from %" PRIu32 " ended", author);
+            ESP_LOGI(TAG, "[MSG] Heard talk %u from %" PRIu32 ": %u frame(s), %u missing",
+                     talk_id, author, played, gaps);
         }
     }
 }
@@ -446,7 +579,7 @@ esp_err_t hh_voice_start(void)
 
 esp_err_t hh_voice_ptt_start(uint8_t scope, uint32_t target)
 {
-    if (scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP) {
+    if (scope != LG_SCOPE_DIRECT && scope != LG_SCOPE_GROUP && scope != LG_SCOPE_BROADCAST) {
         return ESP_ERR_INVALID_ARG;
     }
     if (v.capture == NULL) {
@@ -468,6 +601,38 @@ esp_err_t hh_voice_ptt_start(uint8_t scope, uint32_t target)
     v.talk_req = true;
     xTaskNotifyGive(v.capture);
     return ESP_OK;
+}
+
+/*
+ * A talk of a known length from a generated voice.
+ *
+ * The capture task is created here when the board never had a microphone to create it for. That costs
+ * about 5 KB and only on a board asked to do this - the four handhelds with a speaker and no microphone
+ * can then originate a talk, which they can never do in use, and which is the only way the group and
+ * announcement paths get exercised from more than one sender.
+ */
+esp_err_t hh_voice_demo_start(uint8_t scope, uint32_t target, uint8_t seconds)
+{
+    if (seconds == 0u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (v.capture == NULL) {
+        capture_buf_t *buf = calloc(1, sizeof(*buf));
+        if (buf == NULL ||
+            xTaskCreate(capture_task, "hh_talk", TASK_STACK, buf, TASK_PRIORITY, &v.capture) != pdPASS) {
+            free(buf);
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGI(TAG, "[MSG] Capture started for a generated talk on a board with no microphone");
+    }
+    v.talk_synth = true;
+    v.talk_limit_ms = (uint32_t)seconds * 1000u;
+    esp_err_t err = hh_voice_ptt_start(scope, target);
+    if (err != ESP_OK) {
+        v.talk_synth = false;
+        v.talk_limit_ms = 0;
+    }
+    return err;
 }
 
 void hh_voice_ptt_stop(void)

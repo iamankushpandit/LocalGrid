@@ -66,7 +66,7 @@
       "description": "On-board tests: lg_core unit tests, RFC crypto vectors, simulated three-node grid.",
       "verify_ok": "LG_TESTS_RESULT: PASS",
       "verify_fail": "LG_TESTS_RESULT: FAIL",
-      "verify_timeout_s": 200
+      "verify_timeout_s": 300
     },
     "handheld": {
       "project": "firmware/handheld",
@@ -86,7 +86,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM41",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -98,7 +98,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM16",
+      "port": "COM28",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -110,7 +110,7 @@
     },
     {
       "name": "node-south",
-      "port": "",
+      "port": "COM41",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -177,7 +177,7 @@
     },
     {
       "name": "e40",
-      "port": "COM42",
+      "port": "COM32",
       "role": "H",
       "board": "E40",
       "firmware": "handheld",

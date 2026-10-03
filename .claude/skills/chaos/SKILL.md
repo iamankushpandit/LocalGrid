@@ -72,6 +72,19 @@ could not hold a Wi-Fi session, its LoRa module carried every message, and the r
   from one handheld, because the three are a sequence and D86's re-stamping applies across it. With grid
   time unset it sends only the urgent pair, since an announcement is refused by D6 and counting correct
   behaviour as a failure would manufacture findings. Skipped entirely under `--no-alerts`.
+- **`voice`** drives **push-to-talk** over the three scopes a person has: 1:1, a group, and everyone
+  (D61, D88). It sends `demo <who> <seconds>` to one handheld - preferring one with a microphone, which
+  is two of the six on this bench - and that board talks for 3 to 10 seconds with a **generated voice**,
+  so a board with no microphone can originate a talk too and the same seconds are produced every time.
+  A talk has no token and no acknowledgement, so it is measured at **both ends** and tied together by
+  the talk id: the sender logs `Talk ended: talk N, F frame(s), D dropped before the AP`, every listener
+  logs `Heard talk N from A: P frame(s), M missing`, and `P/F` is the loss for a real voice over a real
+  grid. The round then checks **who heard it against who should have**, in both directions: a listener
+  that heard nothing is a finding, and so is one that played a talk it was **not addressed in**, which
+  is the voice equivalent of reading somebody else's message and is the only check that catches it. A
+  handheld with no Wi-Fi is expected to refuse, because voice never crosses LoRa (D71), and that
+  refusal is recorded as correct rather than counted as a loss. The listeners play the voice out loud,
+  so the round obeys the quiet hours of D87 like `alerts`; `--no-voice` turns it off.
 
 ## Was the backup needed? (the audit that runs always)
 
@@ -152,6 +165,7 @@ The grid counts as steady when all of these are true:
 | Messages that crossed on the backup | How many had an end with no Wi-Fi session, and how many of those **should not have needed it**. The second number must be 0. |
 | Unjustified fallback episodes | Must be 0. Each one is a handheld that could have been on Wi-Fi and was not, and an outage on any handheld without a module. |
 | no_net rounds | Losses here are Wi-Fi resilience failures with nothing to hide behind. |
+| Voice (D61, D88) | Frames sent against frames played, per listener. A listener that heard nothing of a talk addressed to it, or one that played a talk it was not addressed in, is a finding. |
 
 ## Known gaps
 

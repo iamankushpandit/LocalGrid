@@ -286,6 +286,33 @@ miss live talk. That also keeps it off every device's flash and out of an AP's m
 So a note sent over LoRa is encoded at the low rate, and the LoRa payload ceiling is **6 KB**. A
 larger note is carried over Wi-Fi or refused for LoRa with a clear reason; it is never truncated.
 
+### How it gets tested, settled before it is built
+
+The owner's rule, 2026-10-02: future work still needs a test designed the same way as the one that
+exists. Live push-to-talk got that test on the same day - `tools/chaos.py`'s `voice` round, which drives
+a talk from the serial console and counts frames at **both ends** under a shared talk id, because a talk
+carries no token and no acknowledgement. A note is a message rather than a stream, so the shape changes
+but the method does not:
+
+- **A `note` console command**, as `demo` is for live talk: record a known number of seconds from the
+  generated voice (`hh_voice.c`, `synth`) rather than a microphone, so the same bytes are produced on
+  every board and on every run, and the receiver can compare what arrived with what was sent. Without a
+  console handle the harness cannot start one, which is the exact reason voice went untested until now.
+- **Measured at both ends, as a payload rather than a count of frames**: bytes encoded and offered at the
+  sender, bytes reassembled and played at the receiver, and the **airtime** the module reports for it.
+  A note that arrives corrupt must be told apart from one that never arrives, so the receiver reports a
+  checksum of what it decoded.
+- **The interesting path is LoRa only.** A note crossing a healthy grid proves little, because Wi-Fi
+  carries it. The round must put the receiver's Wi-Fi out - the `no_net` round's method - so the note has
+  no choice, and then check it still arrives within the airtime the table above predicts.
+- **An alert must pre-empt it.** D72 and D74 both say so, and a 30 s transfer is the longest window in
+  which an SOS can be delayed by something unimportant. The round sends an SOS mid-note and checks the
+  alert's latency against the ordinary alert figure, not just that it eventually arrived.
+- **A note over the 6 KB ceiling must be refused with a reason**, never truncated and never silently
+  dropped, and the refusal must be visible on the console the way `Talk not sent` already is.
+- **Quiet hours apply** (D87): a note plays out loud on arrival, so the round obeys `--no-voice` and the
+  audible window exactly as the live-talk round does.
+
 The older text below explains why live voice cannot work at all:
 
 What can work is a **voice note**: a few seconds of speech, compressed by a codec built for this

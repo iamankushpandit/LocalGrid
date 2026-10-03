@@ -612,8 +612,22 @@ int lg_client_send_voice(lg_client_t *c, uint8_t scope, uint32_t target, const u
             return LG_ERR_ARG;
         }
         break;
+    case LG_SCOPE_BROADCAST:
+        /*
+         * Talking to everyone (owner, 2026-10-02: "I didn't see a way of broadcasting a voice message
+         * to everyone ... so that announcements can be made that way"). Gated by the same permission as
+         * a written announcement, D56, which every handheld holds by default - so this is open to
+         * everybody until an admin takes it away from somebody, and the rule is one rule rather than
+         * two. Voice is still never offered to LoRa (D71): one 100 ms frame would be seconds of
+         * airtime, and that exclusion is by message type, so it covers this too.
+         */
+        if (!lg_roster_may_announce(c->roster, c->device)) {
+            return LG_ERR_ARG;
+        }
+        target = LG_TARGET_ALL;
+        break;
     default:
-        return LG_ERR_ARG;   /* never broadcast */
+        return LG_ERR_ARG;
     }
     if (lg_client_time_restricted(c)) {
         return LG_ERR_TIME;   /* voice follows the time rule of non-urgent text (D6) */
@@ -699,6 +713,20 @@ static void handle_voice(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
         if ((e->flags & LG_FLAG_E2E_PAYLOAD) != 0 || e->target > 0xFFFFu ||
             !lg_roster_is_member(c->roster, c->device, (uint16_t)e->target) ||
             e->body_len > sizeof(plain)) {
+            return;
+        }
+        memcpy(plain, body, e->body_len);
+        plen = e->body_len;
+    } else if (e->scope == LG_SCOPE_BROADCAST) {
+        /*
+         * A spoken announcement (D88). The fifth and last gate the scope had to pass: the sender, the
+         * handheld service, the node's body check and its validator were all opened to it on 2026-10-02
+         * while this one still dropped it, so an announcement that crossed the whole grid was discarded
+         * by every listener. Like a group it is not sealed end to end - there is no one recipient - and
+         * unlike a group there is no membership to test, because everybody is addressed. The permission
+         * lives at the sender and the AP (D56); a listener plays what the grid accepted.
+         */
+        if ((e->flags & LG_FLAG_E2E_PAYLOAD) != 0 || e->body_len > sizeof(plain)) {
             return;
         }
         memcpy(plain, body, e->body_len);
