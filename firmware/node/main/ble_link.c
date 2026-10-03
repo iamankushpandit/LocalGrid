@@ -76,8 +76,10 @@ enum {
      * console hooks, and only the *scheduling* needed a special image.
      */
     OP_FAULT = 0x0A,
+    /* D91: start the admin page for a window. Not temporary - this is how the page is reached now. */
+    OP_WEB = 0x0B,
     OP_SESSION = 0x80, OP_HELLO_OK = 0x81, OP_LOGIN_OK = 0x82, OP_STATUS = 0x83, OP_HISTORY = 0x84,
-    OP_TRAFFIC = 0x85, OP_CHAOS = 0x86, OP_CHAOS_LOG_DATA = 0x89, OP_FAULT_OK = 0x8A,
+    OP_TRAFFIC = 0x85, OP_CHAOS = 0x86, OP_CHAOS_LOG_DATA = 0x89, OP_FAULT_OK = 0x8A, OP_WEB_OK = 0x8B,
     OP_ERROR = 0xC0, OP_LOGIN_FAIL = 0xC2,
 };
 enum { ERR_LOGIN = 1, ERR_BUSY = 2, ERR_BAD = 3, ERR_VERSION = 4, ERR_INTERNAL = 5 };
@@ -557,6 +559,23 @@ static void do_fault(const uint8_t *body, size_t len)
     }
 }
 
+/* ---- D91: the admin page, on request ---------------------------------------------------------- */
+static void do_web(const uint8_t *body, size_t len)
+{
+    if (len != 2u) {
+        (void)send_error_code(ERR_BAD, "web takes two bytes: minutes (0 = default)");
+        return;
+    }
+    esp_err_t err = web_admin_start_for(lg_rd16(body));
+    if (err != ESP_OK) {
+        (void)send_error_code(ERR_BAD, "the admin page did not start");
+        return;
+    }
+    uint8_t rec[2];
+    lg_wr16(rec, (uint16_t)web_admin_window_left_s());
+    (void)send_short(OP_WEB_OK, rec, sizeof(rec));
+}
+
 /* ---- D85: chaos, from the phone, behind the admin password. TEMPORARY: TEMPORARY.md T5. --------
  *
  * Why this is on BLE at all, having been refused once. D83 put chaos control on Wi-Fi and recorded
@@ -692,7 +711,7 @@ static void handle_request(const link_chunk_t *c)
     }
     if ((op == OP_GET_STATUS || op == OP_GET_HISTORY || op == OP_GET_TRAFFIC ||
          op == OP_CHAOS_GET || op == OP_CHAOS_ARM || op == OP_CHAOS_DISARM ||
-         op == OP_CHAOS_LOG || op == OP_FAULT) && !L.logged_in) {
+         op == OP_CHAOS_LOG || op == OP_FAULT || op == OP_WEB) && !L.logged_in) {
         (void)send_error_code(ERR_LOGIN, "log in first");
         return;
     }
@@ -707,6 +726,7 @@ static void handle_request(const link_chunk_t *c)
     case OP_CHAOS_DISARM: do_chaos_disarm(); break;
     case OP_CHAOS_LOG:    do_chaos_log(body, (size_t)n); break;
     case OP_FAULT:        do_fault(body, (size_t)n); break;
+    case OP_WEB:          do_web(body, (size_t)n); break;
     default:
         (void)send_error_code(ERR_BAD, "unknown request");
         break;

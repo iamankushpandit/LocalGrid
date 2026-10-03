@@ -24,6 +24,21 @@ esp_err_t web_admin_init(void);
 
 esp_err_t web_admin_start(void);
 
+/*
+ * D91: the admin page runs only while somebody has asked for it.
+ *
+ * Resident, the HTTP server left an access point about 14 KB free, which node_station_room() turns
+ * into room for one handheld - measured on Denali, 2026-10-03, with six handhelds cycling through
+ * join / accepted / closed. Started for a window and stopped when it closes, the page costs nothing
+ * the rest of the time. Minutes 0 means the default window; the cap is WEB_WINDOW_MAX_MIN. Calling
+ * it while running renews the window. Setup mode starts it with no window at all, because nothing
+ * else can configure a new access point.
+ */
+esp_err_t web_admin_start_for(uint32_t minutes);
+void      web_admin_stop(void);
+bool      web_admin_running(void);
+uint32_t  web_admin_window_left_s(void);
+
 /* Call from the core task about once a second. */
 void web_admin_publish_snapshot(void);
 

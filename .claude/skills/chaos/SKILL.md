@@ -86,6 +86,22 @@ could not hold a Wi-Fi session, its LoRa module carried every message, and the r
   refusal is recorded as correct rather than counted as a loss. The listeners play the voice out loud,
   so the round obeys the quiet hours of D87 like `alerts`; `--no-voice` turns it off.
 
+## Access points on battery: faults over BLE (D90)
+
+When no access point is on USB, the harness finds them over BLE and **asks each one for its faults**
+with `--admin-password <pw>` (or `LG_ADMIN_PASSWORD` in the environment). Nothing is armed and no
+schedule lives on the AP: `chaos.py` stays the one scheduler, with the same seed and the same plan, and
+an AP victim's `hold` becomes **`ble_bb_off`** (its backbone off for the window, handhelds kept) and its
+`pulse` becomes **`ble_restart`**. Every fault restores itself on the AP's own clock, so a harness that
+dies leaves nothing broken. Each fault is confirmed from the beacons - a restart moves the boot counter,
+a backbone-off drops the link count - and an AP that acknowledges and does nothing is a finding. The
+power-out fault is still out of reach without a cable (D82). Without the password the APs are watched
+and not faulted, and the run says so.
+
+```bash
+python tools/chaos.py --live --lora --until-aps-die --hours 24 --admin-password <pw>
+```
+
 ## Was the backup needed? (the audit that runs always)
 
 Independent of any round, and the most important thing the harness now does. Every handheld with **no

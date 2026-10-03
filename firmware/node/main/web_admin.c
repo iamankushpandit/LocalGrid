@@ -15,6 +15,7 @@
 #include "chaos_self.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/semphr.h"
 #include "gps.h"
 #include "grid_state.h"
@@ -122,6 +123,9 @@ static struct {
      * httpd handlers that use them take it too. Held only while a reply is being written.
      */
     SemaphoreHandle_t emit;
+    httpd_handle_t    server;     /* NULL while the page is not being served (D91) */
+    esp_timer_handle_t window;    /* one-shot: stops the server when the asked-for window closes */
+    int64_t           window_end_us;
     snapshot_t        snap;
     pos_snapshot_t    pos;
     snapshot_t        view;       /* web task only */
@@ -1382,6 +1386,9 @@ esp_err_t web_admin_start(void)
     if (web_admin_init() != ESP_OK) {
         return ESP_ERR_NO_MEM;
     }
+    if (w.server != NULL) {
+        return ESP_OK;   /* already serving: a second start is a renewal, handled by the caller */
+    }
     /*
      * The routes come first so the handler limit can be counted from them rather than written down
      * beside them. It was written down once, as 12, and three routes were added later: the server
@@ -1422,6 +1429,7 @@ esp_err_t web_admin_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    w.server = server;
     for (size_t i = 0; i < n_routes; i++) {
         /* Loudly, and at a level that shows in an ordinary log: an endpoint that did not register is
          * a feature that is absent from a running AP while present in the tree. */
@@ -1437,4 +1445,74 @@ esp_err_t web_admin_start(void)
     ESP_LOGI(TAG, "[WEB] Admin page at http://%u.%u.%u.%u/ (%s)", ip[0], ip[1], ip[2], ip[3],
              cfg.configured ? "configured" : "setup mode");
     return ESP_OK;
+}
+
+/* ---- D91: the page runs only while asked for ---------------------------------------------------- */
+
+#define WEB_WINDOW_DEFAULT_MIN 15u
+#define WEB_WINDOW_MAX_MIN     120u
+
+static void web_window_closed(void *arg)
+{
+    (void)arg;
+    /*
+     * From the esp_timer task. httpd_stop blocks until the server task has exited, which holds the
+     * timer task for a few milliseconds; nothing else on this AP runs timers that cannot wait that.
+     */
+    ESP_LOGI(TAG, "[WEB] Admin page window closed; server stopped (D91)");
+    web_admin_stop();
+}
+
+esp_err_t web_admin_start_for(uint32_t minutes)
+{
+    if (minutes == 0u) {
+        minutes = WEB_WINDOW_DEFAULT_MIN;
+    }
+    if (minutes > WEB_WINDOW_MAX_MIN) {
+        minutes = WEB_WINDOW_MAX_MIN;
+    }
+    esp_err_t err = web_admin_start();
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (w.window == NULL) {
+        const esp_timer_create_args_t args = { .callback = web_window_closed, .name = "lgweb" };
+        err = esp_timer_create(&args, &w.window);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    (void)esp_timer_stop(w.window);   /* a renewal: the old deadline no longer applies */
+    int64_t us = (int64_t)minutes * 60 * 1000000;
+    w.window_end_us = esp_timer_get_time() + us;
+    err = esp_timer_start_once(w.window, (uint64_t)us);
+    ESP_LOGI(TAG, "[WEB] Admin page on for %" PRIu32 " min, then it stops itself (D91)", minutes);
+    return err;
+}
+
+void web_admin_stop(void)
+{
+    if (w.window != NULL) {
+        (void)esp_timer_stop(w.window);
+    }
+    w.window_end_us = 0;
+    if (w.server != NULL) {
+        httpd_handle_t server = w.server;
+        w.server = NULL;
+        (void)httpd_stop(server);
+    }
+}
+
+bool web_admin_running(void)
+{
+    return w.server != NULL;
+}
+
+uint32_t web_admin_window_left_s(void)
+{
+    if (w.server == NULL || w.window_end_us == 0) {
+        return 0;
+    }
+    int64_t left = w.window_end_us - esp_timer_get_time();
+    return left <= 0 ? 0u : (uint32_t)(left / 1000000);
 }

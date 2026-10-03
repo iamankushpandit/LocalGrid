@@ -254,6 +254,7 @@ OP_HELLO, OP_LOGIN, OP_GET_STATUS, OP_GET_HISTORY, OP_GET_TRAFFIC = 0x01, 0x02, 
 # D85, temporary (docs/TEMPORARY.md T5): the only opcodes on this link that change anything.
 OP_CHAOS_GET, OP_CHAOS_ARM, OP_CHAOS_DISARM, OP_CHAOS_LOG = 0x06, 0x07, 0x08, 0x09
 OP_FAULT, OP_FAULT_OK = 0x0A, 0x8A   # D90: one fault, now, named by the laptop (TEMPORARY T6)
+OP_WEB, OP_WEB_OK = 0x0B, 0x8B       # D91: start the admin page for a window of minutes
 OP_SESSION = 0x80                # the one unsealed message: the session both nonces are built from
 OP_HELLO_OK, OP_LOGIN_OK, OP_STATUS, OP_HISTORY, OP_TRAFFIC = 0x81, 0x82, 0x83, 0x84, 0x85
 OP_CHAOS, OP_CHAOS_LOG_DATA = 0x86, 0x89
@@ -265,7 +266,7 @@ OP_NAMES = {OP_SESSION: "SESSION", OP_HELLO: "HELLO", OP_LOGIN: "LOGIN", OP_GET_
             OP_LOGIN_FAIL: "LOGIN_FAIL",
             OP_CHAOS_GET: "CHAOS_GET", OP_CHAOS_ARM: "CHAOS_ARM", OP_CHAOS_DISARM: "CHAOS_DISARM",
             OP_CHAOS_LOG: "CHAOS_LOG", OP_CHAOS: "CHAOS", OP_CHAOS_LOG_DATA: "CHAOS_LOG_DATA",
-            OP_FAULT: "FAULT", OP_FAULT_OK: "FAULT_OK"}
+            OP_FAULT: "FAULT", OP_FAULT_OK: "FAULT_OK", OP_WEB: "WEB", OP_WEB_OK: "WEB_OK"}
 
 # The chaos journal, as the AP packs it (D49, firmware/node/main/chaos_log.h).
 CHAOS_REC_LEN = 16

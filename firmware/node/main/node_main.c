@@ -1199,31 +1199,33 @@ void app_main(void)
     /* D71: the second backbone. A module that does not answer is logged once and changes nothing. */
     (void)lora_start(g_app.index, s_discriminator, on_backbone_frame, on_link);
     ESP_ERROR_CHECK(sess_init(LG_PROTO_TCP_PORT));
-    /* Every AP serves the admin page (D45) - except in a chaos build driven over BLE. */
-#if defined(CONFIG_LG_NODE_CHAOS) && defined(CONFIG_LG_NODE_CHAOS_NO_WEB)
     /*
-     * D85. The BLE admin link is only offered above about 13 KB of free heap (D70's ADV_MIN_HEAP),
-     * and these APs sit at 8-13 KB once handhelds attach - so every AP beaconed and refused every
-     * connection, and a chaos run could not be started over BLE at all. The web server's task stack
-     * alone is 6 KB, and nobody is on this AP's Wi-Fi during a run on battery.
+     * The admin page (D45), on request rather than resident (D91). Resident it cost this AP the room
+     * for every handheld but one: the HTTP server's stack and buffers took the heap that
+     * node_station_room() counts, and on 2026-10-03 six handhelds cycled through join, accepted,
+     * closed, at ten-second intervals, on two access points that each had "1 attached, 0 free".
      *
-     * The snapshot is still published: it is what the BLE link's own GET_STATUS reads, through
-     * web_admin's one emitter, so the link's bytes and the page's can never drift apart. Only the
-     * HTTP server is skipped.
+     * The snapshot is always published - the BLE admin link reads it through web_admin's one emitter,
+     * so the link's bytes and the page's can never drift apart. The server itself starts in setup
+     * mode, with no window, because a new access point can be configured no other way; once
+     * configured it starts only when asked - `web on` at the console, or OP_WEB over the admin link -
+     * and stops itself when the window closes.
      */
-    ESP_LOGW(TAG, "[WEB] Admin page not started: a chaos build gives its heap to the BLE link (D85)");
     if (web_admin_init() != ESP_OK) {
         ESP_LOGE(TAG, "[WEB] Snapshot state could not be created");
     } else {
         web_admin_publish_snapshot();
+        node_settings_t web_cfg;
+        grid_state_settings(&web_cfg);
+        if (!web_cfg.configured) {
+            if (web_admin_start() != ESP_OK) {
+                ESP_LOGE(TAG, "[WEB] Admin page failed to start for setup");
+            }
+        } else {
+            ESP_LOGI(TAG, "[WEB] Admin page off until asked: `web on` at the console, or over the "
+                          "admin link (D91)");
+        }
     }
-#else
-    if (web_admin_start() != ESP_OK) {
-        ESP_LOGE(TAG, "[WEB] Admin page failed to start");
-    } else {
-        web_admin_publish_snapshot();
-    }
-#endif
 
 #if NODE_BLE_ADV_ENABLED
     uint8_t payload[LG_DISC_LEN];

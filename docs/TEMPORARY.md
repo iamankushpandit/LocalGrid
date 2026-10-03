@@ -33,6 +33,10 @@ battery fixes the power and takes their serial cable away, and everything below 
 
 ## The register
 
+> **2026-10-03, D90:** T1's self-scheduler, T2's Wi-Fi arming and T5's BLE arming are **superseded** by
+> T6, one fault on request over BLE. `tools/chaos.py` no longer needs an armed access point: it asks for
+> each fault itself. The three can now be removed on their own terms, with nothing waiting on them.
+
 ### T1 — Chaos code inside the AP firmware (D82)
 
 **What.** `firmware/node/main/chaos_self.c`: an AP that takes its own backbone down, takes its own

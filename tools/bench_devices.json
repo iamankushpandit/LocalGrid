@@ -155,7 +155,7 @@
     },
     {
       "name": "e28",
-      "port": "COM30",
+      "port": "COM32",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
@@ -177,16 +177,17 @@
     },
     {
       "name": "e40",
-      "port": "COM32",
+      "port": "COM30",
       "role": "H",
       "board": "E40",
       "firmware": "handheld",
       "id": "LG-H-E40-TQ99HWP16S",
-      "notes": "LCDWIKI E32R40T 4.0in, added 2026-09-18. Prototype roster user 'Handheld 6'. Not yet plugged in: set the port; the first flash mints its ID. Its CH340 cannot hold idf.py's default flash rate: every attempt fails with 'Serial data stream stopped', and 115200 works first time (2026-10-02), so flash_baud pins it there.",
+      "notes": "LCDWIKI E32R40T 4.0in, added 2026-09-18. Prototype roster user 'Handheld 6'. Not yet plugged in: set the port; the first flash mints its ID. Its CH340 drops the stream under esptool's stub at every rate on every port tried (2026-10-02/03), and an aborted full write leaves the bootloader corrupt, so flash_no_stub writes bootloader and partition table first, then the app, with the ROM loader alone - what worked, hash verified, first try.",
       "device_index": 6,
       "id_created": 1790742980,
       "id_nonce": "a0ea8b33aafa60b3",
-      "flash_baud": 115200
+      "flash_baud": 115200,
+      "flash_no_stub": true
     },
     {
       "name": "c6-alert",

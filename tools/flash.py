@@ -193,6 +193,58 @@ SLOW_BAUD = 115200    # every ESP32 bootloader's own rate, and the one a noisy b
 SLOWER_BAUD = 57600   # when even that drops bytes: a hub port that is worse than the last one was
 
 
+def flash_pieces_no_stub(fw, target, d, log):
+    """Flash without esptool's stub loader, in two small writes, with retries: Big Pepa's way (2026-10-03).
+
+    The E40's CH340 drops the stream under the stub at every rate tried, on every port tried, while the
+    same ports flash other boards cleanly. The ROM loader alone, writing the 29 KB of bootloader and
+    partition table first and the application second, went through - and the order matters: an aborted
+    full write begins with the bootloader, so each one that died mid-stream left the board unbootable
+    with a perfectly good application behind a corrupt first stage. Two pieces, each small enough to
+    survive, each hash-verified by esptool before the next starts.
+
+    A board that needs this says `"flash_no_stub": true` in tools/bench_devices.json.
+    """
+    build = ROOT / fw["project"] / f"build-{target}"
+    args_file = build / "flash_args"
+    if not args_file.exists():
+        return False, f"no {args_file.name} in {build}; build first"
+    pairs = []
+    for line in args_file.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].startswith("0x"):
+            pairs.append((parts[0], parts[1]))
+    if not pairs:
+        return False, f"{args_file} names no images"
+    boot = [p for p in pairs if p[1].startswith(("bootloader", "partition_table"))]
+    rest = [p for p in pairs if p not in boot]
+    baud = str(d.get("flash_baud") or SLOW_BAUD)
+    # Application first, boot record LAST. The first version of this wrote them the other way round and
+    # produced a board that esptool had hash-verified twice over and that the ROM then refused with
+    # `invalid header: 0x20000269` - the application write's failed first attempt had left the bootloader
+    # unreadable after the bootloader had already been written and verified. Rewriting the 29 KB boot
+    # record by hand, after, booted it at once. Whatever a failed ROM-loader write does to its
+    # neighbours, the last thing written and verified is the thing the ROM reads first.
+    for label, group in (("application", rest), ("bootloader and partition table", boot)):
+        if not group:
+            continue
+        flat = [x for pair in group for x in pair]
+        for attempt in range(1, 4):
+            print(f"  writing {label} without the stub at {baud} baud"
+                  f"{' (retry ' + str(attempt) + ')' if attempt > 1 else ''} ...", flush=True)
+            proc = subprocess.run(
+                [sys.executable, "-m", "esptool", "--chip", target, "--port", d["port"], "--baud", baud,
+                 "--no-stub", "--before", "default-reset", "--after", "hard-reset", "write-flash", *flat],
+                cwd=build, capture_output=True, text=True)
+            log.write_text((log.read_text(encoding="utf-8", errors="replace") if log.exists() else "")
+                           + proc.stdout + proc.stderr, encoding="utf-8")
+            if proc.returncode == 0:
+                break
+            if attempt == 3:
+                return False, f"{label} did not write in three tries:\n    {tail(log)}"
+    return True, f"flashed in pieces without the stub at {baud} baud"
+
+
 def flash_app(fw, target, d, log):
     """Flash the application, dropping to 115200 if the default rate will not survive the cable.
 
@@ -212,6 +264,8 @@ def flash_app(fw, target, d, log):
     that again. The owner's complaint was fair: this board has needed a person at the keyboard every
     time it moved ports, and the fix for that is a tool that keeps going, not a note that says 115200.
     """
+    if d.get("flash_no_stub"):
+        return flash_pieces_no_stub(fw, target, d, log)
     want = d.get("flash_baud")
     rates = [want, SLOWER_BAUD] if want else [None, SLOW_BAUD, SLOWER_BAUD]
     rates = [r for i, r in enumerate(rates) if r not in rates[:i]]   # a pinned 57600 is not tried twice

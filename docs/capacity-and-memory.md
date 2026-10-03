@@ -235,9 +235,10 @@ built:
   (`UI task: 4204 bytes of stack unused at its worst`); the access point's tasks — `lg_core` at 10,240
   bytes, plus `lg_blelink`, `gps`, `lora` — do not. Trimming against a measured high-water mark is free
   memory with no behavioural change at all.
-- **The web admin is resident and used perhaps once a week.** A chaos build already proves the access
-  point runs without it (`CONFIG_LG_NODE_CHAOS_NO_WEB`). Starting it on demand would cost a few seconds
-  of latency when an admin connects and nothing the rest of the time.
+- ~~**The web admin is resident and used perhaps once a week.**~~ **Done, D91 (2026-10-03).** It was
+  measured first: resident, Denali sat at 14,004 bytes free with one handheld attached and advertised
+  room for nobody, and six handhelds cycled through join / accepted / closed. The page now starts only
+  in setup mode or on request (`web on`, or `OP_WEB` over BLE) and stops itself when its window closes.
 - **D73 decided the GPS would be sampled rather than resident** — its UART driver and buffers released
   between readings — and it is **not implemented**: `gps.c` still runs a resident task. A decision already
   taken, with the memory still being spent.

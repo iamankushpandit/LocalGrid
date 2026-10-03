@@ -327,6 +327,15 @@ async def run_all(args, key, auth):
                 print(f"  {who}: {what} FAILED ({type(e).__name__}: {e})")
         return out
 
+    if args.command == "web":
+        async def do_web(s):
+            body = await s.ask(gw.OP_WEB, gw.OP_WEB_OK, int(args.minutes).to_bytes(2, "little"))
+            return int.from_bytes(body[:2], "little")
+        done = await each("web on", do_web)
+        for ap in sorted(done):
+            print(f"  {names.get(ap, 'AP ' + str(ap))} (AP {ap}): admin page on for {done[ap]} s")
+        return 0 if len(done) == len(aps) else 1
+
     if args.command == "fault":
         done = await each(f"fault {args.kind}", do_fault)
         for ap in sorted(done):
@@ -407,6 +416,15 @@ async def main_async(args):
         async def do(s):
             return gw.decode_chaos_status(await s.ask(gw.OP_CHAOS_DISARM, gw.OP_CHAOS, b""))
         show(await talk(device, key, auth, do, which_ap))
+        return 0
+
+    if args.command == "web":
+        # D91: the admin page runs only while asked for. `minutes` is the window (0 = the AP's default).
+        async def do(s):
+            body = await s.ask(gw.OP_WEB, gw.OP_WEB_OK, int(args.minutes).to_bytes(2, "little"))
+            return int.from_bytes(body[:2], "little")
+        left = await talk(device, key, auth, do, which_ap)
+        print(f"AP {which_ap}: admin page on at http://192.168.4.1/ for {left} s, then it stops itself")
         return 0
 
     if args.command == "fault":
@@ -495,7 +513,7 @@ async def main_async(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["status", "arm", "disarm", "journal", "fault"])
+    ap.add_argument("command", choices=["status", "arm", "disarm", "journal", "fault", "web"])
     ap.add_argument("--kind", choices=sorted(gw.FAULT_KINDS), default="backbone",
                     help="for 'fault': which radio to take out, or 'restart' (default backbone)")
     ap.add_argument("--seconds", type=int, default=60,

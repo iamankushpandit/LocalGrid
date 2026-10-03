@@ -267,6 +267,54 @@ LORA_COUNTERS = ("frames_out", "frames_in", "frames_first", "parts_out", "parts_
 # It takes no port, joins no Wi-Fi, carries no message, and never holds a BLE address (D21, D25, D70).
 
 
+class BleHands:
+    """Asks an access point to perform one fault, over BLE, behind the admin login (D90).
+
+    The counterpart of BleEyes. The eyes only listen; these connect, log in, send OP_FAULT and
+    disconnect, one short session per fault, using chaos_ble's own session code so there is exactly one
+    implementation of the link. Each fault restores itself on the access point's clock, so a harness
+    that dies mid-run leaves nothing broken behind it - which is why there is no disarm here at all.
+
+    A BLE adapter does one thing at a time well. The eyes' scanner is stopped around each session and
+    started again after, which costs a few seconds of beacons and nothing else: BleEyes keeps its
+    baseline and boot history across a restart of its listener.
+    """
+
+    def __init__(self, secrets_path, password, names):
+        self._secrets = secrets_path
+        self._password = password
+        self._names = names
+        self.aps = {}          # AP index -> BLE device, from one scan at the start
+        self.error = None
+        self._cb = self._gw = self._key = self._auth = None
+
+    def start(self):
+        try:
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+            import grid_watch as gw
+            import chaos_ble as cb
+            backbone_key, _disc = gw.parse_secrets(self._secrets)
+            self._key = gw.link_key(gw.derive_key(backbone_key))
+            self._auth = gw.AdminAuth()
+            self._auth.set_password(self._password)
+            self._gw, self._cb = gw, cb
+            found = asyncio.run(cb.find_all_aps(gw.parse_company_id(), self._key))
+            self.aps = {ap: device for ap, device in found}
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"
+            return False
+        return bool(self.aps)
+
+    def fault(self, ap, kind, seconds):
+        """kind is a grid_watch.FAULT_KINDS name. Returns what the AP acknowledged, or raises."""
+        gw, cb = self._gw, self._cb
+
+        async def do(s):
+            return gw.decode_fault_ok(await s.ask(gw.OP_FAULT, gw.OP_FAULT_OK, gw.fault_body(kind, seconds)))
+
+        return asyncio.run(cb.talk(self.aps[ap], self._key, self._auth, do, ap))
+
+
 class BleEyes:
     """What the beacons say about each AP, for a run that holds no cable to them.
 
@@ -556,6 +604,10 @@ LORA_KINDS = ("lora_only", "lora_down", "lora_wedge", "lora_blind", "lora_handhe
 # clear that stands it down. The last of those had never been sent on this bench, because the console had
 # no way to send it until today.
 EXTRA_KINDS = ("no_net", "alerts", "voice")
+# D90: faults an access point performs on request over BLE, when it has no cable for the PC to type at.
+# ble_bb_off stands where "hold" would (the AP leaves the backbone for the window, keeping its
+# handhelds); ble_restart stands where "pulse" would. Neither can cut power, which D82 already recorded.
+BLE_KINDS = ("ble_bb_off", "ble_restart")
 LORA_WHAT = {
     "lora_only": "ESP-NOW off on every named AP: anything that still crosses went by LoRa",
     "lora_down": "LoRa off on one AP while Wi-Fi stays up: nothing may be lost and nothing may stall",
@@ -690,6 +742,10 @@ def make_schedule(rng, n_aps, n_hhs, args):
             continue
         kind = "hold" if args.scenario == "blackout" or rng.random() < 0.7 else "pulse"
         outage = outage_seconds(rng) if kind == "hold" else 0
+        if getattr(args, "_ble_aps", False) and all(v in aps for v in victims):
+            # The access points are on battery and reached over BLE (D90): the same victims, the same
+            # schedule, the same seed - the fault is simply asked for over the air instead of typed.
+            kind = "ble_bb_off" if kind == "hold" else "ble_restart"
         plan.append({"n": len(plan) + 1, "at_s": round(t), "victims": list(victims),
                      "kind": kind, "outage_s": outage})
         t += outage + 60
@@ -1787,13 +1843,131 @@ class Chaos:
             # them. They still attack themselves when armed over BLE (D82, D85), so a whole-system night
             # is possible - what this side needs is to *see* them, or it would blame the grid for what an
             # AP outage was doing. That is what BleEyes is for.
-            self.say("No AP is on USB: the APs are on battery. AP-side faults cannot be typed at them, "
-                     "and each AP attacks itself when armed over BLE (chaos_ble.py, D85).")
+            self.say("No AP is on USB: the APs are on battery. AP-side faults are asked for over BLE "
+                     "(D90), one short session each, and every one restores itself on the AP's clock.")
             self.event("no_aps_on_usb")
             self.start_ble_eyes()
+            self.start_ble_hands()
             if not self.args.lora:
                 self.say("Nothing for this side to inject without --lora, because every other fault "
                          "needs an AP port. The APs' own faults still land if they are armed.")
+
+    def start_ble_hands(self):
+        """The BLE fault path (D90). Needs the admin password; without it the APs are only watched."""
+        self.hands = None
+        self.ble_slots = {}
+        password = self.args.admin_password or os.environ.get("LG_ADMIN_PASSWORD")
+        if self.args.no_ble:
+            self.say("--no-ble: the access points will not be faulted this run")
+            return
+        if not password:
+            self.say("No --admin-password (or LG_ADMIN_PASSWORD): the access points will be watched but "
+                     "not faulted. Give it to make this a whole-system night.")
+            return
+        hands = BleHands(self.args.secrets, password, self.names_by_index())
+        if self.eyes is not None:
+            self.eyes.close()          # one BLE job at a time: the scan for APs, then the eyes again
+        ok = hands.start()
+        if self.eyes is not None:
+            self.eyes.start()
+        if not ok:
+            self.say(f"No access point answered over BLE ({hands.error or 'none found'}); they will be "
+                     "watched but not faulted")
+            self.event("ble_hands_failed", error=hands.error)
+            return
+        self.hands = hands
+        for n, ap in enumerate(sorted(hands.aps)):
+            self.ble_slots[f"AP{n + 1}"] = ap
+        self.say("Access points reachable for faults over BLE: "
+                 + ", ".join(f"{slot} = AP {ap} {self.names_by_index().get(ap, '')}".rstrip()
+                             for slot, ap in self.ble_slots.items()))
+        self.event("ble_hands", aps=sorted(hands.aps))
+
+    def names_by_index(self):
+        """AP index -> bench name, from the device map, for the eyes and the hands alike."""
+        try:
+            import grid_watch as gw
+            return gw.bench_ap_names()
+        except Exception:
+            return {}
+
+    def ble_fault(self, ap, kind, seconds):
+        """One fault over BLE with the eyes paused around it. Returns the acknowledgement or None."""
+        if self.eyes is not None:
+            self.eyes.close()
+        try:
+            return self.hands.fault(ap, kind, seconds)
+        except Exception as e:
+            self.say(f"  AP {ap}: fault {kind} not acknowledged ({type(e).__name__}: {e})")
+            return None
+        finally:
+            if self.eyes is not None:
+                self.eyes.start()
+
+    def ble_backbone_whole(self):
+        """Every access point the beacons hear has a link to every other one heard."""
+        if self.eyes is None:
+            return True
+        rows = self.eyes.aps()
+        live = [i for i, r in rows.items()
+                if r["heard"] and (r["silent_s"] or 0) <= BLE_SILENT_S and r["links"] is not None]
+        return all(rows[i]["links"] >= len(live) - 1 for i in live)
+
+    def run_ble_experiment(self, e):
+        """An AP fault asked for over BLE (D90): the AP it names breaks itself and comes back on its own."""
+        missing = [s for s in e["victims"] if s not in self.ble_slots]
+        if missing or self.hands is None:
+            self.say(f"#{e['n']} skipped: no BLE access point in slot {', '.join(missing) or '?'}")
+            self.event("skipped", n=e["n"], kind=e["kind"], why="no BLE access point in slot")
+            return
+        aps = [self.ble_slots[s] for s in e["victims"]]
+        names = self.names_by_index()
+        victims = [names.get(a, f"AP {a}") for a in aps]
+        exp = {**e, "slots": e["victims"], "victims": victims, "ap_indices": aps, "started": self.now_s(),
+               "failover": [], "result": None, "unconfirmed": []}
+        self.experiments.append(exp)
+        self.phase = f"#{e['n']}"
+        kind = "backbone" if e["kind"] == "ble_bb_off" else "restart"
+        seconds = e["outage_s"] if kind == "backbone" else 0
+        for h in self.hhs:
+            if self.present(h) and h.registered_node in set(aps):
+                h.failover = (time.monotonic(), exp)
+        self.say(f"#{e['n']} {e['kind']} {', '.join(victims)}"
+                 + (f" for {seconds} s" if seconds else "") + " (over BLE)")
+        self.event("fault", **{k: v for k, v in exp.items() if k not in ("at_s", "failover")})
+        before = {a: dict(self.eyes.aps().get(a) or {}) for a in aps} if self.eyes else {}
+        for a in aps:
+            ack = self.ble_fault(a, kind, seconds or 60)
+            if ack is None:
+                exp["unconfirmed"].append(f"{names.get(a, a)} not acknowledged")
+        # Confirm from the beacons, not from the acknowledgement: a restart moves the boot counter and a
+        # backbone-off drops the link count. An AP that says yes and does nothing is the finding here.
+        def took(a):
+            row = self.eyes.aps().get(a) if self.eyes else None
+            if not row or not before.get(a):
+                return False
+            if kind == "restart":
+                return row["boot"] is not None and row["boot"] != before[a].get("boot")
+            return row["links"] is not None and before[a].get("links") is not None and row["links"] < before[a]["links"]
+        if not self.wait(75, until=lambda: all(took(a) for a in aps)):
+            for a in aps:
+                if not took(a):
+                    exp["unconfirmed"].append(f"{names.get(a, a)} {kind}: the beacons never showed it")
+                    self.finding(f"#{e['n']} {names.get(a, a)} acknowledged a {kind} fault and the beacons "
+                                 f"never showed it", n=e["n"], board=names.get(a, str(a)))
+        if seconds:
+            self.wait(seconds)
+        released = time.monotonic()
+        self.event("released", n=e["n"], unconfirmed=exp["unconfirmed"])
+        if self.wait(self.args.recovery_timeout, until=self.ble_backbone_whole):
+            exp["recovery_s"] = round(time.monotonic() - released, 1)
+            exp["result"] = "recovered"
+            self.say(f"#{e['n']} backbone whole again {exp['recovery_s']} s after release")
+        else:
+            exp["result"] = "not recovered"
+            self.finding(f"#{e['n']} backbone not whole {self.args.recovery_timeout} s after "
+                         f"{', '.join(victims)} came back", n=e["n"])
+        self.phase = ""
 
     def start_ble_eyes(self):
         """Listen to the APs' status beacons, so a run with no cable to them is not blind."""
@@ -1968,6 +2142,8 @@ class Chaos:
             return self.run_voice_experiment(e)
         if e["kind"] in LORA_KINDS:
             return self.run_lora_experiment(e)
+        if e["kind"] in BLE_KINDS:
+            return self.run_ble_experiment(e)
         slots = {b.slot: b for b in self.aps + self.hhs}
         if any(s not in slots for s in e["victims"]):
             self.say(f"#{e['n']} skipped: no board in slot {', '.join(s for s in e['victims'] if s not in slots)}")
@@ -2584,7 +2760,9 @@ class Chaos:
         if self.args.lora:
             self.say("handhelds with a LoRa module: "
                      + (", ".join(h.name for h in self.hhs if h.slot in self.args._lora_hhs) or "none"))
-        plan = make_schedule(random.Random(self.args.seed), len(self.aps), len(self.hhs), self.args)
+        ble_aps = len(getattr(self, 'ble_slots', {}) or {}) if not self.aps else 0
+        self.args._ble_aps = bool(ble_aps)
+        plan = make_schedule(random.Random(self.args.seed), len(self.aps) or ble_aps, len(self.hhs), self.args)
         print_schedule(plan, self.args)
         self.event("schedule", plan=plan)
         run_start = time.monotonic()
@@ -2642,7 +2820,7 @@ class Chaos:
         echo_ok = [x for x in self.echoes if x["result"] == "delivered"]
         echo_lat = sorted(x["latency_s"] for x in echo_ok if x["latency_s"] is not None)
         relink = sorted(e["relink_s"] for e in exps if e.get("relink_s") is not None and any(
-            self.by_name[n].is_ap for n in e["victims"]))
+            (n in self.by_name and self.by_name[n].is_ap) for n in e["victims"]))
 
         def spread(v):
             if not v:
@@ -3154,6 +3332,9 @@ def main():
     ap.add_argument("--self-check", action="store_true", help="check parsers and schedule rules offline, then exit")
     ap.add_argument("--secrets", default=str(ROOT / "firmware" / "common" / "lg_secrets.h"),
                     help="this grid's lg_secrets.h, to open the APs' sealed status beacons (D68)")
+    ap.add_argument("--admin-password", metavar="PASSWORD",
+                    help="the grid's admin password, for faulting access points over BLE when they hold "
+                         "no cable (D90); or set LG_ADMIN_PASSWORD. Without it they are watched only")
     ap.add_argument("--no-ble", action="store_true",
                     help="do not watch the APs over BLE. Only for a run where no AP is armed: without "
                          "it a message lost while an AP was restarting is reported as a finding")

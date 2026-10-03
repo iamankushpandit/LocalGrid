@@ -5,6 +5,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The admin page runs only while asked for, and an access point has room for its handhelds again
+
+The capacity failure recorded below is fixed at its cause rather than around it. With the HTTP server
+resident an access point had about 14 KB free and `node_station_room()` offered room for one handheld;
+with it stopped, the heap the server held is the heap the sessions need. **D91**: the page starts in
+setup mode with no window - a new AP can be configured no other way - and otherwise only on request:
+
+- `web on [minutes]` / `web off` / `web` at the AP console (default 15 min, cap 120);
+- `OP_WEB` over the BLE admin link, behind the same login as every other opcode, from
+  `tools/chaos_ble.py web [minutes] --ap <name>`.
+
+It **stops itself when the window closes** - the same dead-man shape as the faults of D90 - so a page
+left open by someone who walked away costs nothing by morning. The status snapshot is published either
+way, so the BLE link and the page keep reading the same bytes (D70). `web_admin_stop()` and
+`web_admin_running()` are new; `web_admin_start()` is unchanged for setup mode and is idempotent.
+
+### `chaos.py` asks for AP faults over BLE
+
+When no access point is on USB, the harness now finds them over BLE (`BleHands`, beside the `BleEyes`
+that only listened) and asks each for its faults with `--admin-password`. Same seed, same plan: an AP
+`hold` becomes `ble_bb_off`, a `pulse` becomes `ble_restart`, and each is confirmed from the beacons
+rather than from the acknowledgement - a restart must move the boot counter, a backbone-off must drop
+the link count, and an AP that says yes and does nothing is a finding. The eyes' scanner is paused around
+each session, because a BLE adapter does one thing at a time well, and it keeps its baseline across that.
+`BleHands` was proved on the bench the same night against Denali before any run used it. T1, T2 and T5
+are superseded and can come out on their own terms.
+
+### Big Pepa, recorded honestly
+
+The owner's instinct about this board was right and the first diagnosis here was wrong. The stub
+flasher fails on it - at 115200 and 57600, on two hub ports, "stream stopped" or the stub not
+answering - while Chase flashes cleanly on the same ports and Big Pepa's own supply reads 4.1 V at 96%.
+**What finally worked was no stub and small writes**: the 1 MB app alone at 115200, hash verified, then
+the 29 KB of bootloader and partition table. And the boot record *had* become the problem by then: the
+aborted full writes begin with the bootloader, so each one that died mid-stream left it corrupt, and the
+board boot-looped 130 times in 40 s with a verified app behind a broken bootloader until the two small
+pieces were rewritten. `flash.py` now knows this board: `"flash_no_stub": true` in `bench_devices.json`
+makes it write without the stub, in two pieces with retries, instead of handing it to `idf.py flash` -
+**application first, boot record last.** The first version wrote them the other way round and produced a
+board esptool had hash-verified twice that the ROM then refused with `invalid header: 0x20000269`: the
+application's failed first attempt had left the already-verified bootloader unreadable. Whatever a failed
+ROM-loader write does to its neighbours, the last thing written and verified is the thing the ROM reads
+first, so the 29 KB boot record goes last.
+
+
 ### The laptop names each fault over BLE, and the AP build stops differing for a chaos night
 
 The owner asked the question that undoes D82 (2026-10-03): *"BLE should be used for sending commands to

@@ -15,6 +15,7 @@
 #include "lora.h"
 #include "node_app.h"
 #include "sdkconfig.h"
+#include "web_admin.h"
 
 /* No chaos hook may take a radio out for longer than this, whatever was typed. */
 #define CHAOS_MAX_S ((unsigned long)LG_FAULT_MAX_S)
@@ -201,6 +202,34 @@ static int cmd_chaos(int argc, char **argv)
     return 0;
 }
 
+/* web | web on [minutes] | web off: the admin page, which runs only while asked for (D91). */
+static int cmd_web(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "on") == 0) {
+        unsigned long min = argc > 2 ? strtoul(argv[2], NULL, 10) : 0ul;
+        esp_err_t err = web_admin_start_for((uint32_t)min);
+        if (err != ESP_OK) {
+            printf("The admin page did not start: %s\n", esp_err_to_name(err));
+            return 1;
+        }
+        printf("Admin page on at http://192.168.4.1/ for %lu s; it stops itself after that\n",
+               (unsigned long)web_admin_window_left_s());
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "off") == 0) {
+        web_admin_stop();
+        printf("Admin page stopped\n");
+        return 0;
+    }
+    if (web_admin_running()) {
+        printf("Admin page is ON, %lu s left in its window\n", (unsigned long)web_admin_window_left_s());
+    } else {
+        printf("Admin page is off (D91). `web on [minutes]` starts it; default 15, at most 120.\n");
+    }
+    printf("usage: web | web on [minutes] | web off\n");
+    return argc > 1 ? 1 : 0;
+}
+
 static int cmd_bb(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "off") == 0) {
@@ -245,6 +274,7 @@ void console_start(void)
         { .command = "lora",    .help = "The LoRa backbone (D71): status; lora send, off/on, reset, broadcast on|off, at <cmd>", .func = cmd_lora },
 { .command = "chaos",     .help = "chaos | stop | clear: this AP's self-chaos schedule (D82)", .func = cmd_chaos },
         { .command = "bb",      .help = "bb | bb off [seconds] | bb on: stop using the ESP-NOW backbone, for chaos runs", .func = cmd_bb },
+        { .command = "web",     .help = "web | web on [minutes] | web off: the admin page, only while asked for (D91)", .func = cmd_web },
         { .command = "groups",  .help = "Groups, their members, and the table's version (D52)", .func = cmd_groups },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
