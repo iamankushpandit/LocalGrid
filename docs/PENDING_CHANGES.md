@@ -15,7 +15,7 @@ list; they went in first so the analysis could be trusted.
      rather than "session receive error".
    - **Built (D92), not yet run on the boards:** a handheld refused by the only access point in range
      waits 7 s, 15 s, 30 s, then 60 s before asking again.
-   - **Measured 2026-10-04, waiting for the owner to put in the build configuration:** NimBLE pools
+   - **In the build since 2026-10-04 (D93):** NimBLE pools
      halved (9 KB back), one Bluetooth controller connection (2 KB back). AMPDU off and smaller Wi-Fi
      buffers gained nothing; TCP windows are already at their floor.
    - **Measured, behind a switch that is off:** `LG_NODE_GPS_POLLED` gives Everest 4 KB back.

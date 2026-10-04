@@ -39,6 +39,16 @@ CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+# Memory, measured on Fuji on 2026-10-04 with every handheld on the bench pointed at it. NimBLE's
+# default buffer pools are sized for several connections and long writes; this AP has one admin
+# link. Halving three pools left 36 KB free at rest where there were 27, and the AP served six
+# handhelds where it had served four. One controller connection instead of three gave 2 KB more.
+# Tried the same night and not kept, because neither moved the figure: AMPDU off, and Wi-Fi dynamic
+# buffers 16 -> 8. See docs/chaos/2026-10-04-stalled-run-and-memory-trials.md.
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=16
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
 
 # ---- A/B switches for link robustness (main/Kconfig.projbuild); both stay on in normal builds ----
 # BLE advertising shares the radio with Wi-Fi and ESP-NOW. To test without it, add a line

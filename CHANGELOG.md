@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The Bluetooth memory settings are in the build, and the whole set measured together (D93)
+
+`firmware/node/sdkconfig.defaults` now halves three NimBLE buffer pools and keeps one controller
+connection: 11 KB more heap on every access point. With the eight session slots and the memory-aware send
+from earlier today, **Fuji alone with all six handhelds: 45 KB free at rest, all six served, 28 KB free
+with them, low-water mark 16 KB, no refusal** - against 27 KB, four served, and low-water marks of 1 to
+7 KB this morning. The BLE admin link was checked on the smaller pools: it logs in and takes a fault
+command on Fuji and on Everest.
+
 ### What took an access point's heap to 1 KB, and the two changes against it
 
 The `[MEM]` line and the low-water mark caught it on Everest at 10:05 on 2026-10-04: four handhelds
