@@ -16,7 +16,18 @@ static const char *TAG = "TIME";
 
 #define GPS_UART      UART_NUM_2
 #define GPS_BAUD      9600
+/*
+ * CONFIG_LG_NODE_GPS_POLLED is an experiment (owner, 2026-10-04: "make a change but run the
+ * experiments ... if it does not gain then we can keep the GPS the way it is"). Off, nothing here
+ * differs from before: a task of its own and a 1 KB receive buffer. On, the core task reads the UART
+ * from its own loop through gps_poll(), there is no task, and the buffer need only hold what arrives
+ * between two passes - a quarter of a second at 9600 baud.
+ */
+#if CONFIG_LG_NODE_GPS_POLLED
+#define GPS_RX_BUF    256       /* must exceed the UART's 128-byte hardware FIFO */
+#else
 #define GPS_RX_BUF    1024
+#endif
 #define GPS_LINE_MAX  96        /* NMEA allows 82 characters */
 #define GPS_FRESH_MS  5000u     /* a fix older than this is lost: the module stopped reporting one */
 #define TASK_STACK    3072
@@ -184,15 +195,15 @@ static void on_line(const char *line, uint32_t at_ms)
     }
 }
 
-static void gps_task(void *arg)
+/* One read of the UART and everything that follows from it; `wait` is how long to block for bytes. */
+static void gps_pump(TickType_t wait)
 {
-    (void)arg;
     static char line[GPS_LINE_MAX];
     static uint8_t buf[128];
-    size_t len = 0;
-    uint32_t line_ms = 0;   /* when the line's '$' arrived: the time the sentence stands for is just before */
-    for (;;) {
-        int n = uart_read_bytes(GPS_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
+    static size_t len;
+    static uint32_t line_ms;   /* when the line's '$' arrived: the time the sentence stands for is just before */
+    {
+        int n = uart_read_bytes(GPS_UART, buf, sizeof(buf), wait);
         uint32_t now = app_now_ms();
         if (n > 0) {
             g.bytes += (uint32_t)n;
@@ -238,6 +249,27 @@ static void gps_task(void *arg)
     }
 }
 
+#if CONFIG_LG_NODE_GPS_POLLED
+void gps_poll(void)
+{
+    if (g.st.started) {
+        gps_pump(0);
+    }
+}
+#else
+void gps_poll(void)
+{
+}
+
+static void gps_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        gps_pump(pdMS_TO_TICKS(20));
+    }
+}
+#endif
+
 esp_err_t gps_start(int rx_gpio)
 {
     if (rx_gpio < 0) {
@@ -268,9 +300,15 @@ esp_err_t gps_start(int rx_gpio)
     }
     g.rx = rx_gpio;
     g.st.started = true;
+#if CONFIG_LG_NODE_GPS_POLLED
+    ESP_LOGI(TAG, "[TIME] Listening for a GPS on GPIO%d at %d baud, read from the core loop (experiment)",
+             rx_gpio, GPS_BAUD);
+    return ESP_OK;
+#else
     if (xTaskCreate(gps_task, "gps", TASK_STACK, NULL, TASK_PRIORITY, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+#endif
     ESP_LOGI(TAG, "[TIME] Listening for a GPS on GPIO%d at %d baud", rx_gpio, GPS_BAUD);
     return ESP_OK;
 }

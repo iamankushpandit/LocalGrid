@@ -30,6 +30,18 @@ menu "LocalGrid AP"
             snapshot the BLE link reads is still published either way: only the HTTP server is
             skipped, not the emitter it shares with the link.
 
+    config LG_NODE_GPS_POLLED
+        bool "Experiment: read the GPS from the core task's loop instead of a task of its own"
+        default n
+        help
+            The GPS reader's own task holds a 3 KB stack and a 1 KB receive buffer on the one AP
+            that has a GPS, which measured about 6 KB poorer than the others on 2026-10-04 and
+            could hold one handheld. With this on there is no GPS task: the core task reads the
+            UART each pass of its loop and the buffer shrinks to 256 bytes.
+
+            An A/B switch, off by default. It is kept only if a measurement on the AP shows the
+            memory comes back and the GPS still sets grid time with no more bad sentences.
+
     config LG_NODE_BLE_ADV
         bool "Advertise LocalGrid discovery over BLE"
         default y

@@ -37,6 +37,10 @@ typedef struct {
 /* Starts the reader on rx_gpio (UART2). ESP_ERR_INVALID_ARG for a negative pin. */
 esp_err_t gps_start(int rx_gpio);
 
+/* The core task's loop calls this every pass. It reads the UART only in the polled experiment
+ * (CONFIG_LG_NODE_GPS_POLLED); otherwise the reader's own task does and this is empty. */
+void gps_poll(void);
+
 /* Copies the state; safe from any task. */
 void gps_state(gps_state_t *out);
 

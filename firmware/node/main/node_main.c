@@ -1108,6 +1108,7 @@ static void core_task(void *arg)
         last_slew = now;
         lgbb_poll(now);
         lora_poll(now);   /* D71: frames that crossed on the second backbone, and its heartbeat */
+        gps_poll();       /* empty unless the polled-GPS experiment is built in */
         chaos_self_poll(now);   /* D82: inert in an ordinary build */
 #if NODE_BLE_ADV_ENABLED
         ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */

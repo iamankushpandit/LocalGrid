@@ -5,6 +5,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A run stalled by a stale beacon, six memory trials, and a GPS switch that is off
+
+`docs/chaos/2026-10-04-stalled-run-and-memory-trials.md` has the numbers.
+
+- **The six-hour run stalled after one round** and was stopped at 2 h 10 min: every access point said
+  "0 free" for two hours while holding 14 to 21 KB, one handheld could join nothing, and the harness
+  rightly would not inject faults into a grid that was not steady. No crash, brownout or restart. The
+  cause is the room byte D92 already keeps current; that build had not been flashed.
+- **D92 seen on a board:** Fuji alone with six handhelds settled at four attached with 2 refusals in five
+  minutes, where the same situation had produced 67 in six.
+- **Memory, one change at a time on one access point:** halving three NimBLE buffer pools gave back
+  9 KB and let Fuji serve six handhelds; one Bluetooth controller connection instead of three gave 2 KB;
+  AMPDU off and smaller Wi-Fi buffers gave nothing and are dropped. **None of this is in the build
+  configuration yet** - it waits for the owner.
+- **`LG_NODE_GPS_POLLED`, a new switch, off by default.** On, the core task reads the GPS from its own
+  loop instead of a separate task, and the receive buffer shrinks from 1,024 to 256 bytes. Measured on
+  Everest: 26 KB free at rest against 22, three handhelds served against two, grid time from the GPS at
+  the same moment after boot. Off, the GPS reader is exactly as it was.
+
 ### The screen saver shows the grid's time
 
 A third line under the handheld's name and its access point: hours and minutes in the grid's zone, as the
