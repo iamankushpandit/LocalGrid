@@ -1626,6 +1626,14 @@ class Chaos:
         """
         now = time.monotonic()
         mine = [b.name for b in self.boards if b.held or now - b.injected_at < FAULT_GRACE_S]
+        # A radio switched off by a LoRa round is a fault too. It was left out, so on 2026-10-04 a group
+        # message lost five seconds after ESP-NOW was turned off on two access points was reported as
+        # lost "while both were registered" with no fault named - true, and no help to whoever reads it.
+        for b in self.boards:
+            off = [what for what, flag in (("backbone off", b.bb_off), ("LoRa off", b.lora_off),
+                                           ("Wi-Fi off", b.wifi_off)) if flag]
+            if off and b.name not in mine:
+                mine.append(f"{b.name} ({', '.join(off)})")
         if self.eyes is None:
             return mine
         theirs = self.eyes.troubled()
