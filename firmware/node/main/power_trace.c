@@ -7,10 +7,32 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_wifi.h"
+#include "lwip/priv/tcp_priv.h"
+#include "lwip/tcpip.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "UP";
+
+/* lwIP's connection lists belong to its thread, so they are walked there and only the totals kept. */
+static volatile unsigned s_tcp_open, s_tcp_lingering, s_tcp_queued;
+
+static void count_tcp(void *arg)
+{
+    (void)arg;
+    unsigned active = 0, lingering = 0, queued = 0;
+    for (const struct tcp_pcb *q = tcp_active_pcbs; q != NULL; q = q->next) {
+        active++;
+        queued += q->snd_queuelen;
+    }
+    for (const struct tcp_pcb *q = tcp_tw_pcbs; q != NULL; q = q->next) {
+        lingering++;
+    }
+    s_tcp_open = active;
+    s_tcp_lingering = lingering;
+    s_tcp_queued = queued;
+}
 
 #define TRACE_SECONDS  16u
 #define TRACE_MARK     0x4C475054u   /* "LGPT" */
@@ -126,6 +148,17 @@ void ptrace_second(uint32_t uptime_s, uint32_t backbone_tx_total, uint8_t links,
     event_names(events, ev, sizeof(ev));
     ESP_LOGI(TAG, "[UP] %" PRIu32 " s heap %u KB min %u KB sta %u links %u tx %u time %s ev %s", uptime_s,
              p->heap_kb, p->min_heap_kb, stations, links, p->tx, time_quality, ev);
+    /*
+     * Every tenth second, where the heap might be: on 2026-10-04 an access point's resting heap fell by
+     * 5 to 8 KB with nobody joining or leaving, stayed there for up to 45 minutes, and came back, and
+     * nothing in the log said why. TCP connections still open or lingering, and what they have queued,
+     * are the first suspects, so they are counted here; the largest free block shows fragmentation.
+     */
+    if (uptime_s % 10u == 0u) {
+        ESP_LOGI(TAG, "[MEM] tcp open %u lingering %u queued %u, largest block %u KB", s_tcp_open, s_tcp_lingering,
+                 s_tcp_queued, (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / 1024u));
+        (void)tcpip_callback(count_tcp, NULL);   /* counted on lwIP's own thread; printed next time */
+    }
 #else
     (void)time_quality;
 #endif

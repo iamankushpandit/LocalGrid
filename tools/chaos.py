@@ -975,12 +975,19 @@ class Chaos:
     def pulse(self, b):
         """EN low through RTS for 0.2 s with IO0 high. DTR is rewritten after each change for usbser.sys."""
         b.injected_at = time.monotonic()
-        b.ser.dtr = False
-        b.ser.rts = True
-        b.ser.dtr = False
-        time.sleep(0.2)
-        b.ser.rts = False
-        b.ser.dtr = False
+        # A port that was unplugged while the harness was waiting on it has no handle. On 2026-10-04 two
+        # cables were moved mid-run and this raised AttributeError, ending the run 20 minutes early.
+        if b.ser is None:
+            return
+        try:
+            b.ser.dtr = False
+            b.ser.rts = True
+            b.ser.dtr = False
+            time.sleep(0.2)
+            b.ser.rts = False
+            b.ser.dtr = False
+        except (self.serial.SerialException, OSError):
+            pass
 
     def hold(self, b):
         b.injected_at = time.monotonic()

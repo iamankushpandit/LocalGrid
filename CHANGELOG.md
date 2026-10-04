@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The screen saver shows the battery and the messages waiting; the APs say what their TCP stack holds
+
+- **Screen saver, a fourth line** (owner, 2026-10-04): the battery percentage and the number of messages
+  that have arrived and not been looked at - "87%   3 messages" - drawn like the other three lines, in the
+  rain's colours, lit by a passing stream and fading back, with only the changed characters repainted. A
+  board with no battery sense pin shows the messages alone (D62).
+- **`[MEM]` on the AP console every ten seconds:** TCP connections open, lingering, segments queued, and
+  the largest free block. An access point's resting heap was seen to fall by 5 to 8 KB with nobody joining
+  or leaving, stay there for up to 45 minutes and come back, with nothing logged; this is the instrument
+  for finding what holds it. The lists are walked on lwIP's own thread.
+- **chaos.py** no longer dies when a cable is moved mid-run: a reset pulse on a port that has gone is
+  skipped. The device map has Fuji on COM28 and Denali on COM16.
+
 ### A LoRa link that came up on a data frame was taken down in the same pass
 
 An access point's LoRa link to a peer times out after 190 s without a heartbeat. A later data frame from

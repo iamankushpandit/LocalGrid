@@ -66,8 +66,9 @@ static const char *TAG = "UI";
  */
 #define RAIN_FADE_STOPS   4
 #define LABEL_CHARS_MAX   40     /* letters per label line: HH_NAME_MAX plus room for "LoRa to " */
-#define LABEL_LINES       3      /* this handheld's name, its access point, the grid's time */
+#define LABEL_LINES       4      /* this handheld's name, its access point, the grid's time, battery and messages */
 #define LABEL_CLOCK       2      /* the line that holds the time */
+#define LABEL_FACTS       3      /* the line that holds the battery and the messages waiting */
 #define LABEL_REST        2      /* the ramp stop a label letter settles at: readable, plainly green */
 #define LABEL_DECAY_STEPS 3      /* rain steps between one stop and the next on the way down */
 #define CONVS_TRACKED     (LG_MAX_DEVICES + LG_MAX_GROUPS + 1)
@@ -173,6 +174,11 @@ static struct {
      * minutes as the launcher shows them, or "time not set" when the grid has none (D6).
      */
     char      clock[16];
+    /*
+     * The battery and the messages that have arrived and not been looked at (owner, 2026-10-04), drawn
+     * the same way. With the saver on nobody is looking, so that count is what has come in since.
+     */
+    char      facts[32];
     lg_rect_t lrect[LABEL_LINES];
     int16_t   label_c0, label_c1, label_r0, label_r1;   /* the cells the rain must not touch */
     bool      label_on;
@@ -586,9 +592,9 @@ static void show_saver(uint32_t now)
     }
     s.rain_ms = now;
     s.label_on = false;
-    s.who[0] = s.ap[0] = s.clock[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
+    s.who[0] = s.ap[0] = s.clock[0] = s.facts[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
     saver_label_tick();
-    ESP_LOGI(TAG, "[UI] Screen saver on: %s %s, %s", s.who, s.ap, s.clock);
+    ESP_LOGI(TAG, "[UI] Screen saver on: %s %s, %s, %s", s.who, s.ap, s.clock, s.facts);
 }
 
 /*
@@ -615,7 +621,7 @@ static uint8_t utf8_len(uint8_t lead)
 
 static const char *label_text(uint8_t line)
 {
-    return line == 0u ? s.who : line == 1u ? s.ap : s.clock;
+    return line == 0u ? s.who : line == 1u ? s.ap : line == LABEL_CLOCK ? s.clock : s.facts;
 }
 
 /* One letter, in the colour its level says. */
@@ -704,7 +710,7 @@ static void label_line_layout(uint8_t line, const char *old)
     }
 }
 
-/* Place the three lines in the middle of the screen, keep the rain out of them, and paint them. */
+/* Place the lines in the middle of the screen, keep the rain out of them, and paint them. */
 static void saver_label_paint(void)
 {
     int16_t lh = lg_font_montserrat_16.line_height;
@@ -811,12 +817,34 @@ static void saver_label_tick(void)
         hh_local_time(st->grid_time, &lt);   /* D67: the grid's zone */
         snprintf(clock, sizeof(clock), "%02u:%02u", (unsigned)lt.tm_hour % 100u, (unsigned)lt.tm_min % 100u);
     }
+    char facts[sizeof(s.facts)];
+    char msgs[20];
+    uint32_t unread = ui_notify_unread_total();
+    if (unread == 0) {
+        snprintf(msgs, sizeof(msgs), "%s", "no messages");
+    } else {
+        snprintf(msgs, sizeof(msgs), "%" PRIu32 " %s", unread > 999u ? 999u : unread,
+                 unread == 1 ? "message" : "messages");
+    }
+    int8_t batt = hh_service_battery_percent();
+    if (batt >= 0) {
+        snprintf(facts, sizeof(facts), "%d%%   %s", (int)batt, msgs);
+    } else {
+        snprintf(facts, sizeof(facts), "%s", msgs);   /* no sense pin on this board: nothing to say (D62) */
+    }
     if (strcmp(who, s.who) != 0 || strcmp(ap, s.ap) != 0 || !s.label_on) {
         snprintf(s.who, sizeof(s.who), "%s", who);
         snprintf(s.ap, sizeof(s.ap), "%s", ap);
         snprintf(s.clock, sizeof(s.clock), "%s", clock);
+        snprintf(s.facts, sizeof(s.facts), "%s", facts);
         saver_label_paint();
         return;
+    }
+    if (strcmp(facts, s.facts) != 0) {
+        char was[sizeof(s.facts)];
+        snprintf(was, sizeof(was), "%s", s.facts);
+        snprintf(s.facts, sizeof(s.facts), "%s", facts);
+        label_line_layout(LABEL_FACTS, was);
     }
     if (strcmp(clock, s.clock) != 0) {
         char was[sizeof(s.clock)];
