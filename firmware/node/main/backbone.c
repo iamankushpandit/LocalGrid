@@ -420,9 +420,16 @@ bool lgbb_link_acked(uint16_t node, uint32_t now_ms)
     if (l == NULL || !l->usable) {
         return false;
     }
-    bool acked = l->last_ack_ms != 0 && now_ms - l->last_ack_ms <= BB_LINK_TIMEOUT_MS;
-    bool heard = l->last_ms != 0 && now_ms - l->last_ms <= BB_LINK_TIMEOUT_MS;
-    return acked || heard;
+    /*
+     * Heard, not merely acknowledged. This answers "is ESP-NOW carrying frames to that AP, so LoRa can
+     * stay quiet?" (D74), and a MAC-level ACK does not say so: the peer's radio acknowledges a unicast
+     * whether or not its firmware is taking frames in. For the 20 s an AP keeps such a link on ACKs
+     * alone, everything it sent that way went nowhere and LoRa was never offered it - a direct message
+     * lost on 2026-10-04 at 13:44, and the first half of the "40 s gap" of the night before. Only word
+     * from the peer itself counts here; a few seconds of doubled traffic over LoRa when HELLOs are
+     * merely late is the cheaper mistake, and the receiver drops the duplicate.
+     */
+    return l->last_ms != 0 && now_ms - l->last_ms <= BB_LINK_TIMEOUT_MS;
 }
 
 void lgbb_set_extra_peers(lgbb_extra_peers_cb_t cb)

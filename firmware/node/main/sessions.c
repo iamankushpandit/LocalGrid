@@ -40,8 +40,12 @@ static const char *TAG = "NET";
  * same Wi-Fi ACK within milliseconds, so waiting here costs a few ticks and gives the buffers back;
  * if the memory has not come back inside the pass's budget, the frame is dropped like any other that
  * ran out of budget, which costs one frame rather than the access point.
+ *
+ * 12 KB rather than the 8 KB it started at: the floor stops a send *starting*, and what is already in
+ * flight - other sends, the backbone's bursts, an association - carries the heap a few KB lower still.
+ * At 8 KB the low-water mark with six handhelds on one access point was 3 to 4 KB.
  */
-#define SEND_HEAP_FLOOR       8192u
+#define SEND_HEAP_FLOOR       12288u
 
 typedef struct {
     int      fd;

@@ -1215,7 +1215,9 @@ class Chaos:
             self.event("wifi_on", board=b.name)
         elif m := RX["lora_off"].search(line):
             b.lora_off = True
-            b.lora_links.clear()
+            # Not cleared, for the same reason as at a reset below: `lora off` keeps the peer table, so
+            # no "Link up" follows `lora on`, and clearing this made the round report links that "did not
+            # all come back" (2026-10-04, #17) while the AP's own table showed both up.
             self.event("lora_off", board=b.name, seconds=int(m.group(1)))
         elif RX["lora_on"].search(line):
             b.lora_off = False

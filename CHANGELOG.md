@@ -5,6 +5,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Five hours on the day's build: nothing crashed, and every loss was a LoRa-only crossing
+
+Run `chaos-runs/20261004-121046`, seed 25, 12:10 to 17:11, all nine boards cabled, firmware gate passed.
+21 rounds ran and every one recovered; **no crash, no brownout, no restart that was not asked for**; two
+"no heap" refusals in five hours; 36 handheld moves off a lost access point, median 8.0 s, worst 21.9 s.
+**402 of 408 messages delivered** with both ends registered; all six lost while the two access points
+involved could reach each other only by LoRa.
+
+The round that crashed Fuji on 2026-10-03, on the weakest access point: Fuji and Denali held off for
+396 s, all six handhelds on Everest. It rested at 23 KB, held six sends back for memory and dropped none,
+and nobody was stranded.
+
+Two changes from what this run showed, built and **not yet run on the boards**:
+
+- **ESP-NOW counts as carrying frames to a peer only when the peer has been heard, not merely
+  acknowledged.** A radio acknowledges a unicast whether or not its firmware is listening, and for the
+  20 s an access point kept such a link on ACKs alone it offered nothing to LoRa. One lost message is
+  traced to exactly that.
+- **The memory floor for sends is 12 KB, not 8.** At 8 the low-water mark with six handhelds on one
+  access point was 3 to 4 KB.
+
+And two harness false alarms removed: "LoRa links did not all come back" after `lora off`, for the same
+reason as after a reset - the firmware keeps its peer table and prints no "Link up".
+
+Open, with the numbers to size it: when LoRa is the only path, each access point's four-slot LoRa queue
+fills and drops (2 to 8 frames a round), and about half of what is transmitted is not received - three
+access points each on the air 18 s in every 94. That is the cause of all six losses.
+
 ### The Bluetooth memory settings are in the build, and the whole set measured together (D93)
 
 `firmware/node/sdkconfig.defaults` now halves three NimBLE buffer pools and keeps one controller
