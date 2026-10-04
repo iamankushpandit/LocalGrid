@@ -5,6 +5,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### What took an access point's heap to 1 KB, and the two changes against it
+
+The `[MEM]` line and the low-water mark caught it on Everest at 10:05 on 2026-10-04: four handhelds
+attached, 17 KB free, and in the second the minute's grid-state announcement went out the heap touched
+**1 KB** and the largest free block 3 KB. Every `send()` to a handheld takes an MSS-sized buffer (1512 B)
+and holds it until the handheld ACKs; an announcement or a registration burst sends several frames to
+every handheld in one pass, so it costs handhelds x frames x 1.5 KB at once. Denali did the same at a
+registration burst. This is where Fuji was when it panicked holding six.
+
+- **An access point waits for memory before it sends to a handheld.** Below 8 KB free
+  (`SEND_HEAP_FLOOR`) a send waits, a tick at a time and inside the pass's existing budget, for the
+  ACKs that give the buffers back; a talk frame is dropped instead, as it is for a slow listener (D61).
+  If the memory has not come back inside the budget the frame is dropped like any other that ran out of
+  it. A `[NET] Memory held N send(s) back` line says when it has happened.
+- **The backbone's transmit queue is a ring of bytes.** Sixteen whole-frame slots (17 KB for sixteen
+  frames) overran in the catch-up after a link comes up: 78 frames dropped on Everest ten minutes after a
+  boot. The same memory as bytes holds about sixty typical frames.
+
+Also from the 10:39 run before it was stopped to flash this: **with Denali held off for 126 s its two
+handhelds moved to Everest and Fuji in 7.1 s**, where the night before they had been stranded for the
+whole outage; and one direct message was lost with both ends registered and no access-point fault, which
+is not explained yet.
+
 ### An access point keeps eight session slots, not fifteen: 7.4 KB back
 
 The AP's own static tables take 69 KB of RAM (`idf_size.py`), and the largest that was simply too big

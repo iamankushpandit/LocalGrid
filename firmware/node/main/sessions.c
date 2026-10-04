@@ -30,6 +30,18 @@ static const char *TAG = "NET";
  * watchdog panic costs every handheld on the AP, their sessions, and the AP's place in the grid.
  */
 #define SEND_BUDGET_MS        2000u
+/*
+ * No send starts while the heap is below this. Every send() takes an MSS-sized buffer (1512 B) and
+ * keeps it until the handheld ACKs, so anything that sends several frames to every handheld at once
+ * - the minute's grid-state and group announcement, a catch-up after a link comes up - takes
+ * handhelds x frames x 1.5 KB in a single pass. Measured on Everest on 2026-10-04, four handhelds
+ * attached and 17 KB free: the announcement took the heap to **1 KB** for an instant, and the largest
+ * free block to 3 KB. That is the same place Fuji was when it panicked holding six. Handhelds on the
+ * same Wi-Fi ACK within milliseconds, so waiting here costs a few ticks and gives the buffers back;
+ * if the memory has not come back inside the pass's budget, the frame is dropped like any other that
+ * ran out of budget, which costs one frame rather than the access point.
+ */
+#define SEND_HEAP_FLOOR       8192u
 
 typedef struct {
     int      fd;
@@ -46,6 +58,7 @@ static int s_listen_fd = -1;
 static uint32_t s_voice_dropped;   /* talk frames a listener could not take at once (D61) */
 static sess_traffic_t s_traffic;   /* D70: counts and sizes only */
 static uint32_t s_pass_waited_ms;  /* how long this core pass has already waited on sends */
+static uint32_t s_heap_waits, s_heap_wait_ms, s_heap_drops;   /* sends held back for memory (SEND_HEAP_FLOOR) */
 
 /*
  * Frames for the handheld whose own frame is being handled are gathered here and go out as one
@@ -291,6 +304,24 @@ static void write_frames(sess_t *x, const uint8_t *out, size_t total, bool voice
     /* What is left of this pass's shared budget, never more than one send's own cap. */
     uint32_t left = s_pass_waited_ms >= SEND_BUDGET_MS ? 0u : SEND_BUDGET_MS - s_pass_waited_ms;
     uint32_t cap = left < SEND_WAIT_MS ? left : SEND_WAIT_MS;
+    if (esp_get_free_heap_size() < SEND_HEAP_FLOOR) {
+        if (voice) {
+            s_voice_dropped++;   /* a tenth of a second of audio, as when a listener falls behind (D61) */
+            return;
+        }
+        while (esp_get_free_heap_size() < SEND_HEAP_FLOOR && app_now_ms() - started <= cap) {
+            vTaskDelay(1);       /* the handhelds' ACKs are what frees the buffers */
+        }
+        uint32_t held = app_now_ms() - started;
+        s_heap_waits++;
+        s_heap_wait_ms += held;
+        if (esp_get_free_heap_size() < SEND_HEAP_FLOOR) {
+            s_heap_drops++;
+            s_traffic.budget_drops++;
+            s_pass_waited_ms += held;
+            return;
+        }
+    }
     while (sent < total) {
         int n = send(x->fd, out + sent, total - sent, 0);
         if (n > 0) {
@@ -427,6 +458,15 @@ uint32_t sess_voice_dropped(void)
 void sess_pass_begin(void)
 {
     s_pass_waited_ms = 0;
+    /* Said once a minute at most, and only when it has happened: how often memory held a send back. */
+    static uint32_t said_ms, said_waits;
+    uint32_t now = app_now_ms();
+    if (s_heap_waits != said_waits && now - said_ms >= 60000u) {
+        ESP_LOGW(TAG, "[NET] Memory held %" PRIu32 " send(s) back, %" PRIu32 " ms in all, %" PRIu32
+                 " dropped (since the start)", s_heap_waits, s_heap_wait_ms, s_heap_drops);
+        said_ms = now;
+        said_waits = s_heap_waits;
+    }
 }
 
 void sess_traffic(sess_traffic_t *out)

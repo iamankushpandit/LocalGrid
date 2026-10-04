@@ -36,7 +36,18 @@ static const char *TAG = "BB";
 #define BB_PROBE_AFTER_MS        (BB_HELLO_MS + BB_HELLO_MS / 2u)
 #define BB_PROBE_MS              1000u
 #define BB_GAP_MS                (2u * BB_HELLO_MS)   /* a HELLO later than this counts as a gap */
+/*
+ * The transmit queue is a ring of bytes, not of whole-frame slots. It used to be sixteen slots of
+ * BB_FRAME_MAX each - 17 KB to hold sixteen frames, when a HELLO is about 60 bytes and a text message
+ * about 250 - and the catch-up an AP sends when a link comes up (settings, groups, availability, time,
+ * presence for every handheld) overran it: Everest counted 78 frames dropped at a full queue ten
+ * minutes after a boot on 2026-10-04. The same memory held as bytes takes about sixty typical frames.
+ * One frame's worth is kept back for `tx_cur`, the frame being sealed or sent, so the total is what
+ * the slots took.
+ */
 #define BB_TX_QUEUE          16u
+#define BB_TX_RING           ((BB_TX_QUEUE - 1u) * (8u + BB_FRAME_MAX))
+#define BB_TX_HDR            8u      /* per frame in the ring: the 6-byte MAC and a 16-bit length */
 #define BB_TX_DEADMAN_MS     1000u
 #define BB_RX_QUEUE          12u
 #define BB_RX_PER_POLL       8u
@@ -98,9 +109,11 @@ static struct {
     uint32_t          hello_seq;
     uint8_t           key[32];
     QueueHandle_t     rxq;
-    lgbb_tx_t           txq[BB_TX_QUEUE];
-    size_t            tx_head;
-    size_t            tx_count;
+    uint8_t           tx_ring[BB_TX_RING];
+    size_t            tx_head;        /* offset of the oldest frame's header */
+    size_t            tx_used;        /* bytes in the ring */
+    size_t            tx_count;       /* frames in the ring */
+    lgbb_tx_t         tx_cur;         /* the frame being sealed on the way in, or sent on the way out */
     bool              in_flight;
     uint32_t          in_flight_ms;
     volatile bool     tx_done;
@@ -222,23 +235,47 @@ bool lgbb_is_off(void)
     return s.off;
 }
 
+/* The ring's two primitives. Core task only, like everything that touches the queue. */
+static void ring_put(const uint8_t *src, size_t n)
+{
+    size_t at = (s.tx_head + s.tx_used) % BB_TX_RING;
+    size_t first = n < BB_TX_RING - at ? n : BB_TX_RING - at;
+    memcpy(s.tx_ring + at, src, first);
+    memcpy(s.tx_ring, src + first, n - first);
+    s.tx_used += n;
+}
+
+static void ring_peek(size_t offset, uint8_t *dst, size_t n)
+{
+    size_t at = (s.tx_head + offset) % BB_TX_RING;
+    size_t first = n < BB_TX_RING - at ? n : BB_TX_RING - at;
+    memcpy(dst, s.tx_ring + at, first);
+    memcpy(dst + first, s.tx_ring, n - first);
+}
+
 static void enqueue_sealed(const uint8_t *mac, const uint8_t *inner, size_t len)
 {
     if (len == 0 || len > LG_FRAME_MAX || s.off) {
         return;
     }
-    if (s.tx_count >= BB_TX_QUEUE) {
-        s.tx_dropped++;
-        return;
-    }
-    lgbb_tx_t *t = &s.txq[(s.tx_head + s.tx_count) % BB_TX_QUEUE];
+    lgbb_tx_t *t = &s.tx_cur;
     int n = lgbb_seal(t->data, sizeof(t->data), inner, len);
     if (n < 0) {
         ESP_LOGE(TAG, "seal failed");
         return;
     }
+    if (s.tx_used + BB_TX_HDR + (size_t)n > BB_TX_RING) {
+        s.tx_dropped++;
+        return;
+    }
     memcpy(t->mac, mac, 6);
     t->len = (uint16_t)n;
+    uint8_t hdr[BB_TX_HDR];
+    memcpy(hdr, mac, 6);
+    hdr[6] = (uint8_t)(t->len & 0xFFu);
+    hdr[7] = (uint8_t)(t->len >> 8);
+    ring_put(hdr, BB_TX_HDR);
+    ring_put(t->data, t->len);
     s.tx_count++;
     for (size_t i = 0; i < LG_MAX_NODES; i++) {   /* D70: whose link this frame is for */
         const lgbb_link_t *l = &s.links[i];
@@ -280,14 +317,25 @@ static void service_tx(uint32_t now)
     if (s.tx_count == 0) {
         return;
     }
-    lgbb_tx_t *t = &s.txq[s.tx_head];
+    lgbb_tx_t *t = &s.tx_cur;
+    uint8_t hdr[BB_TX_HDR];
+    ring_peek(0, hdr, BB_TX_HDR);
+    memcpy(t->mac, hdr, 6);
+    t->len = (uint16_t)(hdr[6] | ((uint16_t)hdr[7] << 8));
+    if (t->len == 0 || t->len > sizeof(t->data) || BB_TX_HDR + (size_t)t->len > s.tx_used) {
+        ESP_LOGE(TAG, "[BB] Transmit queue out of step; emptied");   /* cannot happen; never send garbage */
+        s.tx_head = s.tx_used = s.tx_count = 0;
+        return;
+    }
+    ring_peek(BB_TX_HDR, t->data, t->len);
     s.tx_done = false;
     esp_err_t err = esp_now_send(t->mac, t->data, t->len);
     if (err == ESP_ERR_ESPNOW_NO_MEM) {
         s.tx_nomem++;          /* back-pressure: keep the frame and retry on the next poll */
         return;
     }
-    s.tx_head = (s.tx_head + 1) % BB_TX_QUEUE;
+    s.tx_head = (s.tx_head + BB_TX_HDR + t->len) % BB_TX_RING;
+    s.tx_used -= BB_TX_HDR + t->len;
     s.tx_count--;
     if (err == ESP_OK) {
         memcpy(s.in_flight_mac, t->mac, 6);
