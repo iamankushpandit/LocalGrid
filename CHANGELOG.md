@@ -5,6 +5,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The instruments, before the analysis: tools that do not disturb the grid, and a run that will not start on the wrong firmware
+
+No firmware changed here. These are the tools the next analysis run depends on, fixed first because a
+measurement taken with a faulty instrument is not a measurement.
+
+**Looking at a board no longer restarts it.** `serial.Serial(port)` raises DTR and RTS as it opens, and
+the auto-reset circuit turns that into a reset - so `flash.py --identify`, `console.py`, `power.py` and
+`serial_capture.py` each restarted every board they looked at. On an access point that throws off every
+handheld; on 2026-10-03 a few minutes of checking two access points put half the bench on "no AP", and the
+checking was the cause. `flash.open_quiet()` sets both lines low on the port object *before* it opens, so
+the driver never raises them. Measured on all nine bench boards (CP210x, CH340, the ESP32-S3's native
+USB): none restarted and all answered `id`; then proved on the tools themselves, with every board's
+uptime still climbing after an identify, a console command and a power reading. The post-flash check and
+`chaos.py` still open the ordinary way, because they want the reset.
+
+**A run refuses to start unless every board runs the current build.** On 2026-10-03 a twelve-hour run to
+flat batteries began with Everest still on the firmware from before three fixes, on a one-line warning.
+`chaos.py` now reads the fingerprint each image prints as it boots (the start of its ELF's SHA-256) and
+compares it with the ELF in the build folder for that board's firmware and chip. A board that printed
+nothing, an image never built, and **an access point with no cable** are all "not verified", and not
+verified stops the run. `--allow-firmware-mismatch` starts anyway and records every problem as the run's
+first finding. Its first use stopped a run and named four boards: Fuji and Denali on an older stamp of the
+same source, and both FreeNoves one handheld build behind.
+
+**The harness had never seen a group.** Its row pattern ended at "member", and the handheld's `groups`
+table grew a MEMBERS column with the group editor (D52) - so from that day the pattern matched no row,
+every handheld looked group-less, and group messages and group voice were left out of every run, while
+the self-check passed on two sample rows written without the column. The pattern takes the column now, the
+self-check carries rows as a handheld really prints them, and when no group holds every handheld under
+test the harness makes one (`chaos`) and says so.
+
+**Five things the report said that were not so:**
+
+- *"Handheld failover: 23 moves, median 2,127 s"* - no such move is in the event log. The BLE fault round
+  marked handhelds as failing over even for a backbone-off, which moves nobody, and never cleared the mark.
+- *"Experiments: 35"* - of 62 reached. Skipped and not-started rounds were invisible; the row now says
+  "35 run of 62 reached (27 skipped or not started)".
+- *"still up at the end"* for an access point silent for hours. The verdict needed every access point to
+  be dead before it would call any of them flat; it is judged one at a time now.
+- *"2 unjustified"* above a table of fourteen. The headline counted only episodes of 45 s or more and did
+  not say so; it gives both numbers.
+- Faults were still being asked of an access point whose battery had gone, and each was reported as a
+  finding. A silent one is no longer asked.
+
+
 ### A handheld whose touch shares the display's SPI bus could restart itself mid-message
 
 Found by the ten-minute harness run that verified the BLE fault path: Big Pepa restarted on its own four

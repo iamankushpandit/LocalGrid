@@ -64,4 +64,4 @@ believing a failure.
 | `flash failed` | Another program holds the port, or the board needs BOOT held during connect. |
 | `no '...' within N s`, `crashed`, or `answered id ...` | Firmware did not start cleanly or identity is wrong. Capture with `python tools/serial_capture.py --ports COMx --seconds 30`. |
 
-`--identify` opens each port, which resets most boards; identifying every node at once loses grid time until the admin sets it again.
+`--identify` opens each port **without restarting the board** (`flash.open_quiet`, verified on all nine bench boards on 2026-10-04), so it can be run against a live grid.

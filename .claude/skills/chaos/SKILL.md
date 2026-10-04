@@ -86,6 +86,19 @@ could not hold a Wi-Fi session, its LoRa module carried every message, and the r
   refusal is recorded as correct rather than counted as a loss. The listeners play the voice out loud,
   so the round obeys the quiet hours of D87 like `alerts`; `--no-voice` turns it off.
 
+## Before it starts: the firmware gate
+
+A live run **stops before injecting anything** unless every board is running the image in the build
+folder. The harness resets each board as it starts, reads the fingerprint the image prints as it boots, and
+compares it with the built ELF for that board's firmware and chip. A board that printed nothing and an
+access point with no cable count as not verified, and that stops the run too. Flash the boards it names
+(`python tools/flash.py <names> --no-build`), or pass `--allow-firmware-mismatch` to run anyway with the
+problems recorded as the run's first finding. A commit changes the version stamp, so the next flash
+relinks the image: after committing, flash every board once so they all match.
+
+If no group holds every handheld under test, the harness makes one called `chaos` so group messages and
+group voice are exercised; it stays on the grid and the next run reuses it.
+
 ## Access points on battery: faults over BLE (D90)
 
 When no access point is on USB, the harness finds them over BLE and **asks each one for its faults**

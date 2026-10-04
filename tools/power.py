@@ -16,8 +16,8 @@ Examples:
 Boards are queried in parallel on purpose: a hub that sags when the radios transmit sags for
 every board at once, and only simultaneous monitoring shows that.
 
-Opening a port resets most boards (an AP loses grid time until a neighbour announces it), and
-the reading is then taken a few seconds into boot. Use --settle to wait before measuring.
+The port is opened without restarting the board (flash.open_quiet), so the reading is of the board
+as it was running, not of a boot. --settle still waits before measuring, for a board just flashed.
 Decision D21: hardware addresses never appear in the output.
 """
 import argparse
@@ -29,7 +29,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from console import MAC_RE, PROMPT, choose, write_line  # noqa: E402
-from flash import LGID, acquire_lock, load_map, release_and_close  # noqa: E402
+from flash import LGID, acquire_lock, load_map, open_quiet, release_and_close  # noqa: E402
 
 BOOT_WAIT_S = 12.0
 RESULT_RE = re.compile(r"POWER_RESULT samples=(\d+) min=(\d+) avg=(\d+) max=(\d+) mV")
@@ -43,12 +43,13 @@ def query(device, command, seconds, settle, out):
     row = {"board": device["name"], "port": device["port"], "ok": False, "lines": [], "note": ""}
     out.append(row)
     try:
-        ser = serial.Serial(device["port"], 115200, timeout=0.2, write_timeout=0.5)
+        ser = open_quiet(device["port"])   # a supply reading must not restart the board it is reading
     except serial.SerialException as e:
         row["note"] = f"serial error: {e}"
         return
     try:
         text = ""
+        write_line(ser, "id")   # not restarted, so it says nothing by itself: this brings its ID and a prompt
         deadline = time.time() + BOOT_WAIT_S
         while time.time() < deadline and PROMPT not in text:
             text += ser.read(512).decode("utf-8", "replace")

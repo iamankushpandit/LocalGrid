@@ -314,6 +314,34 @@ def build(fw_name, fw, target):
 
 # ---- serial ports ----
 
+def open_quiet(port, baud=115200, timeout=0.2, write_timeout=0.5):
+    """Open a port WITHOUT restarting the board on it.
+
+    A plain `serial.Serial(port, ...)` raises DTR and RTS as it opens, and the auto-reset circuit on these
+    boards turns that into a reset. So every tool that only wanted to look - identify, a console command,
+    a power reading, a capture - restarted the board it looked at. On an access point that throws every
+    handheld off it; on 2026-10-03 a few minutes of checking two access points this way put half the bench
+    on "no AP", and the checking was the cause.
+
+    Setting both lines low on the port object *before* it is opened means the driver never raises them.
+    Measured on all nine bench boards (CP210x, CH340 and the ESP32-S3's native USB): none restarted, and
+    every one still answered `id`.
+
+    Use this for looking. A tool that *wants* the reset - the post-flash check that reads the boot banner,
+    and tools/chaos.py, which starts every run from a known state - opens the port the ordinary way.
+    """
+    import serial
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baud
+    ser.timeout = timeout
+    ser.write_timeout = write_timeout   # a native-USB board that is not reading would block a write for ever
+    ser.dtr = False
+    ser.rts = False
+    ser.open()
+    return ser
+
+
 def release_and_close(ser):
     """Close a port so the board keeps running.
 
@@ -337,14 +365,16 @@ def release_and_close(ser):
 # ---- board identity ----
 
 def query_id(port, wait_s=9.0):
-    """Opens the port (which resets most boards), then asks 'id' until an LGID line arrives."""
+    """Opens the port without restarting the board, then asks 'id' until an LGID line arrives.
+
+    A board that happens to be booting prints the same line by itself, so this also serves as "did it
+    come up" after a flash."""
     import serial
     start = time.time()
     last = 0.0
     buf = b""
     try:
-        # write_timeout: a native-USB board that is not reading input would otherwise block the write forever.
-        ser = serial.Serial(port, 115200, timeout=0.2, write_timeout=0.5)
+        ser = open_quiet(port)
     except serial.SerialException as e:
         return f"ERROR {e}"
     try:
@@ -354,7 +384,7 @@ def query_id(port, wait_s=9.0):
             if m:
                 return m.group(1)
             now = time.time()
-            if now - start > 2.0 and now - last > 1.5:
+            if now - start > 0.3 and now - last > 1.5:   # running and quiet: ask straight away
                 last = now
                 try:
                     ser.write(b"id\r\n")

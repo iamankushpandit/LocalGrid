@@ -41,7 +41,7 @@ Pins and ratios are the vendor's (from Braino's measured board profiles), not a 
 
    Boards are queried in parallel so a hub sag shows on all of them at once. Done when the table prints a row per board.
 
-2. **Remember the reset.** Opening a port resets most boards, so a reading lands during boot unless `--settle` waits. An AP loses grid time until a neighbour announces it. Done when you know whether the reading is from boot or steady state.
+2. **No reset.** The port is opened without restarting the board, so a reading is of the board as it was running. `--settle` is only needed for a board that has just been flashed. Done when you know whether the reading is from boot or steady state.
 
 3. **Read the table.**
 

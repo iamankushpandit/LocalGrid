@@ -15,8 +15,8 @@ Examples:
   python tools/console.py H people
 
 Boards: a name, port, or ID from the device map, or "all", "N" (nodes), or "H" (handhelds).
-Opening a port resets most boards: a node loses grid time, which lives only in RAM, and a
-handheld reconnects. Use tools/serial_capture.py when you need to watch without commands.
+The port is opened without restarting the board (flash.open_quiet), so asking a question does not
+disturb the grid. Use tools/serial_capture.py when you need to watch without commands.
 """
 import argparse
 import pathlib
@@ -25,14 +25,14 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from flash import LGID, acquire_lock, load_map, release_and_close  # noqa: E402
+from flash import LGID, acquire_lock, load_map, open_quiet, release_and_close  # noqa: E402
 
 # Decision D21: hardware addresses never appear in tool output, even if firmware logs one.
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 LOG_RE = re.compile(r"^[IWED] \(\d+\) ")   # ESP-IDF log lines: shown only with --raw
 PROMPT = "grid>"
 ID_WAIT_S = 9.0
-PROMPT_WAIT_S = 12.0   # opening the port resets the board; its console starts after boot
+PROMPT_WAIT_S = 12.0   # a board that has only just been flashed is still booting: its console starts after
 SETTLED_WAIT_S = 30.0  # --settled: how long to wait for the board to join a node
 QUIET_S = 1.0
 REPLY_MAX_S = 15.0
@@ -93,15 +93,16 @@ def ask(device, command, trust_port, raw=False, settled=False):
     import serial
 
     try:
-        ser = serial.Serial(device["port"], 115200, timeout=0.2, write_timeout=0.5)
+        ser = open_quiet(device["port"])
     except serial.SerialException as e:
         return False, f"serial error: {e}"
     try:
-        # Every device prints its ID at boot, and opening the port resets the board. Listen
-        # first: typing into a port that is still coming up is lost, and on the ESP32-S3's
-        # native USB it fails outright while the device re-enumerates.
+        # The port is opened without restarting the board (flash.open_quiet), so a running board says
+        # nothing until asked: ask at once. A board that happens to be booting prints its ID by itself,
+        # and write_line retries on the ESP32-S3's native USB, which refuses input while it comes up.
         text = ""
         answered = None
+        write_line(ser, "id")
         deadline = time.time() + ID_WAIT_S
         while time.time() < deadline and answered is None:
             text += ser.read(512).decode("utf-8", "replace")
@@ -125,8 +126,8 @@ def ask(device, command, trust_port, raw=False, settled=False):
         while PROMPT not in text and time.time() < prompt_deadline:
             text += ser.read(512).decode("utf-8", "replace")
 
-        # Opening the port resets the board, so a command lands a few seconds into the boot,
-        # before Wi-Fi is up. That is fine for most questions and useless for one: free heap
+        # A board that has only just started (after a flash, say) gets the command a few seconds into
+        # its boot, before Wi-Fi is up. That is fine for most questions and useless for one: free heap
         # read while the link is still STOPPED is about 40 KB higher than once the node session
         # exists, which is how an imaginary 20 KB regression got chased for several builds.
         #
@@ -172,11 +173,6 @@ def main():
     failures = 0
     for device in chosen:
         print(f"== {device['name']} ({device['port']}) <- {command}", flush=True)
-        if device["role"] == "N":
-            # Opening a port resets these boards, and grid time lives only in RAM: this node
-            # comes back with time UNSET and re-adopts it from a neighbour within a minute.
-            print("  note: this resets the node, so it loses grid time until a neighbour announces it",
-                  flush=True)
         ok, reply = ask(device, command, args.trust_port, args.raw, settled=args.settled)
         print(reply if ok else f"  FAILED: {reply}", flush=True)
         failures += 0 if ok else 1

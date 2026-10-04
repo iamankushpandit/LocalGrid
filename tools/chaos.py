@@ -41,6 +41,7 @@ Output (gitignored): chaos-runs/<start time>/ with raw-NN.log per hour, events.j
 import argparse
 import asyncio
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -577,7 +578,15 @@ def time_source(text, board):
 
 
 IDENTITY = re.compile(r"LGID: (\S+) role=(\w+) board=(\w+)(?: node=(\d+) (\S+))?(?: device=(\d+))?")
-GROUP_ROW = re.compile(r"^\s*(\d+)\s+(\S+)\s+(member|not a member)\s*$")
+# Every image prints the first characters of its own ELF's SHA-256 as it starts. That is the one fact
+# that says which build a board is running, and it is what the firmware gate compares.
+ELF_SHA = re.compile(r"ELF file SHA256:\s+([0-9a-f]{6,})")
+# The trailing MEMBERS column ("1 2 3") arrived with the group editor (D52). The pattern used to end at
+# "member", so from that day it matched no row at all: every handheld looked as if it had no groups,
+# the harness said "No group has every handheld as a member", and group messages and group voice were
+# silently left out of every run - while its own self-check passed, on two rows written without the
+# column. Found on 2026-10-04 by reading a real `groups` reply against it.
+GROUP_ROW = re.compile(r"^\s*(\d+)\s+(\S+)\s+(member|not a member)(?:\s+[\d ]*)?\s*$")
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")   # D21: never write a hardware address
 
 
@@ -603,6 +612,7 @@ LORA_KINDS = ("lora_only", "lora_down", "lora_wedge", "lora_blind", "lora_handhe
 # alerts walks the sequence a person actually uses in an emergency: an announcement, an SOS, and the all
 # clear that stands it down. The last of those had never been sent on this bench, because the console had
 # no way to send it until today.
+CHAOS_GROUP = "chaos"            # the group the harness makes when no group holds every handheld under test
 EXTRA_KINDS = ("no_net", "alerts", "voice")
 # D90: faults an access point performs on request over BLE, when it has no cable for the PC to type at.
 # ble_bb_off stands where "hold" would (the AP leaves the backbone for the window, keeping its
@@ -788,7 +798,9 @@ class Board:
         self.name = self.slot = port     # until the board says who it is
         self.id = self.role = self.board = self.index = self.ap_name = None
         self.expected_id = None          # set once discovery is over: a different ID later means a swapped board
+        self.elf_sha = None              # what the board printed as it started: which build it is running
         self.groups = {}                 # handheld: group name -> member, from its 'groups' command
+        self.group_ids = {}              # handheld: group name -> the grid's id for it
         self.can_hear = None             # from the board's own boot line, not a table: None until said
         self.can_talk = None
         self.voice_sent = {}             # talk id -> (frames, dropped, ms), as the sender reported
@@ -850,6 +862,7 @@ class Chaos:
         self.rng = random.Random(args.seed)
         self.boards, self.aps, self.hhs, self.by_name = [], [], [], {}
         self.group = None
+        self.rounds_reached = 0           # rounds whose turn came, run or not
         self.lines = queue.Queue()
         self.readers = []
         self.stopping = threading.Event()
@@ -1040,6 +1053,8 @@ class Chaos:
             self.event("port_speaks_again", board=b.name, step=b.silence_step)
             b.silence_step = 0
         self.write_raw(f"[{b.name}] {line}")
+        if m := ELF_SHA.search(line):
+            b.elf_sha = m.group(1)
         if m := IDENTITY.search(line):
             b.id_seen = m.group(1)
             if b.expected_id is None:
@@ -1053,6 +1068,7 @@ class Chaos:
                 b.wrong = True
         elif m := GROUP_ROW.search(line):
             b.groups[m.group(2)] = m.group(3) == "member"
+            b.group_ids[m.group(2)] = int(m.group(1))
         if CRASH.search(line):
             self.finding(f"{b.name}: crash output: {line.strip()}", board=b.name)
         # Any board, not only an AP. Handhelds have had their own `lora` block since D77, and gating this
@@ -1391,10 +1407,18 @@ class Chaos:
         for i in sorted(last):
             r = last[i]
             s = quiet.get(i)
-            dead = self.ap_death_at is not None and s is not None and s >= self.args.ap_dead_after * 60
+            # Judged per access point. It used to need *every* access point to be dead before any was
+            # called flat, and one that had dropped out of the listener altogether (no figure at all) was
+            # printed as "still up at the end" hours after its battery had gone.
+            if s is None:
+                verdict = "flat (silent too long to time)"
+            elif s >= self.args.ap_dead_after * 60:
+                verdict = "flat"
+            else:
+                verdict = "still up at the end"
             out.append(f"| {r.get('name') or i} | {int(s) if s is not None else '?'} s ago | "
                        f"{r.get('uptime') or '?'} | {moved.get(i, {}).get('restarts', 0)} | "
-                       f"{r.get('heap_kb')} KB | {'flat' if dead else 'still up at the end'} |")
+                       f"{r.get('heap_kb')} KB | {verdict} |")
         out += ["", "A flat battery is read from silence, not measured: these boards cannot report their "
                 "own charge, so the figure is how long the access point kept beaconing. It is a floor on "
                 "the battery's life, not the battery's life.", ""]
@@ -1530,7 +1554,10 @@ class Chaos:
             out += ["No handheld was ever without a Wi-Fi session.", ""]
             return out
         bad = [e for e in eps if e.get("unjustified_s", 0) >= FALLBACK_GRACE_S]
-        out += [f"{len(eps)} episode(s); **{len(bad)} unjustified**.", "",
+        brief = [e for e in eps if 0 < e.get("unjustified_s", 0) < FALLBACK_GRACE_S]
+        out += [f"{len(eps)} episode(s); **{len(bad)} unjustified for {FALLBACK_GRACE_S} s or longer** (each is "
+                f"a finding), and **{len(brief)} more with a shorter unjustified stretch**, listed below and "
+                f"not raised as findings.", "",
                 "| Handheld | Started (s) | Lasted (s) | Unjustified (s) | Second radio | Why it had none |",
                 "|---|---|---|---|---|---|"]
         for e in sorted(eps, key=lambda x: -x.get("unjustified_s", 0))[:40]:
@@ -1763,11 +1790,32 @@ class Chaos:
                 self.write(h, "volume off")
         if not self.wait(self.args.recovery_timeout, until=lambda: not self.unsteady()):
             self.finding("Grid not steady before the first experiment: " + "; ".join(self.unsteady()))
-        for h in self.hhs:
-            self.write(h, "groups")
-        self.wait(5, until=lambda: all(h.groups for h in self.hhs))
-        shared = [g for g in (self.hhs[0].groups if self.hhs else {}) if all(h.groups.get(g) for h in self.hhs)]
-        self.group = shared[0] if shared else None
+        def shared_groups():
+            for h in self.hhs:
+                h.groups.clear()
+                self.write(h, "groups")
+            self.wait(5, until=lambda: all(h.groups for h in self.hhs))
+            return [g for g in (self.hhs[0].groups if self.hhs else {}) if all(h.groups.get(g) for h in self.hhs)]
+
+        shared = shared_groups()
+        if not shared and len(self.hhs) >= 2:
+            # No group holds every handheld under test, so group messages and group voice would go
+            # untested for the whole run - which is what happened, unnoticed, in every run before this one.
+            # Make one. It stays on the grid afterwards (groups are sticky, D48) and the next run reuses it.
+            devices = ",".join(str(h.index) for h in self.hhs)
+            maker = self.hhs[0]
+            if CHAOS_GROUP in maker.group_ids:
+                command = f"group set {maker.group_ids[CHAOS_GROUP]} {CHAOS_GROUP} {devices}"
+            else:
+                command = f"group new {CHAOS_GROUP} {devices}"
+            self.say(f"No group has every handheld under test; asking {maker.name} for one: {command}")
+            self.write(maker, command)
+            self.wait(8)
+            shared = shared_groups()
+            if not shared:
+                self.finding(f"The group every handheld should share could not be made ({command}); group "
+                             f"messages and group voice are left out of this run")
+        self.group = (CHAOS_GROUP if CHAOS_GROUP in shared else shared[0]) if shared else None
         self.say(f"Group messages go to {self.group}, which every handheld belongs to" if self.group else
                  "No group has every handheld as a member; group messages are left out")
         self.event("group", group=self.group, groups={h.name: h.groups for h in self.hhs})
@@ -1838,6 +1886,7 @@ class Chaos:
                      f"{'' if b.holdable else ' (pulse only: cannot be held)'}")
         if not self.aps and not self.hhs:
             raise SystemExit("No board answered; nothing was injected")
+        self.firmware_gate()
         if not self.aps:
             # The APs are on battery (D81/D82): no serial cable, so no AP-side fault can be *typed* at
             # them. They still attack themselves when armed over BLE (D82, D85), so a whole-system night
@@ -1851,6 +1900,62 @@ class Chaos:
             if not self.args.lora:
                 self.say("Nothing for this side to inject without --lora, because every other fault "
                          "needs an AP port. The APs' own faults still land if they are armed.")
+
+    def firmware_gate(self):
+        """Refuse to start unless every board is running the image that is in the build folder.
+
+        On 2026-10-03 a twelve-hour run to flat batteries was started with one access point still on the
+        firmware from before three fixes, because it could not be reached over USB the night before and
+        the run began on a one-line warning. Everything that access point touched that day was wasted.
+        A warning is not enough; the harness now stops.
+
+        The check is the build's own fingerprint: each image prints the start of its ELF's SHA-256 as it
+        boots, the harness resets every board as it starts and so sees that line, and it is compared with
+        the ELF in the build folder for that board's firmware and chip. A board that printed nothing, an
+        image that was never built, and an access point with no cable are all **not verified**, and not
+        verified is treated as wrong - an access point on battery is exactly the one that went unchecked.
+
+        --allow-firmware-mismatch starts anyway and records every problem as the first finding of the run,
+        so a report can never again be read without knowing what it was run on.
+        """
+        try:
+            bench = load_map()
+        except Exception:
+            bench = {}
+        kinds = bench.get("boards", {})
+        problems = []
+        for b in self.aps + self.hhs:
+            target = (kinds.get(b.board) or {}).get("target")
+            project, elf = ("node", "lg_node.elf") if b.is_ap else ("handheld", "lg_handheld.elf")
+            path = ROOT / "firmware" / project / f"build-{target}" / elf
+            if not target or not path.exists():
+                problems.append(f"{b.name}: no built {project} image for {target or 'board ' + str(b.board)} to compare with")
+                continue
+            want = hashlib.sha256(path.read_bytes()).hexdigest()
+            if not b.elf_sha:
+                problems.append(f"{b.name}: did not print its firmware fingerprint as it started")
+            elif not want.startswith(b.elf_sha):
+                problems.append(f"{b.name}: running {b.elf_sha}, the current {project} build is {want[:len(b.elf_sha)]}")
+        on_usb = {b.index for b in self.aps}
+        for d in bench.get("devices", []):
+            if d.get("role") == "N" and isinstance(d.get("node_index"), int) and d["node_index"] not in on_usb:
+                problems.append(f"{d.get('node_name') or d.get('name')}: not on USB, so its firmware cannot be read")
+        self.event("firmware_gate", problems=problems,
+                   fingerprints={b.name: b.elf_sha for b in self.aps + self.hhs})
+        if not problems:
+            self.say(f"Firmware: all {len(self.aps) + len(self.hhs)} boards are running the current build")
+            return
+        for p in problems:
+            self.say(f"Firmware: {p}")
+        if getattr(self.args, "allow_firmware_mismatch", False):
+            self.finding("THIS RUN STARTED ON FIRMWARE THAT WAS NOT VERIFIED (--allow-firmware-mismatch): "
+                         + "; ".join(problems))
+            return
+        raise SystemExit(
+            "\nNot started: " + str(len(problems)) + " board(s) are not verified as running the current build.\n"
+            "Flash the boards named above (python tools/flash.py <names> --no-build), or pass\n"
+            "--allow-firmware-mismatch to run anyway and have this recorded as the run's first finding.\n"
+            "Nothing was injected.")
 
     def start_ble_hands(self):
         """The BLE fault path (D90). Needs the admin password; without it the APs are only watched."""
@@ -1922,6 +2027,18 @@ class Chaos:
             return
         aps = [self.ble_slots[s] for s in e["victims"]]
         names = self.names_by_index()
+        # An access point whose battery is flat cannot be asked for anything. On 2026-10-03 the harness
+        # went on asking Everest for faults for hours after it had died, and each one was a finding.
+        rows = self.eyes.aps() if self.eyes else {}
+        gone = [a for a in aps if (rows.get(a) or {}).get("silent_s") is not None
+                and rows[a]["silent_s"] > DEAD_AP_S]
+        if gone:
+            self.say(f"#{e['n']}: {', '.join(names.get(a, f'AP {a}') for a in gone)} has gone silent "
+                     f"(battery); not asked")
+            aps = [a for a in aps if a not in gone]
+        if not aps:
+            self.event("skipped", n=e["n"], kind=e["kind"], why="every access point named has gone silent")
+            return
         victims = [names.get(a, f"AP {a}") for a in aps]
         exp = {**e, "slots": e["victims"], "victims": victims, "ap_indices": aps, "started": self.now_s(),
                "failover": [], "result": None, "unconfirmed": []}
@@ -1929,9 +2046,15 @@ class Chaos:
         self.phase = f"#{e['n']}"
         kind = "backbone" if e["kind"] == "ble_bb_off" else "restart"
         seconds = e["outage_s"] if kind == "backbone" else 0
-        for h in self.hhs:
-            if self.present(h) and h.registered_node in set(aps):
-                h.failover = (time.monotonic(), exp)
+        # Only a restart takes handhelds off an access point. A backbone-off leaves them where they are,
+        # so marking them as "failing over" was wrong - and the marker was never cleared, so the next time
+        # such a handheld registered anywhere, hours later, the summary counted it as a failover that had
+        # taken hours. That is where "23 moves, median 2,127 s" came from on 2026-10-03: no such move
+        # is in the event log.
+        if kind == "restart":
+            for h in self.hhs:
+                if self.present(h) and h.registered_node in set(aps):
+                    h.failover = (time.monotonic(), exp)
         self.say(f"#{e['n']} {e['kind']} {', '.join(victims)}"
                  + (f" for {seconds} s" if seconds else "") + " (over BLE)")
         self.event("fault", **{k: v for k, v in exp.items() if k not in ("at_s", "failover")})
@@ -1980,6 +2103,9 @@ class Chaos:
                              f"{', '.join(victims)} came back", n=e["n"])
         else:
             exp["result"] = "done"   # a backbone-off restores itself; the beacons cannot time it (D74)
+        for h in self.hhs:
+            if h.failover and h.failover[1] is exp:
+                h.failover = None    # as the cabled round does: a move after this is not this round's
         self.phase = ""
 
     def start_ble_eyes(self):
@@ -2795,6 +2921,7 @@ class Chaos:
             if time.monotonic() + budget > run_end:
                 self.say(f"#{e['n']} and later not started: they could not finish before the planned end")
                 break
+            self.rounds_reached += 1
             if self.unsteady() and not self.wait(self.args.recovery_timeout, until=lambda: not self.unsteady()):
                 self.finding(f"#{e['n']} not started: grid still not steady: " + "; ".join(self.unsteady()))
                 continue
@@ -2846,7 +2973,11 @@ class Chaos:
                f"Seed {self.args.seed}, planned {self.args.hours} h, boards: {', '.join(b.name for b in self.boards)}.",
                "", "## Result", "",
                "| Measure | Value |", "|---|---|",
-               f"| Experiments | {len(exps)}, recovered {sum(e.get('result') == 'recovered' for e in exps)}, "
+               # "run of reached": a round that was skipped or could not start used to vanish from this
+               # row, so a run that was skipping one round after another looked as if it had stalled.
+               f"| Experiments | {len(exps)} run of {self.rounds_reached} reached "
+               f"({max(0, self.rounds_reached - len(exps))} skipped or not started), "
+               f"recovered {sum(e.get('result') == 'recovered' for e in exps)}, "
                f"not recovered {sum(e.get('result') == 'not recovered' for e in exps)} |",
                f"| Backbone whole again after an AP fault | {spread(relink)} |",
                f"| Steady state after release | {spread(rec_s)} |",
@@ -3296,7 +3427,11 @@ def self_check():
             failures += 1
             print(f"FAIL identity: {line!r} -> {m.groups() if m else None}")
     rows = [("  1   FAMILY            member", ("1", "FAMILY", "member")),
-            ("  3   LEADERS           not a member", ("3", "LEADERS", "not a member"))]
+            ("  3   LEADERS           not a member", ("3", "LEADERS", "not a member")),
+            # as a handheld actually prints them, with the members listed after
+            ("  2   all               member         1 2 3", ("2", "all", "member")),
+            ("  3   testers           not a member   2 6 8", ("3", "testers", "not a member")),
+            ("  4   chaos             member         ", ("4", "chaos", "member"))]
     for line, want in rows:
         m = GROUP_ROW.search(line)
         if (m.groups() if m else None) != want:
@@ -3383,6 +3518,9 @@ def main():
                          "before the PC sets it")
     ap.add_argument("--recovery-timeout", type=float, default=180, help="seconds after release to reach steady state")
     ap.add_argument("--probe-interval", type=float, default=45, help="seconds between handheld messages")
+    ap.add_argument("--allow-firmware-mismatch", action="store_true",
+                    help="start even when a board is not verified as running the current build; every "
+                         "problem is recorded as the run's first finding")
     ap.add_argument("--no-set-time", dest="set_time", action="store_false",
                     help="do not set grid time from the PC clock at the start (1:1 and group need it, D6)")
     ap.add_argument("--audible-hours", metavar="HH-HH",

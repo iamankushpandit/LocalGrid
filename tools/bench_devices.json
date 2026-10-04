@@ -86,7 +86,7 @@
   "devices": [
     {
       "name": "node-main",
-      "port": "COM16",
+      "port": "COM41",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -98,7 +98,7 @@
     },
     {
       "name": "node-north",
-      "port": "COM29",
+      "port": "COM16",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -110,7 +110,7 @@
     },
     {
       "name": "node-south",
-      "port": "COM41",
+      "port": "COM29",
       "role": "N",
       "board": "ELG",
       "firmware": "node",
@@ -122,7 +122,7 @@
     },
     {
       "name": "hosyond",
-      "port": "COM36",
+      "port": "COM51",
       "role": "H",
       "board": "HY3",
       "firmware": "handheld",
@@ -155,7 +155,7 @@
     },
     {
       "name": "e28",
-      "port": "COM32",
+      "port": "COM48",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
@@ -177,7 +177,7 @@
     },
     {
       "name": "e40",
-      "port": "COM30",
+      "port": "COM50",
       "role": "H",
       "board": "E40",
       "firmware": "handheld",
@@ -202,7 +202,7 @@
     },
     {
       "name": "e28b",
-      "port": "COM33",
+      "port": "COM49",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",

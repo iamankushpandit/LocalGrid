@@ -16,6 +16,9 @@ import time
 
 import serial
 
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from flash import open_quiet  # noqa: E402
+
 # Decision D21: hardware addresses never appear in tool output, even if a library logs one.
 MAC_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
@@ -92,7 +95,9 @@ def main():
     sers, threads = {}, []
     for port in args.ports:
         try:
-            ser = serial.Serial(port, args.baud, timeout=0.1, write_timeout=0.5)
+            # Without restarting the board: a capture is for watching what a grid is doing, and a
+            # watcher that resets what it watches sees a different grid. --reset still pulses EN.
+            ser = open_quiet(port, args.baud, timeout=0.1)
         except serial.SerialException as e:
             # Release every port already opened: a plain close holds auto-reset boards in reset,
             # so one bad port name must not leave nodes dead.
