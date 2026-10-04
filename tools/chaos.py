@@ -1222,7 +1222,10 @@ class Chaos:
             self.event("lora_on", board=b.name)
         elif RX["lora_resetting"].search(line):
             b.lora_reset_at = now
-            b.lora_links.clear()
+            # The links are not cleared here. The firmware keeps its peer table across a module reset and
+            # logs no "Link up" afterwards, so clearing this copy made every reset round report "its LoRa
+            # peers did not come back" - three times on 2026-10-04, with the links up throughout. A link
+            # that really drops says so with "Link down", which is handled below.
             self.event("lora_resetting", board=b.name)
         elif m := RX["lora_configured"].search(line):
             b.lora_configured_at = now
