@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The screen saver shows the grid's time
+
+A third line under the handheld's name and its access point: hours and minutes in the grid's zone, as the
+launcher shows them, or "time not set" when the grid has none (D6). It is drawn the way the two names are
+- the UI font in the rain's colours, each character lit white when a stream's head crosses it and fading
+back down the ramp, never falling. When the minute turns only the digits that changed are repainted, and
+they arrive white and fade, the way a glyph in the rain changes. Built warning-free for every handheld
+target; **not yet seen on a screen**, because the boards were in the six-hour analysis run.
+
 ### An access point stops inviting the handheld it is about to refuse (D92)
 
 The thirty-minute cabled run of 2026-10-04 put numbers on a fault three chaos runs had circled: with four

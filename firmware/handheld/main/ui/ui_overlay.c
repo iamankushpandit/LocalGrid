@@ -66,6 +66,8 @@ static const char *TAG = "UI";
  */
 #define RAIN_FADE_STOPS   4
 #define LABEL_CHARS_MAX   40     /* letters per label line: HH_NAME_MAX plus room for "LoRa to " */
+#define LABEL_LINES       3      /* this handheld's name, its access point, the grid's time */
+#define LABEL_CLOCK       2      /* the line that holds the time */
 #define LABEL_REST        2      /* the ramp stop a label letter settles at: readable, plainly green */
 #define LABEL_DECAY_STEPS 3      /* rain steps between one stop and the next on the way down */
 #define CONVS_TRACKED     (LG_MAX_DEVICES + LG_MAX_GROUPS + 1)
@@ -166,8 +168,12 @@ static struct {
      */
     char      who[HH_NAME_MAX];
     char      ap[HH_SSID_MAX + 12];
-    lg_rect_t who_rect;
-    lg_rect_t ap_rect;
+    /*
+     * The grid's time, as a third line drawn exactly like the two names (owner, 2026-10-04): hours and
+     * minutes as the launcher shows them, or "time not set" when the grid has none (D6).
+     */
+    char      clock[16];
+    lg_rect_t lrect[LABEL_LINES];
     int16_t   label_c0, label_c1, label_r0, label_r1;   /* the cells the rain must not touch */
     bool      label_on;
     /*
@@ -176,15 +182,15 @@ static struct {
      * white when a stream's head crosses it, fades down the rain's own ramp to a resting green, and
      * now and then one flickers bright for no reason, the way a glyph in a trail does.
      */
-    struct {
+    struct label_char {
         int16_t x;            /* pixel x of this letter */
         uint8_t w;            /* its width in the UI font */
-        uint8_t off, len;     /* its bytes within s.who or s.ap (UTF-8) */
+        uint8_t off, len;     /* its bytes within the line's text (UTF-8) */
         uint8_t c0, c1;       /* the rain columns it spans */
         uint8_t lvl;          /* 0 white head .. LABEL_REST, the colour it is showing now */
-    } lchar[2][LABEL_CHARS_MAX];
-    uint8_t   nchar[2];
-    int16_t   lrow0[2], lrow1[2];   /* the rain rows each line occupies */
+    } lchar[LABEL_LINES][LABEL_CHARS_MAX];
+    uint8_t   nchar[LABEL_LINES];
+    int16_t   lrow0[LABEL_LINES], lrow1[LABEL_LINES];   /* the rain rows each line occupies */
     uint8_t   label_tick;
     uint32_t  rain_ms;
     uint32_t  rnd;
@@ -580,9 +586,9 @@ static void show_saver(uint32_t now)
     }
     s.rain_ms = now;
     s.label_on = false;
-    s.who[0] = s.ap[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
+    s.who[0] = s.ap[0] = s.clock[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
     saver_label_tick();
-    ESP_LOGI(TAG, "[UI] Screen saver on: %s %s", s.who, s.ap);
+    ESP_LOGI(TAG, "[UI] Screen saver on: %s %s, %s", s.who, s.ap, s.clock);
 }
 
 /*
@@ -607,11 +613,16 @@ static uint8_t utf8_len(uint8_t lead)
     return lead < 0x80u ? 1u : lead < 0xE0u ? 2u : lead < 0xF0u ? 3u : 4u;
 }
 
+static const char *label_text(uint8_t line)
+{
+    return line == 0u ? s.who : line == 1u ? s.ap : s.clock;
+}
+
 /* One letter, in the colour its level says. */
 static void label_char_paint(uint8_t line, uint8_t i)
 {
-    const char *src = line == 0u ? s.who : s.ap;
-    const lg_rect_t *lr = line == 0u ? &s.who_rect : &s.ap_rect;
+    const char *src = label_text(line);
+    const lg_rect_t *lr = &s.lrect[line];
     lg_box_t b;
     memset(&b, 0, sizeof(b));
     b.rect = (lg_rect_t){ s.lchar[line][i].x, lr->y, s.lchar[line][i].w, lr->h };
@@ -629,68 +640,90 @@ static void label_char_paint(uint8_t line, uint8_t i)
 }
 
 /*
- * Lay the two names out letter by letter and paint them at rest.
+ * Lay one line out letter by letter and paint it.
  *
  * Not in the matrix font: that font is katakana and digits (tools/build_matrix_font.py), so it cannot
  * spell "Denali". The UI font carries the letters; the ramp above carries the look. Each letter is
  * measured on its own because the font is proportional, and each remembers which rain columns it
  * spans, so a stream can find the letters it is passing through.
+ *
+ * `old` is what the line said before, or NULL to paint it whole. Given it, only the letters that
+ * differ are painted - the minute turning repaints a digit or two, not the line - and each of those
+ * comes up white and fades down the ramp, the way a glyph in the rain changes. A change that moves
+ * the line (a different width) repaints it whole.
  */
-static void saver_label_paint(void)
+static void label_line_layout(uint8_t line, const char *old)
 {
     const lg_font_t *font = &lg_font_montserrat_16;
-    int16_t lh = font->line_height;
-    int16_t gap = (int16_t)(lh / 3);
-    int16_t total = (int16_t)(lh * 2 + gap);
-    int16_t y = (int16_t)((s.h - total) / 2);
-    s.who_rect = (lg_rect_t){ 0, y, (int16_t)s.w, lh };
-    s.ap_rect  = (lg_rect_t){ 0, (int16_t)(y + lh + gap), (int16_t)s.w, lh };
+    const char *src = label_text(line);
+    struct label_char before[LABEL_CHARS_MAX];
+    uint8_t nbefore = s.nchar[line];
+    memcpy(before, s.lchar[line], sizeof(before));
 
-    /* The cells to keep the rain out of: the union of the two lines, in whole cells. */
-    int16_t top = s.who_rect.y, bot = (int16_t)(s.ap_rect.y + s.ap_rect.h - 1);
-    s.label_r0 = (int16_t)(top / s.row_h);
-    s.label_r1 = (int16_t)(bot / s.row_h);
+    char one[5];
+    uint8_t n = 0;
+    int16_t width = 0;
+    /* First pass: cut the string into letters and measure each. */
+    for (size_t off = 0; src[off] != '\0' && n < LABEL_CHARS_MAX; ) {
+        uint8_t len = utf8_len((uint8_t)src[off]);
+        memcpy(one, src + off, len);
+        one[len] = '\0';
+        int16_t w = lg_draw_text_width(font, NULL, one);
+        s.lchar[line][n].off = (uint8_t)off;
+        s.lchar[line][n].len = len;
+        s.lchar[line][n].w = (uint8_t)(w > 255 ? 255 : w < 1 ? 1 : w);
+        s.lchar[line][n].lvl = LABEL_REST;
+        width = (int16_t)(width + s.lchar[line][n].w);
+        off += len;
+        n++;
+    }
+    s.nchar[line] = n;
+    int16_t x = (int16_t)((s.w - width) / 2);
+    bool whole = old == NULL || n != nbefore || (n != 0u && before[0].x != x);
+    if (whole) {
+        lg_draw_fill(&s.lrect[line], C_BG);   /* whatever it said last, gone before the new letters */
+    }
+    /* Second pass: centre the run, and note the rain columns under each letter. */
+    for (uint8_t i = 0; i < n; i++) {
+        struct label_char *c = &s.lchar[line][i];
+        c->x = x;
+        int16_t c0 = (int16_t)(x / s.col_w), c1 = (int16_t)((x + c->w - 1) / s.col_w);
+        c->c0 = (uint8_t)(c0 < 0 ? 0 : c0);
+        c->c1 = (uint8_t)(c1 >= s.cols ? s.cols - 1 : c1);
+        x = (int16_t)(x + c->w);
+        bool same = !whole && before[i].x == c->x && before[i].w == c->w && before[i].len == c->len &&
+                    before[i].off == c->off && memcmp(old + c->off, src + c->off, c->len) == 0;
+        if (same) {
+            c->lvl = before[i].lvl;   /* a letter in the middle of fading carries on */
+            continue;
+        }
+        if (!whole) {
+            c->lvl = 0;               /* a changed letter arrives as a head does */
+        }
+        label_char_paint(line, i);
+    }
+}
+
+/* Place the three lines in the middle of the screen, keep the rain out of them, and paint them. */
+static void saver_label_paint(void)
+{
+    int16_t lh = lg_font_montserrat_16.line_height;
+    int16_t gap = (int16_t)(lh / 3);
+    int16_t total = (int16_t)(lh * LABEL_LINES + gap * (LABEL_LINES - 1));
+    int16_t y = (int16_t)((s.h - total) / 2);
+    for (uint8_t line = 0; line < LABEL_LINES; line++) {
+        s.lrect[line] = (lg_rect_t){ 0, (int16_t)(y + line * (lh + gap)), (int16_t)s.w, lh };
+        s.lrow0[line] = (int16_t)(s.lrect[line].y / s.row_h);
+        s.lrow1[line] = (int16_t)((s.lrect[line].y + lh - 1) / s.row_h);
+    }
+    /* The cells to keep the rain out of: the union of the lines, in whole cells. */
+    s.label_r0 = s.lrow0[0];
+    s.label_r1 = s.lrow1[LABEL_LINES - 1];
     s.label_c0 = 0;
     s.label_c1 = (int16_t)(s.cols - 1);
     s.label_on = true;
-    s.lrow0[0] = (int16_t)(s.who_rect.y / s.row_h);
-    s.lrow1[0] = (int16_t)((s.who_rect.y + lh - 1) / s.row_h);
-    s.lrow0[1] = (int16_t)(s.ap_rect.y / s.row_h);
-    s.lrow1[1] = (int16_t)((s.ap_rect.y + lh - 1) / s.row_h);
-
-    lg_draw_fill(&s.who_rect, C_BG);   /* whatever the last names were, gone before the new ones */
-    lg_draw_fill(&s.ap_rect, C_BG);
-
-    for (uint8_t line = 0; line < 2u; line++) {
-        const char *src = line == 0u ? s.who : s.ap;
-        char one[5];
-        uint8_t n = 0;
-        int16_t width = 0;
-        /* First pass: cut the string into letters and measure each. */
-        for (size_t off = 0; src[off] != '\0' && n < LABEL_CHARS_MAX; ) {
-            uint8_t len = utf8_len((uint8_t)src[off]);
-            memcpy(one, src + off, len);
-            one[len] = '\0';
-            int16_t w = lg_draw_text_width(font, NULL, one);
-            s.lchar[line][n].off = (uint8_t)off;
-            s.lchar[line][n].len = len;
-            s.lchar[line][n].w = (uint8_t)(w > 255 ? 255 : w < 1 ? 1 : w);
-            s.lchar[line][n].lvl = LABEL_REST;
-            width = (int16_t)(width + s.lchar[line][n].w);
-            off += len;
-            n++;
-        }
-        s.nchar[line] = n;
-        /* Second pass: centre the run, and note the rain columns under each letter. */
-        int16_t x = (int16_t)((s.w - width) / 2);
-        for (uint8_t i = 0; i < n; i++) {
-            s.lchar[line][i].x = x;
-            int16_t c0 = (int16_t)(x / s.col_w), c1 = (int16_t)((x + s.lchar[line][i].w - 1) / s.col_w);
-            s.lchar[line][i].c0 = (uint8_t)(c0 < 0 ? 0 : c0);
-            s.lchar[line][i].c1 = (uint8_t)(c1 >= s.cols ? s.cols - 1 : c1);
-            x = (int16_t)(x + s.lchar[line][i].w);
-            label_char_paint(line, i);
-        }
+    for (uint8_t line = 0; line < LABEL_LINES; line++) {
+        label_line_layout(line, NULL);
     }
 }
 
@@ -700,7 +733,7 @@ static void saver_label_touch(uint8_t col, int16_t row)
     if (!s.label_on) {
         return;
     }
-    for (uint8_t line = 0; line < 2u; line++) {
+    for (uint8_t line = 0; line < LABEL_LINES; line++) {
         if (row < s.lrow0[line] || row > s.lrow1[line]) {
             continue;
         }
@@ -725,7 +758,7 @@ static void saver_label_animate(void)
         return;
     }
     bool decay = (++s.label_tick % LABEL_DECAY_STEPS) == 0u;
-    for (uint8_t line = 0; line < 2u; line++) {
+    for (uint8_t line = 0; line < LABEL_LINES; line++) {
         for (uint8_t i = 0; i < s.nchar[line]; i++) {
             if (decay && s.lchar[line][i].lvl < LABEL_REST) {
                 s.lchar[line][i].lvl++;
@@ -734,7 +767,7 @@ static void saver_label_animate(void)
         }
     }
     if ((rnd() & 7u) == 0u) {
-        uint8_t line = (uint8_t)(rnd() & 1u);
+        uint8_t line = (uint8_t)(rnd() % LABEL_LINES);
         if (s.nchar[line] != 0u) {
             uint8_t i = (uint8_t)(rnd() % s.nchar[line]);
             if (s.lchar[line][i].lvl >= LABEL_REST) {
@@ -745,7 +778,7 @@ static void saver_label_animate(void)
     }
 }
 
-/* Reads the names, and repaints only when one of them has changed - a roam, or a rename. */
+/* Reads the names and the time, and repaints only what has changed - a roam, a rename, the minute. */
 static void saver_label_tick(void)
 {
     const hh_status_t *st = ui_status();
@@ -770,12 +803,27 @@ static void saver_label_tick(void)
     } else {
         snprintf(ap, sizeof(ap), "%s", "no AP");
     }
-    if (strcmp(who, s.who) == 0 && strcmp(ap, s.ap) == 0) {
+    char clock[sizeof(s.clock)];
+    if (st->grid_time == 0) {
+        snprintf(clock, sizeof(clock), "%s", "time not set");   /* D6: the grid has no time yet */
+    } else {
+        struct tm lt;
+        hh_local_time(st->grid_time, &lt);   /* D67: the grid's zone */
+        snprintf(clock, sizeof(clock), "%02u:%02u", (unsigned)lt.tm_hour % 100u, (unsigned)lt.tm_min % 100u);
+    }
+    if (strcmp(who, s.who) != 0 || strcmp(ap, s.ap) != 0 || !s.label_on) {
+        snprintf(s.who, sizeof(s.who), "%s", who);
+        snprintf(s.ap, sizeof(s.ap), "%s", ap);
+        snprintf(s.clock, sizeof(s.clock), "%s", clock);
+        saver_label_paint();
         return;
     }
-    snprintf(s.who, sizeof(s.who), "%s", who);
-    snprintf(s.ap, sizeof(s.ap), "%s", ap);
-    saver_label_paint();
+    if (strcmp(clock, s.clock) != 0) {
+        char was[sizeof(s.clock)];
+        snprintf(was, sizeof(was), "%s", s.clock);
+        snprintf(s.clock, sizeof(s.clock), "%s", clock);
+        label_line_layout(LABEL_CLOCK, was);
+    }
 }
 
 static void rain_step(void)

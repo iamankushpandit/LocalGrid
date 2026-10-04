@@ -19,7 +19,7 @@ list; they went in first so the analysis could be trusted.
      point before it is kept.
    - Recorded as D92.
 
-2. **Screen saver: show the grid time.** A third line under the handheld's name and its access point,
+2. **Screen saver: show the grid time. Built, not yet seen on a screen.** A third line under the handheld's name and its access point,
    drawn the same way as those two: the UI font in the rain's colours, each character lit white when a
    stream's head crosses it and fading back down the ramp, never falling. (Owner, 2026-10-04.)
    - Assumed until told otherwise: hours and minutes as the status bar shows them, repainting only the
