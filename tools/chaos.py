@@ -1285,8 +1285,15 @@ class Chaos:
         why = []
         live_aps = [a for a in self.aps if self.present(a)]
         live_idx = {a.index for a in live_aps}
+        cabled_idx = set(live_idx)
+        # An access point with no cable is still an access point. With Fuji's USB dead on 2026-10-04 and
+        # the other two on cables, every handheld registered with Fuji was "not registered with a live AP"
+        # and no round ever started. One the BLE listener is hearing counts as live for a handheld.
+        if self.eyes is not None:
+            live_idx |= {i for i, r in self.eyes.aps().items()
+                         if r.get("silent_s") is not None and r["silent_s"] <= DEAD_AP_S}
         for a in live_aps:
-            missing = live_idx - {a.index} - a.links
+            missing = cabled_idx - {a.index} - a.links
             if missing:
                 why.append(f"{a.name} has no link to AP {sorted(missing)}")
             if a.status is None:
@@ -1908,6 +1915,18 @@ class Chaos:
             if not self.args.lora:
                 self.say("Nothing for this side to inject without --lora, because every other fault "
                          "needs an AP port. The APs' own faults still land if they are armed.")
+        else:
+            # Some on cables and some not (2026-10-04: Fuji's USB serial went dead mid-night). The cabled
+            # ones are driven as always; the others are only watched, so a handheld registered with one
+            # is known to be on a live access point and the run is not held up waiting for it.
+            try:
+                mapped = {d["node_index"] for d in load_map().get("devices", [])
+                          if d.get("role") == "N" and isinstance(d.get("node_index"), int)}
+            except Exception:
+                mapped = set()
+            if mapped - {a.index for a in self.aps}:
+                self.say("Some access points are not on USB: they are watched over BLE and not faulted.")
+                self.start_ble_eyes()
 
     def firmware_gate(self):
         """Refuse to start unless every board is running the image that is in the build folder.
@@ -2122,13 +2141,13 @@ class Chaos:
             self.say("--no-ble: this run will not watch the APs at all, so a message lost while an AP "
                      "was down will be reported as a finding. Only useful when no AP is armed.")
             return
-        names = {b.index: b.ap_name for b in self.aps if b.ap_name}
-        if not names:
-            try:
-                names = {d["node_index"]: d["node_name"] for d in load_map().get("devices", [])
-                         if d.get("role") == "N" and isinstance(d.get("node_index"), int)}
-            except Exception:
-                names = {}
+        # The device map first, the cabled boards over it: an access point with no cable is named too.
+        try:
+            names = {d["node_index"]: d["node_name"] for d in load_map().get("devices", [])
+                     if d.get("role") == "N" and isinstance(d.get("node_index"), int)}
+        except Exception:
+            names = {}
+        names.update({b.index: b.ap_name for b in self.aps if b.ap_name})
         self.eyes = BleEyes(self.args.secrets, names)
         if not self.eyes.start():
             self.finding(f"The APs could not be watched over BLE ({self.eyes.error}), so an AP fault "

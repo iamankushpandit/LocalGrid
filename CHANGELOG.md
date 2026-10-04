@@ -5,6 +5,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A LoRa link that came up on a data frame was taken down in the same pass
+
+An access point's LoRa link to a peer times out after 190 s without a heartbeat. A later data frame from
+that peer brought the link up again but left the old "last heard" time in place, so the timeout sweep at
+the end of the same pass took it down: "Link up to AP 0" and "Link down to AP 0 (no heartbeat)" at the
+same millisecond, thirty times across two runs on 2026-10-04. Each pair ran the link-up catch-up, and the
+peer was unusable for the frames behind it. Any authenticated frame now counts as word from that AP.
+Built warning-free; **not yet run on the boards**.
+
+Found while reading for the 40-second gap when the backbone switches to LoRa. Part of that gap is the
+test's own doing: `bb off` mutes ESP-NOW in software, the muted AP's radio still acknowledges its
+neighbour's keepalives, so the neighbour keeps the link for the 20 s hard timeout instead of the 6 s it
+takes when an AP is really gone. The rest of the gap is not explained yet.
+
+### chaos.py with some access points on cables and one without
+
+Fuji's USB serial went dead in the night (the board runs and its radio links are up; nothing arrives on
+the port, even from the ROM after a reset). With the other two on cables the harness only listened over
+BLE when *no* AP was on USB, so every handheld registered with Fuji was "not registered with a live AP"
+and no round started. It now watches the cable-less ones over BLE and counts them as live. BLE needs the
+Python that has `bleak`: the ESP-IDF environment's Python does not.
+
 ### A run stalled by a stale beacon, six memory trials, and a GPS switch that is off
 
 `docs/chaos/2026-10-04-stalled-run-and-memory-trials.md` has the numbers.

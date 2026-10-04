@@ -1049,6 +1049,14 @@ static void deliver(const lora_rx_t *r, uint32_t now)
         }
         peer_up(src, r->rssi, r->snr);
     }
+    /*
+     * Any authenticated frame is word from that AP, not only its heartbeat. Without this a link that
+     * had timed out came up on a data frame with the old `last_ms` still in place, and the sweep in
+     * lora_poll() took it down again in the same pass: "Link up to AP 0" and "Link down to AP 0 (no
+     * heartbeat)" at the same millisecond, three times in three seconds on Fuji on 2026-10-04, each
+     * pair running the link-up catch-up and leaving the peer unusable for the frames behind it.
+     */
+    L.peers[src].last_ms = now;
     if (L.on_frame != NULL) {
         /*
          * The number that says whether the radio is earning its keep: a frame the core had not
