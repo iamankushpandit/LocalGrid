@@ -114,6 +114,7 @@ static const char *TAG = "NET";
 #define AVOID_FIRST_MS        15000u
 #define AVOID_MAX_MS          120000u
 #define AVOID_PENALTY_DB      2000
+#define REFUSED_RETRY_MAX_MS  60000u   /* the longest wait before asking the only AP in range again (D92) */
 #define BALANCE_MIN_ONLINE_MS 60000
 #define BALANCE_STAGGER_MS    20000
 #define BALANCE_HOLDOFF_MS    180000
@@ -1146,6 +1147,26 @@ static int pick_node(uint32_t now)
     return best;
 }
 
+/*
+ * How long until an access point that turned this handheld away may be tried again (D92); 0 when it
+ * may be tried now. pick_node still chooses an avoided AP when it is the only one (D84), and before
+ * this that meant asking it again every ten seconds for as long as it kept saying no: 35 attempts in
+ * six minutes each from two handhelds on 2026-10-04, every one costing the AP the heap it was short
+ * of. The wait is half the avoidance span, capped: 7 s, 15 s, 30 s, then a minute - long enough to
+ * stop the hammering, short enough that a freed slot is not left empty for two minutes.
+ */
+static uint32_t join_wait_ms(int node, uint32_t now)
+{
+    if (node < 0 || node >= HH_MAX_NODES || s.avoid_until_ms[node] == 0 ||
+        (int32_t)(now - s.avoid_until_ms[node]) >= 0) {
+        return 0;
+    }
+    uint32_t refused_ms = s.avoid_until_ms[node] - s.avoid_for_ms[node];
+    uint32_t wait = MIN_U32(s.avoid_for_ms[node] / 2u, REFUSED_RETRY_MAX_MS);
+    uint32_t since = now - refused_ms;
+    return since >= wait ? 0 : wait - since;
+}
+
 static void drop_link(const char *why, bool retry_now);
 static void apply_wifi_switch(uint32_t now);   /* D78: the Wi-Fi switch, defined with step() */
 
@@ -1468,14 +1489,19 @@ static void on_scan_done(uint32_t now)
         return;
     }
     int node = pick_node(now);
-    if (node >= 0) {
+    uint32_t held = join_wait_ms(node, now);
+    if (node >= 0 && held == 0) {
         begin_join(node, now);
         return;
     }
     s.backoff_ms = s.backoff_ms == 0 ? BACKOFF_FIRST_MS : MIN_U32(s.backoff_ms * 2, BACKOFF_MAX_MS);
     s.next_attempt_ms = now + s.backoff_ms;
     char why[HH_PROBLEM_MAX];
-    if (found > 0 && s.preferred >= 0) {
+    if (node >= 0) {
+        /* The only AP worth joining turned this handheld away a moment ago: wait, do not hammer. */
+        snprintf(why, sizeof(why), "%.16s is full; asking again in %u s", s.cand[node].ssid,
+                 (unsigned)((held + 999u) / 1000u));
+    } else if (found > 0 && s.preferred >= 0) {
         snprintf(why, sizeof(why), "The chosen AP is not in range");
     } else if (heard == 0) {
         snprintf(why, sizeof(why), "No LocalGrid AP in range");
@@ -1887,10 +1913,10 @@ static void step(uint32_t now)
     case HH_LINK_SEARCHING:
         if (!s_scanning && now >= s.next_attempt_ms) {
             int node = pick_node(now);
-            if (node >= 0) {
+            if (node >= 0 && join_wait_ms(node, now) == 0) {
                 begin_join(node, now);
             } else {
-                start_scan(now);
+                start_scan(now);   /* nothing to join, or the only AP has just refused us (D92) */
             }
         }
         break;

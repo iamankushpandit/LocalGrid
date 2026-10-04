@@ -51,6 +51,7 @@ static const uint8_t s_backbone_key[32] = LG_SECRET_BACKBONE_KEY;
 static uint8_t s_discriminator[4];
 static uint8_t s_last_disc_clients = 0xFF;
 static uint8_t s_last_disc_flags = 0xFF;
+static uint8_t s_last_disc_full = 0xFF;
 
 _Static_assert(LG_PROTO_DHCP_INDICES == LG_MAX_NODES, "one phone DHCP block per possible AP index (D46)");
 
@@ -415,6 +416,15 @@ static uint8_t clients_count(void)
  */
 #define DISC_HEAP_FLOOR        10240u
 #define DISC_HEAP_PER_STATION  4608u
+/*
+ * What a handheld costs between associating and reaching the door (D92). The door looks at the heap
+ * after the newcomer has associated and opened its socket; the beacon is built before it has done
+ * either. Measured on 2026-10-04 with every access point on a cable: 16 KB free with four attached,
+ * 13 KB by the time the fifth was at the door. So the beacon said "1 free" and the door said "no heap"
+ * - 67 times in six minutes, to two handhelds that had nowhere else to go. The beacon now takes this
+ * off before it counts, so it never offers a slot the door will not honour.
+ */
+#define DISC_ARRIVAL_COST      3072u
 
 /* Fixed discovery part (LG_DISC_LEN bytes), shared by the Wi-Fi vendor IE and BLE.
  *
@@ -449,11 +459,10 @@ static uint8_t clients_count(void)
  * died outright of the same cause. Advertised capacity that is not enforced is not capacity; it is a
  * suggestion the grid pays for.
  */
-uint8_t node_station_room(void)
+static uint8_t station_room_with(uint32_t heap)
 {
     uint8_t clients = sess_registered_count();
     uint8_t table_room = (uint8_t)(LG_PROTO_MAX_STATIONS - clients);
-    uint32_t heap = esp_get_free_heap_size();
     uint32_t spare = heap > DISC_HEAP_FLOOR ? (heap - DISC_HEAP_FLOOR) / DISC_HEAP_PER_STATION : 0u;
     uint8_t room = spare > 255u ? 255u : (uint8_t)spare;
     if (room > table_room) {
@@ -465,10 +474,23 @@ uint8_t node_station_room(void)
     return room;
 }
 
+/* The door's figure: the newcomer has already associated and opened its socket. */
+uint8_t node_station_room(void)
+{
+    return station_room_with(esp_get_free_heap_size());
+}
+
+/* The beacon's figure: the same sum on the heap that will be left once a newcomer reaches the door. */
+static uint8_t station_room_advertised(void)
+{
+    uint32_t heap = esp_get_free_heap_size();
+    return station_room_with(heap > DISC_ARRIVAL_COST ? heap - DISC_ARRIVAL_COST : 0u);
+}
+
 static size_t build_discovery(uint8_t out[LG_DISC_LEN])
 {
     uint8_t clients = sess_registered_count();
-    uint8_t room = node_station_room();
+    uint8_t room = station_room_advertised();
     out[0] = LG_DISC_MAGIC0;
     out[1] = LG_DISC_MAGIC1;
     out[2] = LG_DISC_VERSION;
@@ -486,11 +508,24 @@ static void refresh_discovery(void)
 {
     uint8_t payload[LG_DISC_LEN];
     build_discovery(payload);
-    if (payload[11] == s_last_disc_clients && payload[10] == s_last_disc_flags) {
+    /*
+     * Republished when the room goes to or from zero, not only when somebody joins or leaves (D92).
+     * The room byte used to be whatever the heap said at the instant the handheld count last changed -
+     * the moment a session is being set up, and the least representative reading there is - and then
+     * stood until the next change. Only the full/not-full edge is watched: that is the bit a handheld
+     * acts on, and following every count would rewrite the beacon on each wobble of the heap.
+     */
+    uint8_t full = payload[9] == 0u ? 1u : 0u;
+    if (payload[11] == s_last_disc_clients && payload[10] == s_last_disc_flags && full == s_last_disc_full) {
         return;
+    }
+    if (full != s_last_disc_full && s_last_disc_full != 0xFF) {
+        ESP_LOGI(TAG, "[NET] Now advertising %s (%u attached, %u free KB)", full ? "no room" : "room",
+                 (unsigned)payload[11], (unsigned)(esp_get_free_heap_size() / 1024u));
     }
     s_last_disc_clients = payload[11];
     s_last_disc_flags = payload[10];
+    s_last_disc_full = full;
 
     /* Wi-Fi carries the AP name after the fixed part: every AP shares one SSID (D46), so this
      * is the only per-AP label a handheld can show. BLE keeps the fixed part only. */

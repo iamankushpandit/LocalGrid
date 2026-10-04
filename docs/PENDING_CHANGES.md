@@ -9,13 +9,15 @@ list; they went in first so the analysis could be trusted.
 1. **An access point advertises room it then refuses.** Its own console says "No heap to serve another
    handheld; refusing connection" while its beacon says "1 free" (Everest, 16 times in three minutes;
    Denali stranded two handhelds for 1 h 46 min on 2026-10-03).
-   - The beacon and the door use one number, with headroom for the cost of the join itself.
+   - **Built (D92), not yet run on the boards:** the beacon takes the cost of arriving off the heap
+     before it counts, and is rewritten when the room goes to or from zero.
    - A full access point says so in a reply instead of closing the socket, so the handheld shows "AP full"
      rather than "session receive error".
-   - A handheld refused by the only access point in range backs off instead of retrying every 10 s.
+   - **Built (D92), not yet run on the boards:** a handheld refused by the only access point in range
+     waits 7 s, 15 s, 30 s, then 60 s before asking again.
    - Then cut what each session costs (TCP windows, AMPDU, socket count), each measured on a cabled access
      point before it is kept.
-   - Touches D84: record a new decision before building.
+   - Recorded as D92.
 
 2. **Screen saver: show the grid time.** A third line under the handheld's name and its access point,
    drawn the same way as those two: the UI font in the rain's colours, each character lit white when a

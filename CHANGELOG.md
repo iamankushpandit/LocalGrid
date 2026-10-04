@@ -5,6 +5,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### An access point stops inviting the handheld it is about to refuse (D92)
+
+The thirty-minute cabled run of 2026-10-04 put numbers on a fault three chaos runs had circled: with four
+handhelds attached, an access point's beacon said "1 free" and its door said "No heap to serve another
+handheld" - 67 times in six minutes, to two handhelds that retried every ten seconds because nothing else
+was in range.
+
+- **The beacon and the door now agree.** They ran the same sum on the heap at different moments, about
+  3 KB apart: the cost of a handheld associating and opening its socket. The beacon takes that off first
+  (`DISC_ARRIVAL_COST`), so it offers only what the door will honour.
+- **The room byte is kept current.** It was rewritten only when the handheld count changed. It is now
+  also rewritten when the room goes to or from zero, with a `[NET] Now advertising room / no room` line.
+- **A refused handheld waits.** When the only access point worth joining has just turned it away, the
+  handheld waits half the avoidance span (7 s, 15 s, 30 s, at most 60 s) before asking again, keeps
+  scanning meanwhile, and shows "<AP> is full; asking again in N s".
+
+Nobody new is admitted: this removes the invitation, not the limit. Built warning-free for every target;
+**not yet run on the boards**, which were in the six-hour analysis run. Finding the memory to admit more
+is still open.
+
 ### The instruments, before the analysis: tools that do not disturb the grid, and a run that will not start on the wrong firmware
 
 No firmware changed here. These are the tools the next analysis run depends on, fixed first because a
