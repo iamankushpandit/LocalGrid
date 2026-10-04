@@ -104,4 +104,15 @@ uint32_t node_brownouts(void);        /* brownout restarts counted in NVS, read 
  * when a session is accepted, so the two can never disagree - see node_main.c for what happened on
  * 2026-10-01 when only the advert was true.
  */
+/*
+ * Handheld sessions this AP keeps a slot for. Each slot holds a whole frame of receive buffer, 1,060
+ * bytes, whether anybody is in it or not, and the table used to be sized by LG_PROTO_MAX_STATIONS (15,
+ * the SoftAP's limit): 15.9 KB of RAM for sessions an AP on these boards has never been able to serve.
+ * Its memory has let it hold four to six. Eight leaves room for that, for a session being replaced
+ * while its successor registers, and for the gains still to come - and gives 7.4 KB back to the heap,
+ * which is more than one handheld's worth. The door still decides by memory (D84, D92); this is only
+ * the ceiling it can never reach past.
+ */
+#define NODE_SESS_MAX 8
+
 uint8_t node_station_room(void);

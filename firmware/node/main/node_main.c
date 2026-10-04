@@ -462,7 +462,7 @@ static uint8_t clients_count(void)
 static uint8_t station_room_with(uint32_t heap)
 {
     uint8_t clients = sess_registered_count();
-    uint8_t table_room = (uint8_t)(LG_PROTO_MAX_STATIONS - clients);
+    uint8_t table_room = (uint8_t)(clients < NODE_SESS_MAX ? NODE_SESS_MAX - clients : 0u);
     uint32_t spare = heap > DISC_HEAP_FLOOR ? (heap - DISC_HEAP_FLOOR) / DISC_HEAP_PER_STATION : 0u;
     uint8_t room = spare > 255u ? 255u : (uint8_t)spare;
     if (room > table_room) {

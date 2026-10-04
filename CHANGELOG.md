@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### An access point keeps eight session slots, not fifteen: 7.4 KB back
+
+The AP's own static tables take 69 KB of RAM (`idf_size.py`), and the largest that was simply too big
+was the session table: fifteen slots of 1,060 bytes, sized by the SoftAP's station limit, on boards whose
+memory has never let an AP serve more than six handhelds. `NODE_SESS_MAX` is 8, and the advertised room
+is capped by it. That is 7.4 KB more heap on every AP - more than one handheld's worth - with no build
+setting changed. Built warning-free; **not yet run on the boards**.
+
+Looked at and left alone: the backbone's transmit queue (16 frames, 17 KB) is the largest table, but it
+already overflows - Everest counted 78 frames dropped at the queue ten minutes after a boot - so it is a
+finding to follow, not memory to take.
+
 ### The screen saver shows the battery and the messages waiting; the APs say what their TCP stack holds
 
 - **Screen saver, a fourth line** (owner, 2026-10-04): the battery percentage and the number of messages

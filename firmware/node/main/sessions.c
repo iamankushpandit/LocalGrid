@@ -16,7 +16,7 @@
 
 static const char *TAG = "NET";
 
-#define SESS_MAX              LG_PROTO_MAX_STATIONS
+#define SESS_MAX              NODE_SESS_MAX
 #define SESS_IDLE_MS          30000u
 #define SESS_REGISTER_MS      5000u
 #define SEND_WAIT_MS          2000u   /* the longest ONE send may hold up the core task */
