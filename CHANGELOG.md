@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The final build measured: six handhelds on one access point, and voice to one, a group and everyone
+
+`docs/chaos/2026-10-04-day-run.md` has the whole day.
+
+- **One access point alone with all six handhelds for ten minutes**, the other two held off: Everest
+  rested at 23 KB with a low-water mark of 9 KB, Fuji at 28 KB and 15 KB; no refusal, no restart, and the
+  memory floor (now 12 KB) did not have to hold anything back. In the morning the same test had Everest
+  serving two and Fuji four.
+- **Voice, counted by the handhelds:** microphone talk from each FreeNove to one handheld, to the group
+  and to everyone, and generated speech from a third handheld to everyone, at 5 s and at 10 s. 54 listener
+  results, every frame heard, none dropped before the access point. The first test of group and
+  broadcast voice on the hardware.
+
 ### Five hours on the day's build: nothing crashed, and every loss was a LoRa-only crossing
 
 Run `chaos-runs/20261004-121046`, seed 25, 12:10 to 17:11, all nine boards cabled, firmware gate passed.
