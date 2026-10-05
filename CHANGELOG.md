@@ -5,6 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Signed update files, and a page that makes them in the browser
+
+The first piece of updates over the air (`docs/firmware-updates.md`, which also holds the plan for the
+rest, for the owner to review). **Nothing on a device reads an update file yet.**
+
+- **`.lgfw`**: a 128-byte header (role, chip, serial, image length and SHA-256, key id, version name),
+  a 64-byte ECDSA P-256 signature over it, then the application image.
+- **`site/sign/index.html`**, published at `/sign/` by `tools/gen_site.py`: makes a release key, signs an
+  image and checks an update file, all in the browser, with nothing uploaded. For people who are not the
+  bench.
+- **`tools/lgfw.py`**: the same on the command line.
+- Checked against each other: a file signed by either verifies in the other, and both refuse a different
+  key and a changed byte. The real access-point image signs and checks.
+
 ### Voice over LoRa (D95), and one access point for a handheld that is on LoRa alone
 
 - **A talk is also sent as a compact copy that LoRa can carry.** Beside the live frames, every

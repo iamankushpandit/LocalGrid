@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalGrid update signer</title>
+<style>
+  :root { --bg:#f6f7f5; --card:#ffffff; --ink:#18201b; --soft:#56635a; --line:#d5dbd6; --go:#1f7a4a; --go-ink:#ffffff; --bad:#a3261d; --ok:#1f7a4a; --code:#eef1ee; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111512; --card:#1a201c; --ink:#e7ece8; --soft:#9aa69e; --line:#2c3530; --go:#3aa66b; --go-ink:#06120b; --bad:#ff8a7f; --ok:#6fd49b; --code:#222a25; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 8px 0 4px; }
+  h2 { font-size: 1.15rem; margin: 0 0 10px; }
+  p { margin: 0 0 12px; }
+  .lead { color: var(--soft); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin:18px 0; }
+  label { display:block; font-weight:600; margin:12px 0 4px; }
+  input[type=text], input[type=number], select, textarea { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+  textarea { font: 13px/1.4 ui-monospace, Consolas, monospace; min-height: 84px; word-break: break-all; }
+  input[type=file] { width:100%; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  @media (max-width:560px) { .row { grid-template-columns: 1fr; } }
+  button { margin-top:14px; padding:10px 16px; border:0; border-radius:8px; background:var(--go); color:var(--go-ink); font:600 1rem system-ui, sans-serif; cursor:pointer; }
+  button.plain { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .out { margin-top:12px; padding:10px 12px; border-radius:8px; background:var(--code); font: 13px/1.5 ui-monospace, Consolas, monospace; white-space:pre-wrap; word-break:break-all; }
+  .out:empty { display:none; }
+  .ok { color:var(--ok); font-weight:600; }
+  .bad { color:var(--bad); font-weight:600; }
+  .note { color:var(--soft); font-size:.92rem; }
+  code { background:var(--code); padding:1px 5px; border-radius:5px; font-size:.92em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LocalGrid update signer</h1>
+  <p class="lead">Make the signed update file a LocalGrid grid accepts as new firmware. Everything on this page happens in your browser: nothing is uploaded, and it works with no connection once the page is open.</p>
+
+  <section>
+    <h2>1. Your release key</h2>
+    <p>A grid installs an update only if it was signed with the release key that grid trusts. Make one key for your grid, once, and keep the private file safe: anyone who has it can update your devices, and nobody can sign for you without it.</p>
+    <button id="make">Make a new release key</button>
+    <div class="out" id="made"></div>
+    <label for="keyfile">Or open the private key you already have (<code>.key.pem</code>)</label>
+    <input type="file" id="keyfile" accept=".pem,.key,.txt">
+    <div class="out" id="keyinfo"></div>
+    <p class="note">The public key is the long line starting with <code>04</code>. It is not a secret: it is what you give a device when you set it up, so that it knows whose updates to accept.</p>
+  </section>
+
+  <section>
+    <h2>2. Sign a firmware image</h2>
+    <label for="image">Firmware image (<code>lg_node.bin</code> or <code>lg_handheld.bin</code> from the build folder)</label>
+    <input type="file" id="image" accept=".bin">
+    <div class="row">
+      <div>
+        <label for="role">For</label>
+        <select id="role"><option value="N">Access point</option><option value="H">Handheld</option></select>
+      </div>
+      <div>
+        <label for="chip">Chip</label>
+        <select id="chip"><option value="1">ESP32</option><option value="2">ESP32-S3</option><option value="3">ESP32-C6</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="version">Version name</label>
+        <input type="text" id="version" maxlength="32" placeholder="2026.10.5">
+      </div>
+      <div>
+        <label for="serial">Serial number</label>
+        <input type="number" id="serial" min="1" max="4294967295">
+      </div>
+    </div>
+    <p class="note">Devices install an update only if its serial number is higher than the one they run, so a newer build must have a higher number. The time now, in seconds, is filled in for you and is always higher than last time.</p>
+    <button id="sign" disabled>Sign and save the update file</button>
+    <div class="out" id="signed"></div>
+  </section>
+
+  <section>
+    <h2>3. Check an update file</h2>
+    <p>Before you give a file to a grid, or when someone gives one to you, check it against the public key you trust.</p>
+    <label for="lgfw">Update file (<code>.lgfw</code>)</label>
+    <input type="file" id="lgfw" accept=".lgfw">
+    <label for="pub">Public key</label>
+    <textarea id="pub" spellcheck="false" placeholder="04..."></textarea>
+    <button id="check" class="plain">Check it</button>
+    <div class="out" id="checked"></div>
+  </section>
+
+  <p class="note">File layout: a 128-byte header (what the image is for, its length, its SHA-256, the serial number and which key signed it), a 64-byte ECDSA P-256 signature over that header, then the image. The command-line tool <code>tools/lgfw.py</code> in the repository makes and checks the same files.</p>
+</main>
+<script>
+"use strict";
+const HEADER_LEN = 128, SIG_LEN = 64;
+const CHIPS = {1: "ESP32", 2: "ESP32-S3", 3: "ESP32-C6"};
+const ROLES = {N: "access point", H: "handheld"};
+const ALG = {name: "ECDSA", namedCurve: "P-256"};
+const SIGN = {name: "ECDSA", hash: "SHA-256"};
+const $ = id => document.getElementById(id);
+let privateKey = null, publicRaw = null;
+
+const hex = bytes => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
+function unhex(text) {
+  const clean = text.replace(/[^0-9a-fA-F]/g, "");
+  if (clean.length % 2) throw new Error("the public key has an odd number of characters");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  return out;
+}
+const sha256 = async data => new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+const keyId = async pub => (await sha256(pub)).slice(0, 8);
+function show(id, cls, text) { const el = $(id); el.innerHTML = ""; const s = document.createElement("span"); if (cls) s.className = cls; s.textContent = text; el.appendChild(s); }
+function save(name, bytes, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([bytes], {type: type || "application/octet-stream"}));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function pem(der) {
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(der))).replace(/(.{64})/g, "$1\n").trim();
+  return "-----BEGIN PRIVATE KEY-----\n" + b64 + "\n-----END PRIVATE KEY-----\n";
+}
+function unpem(text) {
+  const body = text.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  return Uint8Array.from(atob(body), c => c.charCodeAt(0));
+}
+// The public half of a private key: WebCrypto gives it through the JWK form, as x and y.
+async function publicFromPrivate(key) {
+  const jwk = await crypto.subtle.exportKey("jwk", key);
+  const b = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+  const x = b(jwk.x), y = b(jwk.y), out = new Uint8Array(65);
+  out[0] = 4; out.set(x, 1 + 32 - x.length); out.set(y, 33 + 32 - y.length);
+  return out;
+}
+async function haveKey(key, where) {
+  privateKey = key; publicRaw = await publicFromPrivate(key);
+  $("pub").value = hex(publicRaw);
+  $("sign").disabled = false;
+  show(where, "ok", "Key ready.");
+  $(where).appendChild(document.createTextNode("\nkey id " + hex(await keyId(publicRaw)) + "\npublic key\n" + hex(publicRaw)));
+}
+
+$("serial").value = Math.floor(Date.now() / 1000);
+
+$("make").onclick = async () => {
+  try {
+    const pair = await crypto.subtle.generateKey(ALG, true, ["sign", "verify"]);
+    const der = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
+    await haveKey(pair.privateKey, "made");
+    save("localgrid-release.key.pem", pem(der), "application/x-pem-file");
+    save("localgrid-release.pub.hex", hex(publicRaw) + "\n", "text/plain");
+    $("made").appendChild(document.createTextNode("\n\nTwo files were saved: the private key (keep it safe, back it up, never share it) and the public key."));
+  } catch (e) { show("made", "bad", "Could not make a key: " + e.message); }
+};
+
+$("keyfile").onchange = async ev => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  try {
+    const key = await crypto.subtle.importKey("pkcs8", unpem(await file.text()), ALG, true, ["sign"]);
+    await haveKey(key, "keyinfo");
+  } catch (e) { show("keyinfo", "bad", "That is not a LocalGrid release key (a P-256 private key in PEM form)."); }
+};
+
+$("sign").onclick = async () => {
+  try {
+    const file = $("image").files[0];
+    if (!file) throw new Error("choose a firmware image first");
+    const image = new Uint8Array(await file.arrayBuffer());
+    if (!image.length || image[0] !== 0xE9) throw new Error("that does not look like an ESP application image (it should begin with E9)");
+    const version = new TextEncoder().encode($("version").value.trim());
+    if (!version.length) throw new Error("give the version a name");
+    if (version.length > 32) throw new Error("the version name is longer than 32 bytes");
+    const serial = Number($("serial").value);
+    if (!Number.isInteger(serial) || serial < 1 || serial > 0xFFFFFFFF) throw new Error("the serial number must be a whole number from 1 to 4294967295");
+    const header = new Uint8Array(HEADER_LEN), view = new DataView(header.buffer);
+    header.set([0x4C, 0x47, 0x46, 0x57], 0);           // "LGFW"
+    header[4] = 1;                                      // format
+    header[5] = $("role").value.charCodeAt(0);
+    header[6] = Number($("chip").value);
+    view.setUint32(8, serial, true);
+    view.setUint32(12, image.length, true);
+    header.set(await sha256(image), 16);
+    header.set(await keyId(publicRaw), 48);
+    header.set(version, 56);
+    const signature = new Uint8Array(await crypto.subtle.sign(SIGN, privateKey, header));
+    if (signature.length !== SIG_LEN) throw new Error("this browser returned a signature of an unexpected size");
+    const out = new Uint8Array(HEADER_LEN + SIG_LEN + image.length);
+    out.set(header, 0); out.set(signature, HEADER_LEN); out.set(image, HEADER_LEN + SIG_LEN);
+    const name = file.name.replace(/\.bin$/i, "") + "-" + CHIPS[header[6]].toLowerCase().replace("-", "") + ".lgfw";
+    save(name, out);
+    show("signed", "ok", "Signed and saved as " + name + ".");
+    $("signed").appendChild(document.createTextNode("\n" + ROLES[$("role").value] + " for " + CHIPS[header[6]] + ", version " + $("version").value.trim() + ", serial " + serial + ", " + image.length + " bytes\nkey id " + hex(await keyId(publicRaw))));
+  } catch (e) { show("signed", "bad", "Not signed: " + e.message); }
+};
+
+$("check").onclick = async () => {
+  try {
+    const file = $("lgfw").files[0];
+    if (!file) throw new Error("choose an update file first");
+    const pub = unhex($("pub").value);
+    if (pub.length !== 65 || pub[0] !== 4) throw new Error("the public key should be 65 bytes beginning with 04");
+    const blob = new Uint8Array(await file.arrayBuffer());
+    if (blob.length < HEADER_LEN + SIG_LEN || hex(blob.slice(0, 4)) !== "4c474657" || blob[4] !== 1) throw new Error("that is not a LocalGrid update file");
+    const header = blob.slice(0, HEADER_LEN), view = new DataView(header.buffer);
+    const signature = blob.slice(HEADER_LEN, HEADER_LEN + SIG_LEN), image = blob.slice(HEADER_LEN + SIG_LEN);
+    const problems = [];
+    if (hex(header.slice(48, 56)) !== hex(await keyId(pub))) problems.push("it was signed by a different key");
+    if (view.getUint32(12, true) !== image.length || hex(header.slice(16, 48)) !== hex(await sha256(image))) problems.push("the image does not match its header");
+    const key = await crypto.subtle.importKey("raw", pub, ALG, false, ["verify"]);
+    if (!await crypto.subtle.verify(SIGN, key, signature, header)) problems.push("the signature is not this key's");
+    const role = String.fromCharCode(header[5]);
+    const version = new TextDecoder().decode(header.slice(56, 88)).replace(/\0+$/, "");
+    const what = (ROLES[role] || role) + " for " + (CHIPS[header[6]] || "chip " + header[6]) + ", version " + version + ", serial " + view.getUint32(8, true) + ", " + image.length + " bytes";
+    if (problems.length) { show("checked", "bad", "REFUSED: " + problems.join("; ") + "."); $("checked").appendChild(document.createTextNode("\n(the file says: " + what + ")")); }
+    else { show("checked", "ok", "Good: signed by this key and intact."); $("checked").appendChild(document.createTextNode("\n" + what)); }
+  } catch (e) { show("checked", "bad", "Not checked: " + e.message); }
+};
+
+if (!window.crypto || !crypto.subtle) {
+  document.querySelector("main").insertAdjacentHTML("afterbegin", '<p class="bad">This browser will not sign here. Open the page over https, or from a file, in a current browser.</p>');
+}
+</script>
+</body>
+</html>

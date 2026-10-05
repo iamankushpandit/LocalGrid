@@ -9,6 +9,7 @@ from firmware/node/main/web/admin.html through tools/build_web_preview.py.
 Output:
   OUT/index.html           the landing page (site/index.template.html filled in)
   OUT/admin/index.html     the real admin page answering from a simulated MAIN, in the browser
+  OUT/sign/index.html      the update signer: makes a release key and signs firmware, in the browser
   OUT/assets/...           brand icons
   OUT/.nojekyll            serve files as they are
 
@@ -174,6 +175,13 @@ def main():
     preview = out / "admin" / "index.html"
     subprocess.run([sys.executable, str(ROOT / "tools" / "build_web_preview.py"), str(preview)], check=True)
     check_public("admin/index.html", preview.read_text(encoding="utf-8"))
+
+    # The update signer (docs/firmware-updates.md): one self-contained page, copied as it is. It signs
+    # in the visitor's browser and fetches nothing, so there is nothing to fill in - only to check.
+    signer = ROOT / "site" / "sign" / "index.html"
+    check_public("sign/index.html", signer.read_text(encoding="utf-8"))
+    (out / "sign").mkdir()
+    shutil.copy2(signer, out / "sign" / "index.html")
 
     (out / ".nojekyll").write_text("", encoding="utf-8")
     print(f"site written to {out} (commit {commit})")
