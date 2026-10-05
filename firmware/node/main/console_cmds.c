@@ -8,6 +8,7 @@
 
 #include "esp_console.h"
 #include "esp_log.h"
+#include "lg_fwupdate.h"
 #include "lg_gridkeys.h"
 #include "lg_power.h"
 #include "gps.h"
@@ -259,11 +260,12 @@ void console_start(void)
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_config.prompt = "grid>";
-    repl_config.max_cmdline_length = 256;
+    repl_config.max_cmdline_length = 1024;   /* an `update data` line carries 600 bytes as base64 (D97) */
     esp_console_dev_uart_config_t uart_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&uart_config, &repl_config, &repl));
     lg_gridkeys_register_console(true);   /* D96: `provision`, on a set-up access point and an unset one */
     lg_identity_register_console("N");    /* D96: `identity new`, for a board the bench has never seen */
+    lg_fwu_register_console('N');         /* D97: `update`, a signed update file over the serial line */
 
     const esp_console_cmd_t cmds[] = {
         { .command = "id",      .help = "Print this board's LocalGrid device ID",        .func = cmd_id },

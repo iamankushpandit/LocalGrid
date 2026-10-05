@@ -29,6 +29,7 @@
 #include "lg_bsp_touch.h"
 #include "lg_draw.h"
 #include "lg_bsp_settings.h"
+#include "lg_fwupdate.h"
 #include "lg_gridkeys.h"
 #include "lg_identity.h"
 
@@ -1316,7 +1317,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_config.prompt = "grid>";
-    repl_config.max_cmdline_length = 128;
+    repl_config.max_cmdline_length = 1024;   /* a setup bundle with a release key is 176 characters, an `update data` line 800 (D96, D97) */
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     esp_console_dev_usb_serial_jtag_config_t dev_config = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
     esp_err_t err = esp_console_new_repl_usb_serial_jtag(&dev_config, &repl_config, &repl);
@@ -1363,6 +1364,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         if (i == 0) {
             lg_gridkeys_register_console(false);   /* D96: `provision`, beside the first of the rest */
             lg_identity_register_console("H");     /* D96: `identity new`, for a board the bench has never seen */
+            lg_fwu_register_console('H');          /* D97: `update`, a signed update file over the serial line */
         }
         if (err != ESP_OK) {
             return err;

@@ -122,6 +122,47 @@ int lg_sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32])
     return (st == PSA_SUCCESS && olen == 32) ? 0 : LG_CRYPTO_ERR;
 }
 
+_Static_assert(sizeof(psa_hash_operation_t) <= sizeof(lg_sha256_ctx_t), "lg_sha256_ctx_t is too small for PSA");
+
+int lg_sha256_begin(lg_sha256_ctx_t *ctx)
+{
+    if (ctx == NULL) {
+        return LG_CRYPTO_ERR;
+    }
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    memset(ctx, 0, sizeof(*ctx));
+    memcpy(ctx, &op, sizeof(op));
+    return psa_hash_setup((psa_hash_operation_t *)ctx, PSA_ALG_SHA_256) == PSA_SUCCESS ? 0 : LG_CRYPTO_ERR;
+}
+
+int lg_sha256_update(lg_sha256_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    if (ctx == NULL || (len > 0 && data == NULL)) {
+        return LG_CRYPTO_ERR;
+    }
+    return psa_hash_update((psa_hash_operation_t *)ctx, data, len) == PSA_SUCCESS ? 0 : LG_CRYPTO_ERR;
+}
+
+int lg_sha256_finish(lg_sha256_ctx_t *ctx, uint8_t out[32])
+{
+    if (ctx == NULL || out == NULL) {
+        return LG_CRYPTO_ERR;
+    }
+    size_t olen = 0;
+    psa_status_t st = psa_hash_finish((psa_hash_operation_t *)ctx, out, 32, &olen);
+    if (st != PSA_SUCCESS) {
+        (void)psa_hash_abort((psa_hash_operation_t *)ctx);
+    }
+    return (st == PSA_SUCCESS && olen == 32) ? 0 : LG_CRYPTO_ERR;
+}
+
+void lg_sha256_abort(lg_sha256_ctx_t *ctx)
+{
+    if (ctx != NULL) {
+        (void)psa_hash_abort((psa_hash_operation_t *)ctx);
+    }
+}
+
 int lg_ecdsa_p256_verify(const uint8_t pub[LG_P256_PUB_LEN], const uint8_t *msg, size_t msg_len,
                          const uint8_t sig[LG_P256_SIG_LEN])
 {

@@ -224,8 +224,40 @@ static void test_ecdsa_p256_rfc6979(void)
     CHECK(lg_ecdsa_p256_verify(pub, header, sizeof(header), sig) < 0);
 }
 
+/* SHA-256 fed in pieces must equal SHA-256 fed whole, at every way of cutting the input. */
+static void test_sha256_pieces(void)
+{
+    static uint8_t data[1500];
+    for (size_t i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)(i * 7u + 3u);
+    }
+    uint8_t whole[32], parts[32];
+    /* FIPS 180-4's own example first, so the one-shot it is compared with is itself anchored. */
+    hex2bin("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", whole, sizeof(whole));
+    lg_sha256_ctx_t c;
+    CHECK_EQ(lg_sha256_begin(&c), 0);
+    CHECK_EQ(lg_sha256_update(&c, (const uint8_t *)"a", 1), 0);
+    CHECK_EQ(lg_sha256_update(&c, (const uint8_t *)"bc", 2), 0);
+    CHECK_EQ(lg_sha256_finish(&c, parts), 0);
+    CHECK(memcmp(whole, parts, 32) == 0);
+    CHECK_EQ(lg_sha256(data, sizeof(data), whole), 0);
+    static const size_t steps[] = { 1, 63, 64, 65, 192, 1024 };
+    for (size_t s = 0; s < sizeof(steps) / sizeof(steps[0]); s++) {
+        CHECK_EQ(lg_sha256_begin(&c), 0);
+        for (size_t at = 0; at < sizeof(data); at += steps[s]) {
+            size_t n = sizeof(data) - at < steps[s] ? sizeof(data) - at : steps[s];
+            CHECK_EQ(lg_sha256_update(&c, data + at, n), 0);
+        }
+        CHECK_EQ(lg_sha256_finish(&c, parts), 0);
+        CHECK(memcmp(whole, parts, 32) == 0);
+    }
+    CHECK_EQ(lg_sha256_begin(&c), 0);
+    lg_sha256_abort(&c);   /* abandoned half way: nothing to check but that it does not leak or crash */
+}
+
 void test_crypto(void)
 {
+    test_sha256_pieces();
     test_ecdsa_p256_rfc6979();
     test_chachapoly_rfc8439();
     test_x25519_rfc7748();

@@ -5,6 +5,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A device takes a signed update, and only a signed update (D97)
+
+- **`firmware/common/lg_fwupdate.c`**, in both firmwares: checks the first 192 bytes of an update file
+  (signature against the device's release key, role, chip, serial higher than what runs) before
+  anything is written, then writes the image to the spare slot, hashing it as it arrives, and makes it
+  bootable only if all of it matches the signed header.
+- **The admin page's `/api/update` takes a signed update file and nothing else.** The admin password
+  alone no longer replaces an access point's firmware (T3).
+- **`update`** on both consoles (`update`, `update begin`, `update data <base64>`, `update end`), and
+  **`tools/lgfw.py send <file> <board>`**, which types a file down the serial cable.
+- **`lg_crypto`** gains SHA-256 in pieces (`lg_sha256_begin/update/finish/abort`), tested against the
+  one-shot at six ways of cutting the input and against the FIPS 180-4 example. `LG_TESTS_RESULT: PASS`,
+  4221 checks.
+- **On the bench:** a handheld and an access point each installed a signed update, restarted into the
+  second slot, reported serial 1000 and its version, and rejoined. Refused, each with its reason: another
+  key's signature, access-point firmware on a handheld, a handheld with no release key, the same file a
+  second time, and an image with one byte changed.
+- Both consoles now take lines of up to 1024 characters; the handheld's 128 could not have held a setup
+  bundle that carries a release key.
+
 ### An installer page, images that can be published, and two firmware slots on every handheld
 
 - **`site/flash/index.html`**, published at `/flash/` by `tools/gen_site.py`: choose what the board is

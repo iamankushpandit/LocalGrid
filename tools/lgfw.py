@@ -148,6 +148,58 @@ def cmd_show(args):
           f"(not checked against a key: use `check --pub`)")
 
 
+def cmd_send(args):
+    """Types an update file at a board's console, 600 bytes a line, and waits for each to be taken."""
+    import base64
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import flash
+    data = flash.load_map()
+    device = next((d for d in data["devices"] if args.board in (d.get("name"), d.get("port"), d.get("id"))), None)
+    if device is None or not device.get("port"):
+        sys.exit(f"lgfw: {args.board} is not in the device map, or has no port")
+    blob = pathlib.Path(args.file).read_bytes()
+    # A short read timeout: each of about eight thousand lines is answered in a few milliseconds, and
+    # waiting a fifth of a second for more that is not coming made one file take half an hour.
+    s = flash.open_quiet(device["port"], 115200, 0.01)
+
+    def ask(command, wait):
+        s.reset_input_buffer()
+        s.write(b"\r\n" + command.encode("ascii") + b"\r\n")
+        reply, end = b"", time.time() + wait
+        while time.time() < end:
+            reply += s.read(256)
+            # A reply is whole once the line after it has begun: the console prints its prompt next,
+            # with no newline, so waiting for the buffer to end in one would wait for ever.
+            lines = reply.decode("utf-8", "replace").split("\n")
+            for i in range(len(lines) - 2, -1, -1):
+                if lines[i].strip().startswith("LGFWU:"):
+                    return lines[i].strip()
+        return None
+
+    started = time.time()
+    try:
+        print(f"{device['name']}: {ask('update', 4) or 'no answer (is this firmware older than D97?)'}")
+        answer = ask("update begin", 4)
+        if answer != "LGFWU: ready":
+            sys.exit(f"lgfw: {device['name']} would not start: {answer}")
+        # 144 bytes is 192 characters of base64: with the command in front, a line the console's serial
+        # buffer takes in one piece. 600-byte lines arrived with pieces missing.
+        for at in range(0, len(blob), 144):
+            answer = ask("update data " + base64.b64encode(blob[at:at + 144]).decode("ascii"), 20)
+            if answer is None or "refused" in answer or not answer.startswith("LGFWU: at"):
+                sys.exit(f"lgfw: {device['name']} stopped at byte {at}: {answer}")
+            if at % (144 * 1000) == 0:
+                print(f"  {at * 100 // len(blob)} %", flush=True)
+        answer = ask("update end", 30)
+        print(f"{device['name']}: {answer}  ({time.time() - started:.0f} s)")
+        return 0 if answer and "ok" in answer else 1
+    finally:
+        s.rts = False
+        s.dtr = False
+        time.sleep(0.1)
+        s.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -167,11 +219,15 @@ def main():
     p.add_argument("file")
     p.add_argument("--pub", required=True)
     p.set_defaults(func=cmd_check)
+    p = sub.add_parser("send", help="send an update file to a board over its serial cable")
+    p.add_argument("file")
+    p.add_argument("board", help="a name, port or ID from the device map")
+    p.set_defaults(func=cmd_send)
     p = sub.add_parser("show", help="print an update file's header")
     p.add_argument("file")
     p.set_defaults(func=cmd_show)
     args = ap.parse_args()
-    args.func(args)
+    sys.exit(args.func(args) or 0)
 
 
 if __name__ == "__main__":

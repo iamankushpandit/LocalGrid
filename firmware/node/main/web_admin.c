@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"   /* D81: the admin page can replace this AP's firmware */
+#include "lg_fwupdate.h"   /* D97: and only with a signed update file */
 #include "chaos_log.h"    /* D83 */
 #include "chaos_self.h"
 #include "esp_log.h"
@@ -1191,8 +1192,8 @@ static esp_err_t h_groups(httpd_req_t *req)
  * AP's own Wi-Fi, which is WPA2 with the grid's passphrase, and never reachable from anywhere else:
  * the grid has no Internet at runtime, ever.
  *
- * The body is the raw .bin, streamed in chunks - never buffered whole, because an AP has kilobytes
- * of free heap and the image is about a megabyte.
+ * The body is a signed update file, streamed in chunks - never buffered whole, because the image is
+ * about a megabyte.
  */
 #define OTA_CHUNK 1024
 
@@ -1205,26 +1206,22 @@ static esp_err_t h_update(httpd_req_t *req)
     if (!csrf_ok(req, s)) {
         return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
     }
-    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
-    if (target == NULL) {
-        /* An AP still on the factory-only layout: it has nowhere to put a second image. */
-        return send_error(req, "409 Conflict",
-                          "This access point has no update slot. It must be reflashed over USB once.");
-    }
+    /*
+     * D97: the body is a signed update file (.lgfw), not a bare image. The admin password is no longer
+     * enough to replace this AP's firmware: the file must carry the signature of the release key this
+     * AP was given, be for an access point and for this chip, and be newer than what is running.
+     * lg_fwupdate checks all of that on the first 192 bytes, before anything is erased.
+     */
     int total = req->content_len;
-    if (total <= 0 || (size_t)total > target->size) {
-        return send_error(req, "413 Payload Too Large", "That firmware image does not fit the update slot.");
+    if (total <= (int)LG_FWU_PREFIX_LEN) {
+        return send_error(req, "400 Bad Request", "That is not a LocalGrid update file.");
     }
-
-    esp_ota_handle_t handle = 0;
-    esp_err_t err = esp_ota_begin(target, (size_t)total, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[WEB] Update could not start: %s", esp_err_to_name(err));
-        return send_error(req, "500 Internal Server Error", "The update could not be started.");
+    lg_fwu_abort();
+    if (lg_fwu_begin('N') != ESP_OK) {
+        return send_error(req, "409 Conflict", "Another update is being taken. Try again in a moment.");
     }
-    ESP_LOGW(TAG, "[WEB] Firmware update started: %d bytes into %s", total, target->label);
-
     static char chunk[OTA_CHUNK];   /* one buffer, not one per request: this AP has no heap to spare */
+    static char why[160];
     int received = 0;
     while (received < total) {
         int n = httpd_req_recv(req, chunk, (size_t)(total - received) < OTA_CHUNK
@@ -1233,32 +1230,22 @@ static esp_err_t h_update(httpd_req_t *req)
             continue;
         }
         if (n <= 0) {
-            esp_ota_abort(handle);
+            lg_fwu_abort();
             ESP_LOGE(TAG, "[WEB] Update aborted: the upload stopped after %d of %d bytes", received, total);
             return send_error(req, "400 Bad Request", "The upload did not finish. Nothing was changed.");
         }
-        err = esp_ota_write(handle, chunk, (size_t)n);
-        if (err != ESP_OK) {
-            esp_ota_abort(handle);
-            ESP_LOGE(TAG, "[WEB] Update write failed: %s", esp_err_to_name(err));
-            return send_error(req, "500 Internal Server Error", "The image could not be written.");
+        if (lg_fwu_write((const uint8_t *)chunk, (size_t)n) != ESP_OK) {
+            snprintf(why, sizeof(why), "Update refused: %s. This access point is still running the old firmware.",
+                     lg_fwu_reason());
+            return send_error(req, "400 Bad Request", why);
         }
         received += n;
     }
-    /* esp_ota_end checks the image: a truncated or corrupt one is refused here, before it is made
-     * bootable, so the running firmware is still the one that answers the next request. */
-    err = esp_ota_end(handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[WEB] Update refused: %s", esp_err_to_name(err));
-        return send_error(req, "400 Bad Request",
-                          "That image was rejected. This access point is still running the old firmware.");
+    if (lg_fwu_finish() != ESP_OK) {
+        snprintf(why, sizeof(why), "Update refused: %s. This access point is still running the old firmware.",
+                 lg_fwu_reason());
+        return send_error(req, "400 Bad Request", why);
     }
-    err = esp_ota_set_boot_partition(target);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[WEB] Update could not be made bootable: %s", esp_err_to_name(err));
-        return send_error(req, "500 Internal Server Error", "The update could not be made bootable.");
-    }
-    ESP_LOGW(TAG, "[WEB] Firmware update accepted into %s; restart to run it", target->label);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req,
         "{\"ok\":true,\"slot\":\"pending\",\"note\":\"Restart this access point to run the new firmware. "

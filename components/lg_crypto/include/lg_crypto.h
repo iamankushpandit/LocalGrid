@@ -53,6 +53,19 @@ int lg_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_
 int lg_sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]);
 
 /*
+ * SHA-256 in pieces, for something too large to hold: a firmware image arriving a kilobyte at a time
+ * (docs/firmware-updates.md). begin, any number of updates, then finish; finish or abort ends it, and
+ * one of the two must be called. The context is opaque and belongs to the caller.
+ */
+typedef struct {
+    uint32_t opaque[96];   /* room for PSA's hash state on every chip; a static assert in lg_crypto.c checks it */
+} lg_sha256_ctx_t;
+int  lg_sha256_begin(lg_sha256_ctx_t *ctx);
+int  lg_sha256_update(lg_sha256_ctx_t *ctx, const uint8_t *data, size_t len);
+int  lg_sha256_finish(lg_sha256_ctx_t *ctx, uint8_t out[32]);
+void lg_sha256_abort(lg_sha256_ctx_t *ctx);
+
+/*
  * PBKDF2-HMAC-SHA256 (RFC 8018 section 5.2) for the admin password.
  * password 1..128 bytes, salt 0..64 bytes, out 1..64 bytes, iterations >= 1.
  */

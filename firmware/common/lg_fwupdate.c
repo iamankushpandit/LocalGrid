@@ -1,0 +1,337 @@
+/* lg_fwupdate.c - see lg_fwupdate.h (D97). */
+#include "lg_fwupdate.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_console.h"
+#include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lg_crypto.h"
+#include "lg_gridkeys.h"
+#include "lg_lora_wire.h"
+#include "nvs.h"
+#include "sdkconfig.h"
+
+static const char *TAG = "GRID";
+
+#define NVS_NAMESPACE "lgfw"
+
+static struct {
+    bool            active;
+    bool            checked;          /* the header and signature passed; the image is being written */
+    char            role;
+    uint8_t         prefix[LG_FWU_PREFIX_LEN];
+    size_t          have;             /* bytes of the file taken so far */
+    lg_fwu_info_t   info;
+    const esp_partition_t *target;
+    esp_ota_handle_t ota;
+    lg_sha256_ctx_t hash;
+    const char     *reason;
+} u = { .reason = "" };
+
+const char *lg_fwu_reason(void)
+{
+    return u.reason;
+}
+
+uint8_t lg_fwu_this_chip(void)
+{
+#if CONFIG_IDF_TARGET_ESP32
+    return 1;
+#elif CONFIG_IDF_TARGET_ESP32S3
+    return 2;
+#elif CONFIG_IDF_TARGET_ESP32C6
+    return 3;
+#else
+    return 0;
+#endif
+}
+
+/* The serial and version are kept per slot, so "what is running" needs no bookkeeping at the moment an
+ * update is confirmed or rolled back: it is whatever was recorded for the slot that booted. */
+static void slot_key(const esp_partition_t *p, char kind, char out[16])
+{
+    snprintf(out, 16, "%c_%.12s", kind, p != NULL ? p->label : "none");
+}
+
+uint32_t lg_fwu_running_serial(void)
+{
+    nvs_handle_t h;
+    uint32_t serial = 0;
+    char key[16];
+    slot_key(esp_ota_get_running_partition(), 's', key);
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_u32(h, key, &serial);
+        nvs_close(h);
+    }
+    return serial;
+}
+
+void lg_fwu_running_version(char out[LG_FWU_VERSION_MAX + 1u])
+{
+    nvs_handle_t h;
+    char key[16];
+    out[0] = '\0';
+    slot_key(esp_ota_get_running_partition(), 'v', key);
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = LG_FWU_VERSION_MAX + 1u;
+        if (nvs_get_str(h, key, out, &len) != ESP_OK) {
+            out[0] = '\0';
+        }
+        nvs_close(h);
+    }
+}
+
+static esp_err_t refuse(esp_err_t err, const char *why)
+{
+    u.reason = why;
+    ESP_LOGW(TAG, "[GRID] Firmware update refused: %s", why);
+    lg_fwu_abort();
+    u.reason = why;   /* abort clears nothing of this, but be plain about it */
+    return err;
+}
+
+void lg_fwu_abort(void)
+{
+    if (u.active && u.checked) {
+        (void)esp_ota_abort(u.ota);
+        lg_sha256_abort(&u.hash);
+    }
+    u.active = false;
+    u.checked = false;
+    u.have = 0;
+}
+
+esp_err_t lg_fwu_begin(char role)
+{
+    if (u.active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    memset(&u.info, 0, sizeof(u.info));
+    u.role = role;
+    u.have = 0;
+    u.checked = false;
+    u.reason = "";
+    u.active = true;
+    return ESP_OK;
+}
+
+/* The first 192 bytes are in hand: trust nothing past this point unless every check passes. */
+static esp_err_t check_prefix(void)
+{
+    const uint8_t *h = u.prefix;
+    const lg_gridkeys_t *k = lg_gridkeys();
+    if (memcmp(h, "LGFW", 4) != 0 || h[4] != 1) {
+        return refuse(ESP_ERR_INVALID_ARG, "that is not a LocalGrid update file");
+    }
+    if (!k->has_release) {
+        return refuse(ESP_ERR_NOT_ALLOWED, "this device was not given a release key, so it accepts no update");
+    }
+    uint8_t kid[32];
+    if (lg_sha256(k->release_pub, LG_P256_PUB_LEN, kid) != 0 || memcmp(kid, h + 48, 8) != 0 ||
+        lg_ecdsa_p256_verify(k->release_pub, h, LG_FWU_HEADER_LEN, h + LG_FWU_HEADER_LEN) != 0) {
+        return refuse(ESP_ERR_NOT_ALLOWED, "it is not signed by the release key this device trusts");
+    }
+    /* Signed, so the header can be believed. */
+    u.info.role = (char)h[5];
+    u.info.chip = h[6];
+    u.info.serial = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+    u.info.image_len = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+    memcpy(u.info.sha256, h + 16, 32);
+    memcpy(u.info.version, h + 56, LG_FWU_VERSION_MAX);
+    u.info.version[LG_FWU_VERSION_MAX] = '\0';
+    if (u.info.role != u.role) {
+        return refuse(ESP_ERR_NOT_SUPPORTED, u.role == 'N' ? "it is firmware for a handheld, and this is an access point"
+                                                           : "it is firmware for an access point, and this is a handheld");
+    }
+    if (u.info.chip != lg_fwu_this_chip()) {
+        return refuse(ESP_ERR_NOT_SUPPORTED, "it was built for a different chip");
+    }
+    if (u.info.serial <= lg_fwu_running_serial()) {
+        return refuse(ESP_ERR_INVALID_VERSION, "it is not newer than the firmware already running");
+    }
+    u.target = esp_ota_get_next_update_partition(NULL);
+    if (u.target == NULL) {
+        return refuse(ESP_ERR_NOT_FOUND, "this device has no second firmware slot; it must be reflashed over USB once");
+    }
+    if (u.info.image_len == 0 || u.info.image_len > u.target->size) {
+        return refuse(ESP_ERR_INVALID_SIZE, "the image does not fit the update slot");
+    }
+    if (esp_ota_begin(u.target, u.info.image_len, &u.ota) != ESP_OK) {
+        return refuse(ESP_FAIL, "the update slot could not be opened");
+    }
+    if (lg_sha256_begin(&u.hash) != 0) {
+        (void)esp_ota_abort(u.ota);
+        return refuse(ESP_FAIL, "the image could not be checked");
+    }
+    u.checked = true;
+    ESP_LOGW(TAG, "[GRID] Firmware update %s (serial %u), %u bytes, signed by the release key: writing to %s",
+             u.info.version, (unsigned)u.info.serial, (unsigned)u.info.image_len, u.target->label);
+    return ESP_OK;
+}
+
+esp_err_t lg_fwu_write(const uint8_t *data, size_t len)
+{
+    if (!u.active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    while (len > 0) {
+        if (u.have < LG_FWU_PREFIX_LEN) {
+            size_t n = LG_FWU_PREFIX_LEN - u.have < len ? LG_FWU_PREFIX_LEN - u.have : len;
+            memcpy(u.prefix + u.have, data, n);
+            u.have += n;
+            data += n;
+            len -= n;
+            if (u.have == LG_FWU_PREFIX_LEN) {
+                esp_err_t err = check_prefix();
+                if (err != ESP_OK) {
+                    return err;
+                }
+            }
+            continue;
+        }
+        size_t done = u.have - LG_FWU_PREFIX_LEN;
+        if (done + len > u.info.image_len) {
+            return refuse(ESP_ERR_INVALID_SIZE, "more arrived than the header said the image holds");
+        }
+        if (esp_ota_write(u.ota, data, len) != ESP_OK || lg_sha256_update(&u.hash, data, len) != 0) {
+            return refuse(ESP_FAIL, "the image could not be written");
+        }
+        u.have += len;
+        len = 0;
+    }
+    return ESP_OK;
+}
+
+esp_err_t lg_fwu_finish(void)
+{
+    if (!u.active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!u.checked || u.have != LG_FWU_PREFIX_LEN + u.info.image_len) {
+        return refuse(ESP_ERR_INVALID_SIZE, "the file stopped before the image was complete");
+    }
+    uint8_t digest[32];
+    if (lg_sha256_finish(&u.hash, digest) != 0 || memcmp(digest, u.info.sha256, 32) != 0) {
+        (void)esp_ota_abort(u.ota);
+        u.checked = false;
+        return refuse(ESP_ERR_INVALID_CRC, "the image is not the one that was signed");
+    }
+    if (esp_ota_end(u.ota) != ESP_OK) {
+        u.checked = false;
+        return refuse(ESP_FAIL, "the image is not a valid application for this chip");
+    }
+    /* Recorded against the slot before it is made bootable, so the new firmware knows its own serial
+     * the first time it runs, and a rolled-back one simply reads the other slot's. */
+    nvs_handle_t h;
+    char key[16];
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        slot_key(u.target, 's', key);
+        (void)nvs_set_u32(h, key, u.info.serial);
+        slot_key(u.target, 'v', key);
+        (void)nvs_set_str(h, key, u.info.version);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+    if (esp_ota_set_boot_partition(u.target) != ESP_OK) {
+        u.checked = false;
+        return refuse(ESP_FAIL, "the new firmware could not be made the one that boots");
+    }
+    ESP_LOGW(TAG, "[GRID] Firmware update %s (serial %u) is in %s and boots next; it stays only if it comes up",
+             u.info.version, (unsigned)u.info.serial, u.target->label);
+    u.active = false;
+    u.checked = false;
+    u.reason = "";
+    return ESP_OK;
+}
+
+bool lg_fwu_progress(size_t *received, size_t *total)
+{
+    if (received != NULL) {
+        *received = u.have;
+    }
+    if (total != NULL) {
+        *total = u.checked ? LG_FWU_PREFIX_LEN + u.info.image_len : 0;
+    }
+    return u.active;
+}
+
+bool lg_fwu_info(lg_fwu_info_t *out)
+{
+    if (!u.active || !u.checked || out == NULL) {
+        return false;
+    }
+    *out = u.info;
+    return true;
+}
+
+/* ---- the console: an update over the serial line ---- */
+
+static char s_console_role = 'H';
+
+static void restart_soon(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+}
+
+static int cmd_update(int argc, char **argv)
+{
+    if (argc < 2) {
+        char version[LG_FWU_VERSION_MAX + 1u];
+        lg_fwu_running_version(version);
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        printf("LGFWU: running serial %u version %s slot %s chip %u role %c%s\n", (unsigned)lg_fwu_running_serial(),
+               version[0] != '\0' ? version : "(installed by cable)", run != NULL ? run->label : "?",
+               lg_fwu_this_chip(), s_console_role, lg_gridkeys()->has_release ? "" : " (no release key: accepts no update)");
+        return 0;
+    }
+    if (strcmp(argv[1], "begin") == 0) {
+        lg_fwu_abort();
+        esp_err_t err = lg_fwu_begin(s_console_role);
+        printf("LGFWU: %s\n", err == ESP_OK ? "ready" : esp_err_to_name(err));
+    } else if (strcmp(argv[1], "data") == 0 && argc >= 3) {
+        static uint8_t raw[600];
+        size_t n = lora_b64_decode(argv[2], strlen(argv[2]), raw, sizeof(raw));
+        if (n == 0) {
+            lg_fwu_abort();
+            printf("LGFWU: refused: a line did not arrive whole\n");
+            return 0;
+        }
+        esp_err_t err = lg_fwu_write(raw, n);
+        size_t have = 0;
+        (void)lg_fwu_progress(&have, NULL);
+        if (err == ESP_OK) {
+            printf("LGFWU: at %u\n", (unsigned)have);
+        } else {
+            printf("LGFWU: refused: %s\n", lg_fwu_reason()[0] != '\0' ? lg_fwu_reason() : esp_err_to_name(err));
+        }
+    } else if (strcmp(argv[1], "end") == 0) {
+        esp_err_t err = lg_fwu_finish();
+        if (err == ESP_OK) {
+            printf("LGFWU: ok, restarting into the new firmware\n");
+            xTaskCreate(restart_soon, "lgfwu", 2048, NULL, 1, NULL);
+        } else {
+            printf("LGFWU: refused: %s\n", lg_fwu_reason()[0] != '\0' ? lg_fwu_reason() : esp_err_to_name(err));
+        }
+    } else {
+        printf("LGFWU: usage: update | update begin | update data <base64> | update end\n");
+    }
+    return 0;
+}
+
+void lg_fwu_register_console(char role)
+{
+    s_console_role = role;
+    const esp_console_cmd_t cmd = {
+        .command = "update",
+        .help = "update | update begin | update data <base64> | update end: firmware by signed update file (D97)",
+        .func = cmd_update,
+    };
+    (void)esp_console_cmd_register(&cmd);
+}
