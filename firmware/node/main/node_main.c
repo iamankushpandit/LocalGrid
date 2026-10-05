@@ -33,7 +33,7 @@
 #include "lg_proto_config.h"
 #include "lg_timekeep.h"
 #include "gps.h"
-#include "lg_secrets.h"
+#include "lg_gridkeys.h"
 #include "lora.h"
 #include "node_app.h"
 #include "nvs_flash.h"
@@ -47,7 +47,8 @@ static const char *TAG = "GRID";
 
 node_app_t g_app;
 
-static const uint8_t s_backbone_key[32] = LG_SECRET_BACKBONE_KEY;
+/* The grid's keys come from this device's own storage, or from the build on the bench (D96). */
+#define s_backbone_key (lg_gridkeys()->backbone)
 static uint8_t s_discriminator[4];
 static uint8_t s_last_disc_clients = 0xFF;
 static uint8_t s_last_disc_flags = 0xFF;
@@ -759,7 +760,7 @@ static void wifi_start(void)
     _Static_assert(sizeof(LG_PROTO_SSID) <= sizeof(wc.ap.ssid), "SSID too long");
     memcpy(wc.ap.ssid, LG_PROTO_SSID, sizeof(LG_PROTO_SSID) - 1);
     wc.ap.ssid_len = (uint8_t)(sizeof(LG_PROTO_SSID) - 1);
-    strncpy((char *)wc.ap.password, LG_SECRET_WIFI_PASSPHRASE, sizeof(wc.ap.password) - 1);
+    strncpy((char *)wc.ap.password, lg_gridkeys()->wifi_pass, sizeof(wc.ap.password) - 1);
     wc.ap.channel = LG_PROTO_CHANNEL;
     wc.ap.authmode = WIFI_AUTH_WPA2_PSK;
     wc.ap.max_connection = LG_PROTO_MAX_STATIONS;
@@ -1188,9 +1189,19 @@ void app_main(void)
     record_restart();
 
     ESP_ERROR_CHECK(lg_crypto_init() == 0 ? ESP_OK : ESP_FAIL);
+    /*
+     * D96: no grid keys, no radio. An access point that has not been set up serves nothing - it has no
+     * passphrase to offer and no key to seal the backbone with - and waits on its console for
+     * `provision`, which is how the web flasher and tools/flash.py hand it its grid.
+     */
+    if (!lg_gridkeys_load(true)) {
+        ESP_LOGE(TAG, "[GRID] Not starting the SoftAP, the backbone, BLE, or the admin page until this "
+                      "access point has been set up. The serial console is up for `provision`.");
+        console_start();
+        return;
+    }
     wifi_start();
-    ESP_ERROR_CHECK(lg_hkdf_sha256(NULL, 0, s_backbone_key, sizeof(s_backbone_key), (const uint8_t *)"lg-disc", 7,
-                                   s_discriminator, sizeof(s_discriminator)) == 0 ? ESP_OK : ESP_FAIL);
+    memcpy(s_discriminator, lg_gridkeys()->discriminator, sizeof(s_discriminator));
 
     const lg_node_io_t io = {
         .ctx = NULL,

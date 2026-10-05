@@ -99,7 +99,7 @@ is to prefer a device's own update over carrying, and to carry only once its own
 A page beside the signer that installs LocalGrid on a board over USB from the browser (ESP Web Tools
 over Web Serial), with no toolchain.
 
-**It cannot be offered yet, for one reason:** a built image carries the grid's keys - the Wi-Fi
+**Step 4 below is built (D96, 2026-10-04): a device now holds its own keys.** What is left is a published image, an identity for a board the bench has never seen, and the page. Before D96 it could not be offered at all, for one reason: a built image carries the grid's keys - the Wi-Fi
 passphrase and the backbone key are compiled in from `lg_secrets.h` (see `docs/OPEN_SOURCE.md`,
 decision 4). A downloadable image would make every installation the same grid.
 

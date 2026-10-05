@@ -29,6 +29,7 @@
 #include "lg_bsp_touch.h"
 #include "lg_draw.h"
 #include "lg_bsp_settings.h"
+#include "lg_gridkeys.h"
 #include "lg_identity.h"
 
 
@@ -1359,6 +1360,9 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         err = esp_console_cmd_register(&cmds[i]);
+        if (i == 0) {
+            lg_gridkeys_register_console(false);   /* D96: `provision`, beside the first of the rest */
+        }
         if (err != ESP_OK) {
             return err;
         }

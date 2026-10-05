@@ -18,13 +18,13 @@
 #include "lg_envelope.h"
 #include "lg_lora_wire.h"
 #include "lg_lora_hh.h"
-#include "lg_secrets.h"
+#include "lg_gridkeys.h"
 #include "node_app.h"
 
 static const char *TAG = "LORA";
 
 /* D77: the key that seals LoRa frames between a handheld and an AP. Never the backbone key. */
-static const uint8_t s_lora_hh_key[32] = LG_SECRET_LORA_HH_KEY;
+#define s_lora_hh_key (lg_gridkeys()->lora_hh)   /* from this device's own storage, or the build (D96) */
 
 #define LORA_UART         UART_NUM_1
 #define UART_RX_BUF       1024

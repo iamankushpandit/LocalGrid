@@ -15,6 +15,7 @@
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_board.h"
+#include "lg_gridkeys.h"
 #include "lg_identity.h"
 #include "lg_power.h"
 #include "lg_selftest.h"
@@ -45,6 +46,9 @@ void app_main(void)
     if (nvs != ESP_OK) {
         ESP_LOGE(TAG, "NVS unavailable: %s", esp_err_to_name(nvs));
     }
+    /* D96: the grid's keys, from this handheld's own storage or the build. Without them it starts
+     * anyway - screen, console and all - and says it has not been set up. */
+    (void)lg_gridkeys_load(false);
 
     /* Sound starts before the console can be asked for one. It needs only the board profile
      * and a GPIO, while the self test and the display take about five seconds on the slower

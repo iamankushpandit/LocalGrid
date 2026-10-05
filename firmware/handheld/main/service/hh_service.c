@@ -44,13 +44,9 @@
 #include "lg_proto_config.h"
 #include "lg_timekeep.h"
 #include "lg_roster.h"
-#include "lg_secrets.h"
+#include "lg_gridkeys.h"
 #include "lwip/sockets.h"
 #include "nvs.h"
-
-#ifndef LG_SECRET_DISCRIMINATOR
-#error "lg_secrets.h has no LG_SECRET_DISCRIMINATOR. Run: python tools/gen_secrets.py --update"
-#endif
 
 static const char *TAG = "NET";
 
@@ -131,9 +127,10 @@ static const char *TAG = "NET";
 #define MIN_U32(a, b) ((a) < (b) ? (a) : (b))
 #define MAX_U32(a, b) ((a) > (b) ? (a) : (b))
 
-static const uint8_t s_discriminator[4] = LG_SECRET_DISCRIMINATOR;
+/* The grid's keys come from this handheld's own storage, or from the build on the bench (D96). */
+#define s_discriminator (lg_gridkeys()->discriminator)
 /* D77: seals LoRa frames between this handheld and an AP; never the APs' backbone key. */
-static const uint8_t s_lora_hh_key[32] = LG_SECRET_LORA_HH_KEY;
+#define s_lora_hh_key (lg_gridkeys()->lora_hh)
 
 /*
  * D77: the board's LoRa connector, from the board profile, before the service starts. Declared here
@@ -1350,8 +1347,8 @@ static void begin_join(int node, uint32_t now)
     wifi_config_t wc = { 0 };
     _Static_assert(sizeof(LG_PROTO_SSID) <= sizeof(wc.sta.ssid), "SSID too long");
     memcpy(wc.sta.ssid, LG_PROTO_SSID, sizeof(LG_PROTO_SSID) - 1);
-    _Static_assert(sizeof(LG_SECRET_WIFI_PASSPHRASE) <= sizeof(wc.sta.password), "Wi-Fi passphrase too long");
-    memcpy(wc.sta.password, LG_SECRET_WIFI_PASSPHRASE, sizeof(LG_SECRET_WIFI_PASSPHRASE) - 1);
+    _Static_assert(LG_GK_PASS_MAX < sizeof(wc.sta.password), "Wi-Fi passphrase too long");
+    memcpy(wc.sta.password, lg_gridkeys()->wifi_pass, strlen(lg_gridkeys()->wifi_pass));
     wc.sta.scan_method = WIFI_FAST_SCAN;
     wc.sta.bssid_set = true;
     memcpy(wc.sta.bssid, c->bssid, 6);
@@ -1420,7 +1417,7 @@ static void on_beacon(const ev_t *ev, uint32_t now)
 {
     const uint8_t *p = ev->payload;
     if (p[0] != LG_DISC_MAGIC0 || p[1] != LG_DISC_MAGIC1 || p[2] != LG_DISC_VERSION ||
-        memcmp(p + 3, s_discriminator, sizeof(s_discriminator)) != 0 || p[7] >= HH_MAX_NODES) {
+        memcmp(p + 3, s_discriminator, 4) != 0 || p[7] >= HH_MAX_NODES) {
         return;   /* another grid, another version, or not LocalGrid */
     }
     node_cand_t *c = &s.cand[p[7]];
@@ -1920,6 +1917,17 @@ static void step(uint32_t now)
         drop_link("Session send failed", false);
         return;
     }
+    if (!lg_gridkeys()->ready) {
+        /*
+         * D96: not set up. There is no grid to look for - no passphrase to join with and no way to tell
+         * this grid's access points from anybody else's - so the radio stays quiet and the screen says
+         * why, which is what somebody holding a freshly flashed handheld needs to read.
+         */
+        if (s.problem[0] == '\0') {
+            set_problem("Not set up yet: connect a cable to give it your grid");
+        }
+        return;
+    }
     switch (s.link) {
     case HH_LINK_SEARCHING:
         if (!s_scanning && now >= s.next_attempt_ms) {
@@ -2341,7 +2349,7 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
      * second. The boot counter is already committed to NVS by now, which is what keeps a nonce from
      * ever repeating.
      */
-    if (lp.rx >= 0) {
+    if (lp.rx >= 0 && lg_gridkeys()->ready) {
         esp_err_t lerr = hh_lora_start(lp.rx, lp.tx, lp.rst, s.device, s.boot, s_lora_hh_key,
                                        s_discriminator, on_lora_frame);
         if (lerr != ESP_OK && lerr != ESP_ERR_INVALID_ARG) {

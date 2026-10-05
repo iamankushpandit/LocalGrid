@@ -5,6 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A device holds its grid's keys (D96): the first step to a web flasher
+
+- **`firmware/common/lg_gridkeys.c`**: both firmwares read the Wi-Fi passphrase and keys from the
+  device's own storage, and fall back to `lg_secrets.h` only when the device has none and the build has
+  real ones. Every use of a compiled-in secret now goes through it.
+- **`provision`** on both consoles takes a setup bundle, checks it, stores it and restarts; `provision`
+  alone says `unset`, `build` or `set`; `provision erase` forgets. It never prints a key. An access
+  point refuses a bundle without the backbone key and a handheld refuses one with it.
+- **An unset device waits**: an access point starts its console and nothing else; a handheld starts its
+  screen and says it has not been set up.
+- **`tools/provision.py`** makes the bundle from `lg_secrets.h` and types it at a board.
+- **On the boards:** all nine started from the build's keys as before; a handheld and an access point
+  were given their own over the cable, restarted, reported `set` and rejoined the grid.
+
 ### A device can check an update's signature
 
 `lg_crypto` gains `lg_ecdsa_p256_verify` (ECDSA P-256 with SHA-256, verification only, through PSA
