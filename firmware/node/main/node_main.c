@@ -158,12 +158,13 @@ static void sync_time_zone(void)
 {
     static char s_refused[SETTINGS_POSIX_TZ_MAX + 1];   /* said once, not every second */
     char tz[SETTINGS_POSIX_TZ_MAX + 1];
-    grid_state_posix_tz(tz, sizeof(tz));
+    bool saved = grid_state_posix_tz(tz, sizeof(tz));
     if (strcmp(tz, g_app.core.tz) == 0 || (s_refused[0] != '\0' && strcmp(tz, s_refused) == 0)) {
         return;
     }
     if (lg_node_set_time_zone(&g_app.core, tz) == LG_OK) {
-        ESP_LOGI("TIME", "[TIME] Time zone for handhelds: %s", tz[0] != '\0' ? tz : "none");
+        ESP_LOGI("TIME", "[TIME] Time zone for handhelds: %s%s", tz[0] != '\0' ? tz : "none",
+                 tz[0] != '\0' && !saved ? " (from the zone's name; the admin page has not saved a rule)" : "");
     } else {
         snprintf(s_refused, sizeof(s_refused), "%s", tz);
         ESP_LOGW("TIME", "[TIME] Time zone \"%s\" in the settings is not a POSIX TZ; not sent", tz);
@@ -845,8 +846,11 @@ static void print_config(void)
            NODE_PMF_CAPABLE ? "capable" : "off (A/B build)");
     if (cfg.configured) {
         printf("  grid name: %s\n", cfg.grid_name);
-        printf("  time zone: %s, for handhelds %s\n", cfg.timezone[0] ? cfg.timezone : "not set",
-               cfg.posix_tz[0] ? cfg.posix_tz : "not set (save the time or zone on the admin page once)");
+        char rule[SETTINGS_POSIX_TZ_MAX + 1];
+        bool saved = grid_state_posix_tz(rule, sizeof(rule));
+        printf("  time zone: %s, for handhelds %s%s\n", cfg.timezone[0] ? cfg.timezone : "not set",
+               rule[0] ? rule : "not set (save the time or zone on the admin page once)",
+               rule[0] && !saved ? " (worked out from the name)" : "");
         printf("  admin password: set, %" PRIu32 " PBKDF2 iterations\n", cfg.iterations);
     } else {
         printf("  admin setup: not done; any AP serves the setup page\n");

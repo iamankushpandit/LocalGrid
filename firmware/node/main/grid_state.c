@@ -1,4 +1,5 @@
 #include "grid_state.h"
+#include "tz_names.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -419,11 +420,15 @@ void grid_state_init(uint16_t self)
              s.settings.configured ? "set up" : "not set up");
 }
 
-void grid_state_posix_tz(char *out, size_t cap)
+bool grid_state_posix_tz(char *out, size_t cap)
 {
     xSemaphoreTake(s.lock, portMAX_DELAY);
-    snprintf(out, cap, "%s", s.settings.posix_tz);
+    bool saved = s.settings.posix_tz[0] != '\0';
+    /* D100: a zone known only by its name still has a rule, if the name is a common one. */
+    const char *rule = saved ? s.settings.posix_tz : tz_rule_for_name(s.settings.timezone);
+    snprintf(out, cap, "%s", rule != NULL ? rule : "");
     xSemaphoreGive(s.lock);
+    return saved;
 }
 
 void grid_state_settings(node_settings_t *out)

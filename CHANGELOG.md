@@ -5,6 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Handhelds showed UTC on a grid that knew its zone only by name (D100)
+
+- **Found by the owner:** a handheld's clock read 15:14 when it was 10:14. Every AP held the zone's
+  name, `America/Chicago`, but not the rule handhelds need; the settings predate D67, and a grid on GPS
+  time never sends anyone to the admin page to save it again.
+- **An AP with a name and no rule now looks the rule up** in a short table of common zones
+  (`firmware/node/main/tz_names.c`). A rule saved on the admin page still wins, and `config` says which
+  it is using.
+- **On the bench:** flashing the three APs alone moved all five handhelds from UTC to local time.
+
 ### LoRa transmit power can be turned down, with an explanation of why (D98)
 
 - **Three levels, full (22 dBm, the default), medium (14) and low (5)**, kept on each device across
