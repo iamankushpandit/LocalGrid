@@ -329,6 +329,17 @@ static int cmd_lora(int argc, char **argv)
         printf("LoRa on.\n");
         return 0;
     }
+    if (argc > 1 && strcmp(argv[1], "power") == 0) {
+        if (argc > 2) {
+            hh_service_set_lora_power(strcmp(argv[2], "low") == 0 ? LG_LORA_POWER_LOW
+                                      : strcmp(argv[2], "medium") == 0 ? LG_LORA_POWER_MEDIUM
+                                      : strcmp(argv[2], "full") == 0 ? LG_LORA_POWER_FULL : atoi(argv[2]));
+        }
+        printf("LoRa transmit power: %s (%d dBm). full reaches furthest; medium or low is for devices close\n"
+               "together, where full power drowns out the radios beside it. lora power <full|medium|low>\n",
+               lg_lora_power_name(hh_service_lora_power()), hh_service_lora_power());
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "reset") == 0) {
         hh_lora_request_reset();
         printf("Asked the LoRa task to reset and reconfigure the module.\n");
@@ -916,7 +927,7 @@ static int cmd_ui(int argc, char **argv)
     return 0;
 }
 
-/* screen <home|status|messages|groups|settings>: opens that screen, the way `chat` opens a
+/* screen <home|status|messages|groups|settings|lorapower>: opens that screen, the way `chat` opens a
  * conversation, so every screen can be reached from serial (D23, D25, D28). */
 /*
  * touch [seconds]: prints what the panel reports against what the screens are told, so a finger
@@ -969,7 +980,7 @@ static int cmd_screen(int argc, char **argv)
         ui_nav_t    nav;
     } SCREENS[] = {
         { "home", NAV_HOME },     { "status", NAV_STATUS },     { "messages", NAV_CONVERSATIONS },
-        { "groups", NAV_GROUPS }, { "settings", NAV_SETTINGS },
+        { "groups", NAV_GROUPS }, { "settings", NAV_SETTINGS }, { "lorapower", NAV_LORA_POWER },
     };
     for (size_t i = 0; argc == 2 && i < sizeof(SCREENS) / sizeof(SCREENS[0]); i++) {
         if (strcmp(argv[1], SCREENS[i].name) == 0) {
@@ -978,7 +989,7 @@ static int cmd_screen(int argc, char **argv)
             return 0;
         }
     }
-    printf("usage: screen <home|status|messages|groups|settings>\n");
+    printf("usage: screen <home|status|messages|groups|settings|lorapower>\n");
     return 1;
 }
 
@@ -1337,13 +1348,13 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "scan",      .help = "Scan the grid channel now",                               .func = cmd_scan },
         { .command = "reconnect", .help = "Drop the node session and join again",                    .func = cmd_reconnect },
         { .command = "wifi",      .help = "wifi [on|off [seconds]]: switch Wi-Fi off to test LoRa (D78)", .func = cmd_wifi },
-        { .command = "lora",      .help = "lora | off [s] | on | reset | at <cmd> | pins <rx> <tx>: the second radio (D77)", .func = cmd_lora },
+        { .command = "lora",      .help = "lora | off [s] | on | reset | power [full|medium|low] | at <cmd> | pins <rx> <tx>: the second radio (D77)", .func = cmd_lora },
         { .command = "groups",    .help = "Groups, members, and whether this handheld belongs",      .func = cmd_groups },
         { .command = "group",     .help = "group new <name> <devices> | set <id> <name> <devices> | rm <id> (D52)", .func = cmd_group },
         { .command = "send",      .help = "send <device|group|all|urgent|safe> <text>: send a message; safe stands down an SOS (D66)", .func = cmd_send },
         { .command = "msgs",      .help = "msgs [count]: messages sent and received, newest first",  .func = cmd_msgs },
         { .command = "chat",      .help = "chat <device|group|all>: open that conversation on screen", .func = cmd_chat },
-        { .command = "screen",    .help = "screen <home|status|messages|groups|settings>: open that screen", .func = cmd_screen },
+        { .command = "screen",    .help = "screen <home|status|messages|groups|settings|lorapower>: open that screen", .func = cmd_screen },
         { .command = "touch",     .help = "touch [seconds]: what the panel reports and where it lands", .func = cmd_touch },
         { .command = "ui",        .help = "ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <p> | button <n> <press|hold> | log", .func = cmd_ui },
         { .command = "time",      .help = "Show grid time and the time restriction",                 .func = cmd_time },

@@ -152,6 +152,18 @@ static int cmd_lora(int argc, char **argv)
         lora_enable();
         return 0;
     }
+    if (strcmp(argv[1], "power") == 0) {
+        /* D98. A setting of this AP alone, kept across restarts. */
+        if (argc > 2) {
+            lora_set_power(strcmp(argv[2], "low") == 0 ? LG_LORA_POWER_LOW
+                           : strcmp(argv[2], "medium") == 0 ? LG_LORA_POWER_MEDIUM
+                           : strcmp(argv[2], "full") == 0 ? LG_LORA_POWER_FULL : atoi(argv[2]));
+        }
+        printf("LoRa transmit power: %s (%d dBm). full reaches furthest; medium or low is for devices close\n"
+               "together, where full power drowns out the radios beside it. lora power <full|medium|low>\n",
+               lg_lora_power_name(lora_power()), lora_power());
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "reset") == 0) {
         lora_request_reset();
         printf("Resetting and reconfiguring the module\n");
@@ -276,7 +288,7 @@ void console_start(void)
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
         { .command = "gps",     .help = "The GPS on MAIN: heard, fix, satellites (D63); gps raw dumps what arrives", .func = cmd_gps },
-        { .command = "lora",    .help = "The LoRa backbone (D71): status; lora send, off/on, reset, broadcast on|off, at <cmd>", .func = cmd_lora },
+        { .command = "lora",    .help = "The LoRa backbone (D71): status; lora send, off/on, reset, power [full|medium|low], broadcast on|off, at <cmd>", .func = cmd_lora },
 { .command = "chaos",     .help = "chaos | stop | clear: this AP's self-chaos schedule (D82)", .func = cmd_chaos },
         { .command = "bb",      .help = "bb | bb off [seconds] | bb on: stop using the ESP-NOW backbone, for chaos runs", .func = cmd_bb },
         { .command = "web",     .help = "web | web on [minutes] | web off: the admin page, only while asked for (D91)", .func = cmd_web },

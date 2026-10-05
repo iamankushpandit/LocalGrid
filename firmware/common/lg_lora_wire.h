@@ -97,6 +97,25 @@ _Static_assert(LORA_PART_HDR + LORA_SLICE_MAX == LORA_PART_RAW_MAX, "a part fill
 #define LG_LORA_CR_CODE      1
 #define LG_LORA_PREAMBLE     12
 #define LG_LORA_POWER_DBM    22          /* AT+CRFOP, 0..22 */
+/*
+ * How strongly the LoRa radio transmits (D98). Full is what reaches furthest and is the default. The
+ * lower two exist for one situation: devices close together - on one table, in one room - where a
+ * module at full power swamps its neighbours' receivers and they lose frames they would otherwise
+ * hear. The bench is that situation: D95's voice figures were only reached with the modules turned
+ * down by hand. It is a setting on each device and is not shared across the grid.
+ */
+#define LG_LORA_POWER_FULL   22
+#define LG_LORA_POWER_MEDIUM 14
+#define LG_LORA_POWER_LOW    5
+static inline int lg_lora_power_clamp(int dbm)
+{
+    return dbm <= (LG_LORA_POWER_LOW + LG_LORA_POWER_MEDIUM) / 2 ? LG_LORA_POWER_LOW
+         : dbm <= (LG_LORA_POWER_MEDIUM + LG_LORA_POWER_FULL) / 2 ? LG_LORA_POWER_MEDIUM : LG_LORA_POWER_FULL;
+}
+static inline const char *lg_lora_power_name(int dbm)
+{
+    return dbm == LG_LORA_POWER_LOW ? "low" : dbm == LG_LORA_POWER_MEDIUM ? "medium" : "full";
+}
 
 /*
  * The address plan. Address 0 is the broadcast address and nothing else: the bench proved on

@@ -13,6 +13,7 @@
 
 #include "esp_err.h"
 #include "lg_identity.h"
+#include "lg_lora_wire.h"   /* D98: the three transmit-power levels and their names */
 #include "lg_types.h"
 
 #define HH_MAX_NODES    LG_MAX_NODES
@@ -405,6 +406,11 @@ typedef struct {
 
 /* false (and out->fitted false) on a board with no connector or no module. Any task. */
 bool hh_service_lora_ui(hh_lora_ui_t *out);
+
+/* D98: the LoRa transmit power, kept across restarts. Full by default; lower only for devices that
+ * sit close together. Any task. */
+int  hh_service_lora_power(void);
+void hh_service_set_lora_power(int dbm);
 
 /*
  * D67: Unix seconds (grid time is UTC) as local wall-clock time in the grid's zone, which the AP

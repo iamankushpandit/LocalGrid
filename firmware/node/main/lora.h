@@ -147,6 +147,10 @@ void lora_request_reset(void);
 /* Console: send one AT command and log what comes back, for bring-up. Any task. */
 void lora_request_at(const char *command);
 
+/* D98: transmit power, one of LG_LORA_POWER_FULL, _MEDIUM, _LOW; kept across restarts. */
+void lora_set_power(int dbm);
+int  lora_power(void);
+
 /* Console: use the broadcast address for frames meant for every AP, or send one copy per peer. */
 void lora_set_broadcast(bool on);
 

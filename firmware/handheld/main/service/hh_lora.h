@@ -161,3 +161,8 @@ esp_err_t hh_lora_set_pins(int rx_gpio, int tx_gpio);
 /* Console: reset and reconfigure the module, or ask it something directly, for bring-up. */
 void hh_lora_request_reset(void);
 void hh_lora_request_at(const char *command);
+
+/* D98: transmit power, one of LG_LORA_POWER_FULL, _MEDIUM, _LOW (anything else goes to the nearest).
+ * May be called before hh_lora_start, which then configures the module with it. */
+void hh_lora_set_power(int dbm);
+int  hh_lora_power(void);

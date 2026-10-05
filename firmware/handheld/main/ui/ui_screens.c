@@ -488,7 +488,7 @@ void ui_group_edit_touch(int16_t x, int16_t y, bool down)
 /* ---- settings ---- */
 
 enum { SET_TAB_GRID, SET_TAB_SOUND, SET_TAB_SCREEN, SET_TAB_DEVICE };
-enum { SET_WHICH_AP = 20, SET_RECONNECT, SET_SCAN, SET_VOLUME, SET_TEST, SET_SAVER, SET_CALIBRATE, SET_NAME,
+enum { SET_WHICH_AP = 20, SET_RECONNECT, SET_SCAN, SET_VOLUME, SET_TEST, SET_SAVER, SET_CALIBRATE, SET_LORA_POWER, SET_NAME,
        SET_RESTART, SET_TALK, SET_TONE_RECV, SET_TONE_ANN, SET_TONE_URG };
 
 static const char *const SET_TABS[] = { "Grid", "Sound", "Screen", "Device" };
@@ -510,6 +510,7 @@ static uint32_t settings_build(bool rebuild)
     sig = mix(sig, lg_bsp_audio_talk_boost());
     sig = mix(mix_str(sig, st->name), lg_bsp_touch_needs_calibration());
     sig = mix(mix(sig, st->free_heap / 4096u), s_set.restart_armed);
+    sig = mix(sig, (uint32_t)hh_service_lora_power());
     if (!rebuild) {
         return sig;
     }
@@ -519,6 +520,14 @@ static uint32_t settings_build(bool rebuild)
     switch (s_set.tab) {
     case SET_TAB_GRID:
         slist_add(ROW_ACTION, "Which AP", st->preferred_node < 0 ? "automatic" : "fixed", SET_WHICH_AP, 0);
+        {
+            /* D98: only on a handheld that has the radio. What it is for is on the page it opens, so
+             * the row here stays one line like the others. */
+            hh_lora_ui_t lora;
+            if (hh_service_lora_ui(&lora) && lora.fitted) {
+                slist_add(ROW_ACTION, "LoRa power", lg_lora_power_name(hh_service_lora_power()), SET_LORA_POWER, 0);
+            }
+        }
         slist_add(ROW_BUTTON, "Reconnect", NULL, SET_RECONNECT, 0)->style = BTN_MAIN;
         slist_add(ROW_BUTTON, "Look for APs", NULL, SET_SCAN, 0)->style = BTN_PLAIN;
         if (st->link == HH_LINK_ONLINE) {
@@ -650,6 +659,9 @@ void ui_settings_touch(int16_t x, int16_t y, bool down)
     switch (ev.id) {
     case SET_WHICH_AP:
         ui_go(NAV_WHICH_AP, 0, 0, NULL);
+        break;
+    case SET_LORA_POWER:
+        ui_go(NAV_LORA_POWER, 0, 0, NULL);
         break;
     case SET_RECONNECT:
         hh_service_reconnect();
@@ -1102,6 +1114,64 @@ void ui_which_ap_touch(int16_t x, int16_t y, bool down)
     } else if (ev.type == SLIST_ROW && ev.id == 30) {
         hh_service_prefer_node((int)ev.arg);
         ui_which_ap_refresh();
+    }
+}
+
+/* ---- LoRa power (D98) ----
+ *
+ * A page of its own, as Which AP has, so there is room to say what the setting is for (owner,
+ * 2026-10-05: "we need to tell the user what that is for ... some people who like to explore devices
+ * might be confused") without squeezing words into the Settings list around the other rows.
+ */
+
+static uint32_t s_lp_shown;
+
+static uint32_t lora_power_build(bool rebuild)
+{
+    int now = hh_service_lora_power();
+    uint32_t sig = mix(2166136261u, (uint32_t)now);
+    if (!rebuild) {
+        return sig;
+    }
+    slist_begin("LoRa power", true, false);
+    /* A note holds SLIST_VALUE_MAX - 1 bytes and six lines, so the explanation is three short ones. */
+    slist_add(ROW_NOTE, NULL, "How strongly the long-range radio sends. Full reaches furthest and is right "
+                              "almost always.", -1, 0);
+    slist_add(ROW_ACTION, "Full", now == LG_LORA_POWER_FULL ? "in use" : "furthest", 31, LG_LORA_POWER_FULL);
+    slist_add(ROW_ACTION, "Medium", now == LG_LORA_POWER_MEDIUM ? "in use" : "", 31, LG_LORA_POWER_MEDIUM);
+    slist_add(ROW_ACTION, "Low", now == LG_LORA_POWER_LOW ? "in use" : "side by side", 31, LG_LORA_POWER_LOW);
+    slist_add(ROW_NOTE, NULL, "Turn it down only when devices sit close together, such as on one table.", -1, 0);
+    slist_add(ROW_NOTE, NULL, "At full power, radios that close drown each other out and messages go missing. "
+                              "Wi-Fi is not affected.", -1, 0);
+    return sig;
+}
+
+void ui_lora_power_open(uint16_t w, uint16_t h)
+{
+    s_w = w;
+    s_h = h;
+    s_lp_shown = lora_power_build(true);
+    slist_show(w, h, 0, false);
+}
+
+void ui_lora_power_refresh(void)
+{
+    uint32_t sig = lora_power_build(false);
+    if (sig != s_lp_shown) {
+        s_lp_shown = lora_power_build(true);
+        slist_update();
+    }
+}
+
+void ui_lora_power_touch(int16_t x, int16_t y, bool down)
+{
+    slist_event_t ev;
+    slist_touch(x, y, down, &ev);
+    if (ev.type == SLIST_BACK) {
+        ui_go(NAV_SETTINGS, 0, SET_TAB_GRID, NULL);
+    } else if (ev.type == SLIST_ROW && ev.id == 31) {
+        hh_service_set_lora_power((int)ev.arg);
+        ui_lora_power_refresh();
     }
 }
 

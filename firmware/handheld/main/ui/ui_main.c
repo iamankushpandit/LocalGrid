@@ -55,6 +55,7 @@ typedef enum {
     SCREEN_GROUP_EDIT,
     SCREEN_SETTINGS,
     SCREEN_WHICH_AP,
+    SCREEN_LORA_POWER,
     SCREEN_RENAME,
 } screen_t;
 
@@ -284,6 +285,7 @@ static void refresh(void)
     case SCREEN_GROUP_EDIT: ui_group_edit_refresh(now); return;
     case SCREEN_SETTINGS:   ui_settings_refresh(); return;
     case SCREEN_WHICH_AP:   ui_which_ap_refresh(); return;
+    case SCREEN_LORA_POWER: ui_lora_power_refresh(); return;
     case SCREEN_STATUS:     ui_status_refresh(); return;
     case SCREEN_RENAME:     return;
     default:                break;
@@ -424,6 +426,10 @@ static void apply_nav(void)
         s.screen = SCREEN_WHICH_AP;
         ui_which_ap_open(s.w, s.h);
         break;
+    case NAV_LORA_POWER:
+        s.screen = SCREEN_LORA_POWER;
+        ui_lora_power_open(s.w, s.h);
+        break;
     case NAV_RENAME:
         s.screen = SCREEN_RENAME;
         ui_rename_open(s.w, s.h);
@@ -450,6 +456,7 @@ static void on_tap(int16_t x, int16_t y, bool down)
     case SCREEN_GROUP_EDIT: ui_group_edit_touch(x, y, down); return;
     case SCREEN_SETTINGS:   ui_settings_touch(x, y, down); return;
     case SCREEN_WHICH_AP:   ui_which_ap_touch(x, y, down); return;
+    case SCREEN_LORA_POWER: ui_lora_power_touch(x, y, down); return;
     case SCREEN_STATUS:     ui_status_touch(x, y, down); return;
     case SCREEN_RENAME:     ui_rename_touch(x, y, down); return;
     default:                break;
@@ -547,6 +554,7 @@ static void handle_request(const ui_req_t *r)
             ui_unit_log();
         }
         ui_chat_log();
+        slist_log();
         ui_overlay_log((uint32_t)(esp_timer_get_time() / 1000), s_last_touch);
         break;
     case UI_PAGE:

@@ -123,6 +123,7 @@ static const char *TAG = "NET";
 #define STA_BEACON_TIMEOUT_S  3
 #define NVS_NAMESPACE         "lghh"
 #define NVS_KEY_WIFI_OFF      "wifi_off"   /* D78: the Wi-Fi switch, in this service's own store */
+#define NVS_KEY_LORA_DBM      "lora_dbm"   /* D98: LoRa transmit power */
 
 #define MIN_U32(a, b) ((a) < (b) ? (a) : (b))
 #define MAX_U32(a, b) ((a) > (b) ? (a) : (b))
@@ -2349,6 +2350,15 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
      * second. The boot counter is already committed to NVS by now, which is what keeps a nonce from
      * ever repeating.
      */
+    {
+        nvs_handle_t h;
+        int8_t dbm = LG_LORA_POWER_FULL;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+            (void)nvs_get_i8(h, NVS_KEY_LORA_DBM, &dbm);
+            nvs_close(h);
+        }
+        hh_lora_set_power(dbm);   /* D98: before the module is configured, so it starts at this power */
+    }
     if (lp.rx >= 0 && lg_gridkeys()->ready) {
         esp_err_t lerr = hh_lora_start(lp.rx, lp.tx, lp.rst, s.device, s.boot, s_lora_hh_key,
                                        s_discriminator, on_lora_frame);
@@ -2587,6 +2597,23 @@ void hh_service_set_voice_io(const hh_voice_io_t *io)
 bool hh_service_wifi_session(void)
 {
     return s.link == HH_LINK_ONLINE;
+}
+
+int hh_service_lora_power(void)
+{
+    return hh_lora_power();
+}
+
+void hh_service_set_lora_power(int dbm)
+{
+    hh_lora_set_power(dbm);
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_i8(h, NVS_KEY_LORA_DBM, (int8_t)hh_lora_power()) == ESP_OK) {
+            (void)nvs_commit(h);
+        }
+        nvs_close(h);
+    }
 }
 
 esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len)

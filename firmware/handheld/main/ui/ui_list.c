@@ -525,3 +525,28 @@ void slist_redraw(void)
 {
     slist_show(s.w, s.h, s.bottom, true);
 }
+
+void slist_log(void)
+{
+    static const char *const KINDS[] = { "section", "fact", "action", "choice", "button", "note", "check", "field" };
+    printf("LIST \"%s\" %ux%u rows %u, content %d px in %d, scrolled %d\n", s.title, s.w, s.h, s.n, s.content_h,
+           s.list.h, s.scroll);
+    for (uint8_t i = 0; i < s.n; i++) {
+        const slist_row_t *r = &s.rows[i];
+        uint16_t starts[NOTE_LINES + 2];
+        const char *mark = "";
+        if (r->kind == ROW_NOTE) {
+            /* one line more than is drawn: if the text needs it, the last of it is not on screen */
+            uint8_t lines = lg_text_wrap(F_SMALL, F_EMOJI, r->value, content_w(), starts, NOTE_LINES + 1);
+            mark = lines > NOTE_LINES || strlen(r->value) >= SLIST_VALUE_MAX - 1 ? "  CUT SHORT" : "";
+        } else if (r->kind == ROW_ACTION || r->kind == ROW_FACT) {
+            /* label and value side by side: measured at the larger font, with a gap between */
+            char both[SLIST_LABEL_MAX + SLIST_VALUE_MAX + 4];
+            snprintf(both, sizeof(both), "%s   %s", r->label, r->value);
+            mark = lg_text_wrap(F_BODY, F_EMOJI, both, (int16_t)(content_w() - 26), starts, 2) > 1 ? "  TOO WIDE" : "";
+        }
+        bool both_set = r->label[0] != 0 && r->value[0] != 0;
+        printf("LIST %2u %-7s y %4d h %3d  %s%s%s%s\n", i, r->kind < 8 ? KINDS[r->kind] : "?", r->y, r->h, r->label,
+               both_set ? " | " : "", r->value, mark);
+    }
+}

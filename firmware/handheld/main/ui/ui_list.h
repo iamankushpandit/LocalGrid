@@ -89,3 +89,7 @@ bool slist_touch(int16_t x, int16_t y, bool down, slist_event_t *event);
  * and letting go does nothing. */
 void slist_hold_refused(void);
 void slist_scroll_by(int16_t dy);
+
+/* `ui log`: every row with where it sits, so a list can be checked on the board without a camera:
+ * a note cut short, or a label and value too wide to share a row, is marked. */
+void slist_log(void);

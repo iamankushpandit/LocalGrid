@@ -19,6 +19,7 @@ typedef enum {
     NAV_GROUP_EDIT,    /* target: group id, 0 for a new group */
     NAV_SETTINGS,      /* target: the tab */
     NAV_WHICH_AP,
+    NAV_LORA_POWER,
     NAV_RENAME,
     NAV_CALIBRATE,
 } ui_nav_t;
@@ -49,6 +50,10 @@ void ui_status_refresh(void);
 void ui_which_ap_open(uint16_t w, uint16_t h);
 void ui_which_ap_touch(int16_t x, int16_t y, bool down);
 void ui_which_ap_refresh(void);
+
+void ui_lora_power_open(uint16_t w, uint16_t h);
+void ui_lora_power_touch(int16_t x, int16_t y, bool down);
+void ui_lora_power_refresh(void);
 
 void ui_rename_open(uint16_t w, uint16_t h);
 void ui_rename_touch(int16_t x, int16_t y, bool down);

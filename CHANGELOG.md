@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### LoRa transmit power can be turned down, with an explanation of why (D98)
+
+- **Three levels, full (22 dBm, the default), medium (14) and low (5)**, kept on each device across
+  restarts and applied to the module at once. Nothing changes for a device nobody touches.
+- **Handheld:** a `LoRa power` row on the Settings grid tab, only when a LoRa module is fitted, opening
+  a page with the three choices and what they are for: lower it only when devices sit close together,
+  where full power drowns out the radios beside it.
+- **Console, both firmwares:** `lora power [full|medium|low]`, which prints the same explanation.
+- **`ui log` now lists the rows of the list on screen** with their position and height, and marks a note
+  that is cut short or a label and value too wide to share a row, so a list screen can be checked on the
+  board over serial. `screen lorapower` opens the new page.
+- **On the bench:** two FreeNoves and one access point took each level (`+OK` from the module) and kept
+  medium across a restart; Settings and the new page both fit the 240x320 screen without scrolling, with
+  nothing cut or overlapping. What each level does to delivery and range is not measured.
+
 ### A device takes a signed update, and only a signed update (D97)
 
 - **`firmware/common/lg_fwupdate.c`**, in both firmwares: checks the first 192 bytes of an update file

@@ -20,11 +20,13 @@
 #include "lg_lora_hh.h"
 #include "lg_gridkeys.h"
 #include "node_app.h"
+#include "nvs.h"
 
 static const char *TAG = "LORA";
 
 /* D77: the key that seals LoRa frames between a handheld and an AP. Never the backbone key. */
 #define s_lora_hh_key (lg_gridkeys()->lora_hh)   /* from this device's own storage, or the build (D96) */
+static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set to */
 
 #define LORA_UART         UART_NUM_1
 #define UART_RX_BUF       1024
@@ -320,7 +322,7 @@ static bool configure(void)
     if (!at_ok(cmd, AT_TIMEOUT_MS)) {
         return false;
     }
-    snprintf(cmd, sizeof(cmd), "AT+CRFOP=%d", LORA_POWER_DBM);
+    snprintf(cmd, sizeof(cmd), "AT+CRFOP=%d", s_power_dbm);
     if (!at_ok(cmd, AT_TIMEOUT_MS)) {
         return false;
     }
@@ -333,8 +335,45 @@ static bool configure(void)
     (void)at_value("AT+NETWORKID?", net, sizeof(net));
     (void)at_value("AT+PARAMETER?", par, sizeof(par));
     ESP_LOGI(TAG, "[LORA] Configured %s: address %s, network %s, parameters %s, %" PRIu32 " Hz, %d dBm",
-             L.version[0] != '\0' ? L.version : "module", addr, net, par, (uint32_t)LORA_BAND_HZ, LORA_POWER_DBM);
+             L.version[0] != '\0' ? L.version : "module", addr, net, par, (uint32_t)LORA_BAND_HZ, s_power_dbm);
     return true;
+}
+
+/* D98: transmit power, kept in this AP's own NVS. Not grid state: which devices sit close together
+ * is a fact about each one's place, not about the grid. */
+#define LORA_NVS_NAMESPACE "lglora"
+#define LORA_NVS_DBM       "dbm"
+
+static void power_load(void)
+{
+    nvs_handle_t h;
+    int8_t dbm = LG_LORA_POWER_FULL;
+    if (nvs_open(LORA_NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_i8(h, LORA_NVS_DBM, &dbm);
+        nvs_close(h);
+    }
+    s_power_dbm = (int8_t)lg_lora_power_clamp(dbm);
+}
+
+void lora_set_power(int dbm)
+{
+    s_power_dbm = (int8_t)lg_lora_power_clamp(dbm);
+    nvs_handle_t h;
+    if (nvs_open(LORA_NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_i8(h, LORA_NVS_DBM, s_power_dbm) == ESP_OK) {
+            (void)nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    char cmd[24];
+    snprintf(cmd, sizeof(cmd), "AT+CRFOP=%d", s_power_dbm);
+    lora_request_at(cmd);
+    ESP_LOGI(TAG, "[LORA] Transmit power: %s (%d dBm)", lg_lora_power_name(s_power_dbm), s_power_dbm);
+}
+
+int lora_power(void)
+{
+    return s_power_dbm;
 }
 
 /* ---- receive ---- */
@@ -1243,7 +1282,7 @@ void lora_print(void)
            L.off ? " [OFF: chaos hook]" : "", L.pins.rx, L.pins.tx, L.pins.rst >= 0 ? "wired" : "not used");
     printf("  address %u, network %u, %lu Hz, SF%d BW%s CR4/%d, %d dBm, broadcast %s%s%s\n",
            (unsigned)L.address, L.networkid, (unsigned long)LORA_BAND_HZ, LORA_SF,
-           LORA_BW_CODE == 7 ? "125" : LORA_BW_CODE == 8 ? "250" : "500", LORA_CR_CODE + 4, LORA_POWER_DBM,
+           LORA_BW_CODE == 7 ? "125" : LORA_BW_CODE == 8 ? "250" : "500", LORA_CR_CODE + 4, s_power_dbm,
            L.broadcast_ok ? "on" : "off", L.version[0] != '\0' ? ", " : "", L.version);
     if (t.heard_age_ms == 0xFFFFFFFFu) {
         printf("  nothing received yet\n");
@@ -1346,6 +1385,7 @@ esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], lgbb_fra
     if (L.started) {
         return ESP_ERR_INVALID_STATE;
     }
+    power_load();   /* D98: before the module is configured */
     if (ap_index >= LG_MAX_NODES) {
         ESP_LOGW(TAG, "[LORA] AP index %u has no LoRa address; not started", ap_index);
         return ESP_ERR_INVALID_ARG;

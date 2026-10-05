@@ -17,6 +17,7 @@
 #include "lg_lora_hh.h"
 
 static const char *TAG = "LORA";
+static int s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set to */
 
 /*
  * Which serial port. UART0 is the console on the boards that have one there, and a board with a GPS
@@ -286,7 +287,7 @@ static bool configure(void)
     if (!at_ok(cmd, AT_TIMEOUT_MS)) {
         return false;
     }
-    snprintf(cmd, sizeof(cmd), "AT+CRFOP=%d", LG_LORA_POWER_DBM);
+    snprintf(cmd, sizeof(cmd), "AT+CRFOP=%d", s_power_dbm);
     if (!at_ok(cmd, AT_TIMEOUT_MS)) {
         return false;
     }
@@ -299,8 +300,24 @@ static bool configure(void)
     (void)at_value("AT+PARAMETER?", par, sizeof(par));
     ESP_LOGI(TAG, "[LORA] Configured %s: address %s, network %s, parameters %s, %" PRIu32 " Hz, %d dBm",
              L.version[0] != '\0' ? L.version : "module", addr, net, par, (uint32_t)LG_LORA_BAND_HZ,
-             LG_LORA_POWER_DBM);
+             s_power_dbm);
     return true;
+}
+
+void hh_lora_set_power(int dbm)
+{
+    s_power_dbm = lg_lora_power_clamp(dbm);
+    if (L.started && L.fitted) {
+        char cmd[24];
+        snprintf(cmd, sizeof(cmd), "AT+CRFOP=%d", s_power_dbm);
+        hh_lora_request_at(cmd);   /* the module takes it at once; a restart sets it again from here */
+        ESP_LOGI(TAG, "[LORA] Transmit power: %s (%d dBm)", lg_lora_power_name(s_power_dbm), s_power_dbm);
+    }
+}
+
+int hh_lora_power(void)
+{
+    return s_power_dbm;
 }
 
 /* ---- receive ---- */
