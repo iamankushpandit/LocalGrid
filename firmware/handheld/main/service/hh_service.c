@@ -1723,9 +1723,20 @@ static void drain_voice_queue(void)
             s.voice_refused = 0;   /* a new talk */
         }
         s.voice_ms = now_ms();
+        /*
+         * With no session but a LoRa peer (D95): the compact frames of the talk go to the radio, and
+         * the live ones are dropped here without a word - reporting them as "not connected" would stop
+         * the talk whose compact half is getting through.
+         */
+        bool compact = req.len > 0 && req.frame[0] == LG_VOICE_CODEC_C2_1200;
+        bool lora_only = s.link != HH_LINK_ONLINE && hh_lora_has_peer();
+        if (lora_only && !compact) {
+            continue;
+        }
         s.sending_voice = true;
-        int rc = s.link == HH_LINK_ONLINE ? lg_client_send_voice(&s.client, req.scope, req.target, req.frame, req.len)
-                                          : LG_ERR_SHORT;
+        int rc = (s.link == HH_LINK_ONLINE || lora_only)
+                     ? lg_client_send_voice(&s.client, req.scope, req.target, req.frame, req.len)
+                     : LG_ERR_SHORT;
         s.sending_voice = false;
         if (rc == LG_ERR_FULL) {
             continue;   /* this frame was dropped at a full socket; the next may get through */
@@ -2563,6 +2574,11 @@ size_t hh_service_messages(hh_message_t *out, size_t max)
 void hh_service_set_voice_io(const hh_voice_io_t *io)
 {
     s.voice_io = io;
+}
+
+bool hh_service_wifi_session(void)
+{
+    return s.link == HH_LINK_ONLINE;
 }
 
 esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len)

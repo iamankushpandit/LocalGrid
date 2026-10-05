@@ -632,7 +632,13 @@ int lg_client_send_voice(lg_client_t *c, uint8_t scope, uint32_t target, const u
     if (lg_client_time_restricted(c)) {
         return LG_ERR_TIME;   /* voice follows the time rule of non-urgent text (D6) */
     }
-    if (!c->registered) {
+    /*
+     * The compact codec may leave without a session (D95): it is the one kind of voice LoRa carries,
+     * so a handheld that has lost its AP offers it to the radio exactly as it offers text (D80). Live
+     * frames still need a session, because nothing else can carry them.
+     */
+    bool compact = payload[0] == LG_VOICE_CODEC_C2_1200;
+    if (!c->registered && !compact) {
         return LG_ERR_SHORT;
     }
     if (scope == LG_SCOPE_DIRECT) {
@@ -655,9 +661,10 @@ int lg_client_send_voice(lg_client_t *c, uint8_t scope, uint32_t target, const u
     e.origin_boot = c->boot;
     e.origin_seq  = LG_VOICE_SEQ_BIT | c->voice_seq;
     e.grid_time   = c_local_time(c);
+    e.flags       = compact ? LG_FLAG_COMPACT : 0;
 
     if (scope == LG_SCOPE_DIRECT) {
-        e.flags = LG_FLAG_E2E_PAYLOAD;
+        e.flags |= LG_FLAG_E2E_PAYLOAD;
         uint8_t nonce[LG_E2E_NONCE_LEN];
         uint8_t aad[LG_E2E_AAD_LEN];
         uint8_t ct[LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN];
@@ -734,8 +741,9 @@ static void handle_voice(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
     } else {
         return;
     }
-    if (!lg_voice_hdr_dec(plain, plen, NULL)) {
-        return;
+    if (!lg_voice_hdr_dec(plain, plen, NULL) ||
+        ((e->flags & LG_FLAG_COMPACT) != 0) != (plain[0] == LG_VOICE_CODEC_C2_1200)) {
+        return;   /* the envelope and the payload must agree about the codec (D95) */
     }
     seen->boot = e->origin_boot;
     seen->seq  = e->origin_seq;

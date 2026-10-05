@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "lg_body.h"
 #include "lg_envelope.h"
 
 void lglh_init(lglh_t *c, const uint8_t key[LG_AEAD_KEY_LEN], uint16_t self, uint32_t boot)
@@ -120,6 +121,13 @@ bool lglh_type_allowed(const uint8_t *frame, size_t len)
     case LG_T_PING:
     case LG_T_PONG:
         return true;
+    case LG_T_VOICE:
+        /*
+         * Only the compact codec (D95), which says so on its envelope and is bounded in length. It asks
+         * an AP to trust nothing: a talk is addressed by its author to a person, a group or everyone,
+         * and the AP checks membership and the right to announce exactly as it does over Wi-Fi.
+         */
+        return (e.flags & LG_FLAG_COMPACT) != 0 && e.body_len <= LG_VOICE_C2_PAYLOAD_MAX + LG_AEAD_TAG_LEN;
     default:
         /*
          * Everything else is refused, and the list above is the whole allowance. Voice (LG_T_VOICE)

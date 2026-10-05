@@ -1,6 +1,8 @@
 /* lg_lora_wire.c - the radio-independent half of the LoRa backbone (D71). See lg_lora_wire.h. */
 #include "lg_lora_wire.h"
 
+#include "lg_body.h"
+
 #include <string.h>
 
 /* ---- base64 ---- */
@@ -293,6 +295,13 @@ lora_asm_result_t lora_asm_feed(lora_asm_t *a, uint32_t now_ms, const uint8_t *p
 
 /* ---- the send policy ---- */
 
+bool lora_frame_is_compact_voice(const uint8_t *frame, size_t len)
+{
+    lg_env_t e;
+    return frame != NULL && lg_env_decode(frame, len, &e) == LG_OK && e.type == LG_T_VOICE &&
+           (e.flags & LG_FLAG_COMPACT) != 0;
+}
+
 lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
 {
     lg_env_t e;
@@ -300,7 +309,13 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
         return LORA_SEND_NEVER;
     }
     if (e.type == LG_T_VOICE) {
-        return LORA_SEND_NEVER;   /* one 100 ms frame would be seconds of airtime (D61, D71) */
+        /*
+         * Live talk never: one 100 ms frame would be seconds of airtime (D61, D71). The compact codec
+         * does (D95): a second of speech is one frame of two parts, about as long on the air as it took
+         * to say. Like text it goes only while Wi-Fi is not carrying.
+         */
+        return (e.flags & LG_FLAG_COMPACT) != 0 && e.body_len <= LG_VOICE_C2_PAYLOAD_MAX + LG_AEAD_TAG_LEN
+                   ? LORA_SEND_IF_WIFI_DOWN : LORA_SEND_NEVER;
     }
     if ((e.flags & (LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR)) != 0u) {
         return LORA_SEND_ALWAYS;   /* urgent broadcasts, SOS and all clear go on both radios */

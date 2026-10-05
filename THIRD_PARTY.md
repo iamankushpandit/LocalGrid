@@ -48,6 +48,23 @@ Board facts for the alert and distress unit, restated, no code copied:
 | `components/lg_bsp/src/lg_bsp_display.c` (`JD9853_INIT`) | The JD9853 vendor register sequence, as data. | The same factory example, `esp_lcd_jd9853.c` (`vendor_specific_init_default`), Apache-2.0 (Espressif SPDX header). |
 | `components/lg_bsp/src/lg_bsp_touch.c` (AXS5106L) | Register 0x01, a 14-byte read, the point count in the second byte's low nibble, and the 12-bit X and Y layout. | The same factory example, `esp_lcd_touch_axs5106.c`, Apache-2.0. |
 
+## Codec2 (github.com/drowe67/codec2), LGPL-2.1
+
+`components/codec2` holds the speech codec behind voice over LoRa (D72, D78, D95): Codec2 **1.2.0**
+by David Rowe and contributors, under the GNU Lesser General Public License 2.1, whose text is
+`components/codec2/COPYING`. LocalGrid is GPL-3.0-or-later (D76), which may carry it.
+
+| Here | What |
+|---|---|
+| `components/codec2/src/*.c`, `*.h` | Codec2's own files, **unmodified**: the vocoder, its FFT and its quantisers. Only what the 1200 bit/s mode needs is included; the modem, FreeDV and the command-line tools are left out. |
+| `components/codec2/codebook/*.txt` | Codec2's codebook tables, unmodified. |
+| `components/codec2/src/codebook*.c` | Generated from those tables by `tools/gen_codec2_codebooks.py`, which does what Codec2's `generate_codebook.c` does; the output carries Codec2's own LGPL notice. |
+| `components/codec2/include/codec2/version.h` | The content Codec2's CMake build generates for 1.2.0, written out by hand. |
+| `components/codec2/lg_codec2_port.c`, `CMakeLists.txt`, `tools/gen_codec2_codebooks.py` | LocalGrid's own (GPL-3.0-or-later): the three memory hooks Codec2's embedded build asks for, and how it is built. |
+
+Because the library's files are unmodified and built from source in this tree, anyone may replace it
+with another version of Codec2 and rebuild, which is what the LGPL asks for.
+
 ## Fonts
 
 See `components/lg_draw/fonts/README.md`. Montserrat and Font Awesome Free (as converted by

@@ -777,22 +777,23 @@ void hh_lora_offer(const uint8_t *frame, size_t len, bool wifi_ok)
         return;
     }
     bool alert = p == LORA_SEND_ALWAYS;
+    int copies = lora_frame_is_compact_voice(frame, len) ? 2 : 1;   /* D95: said twice, nothing resends it */
 
     lock();
-    /* Sealed straight into its queue slot: nothing is ever staged in a second buffer. */
-    uint8_t id = ++L.next_id;
-    lora_txq_slot_t *s = lora_txq_reserve(&L.txq, LG_LORA_ADDR_BROADCAST, alert, id,
-                                          LGLH_OUTER_LEN + len + LG_AEAD_TAG_LEN,
-                                          now_ms() + rand_ms(BACKOFF_MAX_MS));
-    if (s == NULL) {
-        unlock();
-        return;   /* lora_txq counts what it could not hold */
-    }
-    int sealed = lglh_seal(&L.seal, s->data, s->cap, frame, len);
-    if (sealed <= 0 || !lora_txq_commit(&L.txq, s, (size_t)sealed)) {
-        lora_txq_release(&L.txq, s);
-        unlock();
-        return;
+    for (int copy = 0; copy < copies; copy++) {
+        /* Sealed straight into its queue slot: nothing is ever staged in a second buffer. */
+        uint8_t id = ++L.next_id;
+        lora_txq_slot_t *s = lora_txq_reserve(&L.txq, LG_LORA_ADDR_BROADCAST, alert, id,
+                                              LGLH_OUTER_LEN + len + LG_AEAD_TAG_LEN,
+                                              now_ms() + rand_ms(BACKOFF_MAX_MS));
+        if (s == NULL) {
+            break;   /* lora_txq counts what it could not hold */
+        }
+        int sealed = lglh_seal(&L.seal, s->data, s->cap, frame, len);
+        if (sealed <= 0 || !lora_txq_commit(&L.txq, s, (size_t)sealed)) {
+            lora_txq_release(&L.txq, s);
+            break;
+        }
     }
     unlock();   /* lora_txq_commit worked out how many parts that is */
 }

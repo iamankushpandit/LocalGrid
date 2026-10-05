@@ -737,9 +737,12 @@ static bool voice_body_ok(const lg_env_t *e, const uint8_t *body)
         return false;
     }
     if (e->scope == LG_SCOPE_DIRECT) {
+        /* Sealed, so only the length can be held to the codec the envelope claims: a frame marked
+         * compact can be no longer than a compact frame, which is what bounds its airtime (D95). */
+        size_t most = (e->flags & LG_FLAG_COMPACT) != 0 ? LG_VOICE_C2_PAYLOAD_MAX : LG_VOICE_PAYLOAD_MAX;
         return (e->flags & LG_FLAG_E2E_PAYLOAD) != 0 &&
                e->body_len >= LG_VOICE_HDR_LEN + LG_AEAD_TAG_LEN &&
-               e->body_len <= LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN;
+               e->body_len <= most + LG_AEAD_TAG_LEN;
     }
     /*
      * A group and an announcement carry the same body: not end-to-end sealed, because there is no one
@@ -748,15 +751,18 @@ static bool voice_body_ok(const lg_env_t *e, const uint8_t *body)
      * hh_service_voice_send were both opened to LG_SCOPE_BROADCAST on 2026-10-02 while this still said
      * "never broadcast", so an announcement that got past both of those was rejected here as invalid.
      */
+    /* Where the payload is readable, the envelope's codec flag must match it (D95): the flag is what
+     * lets a frame onto LoRa, so a live frame must not be able to wear it. */
+    bool compact = (e->flags & LG_FLAG_COMPACT) != 0;
     if (e->scope == LG_SCOPE_GROUP) {
         return (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 && e->target <= 0xFFFFu &&
-               lg_voice_hdr_dec(body, e->body_len, NULL);
+               lg_voice_hdr_dec(body, e->body_len, NULL) && compact == (body[0] == LG_VOICE_CODEC_C2_1200);
     }
     if (e->scope == LG_SCOPE_BROADCAST) {
         /* An announcement's target is the broadcast constant, not a 16-bit group id: checking it against
          * the group's range is what silently dropped the first working spoken announcement. */
         return (e->flags & LG_FLAG_E2E_PAYLOAD) == 0 && e->target == LG_TARGET_ALL &&
-               lg_voice_hdr_dec(body, e->body_len, NULL);
+               lg_voice_hdr_dec(body, e->body_len, NULL) && compact == (body[0] == LG_VOICE_CODEC_C2_1200);
     }
     return false;
 }
@@ -789,11 +795,30 @@ static uint8_t validate_voice(lg_node_t *n, const lg_env_t *e, const uint8_t *bo
     }
     if (e->scope == LG_SCOPE_DIRECT) {
         const lg_presence_entry_t *p = presence_find(n, e->target);
-        if (p == NULL || p->state != LG_PRES_ONLINE) {
+        /*
+         * A handheld on LoRa alone is not "offline" for a talk (D80, D95): the compact frames of the
+         * talk reach it, and the live ones are dropped by the radio's own policy on the way out. Refusing
+         * the live ones here would stop the whole talk at the sender, compact frames included.
+         */
+        if (p == NULL || (p->state != LG_PRES_ONLINE && p->state != LG_PRES_LORA)) {
             return LG_ACK_REJ_OFFLINE;
         }
     }
     return 0;
+}
+
+/*
+ * A live 1:1 frame for a handheld that is on LoRa alone goes nowhere (D80, D95): it is not refused,
+ * because that would stop the talk whose compact frames are reaching them, and it is not handed to the
+ * glue either, because nothing could carry it. Compact frames are not live and are never dropped here.
+ */
+static bool voice_live_for_lora_only(lg_node_t *n, const lg_env_t *e)
+{
+    if (e->scope != LG_SCOPE_DIRECT || (e->flags & LG_FLAG_COMPACT) != 0) {
+        return false;
+    }
+    const lg_presence_entry_t *p = presence_find(n, e->target);
+    return p != NULL && p->state == LG_PRES_LORA;
 }
 
 /* Takes a voice frame if it is the newest from its author; the table never touches text dedup. */
@@ -836,6 +861,9 @@ static void handle_client_voice(lg_node_t *n, const lg_env_t *e, const uint8_t *
     if (!voice_take(n, e)) {
         return;   /* no ack: voice is never acknowledged when taken */
     }
+    if (voice_live_for_lora_only(n, e)) {
+        return;
+    }
     lg_env_t f = *e;
     f.ttl = LG_TTL_DEFAULT;
     f.origin_node = n->self;
@@ -861,6 +889,9 @@ static void handle_backbone_voice(lg_node_t *n, uint16_t from_node, const lg_env
         return;
     }
     if (!voice_take(n, e)) {
+        return;
+    }
+    if (voice_live_for_lora_only(n, e)) {
         return;
     }
     if (e->scope == LG_SCOPE_DIRECT) {
@@ -1089,6 +1120,12 @@ uint8_t lg_node_presence_state(const lg_node_t *n, uint32_t device)
     return LG_PRES_OFFLINE;
 }
 
+/* Another AP this one can still reach over the backbone, or this AP itself. */
+static bool ap_alive(const lg_node_t *n, uint16_t node)
+{
+    return node == n->self || (n->io.is_neighbor != NULL && n->io.is_neighbor(n->io.ctx, node));
+}
+
 void lg_node_mark_lora_reachable(lg_node_t *n, uint32_t device)
 {
     if (n == NULL || device == 0 || lg_roster_user(n->roster, device) == NULL) {
@@ -1103,6 +1140,18 @@ void lg_node_mark_lora_reachable(lg_node_t *n, uint32_t device)
     }
     if (p->state == LG_PRES_LORA && p->node == n->self) {
         return;   /* already known this way: say nothing, so hearing it often costs no airtime */
+    }
+    /*
+     * One AP carries a handheld that is on LoRa alone. A handheld's frames are broadcast on the radio,
+     * so every AP in earshot hears each one, and each used to claim the handheld for itself here: the
+     * claims carried the same epoch, so no AP gave way to another, all of them stayed "the" AP for that
+     * handheld, and everything addressed to it went out from three radios at once and collided. That is
+     * the fifth of inbound messages a LoRa-only handheld kept losing while everything it sent arrived,
+     * and on 2026-10-04 it was two packets in five of a talk. While the AP that has it is still up,
+     * hearing the handheld here changes nothing.
+     */
+    if (p->state == LG_PRES_LORA && p->node != n->self && ap_alive(n, p->node)) {
+        return;
     }
     p->state = LG_PRES_LORA;
     p->node  = n->self;
@@ -1129,7 +1178,14 @@ static void apply_presence(lg_node_t *n, const lg_presence_t *pr)
     if (p == NULL) {
         return;
     }
-    if (pr->epoch > p->epoch || (pr->epoch == p->epoch && pr->node == p->node)) {
+    /*
+     * Two APs that heard the same handheld over LoRa at the same moment both claim it, with the same
+     * epoch. The lower index keeps it, so they agree within one exchange; and a claim always wins over
+     * an AP that can no longer be reached, so a handheld is not left with a dead AP as its only way in.
+     */
+    bool lora_tie = pr->epoch == p->epoch && pr->node != p->node && pr->state == LG_PRES_LORA &&
+                    p->state == LG_PRES_LORA && (pr->node < p->node || !ap_alive(n, p->node));
+    if (pr->epoch > p->epoch || (pr->epoch == p->epoch && pr->node == p->node) || lora_tie) {
         /* Presence is announced again every LG_PRESENCE_ANNOUNCE_MS (D48), so most updates repeat what this
          * AP already holds; only a change is worth a frame to each local handheld. */
         bool changed = pr->epoch != p->epoch || pr->node != p->node || pr->state != p->state ||

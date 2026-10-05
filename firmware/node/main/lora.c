@@ -784,6 +784,9 @@ void lora_offer_handheld(uint32_t device, const uint8_t *frame, size_t len, bool
         return;
     }
     (void)queue_sealed_hh(LG_LORA_ADDR_HANDHELD(device), p == LORA_SEND_ALWAYS, frame, len);
+    if (lora_frame_is_compact_voice(frame, len)) {
+        (void)queue_sealed_hh(LG_LORA_ADDR_HANDHELD(device), false, frame, len);   /* D95: said twice */
+    }
 }
 
 void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)
@@ -808,6 +811,9 @@ void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)
     }
     L.force_once = false;
     (void)queue_sealed((uint16_t)LORA_ADDR_AP(node), policy == LORA_SEND_ALWAYS, frame, len);
+    if (lora_frame_is_compact_voice(frame, len)) {
+        (void)queue_sealed((uint16_t)LORA_ADDR_AP(node), false, frame, len);   /* D95: said twice */
+    }
 }
 
 /*

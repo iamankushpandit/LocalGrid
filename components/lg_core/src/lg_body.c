@@ -105,7 +105,13 @@ bool lg_voice_hdr_dec(const uint8_t *body, size_t len, lg_voice_hdr_t *out)
     if (body == NULL || len < LG_VOICE_HDR_LEN || len > LG_VOICE_PAYLOAD_MAX) {
         return false;
     }
-    if (body[0] != LG_VOICE_CODEC_IMA_8K || body[8] > LG_VOICE_STEP_MAX || body[9] != 0) {
+    if (body[0] == LG_VOICE_CODEC_C2_1200) {
+        size_t data = len - LG_VOICE_HDR_LEN;
+        if (data > LG_VOICE_C2_DATA_MAX || data % LG_VOICE_C2_FRAME_LEN != 0 || body[6] != 0 || body[7] != 0 ||
+            body[8] != 0 || body[9] != 0) {
+            return false;
+        }
+    } else if (body[0] != LG_VOICE_CODEC_IMA_8K || body[8] > LG_VOICE_STEP_MAX || body[9] != 0) {
         return false;
     }
     if (out != NULL) {

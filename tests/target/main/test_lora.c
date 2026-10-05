@@ -9,7 +9,9 @@
  */
 #include <string.h>
 
+#include "lg_body.h"
 #include "lg_envelope.h"
+#include "lg_lora_hh.h"
 #include "lg_test.h"
 #include "lg_lora_wire.h"
 
@@ -259,6 +261,22 @@ static void test_policy(void)
     /* Live voice is refused even when it is marked urgent: seconds of airtime for 100 ms of sound. */
     n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, LG_FLAG_URGENT, frame, sizeof(frame), 40);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_NEVER);
+    /*
+     * The compact codec is the exception (D95): marked on the envelope and no longer than a compact
+     * packet, it goes like text, when Wi-Fi is not carrying. The same marker on a frame as long as a
+     * live one buys nothing, so a forged marker cannot put 400 bytes on the air.
+     */
+    n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, LG_FLAG_COMPACT, frame, sizeof(frame),
+                   LG_VOICE_C2_PAYLOAD_MAX + LG_AEAD_TAG_LEN);
+    CHECK(n > 0);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    CHECK(lglh_type_allowed(frame, n));
+    n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, LG_FLAG_COMPACT, frame, sizeof(frame),
+                   LG_VOICE_C2_PAYLOAD_MAX + LG_AEAD_TAG_LEN + 1u);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_NEVER);
+    CHECK(!lglh_type_allowed(frame, n));
+    n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, 0, frame, sizeof(frame), 40);
+    CHECK(!lglh_type_allowed(frame, n));
 
     n = make_frame(LG_T_TEXT, LG_SCOPE_BROADCAST, LG_FLAG_URGENT, frame, sizeof(frame), 20);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_ALWAYS);

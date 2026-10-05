@@ -68,6 +68,14 @@ enum {
     LG_FLAG_FRAGMENT      = 0x0008,
     LG_FLAG_RELAYED       = 0x0010,
     LG_FLAG_ALL_CLEAR     = 0x0020,   /* an urgent broadcast standing down the author's earlier SOS (D66) */
+    /*
+     * On LG_T_VOICE only: the frame carries speech in the compact codec (LG_VOICE_CODEC_C2_1200), about
+     * 150 bytes for a second of talk where the live codec needs 4,000 - so LoRa may carry it and a
+     * handheld reachable only over LoRa may be sent it (D95). It is in the envelope because a 1:1 talk
+     * is sealed end to end and an AP cannot read the codec byte inside it. Set by the author, covered by
+     * the end-to-end AAD, never rewritten.
+     */
+    LG_FLAG_COMPACT       = 0x0040,
 };
 
 typedef struct {

@@ -299,6 +299,10 @@ typedef struct {
 /* Registers the voice module's callbacks; io must outlive the service. */
 void hh_service_set_voice_io(const hh_voice_io_t *io);
 
+/* True while a Wi-Fi session with an AP is up. One word, read from any task: the voice module asks
+ * it to know whether a talk is going out live or only as compact frames over LoRa (D95). */
+bool hh_service_wifi_session(void);
+
 /* Queues one frame for the AP. ESP_ERR_NO_MEM when the queue is full (the frame is dropped),
  * ESP_ERR_INVALID_ARG for a bad scope or length. */
 esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *frame, size_t len);

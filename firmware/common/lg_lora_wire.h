@@ -238,6 +238,15 @@ typedef enum {
 /* Reads the envelope of an unsealed lg frame and says whether LoRa may carry it. */
 lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len);
 
+/*
+ * A frame of voice in the compact codec (D95). Every radio that puts one on the air sends it twice:
+ * it is two parts, either of which can be lost, nothing acknowledges it and nothing sends it again,
+ * and on the bench on 2026-10-04 two packets in five of a talk did not arrive when sent once. The
+ * second copy is sealed afresh, so the link does not see a replay; the core's newest-only rule for
+ * voice drops whichever copy comes second.
+ */
+bool lora_frame_is_compact_voice(const uint8_t *frame, size_t len);
+
 /* Whether this frame is one of the alerts that must never wait behind anything. */
 bool lora_is_alert_frame(const uint8_t *frame, size_t len);
 

@@ -241,6 +241,18 @@ typedef struct {
  */
 #define LG_VOICE_HDR_LEN      10u
 #define LG_VOICE_CODEC_IMA_8K 1u
+/*
+ * Codec2 at 1200 bit/s (D72, D78, D95): 6 bytes for every 40 ms, so the data is a whole number of
+ * 6-byte codec frames, at most LG_VOICE_C2_FRAMES of them (1.12 s) - what fits two LoRa parts with the
+ * envelope and both seals around it. `frame` counts these packets within the talk; predictor and
+ * step_index are unused and zero. Sent beside the live frames of the same talk, under the same talk id,
+ * with LG_FLAG_COMPACT on the envelope.
+ */
+#define LG_VOICE_CODEC_C2_1200 2u
+#define LG_VOICE_C2_FRAME_LEN  6u
+#define LG_VOICE_C2_FRAMES     28u
+#define LG_VOICE_C2_DATA_MAX   (LG_VOICE_C2_FRAME_LEN * LG_VOICE_C2_FRAMES)   /* 168 */
+#define LG_VOICE_C2_PAYLOAD_MAX (LG_VOICE_HDR_LEN + LG_VOICE_C2_DATA_MAX)
 #define LG_VOICE_END          0x01u        /* last frame of a talk (release) */
 #define LG_VOICE_STEP_MAX     88u
 #define LG_VOICE_PAYLOAD_MAX  (LG_VOICE_HDR_LEN + LG_VOICE_DATA_MAX)

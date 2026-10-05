@@ -20,10 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "codec2.h"
 #include "esp_log.h"
+#include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "hh_adpcm.h"
 #include "lg_body.h"
@@ -301,6 +304,338 @@ static void synth(int16_t *pcm, size_t n)
     }
 }
 
+/* ---- the compact copy of a talk: Codec2, for LoRa (D72, D78, D95) ----
+ *
+ * Every talk is also encoded with Codec2 at 1200 bit/s and sent beside the live frames, under the same
+ * talk id, in packets of LG_VOICE_C2_FRAMES codec frames (1.12 s, 168 bytes). The live frames need
+ * Wi-Fi; these are small enough for LoRa, so a listener who can only be reached that way - or a talker
+ * who has only that - still gets the talk, late and in one piece. A listener who heard the live frames
+ * ignores these. Only the first C2_PACKETS_MAX packets of a talk are sent, about ten seconds, which is
+ * what D78 allows on a channel that carries a second of speech in a little more than a second.
+ *
+ * Nothing is kept: the packets are collected until the last one arrives, played once, and freed.
+ *
+ * Codec2 wants a deep stack and some heap, so each direction gets a task that exists only while there
+ * is work for it: one for the length of a talk on the talker, one from the first packet of a note to
+ * the end of its playback on a listener. A handheld that is doing neither carries none of it.
+ */
+#define C2_SAMPLES        320u      /* 40 ms at 8 kHz: one Codec2 1200 frame in */
+#define C2_PACKETS_MAX    9u        /* 9 x 1.12 s: the ten seconds of D78 */
+#define C2_ENC_STACK      20480
+#define C2_DEC_STACK      24576     /* 14 KB overflowed on the first note played (2026-10-04); about 18 KB is used */
+#define C2_PRIORITY       3         /* below capture and playback (4): live talk is never held up by this */
+#define C2_PCM_BUFFER     (FRAME_SAMPLES * 5u * sizeof(int16_t))   /* half a second of samples waiting */
+#define C2_SPACING_MS     2800      /* between packets: each goes twice, about 2.6 s on the air, and queues are four deep */
+#define NOTE_STRAGGLE_MS  3000      /* after the last packet has come, how long to wait for a missing one */
+#define NOTE_GIVE_UP_MS   10000     /* no packet for this long (three spacings and a bit): play what there is */
+#define NOTE_BUSY_WAIT_MS 20000     /* how long a finished note waits for this handheld to stop talking or playing */
+
+static struct {
+    TaskHandle_t          task;      /* NULL when no talk is being encoded */
+    StreamBufferHandle_t  pcm;
+    volatile bool         ending;
+    uint16_t              talk;
+    uint8_t               scope;
+    uint32_t              target;
+} c2tx;
+
+typedef struct {
+    uint32_t author;
+    uint32_t boot;
+    uint8_t  scope;
+    uint32_t target;
+    uint16_t talk;
+    volatile int16_t  last;          /* index of the packet that carried END, -1 until it has come */
+    volatile uint32_t heard_ms;      /* when the newest packet came */
+    volatile bool     closed;        /* playback has begun: later packets are too late */
+    bool     have[C2_PACKETS_MAX];
+    uint8_t  len[C2_PACKETS_MAX];
+    uint8_t  data[C2_PACKETS_MAX][LG_VOICE_C2_DATA_MAX];
+} c2_note_t;
+
+static c2_note_t *volatile c2rx;     /* the note being collected or played; NULL when none */
+
+static void c2_send(uint16_t index, uint8_t flags, uint8_t *pkt, size_t data)
+{
+    lg_voice_hdr_t h = { .codec = LG_VOICE_CODEC_C2_1200, .flags = flags, .talk = c2tx.talk, .frame = index };
+    (void)lg_voice_hdr_enc(&h, pkt);
+    for (int tries = 0; tries < 25; tries++) {   /* the service's queue is four deep and drains every pass */
+        if (hh_service_voice_send(c2tx.scope, c2tx.target, pkt, LG_VOICE_HDR_LEN + data) != ESP_ERR_NO_MEM) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+/*
+ * Encodes the talk as it is spoken and sends the packets C2_SPACING_MS apart.
+ *
+ * Spaced, because the frame is two LoRa parts of about 0.65 s each and every radio on the way has a
+ * queue of four: sent as fast as they were spoken (one every 1.12 s) the first test on the bench lost
+ * two packets of five to a full queue, on a channel that was otherwise idle. At this spacing nothing
+ * waits behind anything, on the talker's radio or on an AP relaying to a listener's. The talk therefore
+ * finishes arriving after it has finished being said - which over LoRa it always did.
+ */
+typedef struct {
+    uint8_t len;
+    uint8_t body[LG_VOICE_C2_PAYLOAD_MAX];   /* header room first, then the codec frames */
+} c2_packet_t;
+
+static void c2_encode_task(void *arg)
+{
+    (void)arg;
+    struct CODEC2 *c = codec2_create(CODEC2_MODE_1200);
+    int16_t *in = malloc(C2_SAMPLES * sizeof(int16_t));
+    c2_packet_t *pk = calloc(C2_PACKETS_MAX, sizeof(c2_packet_t));
+    size_t have = 0, bytes = 0;
+    uint16_t made = 0, sent = 0;   /* packets filled, packets sent */
+    uint32_t crc = 0, worst_ms = 0, next_ms = 0;
+    bool sent_end = false;
+    bool encoding = c != NULL && in != NULL && pk != NULL;
+    bool ok = encoding;
+    while (ok && (encoding || sent < made)) {
+        if (encoding) {
+            size_t got = xStreamBufferReceive(c2tx.pcm, (uint8_t *)in + have * sizeof(int16_t),
+                                              (C2_SAMPLES - have) * sizeof(int16_t), pdMS_TO_TICKS(60));
+            have += got / sizeof(int16_t);
+            bool drained = c2tx.ending && xStreamBufferIsEmpty(c2tx.pcm);
+            if ((have == C2_SAMPLES || (drained && have > 0)) && made <= C2_PACKETS_MAX) {
+                uint16_t at = made > 0 && pk[made - 1u].len < LG_VOICE_C2_DATA_MAX ? (uint16_t)(made - 1u) : made;
+                if (at < C2_PACKETS_MAX) {
+                    memset(in + have, 0, (C2_SAMPLES - have) * sizeof(int16_t));   /* the last, partial 40 ms */
+                    uint8_t *to = pk[at].body + LG_VOICE_HDR_LEN + pk[at].len;
+                    uint32_t t0 = now_ms();
+                    codec2_encode(c, to, in);
+                    uint32_t took = now_ms() - t0;
+                    worst_ms = took > worst_ms ? took : worst_ms;
+                    crc = esp_rom_crc32_le(crc, to, LG_VOICE_C2_FRAME_LEN);
+                    pk[at].len = (uint8_t)(pk[at].len + LG_VOICE_C2_FRAME_LEN);
+                    bytes += LG_VOICE_C2_FRAME_LEN;
+                    made = (uint16_t)(at + 1u);
+                }
+                have = 0;   /* past the ten seconds the samples are simply let go: that part is live only */
+            }
+            if (drained) {
+                encoding = false;
+                vStreamBufferDelete(c2tx.pcm);   /* the capture task set `ending` and feeds no more */
+                c2tx.pcm = NULL;
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        /* A packet goes once it is full, or once the talk is over, and never sooner than the spacing. */
+        bool whole = sent < made && (pk[sent].len == LG_VOICE_C2_DATA_MAX || !encoding);
+        if (whole && (int32_t)(now_ms() - next_ms) >= 0) {
+            bool last = (!encoding && sent + 1u == made) || sent + 1u == C2_PACKETS_MAX;
+            c2_send(sent, last ? LG_VOICE_END : 0, pk[sent].body, pk[sent].len);
+            sent_end = last;
+            sent++;
+            next_ms = now_ms() + C2_SPACING_MS;
+        }
+    }
+    if (ok && sent > 0 && !sent_end && sent < C2_PACKETS_MAX) {
+        /* Released exactly on a packet boundary, after that packet had gone: an empty last one says so. */
+        while ((int32_t)(now_ms() - next_ms) < 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        memset(pk[sent].body, 0, sizeof(pk[sent].body));
+        c2_send(sent, LG_VOICE_END, pk[sent].body, 0);
+        sent++;
+    }
+    /* The sender's half of the measurement, as "Talk ended" is for the live frames. */
+    if (ok) {
+        ESP_LOGI(TAG, "[MSG] Note sent: talk %u, %u packet(s), %u bytes, crc %08" PRIx32
+                 ", slowest encode %" PRIu32 " ms, stack left %u",
+                 c2tx.talk, sent, (unsigned)bytes, crc, worst_ms, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    } else {
+        ESP_LOGW(TAG, "[MSG] No memory for the compact copy of this talk; it went out live only");
+        while (!c2tx.ending) {
+            vTaskDelay(pdMS_TO_TICKS(20));   /* the capture task still holds the buffer */
+            (void)xStreamBufferReset(c2tx.pcm);
+        }
+        vStreamBufferDelete(c2tx.pcm);
+        c2tx.pcm = NULL;
+    }
+    if (c != NULL) {
+        codec2_destroy(c);
+    }
+    free(in);
+    free(pk);
+    c2tx.task = NULL;
+    vTaskDelete(NULL);
+}
+
+/* Capture task: a talk is starting. Quietly does nothing when the last talk's copy is still going out. */
+static void c2_talk_begin(uint16_t talk, uint8_t scope, uint32_t target)
+{
+    if (c2tx.task != NULL) {
+        return;
+    }
+    c2tx.pcm = xStreamBufferCreate(C2_PCM_BUFFER, C2_SAMPLES * sizeof(int16_t));
+    if (c2tx.pcm == NULL) {
+        return;
+    }
+    c2tx.talk = talk;
+    c2tx.scope = scope;
+    c2tx.target = target;
+    c2tx.ending = false;
+    if (xTaskCreate(c2_encode_task, "hh_c2enc", C2_ENC_STACK, NULL, C2_PRIORITY, &c2tx.task) != pdPASS) {
+        vStreamBufferDelete(c2tx.pcm);
+        c2tx.pcm = NULL;
+        c2tx.task = NULL;
+    }
+}
+
+/* Capture task: 100 ms of the talk, after the gain. Never waits: what does not fit is left out. */
+static void c2_talk_feed(uint16_t talk, const int16_t *pcm, size_t samples)
+{
+    if (c2tx.task != NULL && c2tx.pcm != NULL && c2tx.talk == talk && !c2tx.ending) {
+        (void)xStreamBufferSend(c2tx.pcm, pcm, samples * sizeof(int16_t), 0);
+    }
+}
+
+static void c2_talk_end(uint16_t talk)
+{
+    if (c2tx.task != NULL && c2tx.talk == talk) {
+        c2tx.ending = true;
+    }
+}
+
+static void c2_play_task(void *arg)
+{
+    c2_note_t *n = arg;
+    /* Wait for the note to be whole, or for it to be clear that it will not be. */
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        uint32_t quiet = now_ms() - n->heard_ms;
+        if (n->last >= 0) {
+            bool whole = true;
+            for (int i = 0; i <= n->last; i++) {
+                whole = whole && n->have[i];
+            }
+            if (whole || quiet >= NOTE_STRAGGLE_MS) {
+                break;
+            }
+        } else if (quiet >= NOTE_GIVE_UP_MS) {
+            break;
+        }
+    }
+    n->closed = true;
+    int top = n->last >= 0 ? n->last : (int)C2_PACKETS_MAX - 1;
+    while (top >= 0 && !n->have[top]) {
+        top--;
+    }
+    unsigned packets = 0, missing = 0, bytes = 0;
+    uint32_t crc = 0;
+    for (int i = 0; i <= top; i++) {
+        if (n->have[i]) {
+            packets++;
+            bytes += n->len[i];
+            crc = esp_rom_crc32_le(crc, n->data[i], n->len[i]);
+        } else {
+            missing++;
+        }
+    }
+    /* Half duplex, and one talker at a time: a note waits for a talk in either direction to finish. */
+    bool free_to_play = false;
+    for (uint32_t waited = 0; waited < NOTE_BUSY_WAIT_MS && bytes > 0; waited += 100) {
+        taskENTER_CRITICAL(&v.mux);
+        free_to_play = !v.st.talking && v.st.heard == 0 && !v.talk_req;
+        if (free_to_play) {
+            v.st.heard = n->author;
+            v.st.heard_scope = n->scope;
+            v.st.heard_target = n->target;
+            v.st.version++;
+        }
+        taskEXIT_CRITICAL(&v.mux);
+        if (free_to_play) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    struct CODEC2 *c = free_to_play ? codec2_create(CODEC2_MODE_1200) : NULL;
+    int16_t *pcm = free_to_play ? malloc(C2_SAMPLES * sizeof(int16_t)) : NULL;
+    uint32_t worst_ms = 0;
+    if (c != NULL && pcm != NULL) {
+        ESP_LOGI(TAG, "[MSG] Hearing device %" PRIu32 " (%s %" PRIu32 "), a note", n->author,
+                 n->scope == LG_SCOPE_GROUP ? "group" : n->scope == LG_SCOPE_BROADCAST ? "everyone" : "1:1",
+                 n->target);
+        lg_bsp_audio_cue(LG_CUE_TALK);
+        vTaskDelay(pdMS_TO_TICKS(PREBUFFER_MS));
+        if (lg_bsp_audio_voice_start() == ESP_OK) {
+            for (int i = 0; i <= top && !v.talk_req; i++) {
+                for (unsigned off = 0; n->have[i] && off + LG_VOICE_C2_FRAME_LEN <= n->len[i];
+                     off += LG_VOICE_C2_FRAME_LEN) {
+                    uint32_t t0 = now_ms();
+                    codec2_decode(c, pcm, n->data[i] + off);
+                    uint32_t took = now_ms() - t0;
+                    worst_ms = took > worst_ms ? took : worst_ms;
+                    (void)lg_bsp_audio_voice_write(pcm, C2_SAMPLES, SPEAKER_WAIT_MS);
+                }
+            }
+            lg_bsp_audio_voice_stop();
+        } else {
+            ESP_LOGW(TAG, "[MSG] The speaker would not open for a note");
+        }
+    } else if (bytes > 0) {
+        ESP_LOGW(TAG, "[MSG] A note from device %" PRIu32 " was not played: %s", n->author,
+                 free_to_play ? "no memory for the decoder" : "this handheld stayed busy");
+    }
+    if (free_to_play) {
+        set_heard(0, 0, 0);
+    }
+    /* The listener's half of the measurement: the same crc as the sender's "Note sent" means every byte. */
+    ESP_LOGI(TAG, "[MSG] Heard note %u from %" PRIu32 ": %u packet(s), %u missing, %u bytes, crc %08" PRIx32
+             ", slowest decode %" PRIu32 " ms, stack left %u%s",
+             n->talk, n->author, packets, missing, bytes, crc, worst_ms,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL), n->last >= 0 ? "" : ", no last packet");
+    if (c != NULL) {
+        codec2_destroy(c);
+    }
+    free(pcm);
+    c2rx = NULL;
+    free(n);
+    vTaskDelete(NULL);
+}
+
+/* Playback task: a compact packet of a talk whose live frames this handheld did not hear. */
+static void c2_on_packet(const rx_frame_t *f, const lg_voice_hdr_t *h)
+{
+    c2_note_t *n = c2rx;
+    if (n == NULL) {
+        n = calloc(1, sizeof(*n));
+        if (n == NULL) {
+            return;
+        }
+        n->author = f->author;
+        n->boot = f->boot;
+        n->scope = f->scope;
+        n->target = f->target;
+        n->talk = h->talk;
+        n->last = -1;
+        n->heard_ms = now_ms();
+        c2rx = n;
+        if (xTaskCreate(c2_play_task, "hh_c2dec", C2_DEC_STACK, n, C2_PRIORITY, NULL) != pdPASS) {
+            c2rx = NULL;
+            free(n);
+            ESP_LOGW(TAG, "[MSG] No memory to take a note from device %" PRIu32, f->author);
+            return;
+        }
+    }
+    if (n->closed || n->author != f->author || n->boot != f->boot || n->talk != h->talk ||
+        h->frame >= C2_PACKETS_MAX) {
+        return;   /* one note at a time; anything else is a second talker, or too late */
+    }
+    size_t data = f->len - LG_VOICE_HDR_LEN;
+    memcpy(n->data[h->frame], f->frame + LG_VOICE_HDR_LEN, data);
+    n->len[h->frame] = (uint8_t)data;
+    n->have[h->frame] = data > 0;
+    n->heard_ms = now_ms();
+    if (h->flags & LG_VOICE_END) {
+        n->last = (int16_t)h->frame;
+    }
+}
+
 static size_t pack(const hh_adpcm_state_t *from, uint16_t talk, uint16_t frame, uint8_t flags, uint8_t *out)
 {
     lg_voice_hdr_t h = {
@@ -345,6 +680,7 @@ static void capture_task(void *arg)
         s_quiet = 0;
         uint32_t started = now_ms();
         uint32_t dropped = 0;
+        c2_talk_begin(talk, scope, target);   /* the compact copy, for whoever only LoRa reaches (D95) */
         ESP_LOGI(TAG, "[MSG] Talking to %s %" PRIu32 "%s",
                  scope == LG_SCOPE_BROADCAST ? "everyone" : scope == LG_SCOPE_GROUP ? "group" : "device",
                  target, synthetic ? " (generated voice)" : "");
@@ -378,12 +714,21 @@ static void capture_task(void *arg)
                 }
                 agc(pcm, FRAME_SAMPLES);
             }
+            c2_talk_feed(talk, pcm, FRAME_SAMPLES);
             size_t hl = pack(&enc, talk, frame, 0, out);
             hh_adpcm_encode(&enc, pcm, FRAME_SAMPLES, out + hl);
             if (hh_service_voice_send(scope, target, out, hl + FRAME_DATA) != ESP_OK) {
                 dropped++;
             }
             frame++;
+            /*
+             * With no Wi-Fi session only the compact copy is going out, and that is ten seconds (D78):
+             * a talk held longer would be speech nobody receives.
+             */
+            if (!hh_service_wifi_session() && now_ms() - started >= C2_PACKETS_MAX * LG_VOICE_C2_FRAMES * 40u) {
+                v.talk_req = false;
+                set_problem("Over LoRa a talk is ten seconds; press again to go on");
+            }
             if (limit_ms != 0 && now_ms() - started >= limit_ms) {
                 v.talk_req = false;   /* a talk of an asked-for length: it stops itself */
             }
@@ -392,6 +737,7 @@ static void capture_task(void *arg)
                 set_problem("Talk stops after a minute; press again to go on");
             }
         }
+        c2_talk_end(talk);
         size_t hl = pack(&enc, talk, frame, LG_VOICE_END, out);
         (void)hh_service_voice_send(scope, target, out, hl);
         if (!synthetic) {
@@ -470,6 +816,7 @@ static void playback_task(void *arg)
     uint16_t gaps = 0;
     uint16_t talk_id = 0;
     uint16_t last_frame = 0;
+    bool live_seen = false;   /* author, boot and talk_id name a talk whose live frames were played */
     for (;;) {
         TickType_t wait = playing ? pdMS_TO_TICKS(50) : portMAX_DELAY;   /* 50 ms: the silence below fills it */
         if (xQueueReceive(v.rx, f, wait) != pdTRUE) {
@@ -491,6 +838,17 @@ static void playback_task(void *arg)
         if (!lg_voice_hdr_dec(f->frame, f->len, &h) || v.talk_req) {
             continue;
         }
+        if (h.codec == LG_VOICE_CODEC_C2_1200) {
+            /*
+             * The compact copy of a talk (D95). Whoever heard the live frames has heard the talk, and
+             * `talk_id` still names it after its END, which is when the last compact packet arrives.
+             * Anyone else was reached only this way, and gets it as a note.
+             */
+            if (!(live_seen && f->author == author && f->boot == boot && h.talk == talk_id)) {
+                c2_on_packet(f, &h);
+            }
+            continue;
+        }
         if (playing && (f->author != author || f->boot != boot)) {
             continue;   /* one talker at a time: the second is heard once the first lets go */
         }
@@ -502,6 +860,7 @@ static void playback_task(void *arg)
             author = f->author;
             boot = f->boot;
             talk_id = h.talk;
+            live_seen = true;
             played = 0;
             gaps = 0;
             last_frame = h.frame;

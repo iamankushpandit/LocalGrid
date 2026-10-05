@@ -1689,6 +1689,95 @@ static void test_voice_body(void)
     CHECK(LG_ENV_SIZE + LG_VOICE_PAYLOAD_MAX + LG_AEAD_TAG_LEN <= LG_FRAME_MAX);
 }
 
+/* A compact voice payload (D95): the Codec2 header for (talk, packet) and `frames` six-byte codec frames. */
+static size_t compact_payload(uint8_t *out, uint16_t talk, uint16_t packet, uint8_t flags, size_t frames,
+                              uint8_t fill)
+{
+    lg_voice_hdr_t h = { .codec = LG_VOICE_CODEC_C2_1200, .flags = flags, .talk = talk, .frame = packet };
+    size_t n = lg_voice_hdr_enc(&h, out);
+    memset(out + n, fill, frames * LG_VOICE_C2_FRAME_LEN);
+    return n + frames * LG_VOICE_C2_FRAME_LEN;
+}
+
+/* The compact codec (D95): the one kind of voice that may cross LoRa. */
+static void test_voice_compact(void)
+{
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    /* The body: whole codec frames only, no more than a packet's worth, and the unused fields zero. */
+    size_t n = compact_payload(p, 3, 0, 0, LG_VOICE_C2_FRAMES, 0x5A);
+    CHECK_EQ(n, LG_VOICE_C2_PAYLOAD_MAX);
+    lg_voice_hdr_t d;
+    CHECK(lg_voice_hdr_dec(p, n, &d));
+    CHECK_EQ(d.codec, LG_VOICE_CODEC_C2_1200);
+    CHECK_EQ(d.talk, 3);
+    CHECK(lg_voice_hdr_dec(p, LG_VOICE_HDR_LEN, NULL));                               /* an empty last packet */
+    CHECK(!lg_voice_hdr_dec(p, LG_VOICE_HDR_LEN + LG_VOICE_C2_FRAME_LEN + 1u, NULL)); /* a codec frame and a bit */
+    CHECK(!lg_voice_hdr_dec(p, n + LG_VOICE_C2_FRAME_LEN, NULL));                     /* one frame too many */
+    p[8] = 1;
+    CHECK(!lg_voice_hdr_dec(p, n, NULL));                                             /* a live codec's field in use */
+    p[8] = 0;
+    /* What bounds its airtime: envelope, payload and both seals inside two LoRa parts of 130 bytes. */
+    CHECK(LG_ENV_SIZE + LG_VOICE_C2_PAYLOAD_MAX + LG_AEAD_TAG_LEN + 12u + LG_AEAD_TAG_LEN <= 260u);
+
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* A group: sent by the handheld with the envelope marked, delivered to members across two hops. */
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 1);
+    CHECK_EQ(s->clients[ALEX].voice_frames, 1);
+    CHECK_EQ(s->clients[RANGER].voice_frames, 0);            /* not a member */
+    CHECK_EQ(s->clients[EMMA].voice_len, n);
+    CHECK(memcmp(s->clients[EMMA].voice_last, p, sizeof(s->clients[EMMA].voice_last)) == 0);
+    CHECK_EQ(s->clients[EMMA].voice_last[0], LG_VOICE_CODEC_C2_1200);
+
+    /* 1:1: sealed end to end like live talk, and still marked on the outside where an AP can read it. */
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, p, n), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    CHECK_EQ(s->clients[EMMA].voice_scope, LG_SCOPE_DIRECT);
+    CHECK(memcmp(s->clients[EMMA].voice_last, p, sizeof(s->clients[EMMA].voice_last)) == 0);
+
+    /*
+     * The marker and the codec must agree wherever the codec can be read. A live frame wearing the
+     * marker is what would put 400 bytes of ADPCM on a LoRa channel, so the AP refuses it; and a
+     * compact frame without it is refused too, so the two never drift apart.
+     */
+    uint8_t live[LG_VOICE_PAYLOAD_MAX];
+    size_t ln = voice_payload(live, 4, 0, 0, NULL, 40, 0x33);
+    uint8_t frame[LG_FRAME_MAX];
+    uint32_t rejected = s->nodes[0].node.stats.rejected;
+    int len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 700u, LG_SCOPE_GROUP, LG_PROTO_FAMILY,
+                          LG_FLAG_COMPACT, live, ln);
+    CHECK(len > 0);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected + 1u);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 701u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0, p, n);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected + 2u);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    /* And a handheld drops a frame whose marker and payload disagree, whoever let it through. */
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 702u, LG_SCOPE_GROUP, LG_PROTO_FAMILY,
+                      LG_FLAG_COMPACT, live, ln);
+    lg_client_on_frame(cl(s, EMMA), frame, (size_t)len);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+
+    /*
+     * Without a session a handheld still sends the compact codec - the radio may carry it (D80) - and
+     * still refuses to send live talk, which nothing else can carry.
+     */
+    lg_client_disconnected(cl(s, DAD));
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, live, ln), LG_ERR_SHORT);
+    int rc = lg_client_send_voice(cl(s, DAD), LG_SCOPE_GROUP, LG_PROTO_FAMILY, p, n);
+    CHECK(rc == LG_OK || rc == LG_ERR_FULL);   /* offered to the link; the simulated one may have nowhere to put it */
+    sim_destroy(s);
+}
+
 static void test_voice_group(void)
 {
     sim_t *s = make_chain();
@@ -2321,12 +2410,40 @@ static void test_presence_lora_voice_refused(void)
     uint32_t heard = s->clients[EMMA].voice_frames;
     CHECK(heard > 0);
 
-    /* Now she is reachable only over LoRa, and voice stops: refused by the client or by the AP,
-     * and either way not one more frame arrives. */
+    /* Now she is reachable only over LoRa, and live voice stops: not one more frame arrives. It is
+     * not refused either (D95), because a refusal stops the talk at the sender, and the compact frames
+     * of that same talk are what does reach her. */
     set_lora_presence(s, LG_PROTO_EMMA, 2);
+    uint32_t refusals = s->clients[DAD].voice_refusals;
     (void)lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, voice, vn);
     CHECK(sim_pump(s));
     CHECK_EQ(s->clients[EMMA].voice_frames, heard);
+    CHECK_EQ(s->clients[DAD].voice_refusals, refusals);
+    uint8_t compact[LG_VOICE_C2_PAYLOAD_MAX];
+    size_t cn = compact_payload(compact, 3, 0, 0, 10, 0x6B);
+    CHECK_EQ(lg_client_send_voice(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, compact, cn), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, heard + 1u);
+    CHECK_EQ(s->clients[EMMA].voice_last[0], LG_VOICE_CODEC_C2_1200);
+
+    /*
+     * One AP carries a handheld that is on LoRa alone. Her frames are broadcast on the radio, so the AP
+     * next door hears them too - and it must not claim her while the AP that has her is still up, or
+     * both would transmit everything addressed to her at once and the copies would collide.
+     */
+    lg_node_mark_lora_reachable(&s->nodes[1].node, LG_PROTO_EMMA);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[i].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_LORA && pe->node == 2);
+    }
+    /* An AP that cannot reach hers does claim her, and the lower index is then agreed everywhere. */
+    lg_node_mark_lora_reachable(&s->nodes[0].node, LG_PROTO_EMMA);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[i].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_LORA && pe->node == 0);
+    }
     sim_destroy(s);
 }
 
@@ -2849,6 +2966,7 @@ void test_messaging(void)
     test_positions();
     test_position_time();
     test_voice_body();
+    test_voice_compact();
     test_voice_group();
     test_voice_direct();
     test_voice_duplicates_and_order();
