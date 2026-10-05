@@ -122,6 +122,26 @@ int lg_sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32])
     return (st == PSA_SUCCESS && olen == 32) ? 0 : LG_CRYPTO_ERR;
 }
 
+int lg_ecdsa_p256_verify(const uint8_t pub[LG_P256_PUB_LEN], const uint8_t *msg, size_t msg_len,
+                         const uint8_t sig[LG_P256_SIG_LEN])
+{
+    if (pub == NULL || sig == NULL || pub[0] != 0x04 || (msg_len > 0 && msg == NULL)) {
+        return LG_CRYPTO_ERR;
+    }
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+    psa_set_key_bits(&attr, 256);
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_VERIFY_MESSAGE);
+    psa_set_key_algorithm(&attr, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+    psa_key_id_t key = 0;
+    if (psa_import_key(&attr, pub, LG_P256_PUB_LEN, &key) != PSA_SUCCESS) {
+        return LG_CRYPTO_ERR;   /* not a point on the curve */
+    }
+    psa_status_t st = psa_verify_message(key, PSA_ALG_ECDSA(PSA_ALG_SHA_256), msg, msg_len, sig, LG_P256_SIG_LEN);
+    (void)psa_destroy_key(key);
+    return st == PSA_SUCCESS ? 0 : LG_CRYPTO_ERR;
+}
+
 int lg_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len,
                    const uint8_t *info, size_t info_len, uint8_t *out, size_t out_len)
 {

@@ -181,8 +181,52 @@ static void test_e2e_pairs(void)
     CHECK(lg_e2e_open(&ranger, 1, dad.pub, nonce, aad, sizeof(aad), ct, (size_t)n, pt) < 0);
 }
 
+/* RFC 6979 appendix A.2.5: ECDSA, curve P-256, SHA-256, for the firmware update signature. */
+static void test_ecdsa_p256_rfc6979(void)
+{
+    uint8_t pub[LG_P256_PUB_LEN], sig[LG_P256_SIG_LEN];
+    hex2bin("04"
+            "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6"
+            "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", pub, sizeof(pub));
+    hex2bin("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"
+            "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", sig, sizeof(sig));
+    CHECK_EQ(lg_ecdsa_p256_verify(pub, (const uint8_t *)"sample", 6, sig), 0);
+    CHECK(lg_ecdsa_p256_verify(pub, (const uint8_t *)"sampl3", 6, sig) < 0);   /* another message */
+    CHECK(lg_ecdsa_p256_verify(pub, (const uint8_t *)"sample", 5, sig) < 0);   /* a shorter one */
+    sig[40] ^= 1u;
+    CHECK(lg_ecdsa_p256_verify(pub, (const uint8_t *)"sample", 6, sig) < 0);   /* one bit of s */
+    hex2bin("f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367"
+            "019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083", sig, sizeof(sig));
+    CHECK_EQ(lg_ecdsa_p256_verify(pub, (const uint8_t *)"test", 4, sig), 0);
+    CHECK(lg_ecdsa_p256_verify(pub, (const uint8_t *)"sample", 6, sig) < 0);   /* the other message's signature */
+    pub[64] ^= 1u;
+    CHECK(lg_ecdsa_p256_verify(pub, (const uint8_t *)"test", 4, sig) < 0);     /* not a point on the curve */
+    pub[64] ^= 1u;
+    pub[0] = 0x02;
+    CHECK(lg_ecdsa_p256_verify(pub, (const uint8_t *)"test", 4, sig) < 0);     /* only the uncompressed form */
+
+    /*
+     * And a real update file's header (docs/firmware-updates.md), signed by tools/lgfw.py on
+     * 2026-10-04 with a throwaway key: the same bytes the browser page checked. A device, the
+     * command line and the browser must all agree that this signature is good.
+     */
+    static uint8_t header[128];
+    hex2bin("0448dd817fd5cf888c67b3206fd4c1cb8f7f43591f01bfb62f6831d2e46dd1821b"
+            "987d4995054d997f38c1388a0e3b64704f8a0ff082795455a347665f4d000385", pub, sizeof(pub));
+    hex2bin("4c47465701480200d2040000c90000009e0f8e45b3ca8a1b4cf66c82e4090edb"
+            "974e2e57a32d0e00e9ea89bd7809f40a5b5fbf858281842974696e792d310000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000", header, sizeof(header));
+    hex2bin("caf699d21552fbc232b34eac7f3af1b8c4e1f12393202a2886319de830e7ce00"
+            "d1b15d7ffda604e58f68f1dc93a93da6d179704b1f4c7342b3d5a9c7941917d5", sig, sizeof(sig));
+    CHECK_EQ(lg_ecdsa_p256_verify(pub, header, sizeof(header), sig), 0);
+    header[8] ^= 1u;   /* the serial number: a forged "newer" must not verify */
+    CHECK(lg_ecdsa_p256_verify(pub, header, sizeof(header), sig) < 0);
+}
+
 void test_crypto(void)
 {
+    test_ecdsa_p256_rfc6979();
     test_chachapoly_rfc8439();
     test_x25519_rfc7748();
     test_hkdf_rfc5869();

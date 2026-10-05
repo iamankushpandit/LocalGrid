@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A device can check an update's signature
+
+`lg_crypto` gains `lg_ecdsa_p256_verify` (ECDSA P-256 with SHA-256, verification only, through PSA
+Crypto), with the RFC 6979 appendix A.2.5 vectors in `tests/target` and one real update-file header
+signed by `tools/lgfw.py` - the same bytes the browser page checked - so the device, the command line
+and the browser are shown to agree. A changed serial number, a changed message, a changed signature and
+a key that is not on the curve are all refused. `LG_TESTS_RESULT: PASS`, 2614 checks, on a FreeNove.
+Nothing calls it yet: accepting an update on a device is the next step in `docs/firmware-updates.md`.
+
 ### Signed update files, and a page that makes them in the browser
 
 The first piece of updates over the air (`docs/firmware-updates.md`, which also holds the plan for the

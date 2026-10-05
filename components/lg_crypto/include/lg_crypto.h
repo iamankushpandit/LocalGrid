@@ -59,6 +59,17 @@ int lg_sha256(const uint8_t *msg, size_t msg_len, uint8_t out[32]);
 int lg_pbkdf2_sha256(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len,
                      uint32_t iterations, uint8_t *out, size_t out_len);
 
+/*
+ * ECDSA over P-256 with SHA-256 (FIPS 186-4), verification only: the check a device makes on a firmware
+ * update file before it trusts a byte of it (docs/firmware-updates.md). pub is the signer's public key
+ * as an uncompressed point (0x04, X, Y); sig is r then s, 32 bytes each, as the browser's WebCrypto and
+ * tools/lgfw.py both write it. Returns 0 only if the signature is that key's over exactly msg.
+ */
+#define LG_P256_PUB_LEN 65u
+#define LG_P256_SIG_LEN 64u
+int lg_ecdsa_p256_verify(const uint8_t pub[LG_P256_PUB_LEN], const uint8_t *msg, size_t msg_len,
+                         const uint8_t sig[LG_P256_SIG_LEN]);
+
 /* Constant-time equality for secrets such as password hashes and session tokens. */
 bool lg_ct_equal(const uint8_t *a, const uint8_t *b, size_t len);
 
