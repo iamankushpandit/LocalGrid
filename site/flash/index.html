@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install LocalGrid</title>
+<style>
+  :root { --bg:#f6f7f5; --card:#ffffff; --ink:#18201b; --soft:#56635a; --line:#d5dbd6; --go:#1f7a4a; --go-ink:#ffffff; --bad:#a3261d; --ok:#1f7a4a; --code:#eef1ee; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111512; --card:#1a201c; --ink:#e7ece8; --soft:#9aa69e; --line:#2c3530; --go:#3aa66b; --go-ink:#06120b; --bad:#ff8a7f; --ok:#6fd49b; --code:#222a25; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.6rem; margin: 8px 0 4px; }
+  h2 { font-size: 1.15rem; margin: 0 0 10px; }
+  p { margin: 0 0 12px; }
+  .lead, .note { color: var(--soft); }
+  .note { font-size:.92rem; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin:18px 0; }
+  label { display:block; font-weight:600; margin:12px 0 4px; }
+  input[type=text], input[type=number], select, textarea { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+  textarea { font: 13px/1.4 ui-monospace, Consolas, monospace; min-height: 64px; word-break: break-all; }
+  input[type=file] { width:100%; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  @media (max-width:560px) { .row { grid-template-columns: 1fr; } }
+  button, esp-web-install-button button { margin-top:14px; padding:10px 16px; border:0; border-radius:8px; background:var(--go); color:var(--go-ink); font:600 1rem system-ui, sans-serif; cursor:pointer; }
+  button.plain { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .out { margin-top:12px; padding:10px 12px; border-radius:8px; background:var(--code); font: 13px/1.5 ui-monospace, Consolas, monospace; white-space:pre-wrap; word-break:break-word; }
+  .out:empty { display:none; }
+  .ok { color:var(--ok); font-weight:600; }
+  .bad { color:var(--bad); font-weight:600; }
+  code { background:var(--code); padding:1px 5px; border-radius:5px; font-size:.92em; }
+  .hide { display:none; }
+</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+<main>
+  <h1>Install LocalGrid</h1>
+  <p class="lead">Put LocalGrid on a board over its USB cable, then give the board its place in your grid. You need a desktop browser with Web Serial (Chrome or Edge). The grid itself never uses the Internet; only this page does.</p>
+  <p class="bad hide" id="noserial">This browser cannot talk to a USB serial port. Use Chrome or Edge on a computer.</p>
+
+  <section>
+    <h2>1. Install the firmware</h2>
+    <label for="kind">What is this board going to be?</label>
+    <select id="kind">
+      <option value="node-esp32">An access point (ESP32)</option>
+      <option value="handheld-esp32">A handheld with an ESP32</option>
+      <option value="handheld-esp32s3">A handheld with an ESP32-S3</option>
+      <option value="handheld-esp32c6">A handheld with an ESP32-C6</option>
+    </select>
+    <div id="installer"></div>
+    <div class="out" id="installnote"></div>
+    <p class="note">Installing erases the board. A board that already runs LocalGrid can skip to step 3.</p>
+  </section>
+
+  <section>
+    <h2>2. Your grid</h2>
+    <p>Every device in one grid shares its keys. Make them once and keep the file: it is what lets you add a device later, and anyone who has it can join your grid.</p>
+    <div class="row">
+      <div>
+        <label for="gridname">Start a new grid</label>
+        <input type="text" id="gridname" maxlength="24" placeholder="A name for it">
+        <button id="newgrid">Make the grid file</button>
+      </div>
+      <div>
+        <label for="gridfile">Or open your grid file</label>
+        <input type="file" id="gridfile" accept=".json,.lggrid">
+      </div>
+    </div>
+    <label for="release">Release public key (optional)</label>
+    <textarea id="release" spellcheck="false" placeholder="04...  from the update signer; devices accept updates signed by this key"></textarea>
+    <div class="out" id="gridinfo"></div>
+  </section>
+
+  <section>
+    <h2>3. Set up this board</h2>
+    <div class="row">
+      <div>
+        <label for="board">Board</label>
+        <select id="board"></select>
+      </div>
+      <div>
+        <label for="index" id="indexlabel">Number</label>
+        <input type="number" id="index" min="0" max="32" value="0">
+      </div>
+    </div>
+    <div id="namerow">
+      <label for="apname">Access point name</label>
+      <input type="text" id="apname" maxlength="15" placeholder="Everest">
+    </div>
+    <label><input type="checkbox" id="replace"> This board already has an identity; give it a new one</label>
+    <button id="setup" disabled>Connect and set up</button>
+    <div class="out" id="log"></div>
+    <p class="note">An access point takes a number from 0 to 15 and a name. A handheld takes a number from 1 to 32, different for each handheld in the grid; people's names are set later on the admin page.</p>
+  </section>
+</main>
+<script>
+"use strict";
+const BOARDS = {{BOARDS_JSON}};
+const IMAGES = {{IMAGES_JSON}};
+const $ = id => document.getElementById(id);
+const hex = b => Array.from(new Uint8Array(b), x => x.toString(16).padStart(2, "0")).join("");
+const unhex = t => { const c = t.replace(/[^0-9a-fA-F]/g, ""); const o = new Uint8Array(c.length / 2); for (let i = 0; i < o.length; i++) o[i] = parseInt(c.substr(i * 2, 2), 16); return o; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let grid = null;
+
+function say(id, cls, text) { const el = $(id); el.textContent = ""; const s = document.createElement("span"); if (cls) s.className = cls; s.textContent = text; el.appendChild(s); }
+function more(id, text) { $(id).appendChild(document.createTextNode(text)); }
+function save(name, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], {type: "application/json"}));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+function crc32(bytes) {
+  let c, crc = 0xFFFFFFFF;
+  for (let n = 0; n < bytes.length; n++) { c = (crc ^ bytes[n]) & 0xFF; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crc = (crc >>> 8) ^ c; }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+// HKDF-SHA256 with an empty salt, as the boards compute it.
+async function hkdf(key, info, length) {
+  const k = await crypto.subtle.importKey("raw", key, "HKDF", false, ["deriveBits"]);
+  return new Uint8Array(await crypto.subtle.deriveBits({name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: new TextEncoder().encode(info)}, k, length * 8));
+}
+// The setup bundle a device's `provision` command takes (firmware/common/lg_gridkeys.h).
+async function bundle(accessPoint) {
+  const pass = new TextEncoder().encode(grid.passphrase), bb = unhex(grid.backbone);
+  const rel = $("release").value.trim() ? unhex($("release").value) : null;
+  if (rel && (rel.length !== 65 || rel[0] !== 4)) throw new Error("the release public key should be 65 bytes beginning with 04");
+  const parts = [new TextEncoder().encode("LGK1"), Uint8Array.of((accessPoint ? 1 : 2) | (rel ? 4 : 0), pass.length), pass];
+  if (accessPoint) parts.push(bb); else { parts.push(await hkdf(bb, "lg-disc", 4)); parts.push(await hkdf(bb, "lg-lora-hh", 32)); }
+  if (rel) parts.push(rel);
+  const body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let at = 0;
+  for (const p of parts) { body.set(p, at); at += p.length; }
+  const out = new Uint8Array(body.length + 4); out.set(body); new DataView(out.buffer).setUint32(body.length, crc32(body), true);
+  return btoa(String.fromCharCode(...out));
+}
+function haveGrid(g, from) {
+  if (!g || typeof g.passphrase !== "string" || g.passphrase.length < 8 || g.passphrase.length > 63 || unhex(g.backbone || "").length !== 32) throw new Error("that is not a LocalGrid grid file");
+  grid = g;
+  if (g.release) $("release").value = g.release;
+  say("gridinfo", "ok", "Grid “" + (g.name || "unnamed") + "” ready" + from + ".");
+  $("setup").disabled = !("serial" in navigator);
+}
+
+$("newgrid").onclick = () => {
+  try {
+    const alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const r = crypto.getRandomValues(new Uint8Array(20));
+    const g = {localgrid_grid: 1, name: $("gridname").value.trim() || "My grid",
+               passphrase: Array.from(r, x => alphabet[x % alphabet.length]).join(""),
+               backbone: hex(crypto.getRandomValues(new Uint8Array(32))), release: $("release").value.trim()};
+    haveGrid(g, "; its file was saved - keep it safe");
+    save(g.name.replace(/[^\w-]+/g, "-").toLowerCase() + ".lggrid.json", JSON.stringify(g, null, 1) + "\n");
+  } catch (e) { say("gridinfo", "bad", e.message); }
+};
+$("gridfile").onchange = async ev => {
+  try { haveGrid(JSON.parse(await ev.target.files[0].text()), ", from your file"); }
+  catch (e) { say("gridinfo", "bad", "Could not use that file: " + e.message); }
+};
+
+function kindChanged() {
+  const kind = $("kind").value, ap = kind.startsWith("node"), chip = kind.split("-")[1];
+  $("board").textContent = "";
+  for (const [code, b] of Object.entries(BOARDS)) {
+    if (b.target !== chip || (ap ? b.role !== "N" : b.role === "N")) continue;
+    const o = document.createElement("option"); o.value = code; o.textContent = b.description; $("board").appendChild(o);
+  }
+  $("namerow").classList.toggle("hide", !ap);
+  $("indexlabel").textContent = ap ? "Access point number (0 to 15)" : "Handheld number (1 to 32)";
+  $("index").min = ap ? 0 : 1; $("index").max = ap ? 15 : 32; if (!ap && Number($("index").value) < 1) $("index").value = 1;
+  const holder = $("installer"); holder.textContent = "";
+  if (IMAGES.includes(kind)) {
+    const b = document.createElement("esp-web-install-button"); b.setAttribute("manifest", "firmware/manifest-" + kind + ".json");
+    holder.appendChild(b); $("installnote").textContent = "";
+  } else {
+    say("installnote", "bad", "No published image for this kind of board yet.");
+    more("installnote", " Build it from the source and flash it with tools/flash.py, then use steps 2 and 3 here.");
+  }
+}
+$("kind").onchange = kindChanged;
+
+// One line in, lines out, over Web Serial. The board's console echoes and answers on the same port.
+async function talk(port, reader, writer, command, marker, ms) {
+  await writer.write(new TextEncoder().encode("\r\n" + command + "\r\n"));
+  let text = "", end = Date.now() + ms;
+  while (Date.now() < end) {
+    const got = await Promise.race([reader.read(), sleep(250).then(() => null)]);
+    if (got && got.value) text += new TextDecoder().decode(got.value);
+    const lines = text.split(/\r?\n/);
+    const at = lines.findLastIndex(l => l.trim().startsWith(marker));
+    if (at >= 0 && at < lines.length - 1) return lines[at].trim();   /* the whole line has arrived */
+  }
+  const line = text.split(/\r?\n/).reverse().find(l => l.trim().startsWith(marker));
+  return line ? line.trim() : null;
+}
+
+$("setup").onclick = async () => {
+  let port = null, reader = null, writer = null;
+  const ap = $("kind").value.startsWith("node");
+  try {
+    if (!grid) throw new Error("make or open your grid file first");
+    const index = Number($("index").value), name = $("apname").value.trim();
+    if (!Number.isInteger(index) || index < (ap ? 0 : 1) || index > (ap ? 15 : 32)) throw new Error("that number is out of range");
+    if (ap && !/^[A-Za-z0-9_-]{1,15}$/.test(name)) throw new Error("give the access point a name of letters and digits, no spaces");
+    const keys = await bundle(ap);
+    port = await navigator.serial.requestPort();
+    await port.open({baudRate: 115200});
+    try { await port.setSignals({dataTerminalReady: false, requestToSend: false}); } catch (e) { /* not every bridge has them */ }
+    reader = port.readable.getReader(); writer = port.writable.getWriter();
+    say("log", "", "Connected. Asking the board who it is...\n");
+    const id = await talk(port, reader, writer, "id", "LGID", 4000);
+    more("log", (id || "The board did not answer. Is LocalGrid installed on it, and is anything else using the port?") + "\n");
+    if (!id) throw new Error("no answer from the board");
+    const fresh = !/LG-[NH]-/.test(id) || $("replace").checked;
+    if (fresh) {
+      const cmd = "identity new " + $("board").value + " " + Math.floor(Date.now() / 1000) + " " + index + (ap ? " " + name : "") + ($("replace").checked ? " replace" : "");
+      const made = await talk(port, reader, writer, cmd, "LGIDNEW:", 6000);
+      more("log", (made || "LGIDNEW: no answer") + "\n");
+      if (!made || made.includes("refused") || made.includes("usage")) throw new Error("the board did not take an identity");
+      more("log", "Waiting for it to restart...\n"); await sleep(7000);
+    } else {
+      more("log", "It already has an identity, which it keeps.\n");
+    }
+    const done = await talk(port, reader, writer, "provision " + keys, "LGPROV:", 6000);
+    more("log", (done || "LGPROV: no answer") + "\n");
+    if (!done || !done.includes("ok")) throw new Error("the board did not take the grid keys");
+    const ok = document.createElement("span"); ok.className = "ok"; ok.textContent = "Done. The board is restarting into your grid."; $("log").appendChild(ok);
+  } catch (e) {
+    const bad = document.createElement("span"); bad.className = "bad"; bad.textContent = "Not set up: " + e.message; $("log").appendChild(bad);
+  } finally {
+    try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch (e) {}
+    try { if (writer) writer.releaseLock(); } catch (e) {}
+    try { if (port) await port.close(); } catch (e) {}
+  }
+};
+
+if (!("serial" in navigator)) $("noserial").classList.remove("hide");
+kindChanged();
+</script>
+</body>
+</html>

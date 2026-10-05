@@ -25,4 +25,4 @@ idf_component_register(SRCS "hh_main.c"
                             "voice/hh_voice.c"
                        INCLUDE_DIRS "." "service" "ui" "voice" "../../common"
                        REQUIRES lg_draw lg_core lg_crypto lg_identity lg_board lg_bsp lg_selftest lg_power codec2
-                                esp_wifi esp_netif esp_event nvs_flash lwip esp_timer console esp_driver_uart esp_driver_gpio)
+                                esp_wifi esp_netif esp_event nvs_flash lwip esp_timer console esp_driver_uart esp_driver_gpio app_update)

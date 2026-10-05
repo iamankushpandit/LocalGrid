@@ -12,7 +12,15 @@
 #include "freertos/task.h"
 #include "lg_crypto.h"
 #include "lg_lora_wire.h"
+/*
+ * A build made to be published (tools/build_release.py sets LG_PUBLISHED_BUILD) is compiled without
+ * lg_secrets.h at all: it cannot carry a grid's keys even by accident, and needs none to build.
+ */
+#if LG_PUBLISHED_BUILD
+#define LG_SECRET_NONE 1
+#else
 #include "lg_secrets.h"
+#endif
 #include "nvs.h"
 
 static const char *TAG = "GRID";

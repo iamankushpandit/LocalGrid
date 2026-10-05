@@ -10,6 +10,7 @@ Output:
   OUT/index.html           the landing page (site/index.template.html filled in)
   OUT/admin/index.html     the real admin page answering from a simulated MAIN, in the browser
   OUT/sign/index.html      the update signer: makes a release key and signs firmware, in the browser
+  OUT/flash/index.html     the installer: flashes a published image over USB and sets the board up
   OUT/assets/...           brand icons
   OUT/.nojekyll            serve files as they are
 
@@ -22,6 +23,7 @@ Pure standard library; CI runs it on every pull request and Pages runs it on eve
 import argparse
 import datetime
 import html
+import json
 import pathlib
 import re
 import shutil
@@ -143,6 +145,8 @@ def check_public(path, text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=str(ROOT / "build" / "site"), help="output directory (replaced)")
+    ap.add_argument("--firmware", help="a folder of published images and manifests from tools/build_release.py; "
+                                       "without it the installer page says no image is published")
     ap.add_argument("--repo", default="https://github.com/iamankushpandit/LocalGrid", help="repository URL for links")
     args = ap.parse_args()
 
@@ -182,6 +186,27 @@ def main():
     check_public("sign/index.html", signer.read_text(encoding="utf-8"))
     (out / "sign").mkdir()
     shutil.copy2(signer, out / "sign" / "index.html")
+
+    # The installer (D96): flashes a published image over Web Serial and then sets the board up. The
+    # board list comes from the device map (descriptions only), and it offers an image only for the
+    # kinds a release build has actually put in --firmware.
+    device_map = json.loads((ROOT / "tools" / "bench_devices.json").read_text(encoding="utf-8"))
+    roles = {d["board"]: d["role"] for d in device_map.get("devices", []) if d.get("board")}
+    boards_json = {code: {"description": b["description"], "target": b["target"], "role": roles.get(code, "H")}
+                   for code, b in device_map.get("boards", {}).items()}
+    images = []
+    (out / "flash").mkdir()
+    if args.firmware:
+        src = pathlib.Path(args.firmware)
+        (out / "flash" / "firmware").mkdir()
+        for f in sorted(src.glob("*")):
+            if f.suffix in (".bin", ".json"):
+                shutil.copy2(f, out / "flash" / "firmware" / f.name)
+        images = sorted(m.stem.replace("manifest-", "") for m in src.glob("manifest-*.json"))
+    flasher = (ROOT / "site" / "flash" / "index.html").read_text(encoding="utf-8")
+    flasher = flasher.replace("{{BOARDS_JSON}}", json.dumps(boards_json)).replace("{{IMAGES_JSON}}", json.dumps(images))
+    check_public("flash/index.html", flasher)
+    (out / "flash" / "index.html").write_text(flasher, encoding="utf-8")
 
     (out / ".nojekyll").write_text("", encoding="utf-8")
     print(f"site written to {out} (commit {commit})")

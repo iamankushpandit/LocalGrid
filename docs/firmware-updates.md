@@ -1,7 +1,8 @@
 # Firmware updates: signed, sticky, and installable by somebody who is not the bench
 
-Status, 2026-10-04: **the update file and the two tools that make it are built and checked against each
-other. Nothing on a device reads one yet.** Everything from "What a device does with it" down is a plan
+Status, 2026-10-05: **the update file and its tools, runtime grid keys, identity over the cable, publishable
+images, the installer page and two slots on every device are built. No device accepts or passes on an
+update yet** - that is steps 1 and 3 of the order of work at the end. Everything from "What a device does with it" down is a plan
 for the owner to review before it is built.
 
 The owner's requirement (2026-10-04): updates over the air for handhelds and access points, "as sticky as

@@ -15,6 +15,7 @@
 #include "lg_board.h"
 #include "lg_bsp_audio.h"
 #include "lg_bsp_board.h"
+#include "esp_ota_ops.h"
 #include "lg_gridkeys.h"
 #include "lg_identity.h"
 #include "lg_power.h"
@@ -113,4 +114,16 @@ void app_main(void)
         return;
     }
     hh_mem_mark("after UI start");
+
+    /*
+     * An image that arrived as an update runs once on trial (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE).
+     * Getting this far - service, voice, self test and the screen all started - is what makes it worth
+     * keeping; an image that cannot get here is replaced by the one before it at the next restart.
+     */
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running != NULL && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY && esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+        ESP_LOGI(TAG, "[GRID] New firmware confirmed: it started, so it stays");
+    }
 }

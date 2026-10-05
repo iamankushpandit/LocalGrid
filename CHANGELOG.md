@@ -5,6 +5,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### An installer page, images that can be published, and two firmware slots on every handheld
+
+- **`site/flash/index.html`**, published at `/flash/` by `tools/gen_site.py`: choose what the board is
+  to be, flash it from the browser (ESP Web Tools over Web Serial), make or open a grid file, then
+  connect and set the board up - `identity new` and `provision` typed at its console by the page. The
+  board list comes from the device map. The setup bundles the page makes are byte for byte the ones
+  `tools/provision.py` makes, which the boards accept. **The connect-and-set-up step has not been run
+  against a board**: a browser will only open a serial port a person has picked.
+- **`tools/build_release.py`**: builds each firmware with `LG_PUBLISHED_BUILD`, which compiles no
+  `lg_secrets.h` in at all, merges bootloader, partition table and app into one file per (firmware,
+  chip), and writes the manifest the page's flash button reads; with `--key` it also writes the signed
+  update files. `tools/gen_site.py --firmware DIR` publishes them. Without them the page says no image
+  is published and offers only the setup steps.
+- **Proved on a board:** the four published images contain neither the bench passphrase nor the
+  backbone key (the bench image contains both). The published handheld image was written to Marshall as
+  the page's button would write it; it started, reported `unset` and showed "Not set up yet: connect a
+  cable to give it your grid"; given its keys over the cable it restarted, reported `set` and came
+  online.
+- **Handhelds have two firmware slots**, the layout access points have had since D81, with rollback: an
+  image that arrives as an update runs once on trial and is kept once the handheld has started. This
+  moves the identity partition, so every handheld was re-flashed once over USB with
+  `--update-identity`. All six are back online.
+- **Big Pepa's identity was written by Big Pepa.** The flashing tool could not write its identity
+  partition (the CH340 and esptool's stub again), which left it with firmware and no identity; the new
+  `identity new` console command gave it one over the same cable. Its ID is now
+  `LG-H-E40-TJGVKGNFR7`.
+
 ### A board can be given its identity over the cable
 
 `identity new <board> <unix seconds> <index> [name] [replace]` on both consoles: the board mints its own

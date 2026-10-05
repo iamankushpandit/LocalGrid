@@ -1,7 +1,8 @@
 # LocalGrid handheld firmware (prototype): joins the grid and shows its state on screen.
 cmake_minimum_required(VERSION 3.22)
 
-if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../common/lg_secrets.h")
+# A published build (D96) carries no grid's keys and needs no lg_secrets.h; every other build does.
+if(NOT DEFINED ENV{LG_PUBLISHED_BUILD} AND NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../common/lg_secrets.h")
     message(FATAL_ERROR "firmware/common/lg_secrets.h is missing. Run: python tools/gen_secrets.py")
 endif()
 
@@ -14,6 +15,9 @@ set(EXTRA_COMPONENT_DIRS "${LG_COMPONENTS}/lg_core" "${LG_COMPONENTS}/lg_crypto"
 set(COMPONENTS main)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+if(DEFINED ENV{LG_PUBLISHED_BUILD})
+    idf_build_set_property(COMPILE_DEFINITIONS "LG_PUBLISHED_BUILD=1" APPEND)
+endif()
 # The service copies every message into its own list as it arrives and reads only the newest
 # inbox entry, so lg_client's inbox needs one slot here (8.3 KB of RAM saved). Every component
 # must agree on it, since it sizes lg_client_t.
