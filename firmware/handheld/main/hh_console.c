@@ -1362,6 +1362,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         err = esp_console_cmd_register(&cmds[i]);
         if (i == 0) {
             lg_gridkeys_register_console(false);   /* D96: `provision`, beside the first of the rest */
+            lg_identity_register_console("H");     /* D96: `identity new`, for a board the bench has never seen */
         }
         if (err != ESP_OK) {
             return err;

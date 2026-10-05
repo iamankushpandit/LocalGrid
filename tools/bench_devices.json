@@ -126,8 +126,8 @@
       "role": "H",
       "board": "HY3",
       "firmware": "handheld",
-      "id": "LG-H-HY3-MPT765WSFG",
-      "id_created": 1789494151,
+      "id": "LG-H-HY3-CB54KHSXJ6",
+      "id_created": 1791200000,
       "notes": "Prototype roster user 'Handheld 2'. Run the test app with --firmware tests.",
       "device_index": 2
     },

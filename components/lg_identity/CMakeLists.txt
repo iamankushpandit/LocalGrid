@@ -3,4 +3,4 @@
 idf_component_register(SRCS src/lg_identity.c
                        INCLUDE_DIRS include
                        REQUIRES nvs_flash
-                       PRIV_REQUIRES lg_crypto esp_hw_support esp_driver_uart esp_driver_usb_serial_jtag vfs)
+                       PRIV_REQUIRES lg_crypto esp_hw_support esp_driver_uart esp_driver_usb_serial_jtag vfs console esp_system)

@@ -76,6 +76,28 @@ typedef struct {
 esp_err_t lg_identity_load(lg_identity_t *out);
 
 /*
+ * Mints an identity for this board and writes it to the "lgid" partition (D96): what tools/flash.py
+ * --new-id does from the PC, done by the board itself, so a board the bench has never seen can be set up
+ * from a browser. `role` is "N" or "H" and comes from the firmware, never from whoever is asking;
+ * `board` is the three-character hardware code; `created` is the time now in Unix seconds, supplied by
+ * the caller because a board that has never been on a grid does not know it; `index` is the access
+ * point's index (0..15) or the handheld's device index (1..32); `name` is the access point's name and is
+ * ignored for a handheld. The random part comes from the board's own generator. On ESP_OK the ID is in
+ * `id_out` and takes effect at the next start.
+ * ESP_ERR_INVALID_ARG for anything out of range, ESP_ERR_INVALID_STATE when the board's MAC cannot be read.
+ */
+esp_err_t lg_identity_mint(const char *role, const char *board, uint32_t created, uint32_t index,
+                           const char *name, char *id_out, size_t id_len);
+
+/*
+ * Registers `identity new <board> <unix seconds> <index> [name] [replace]` on the console, for the web
+ * flasher and for anyone with a cable. A board that already has an identity keeps it unless the last
+ * word is "replace": two boards must never share one, and a board must not lose its own by accident.
+ * The reply begins "LGIDNEW: ".
+ */
+void lg_identity_register_console(const char *role);
+
+/*
  * The result of the check made by the last lg_identity_load: LG_IDENTITY_UNCHECKED before it
  * runs. Firmware refuses to join the grid on LG_IDENTITY_MISMATCH and behaves as it always did
  * on LG_IDENTITY_UNCHECKED.

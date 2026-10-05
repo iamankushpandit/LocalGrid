@@ -263,6 +263,7 @@ void console_start(void)
     esp_console_dev_uart_config_t uart_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&uart_config, &repl_config, &repl));
     lg_gridkeys_register_console(true);   /* D96: `provision`, on a set-up access point and an unset one */
+    lg_identity_register_console("N");    /* D96: `identity new`, for a board the bench has never seen */
 
     const esp_console_cmd_t cmds[] = {
         { .command = "id",      .help = "Print this board's LocalGrid device ID",        .func = cmd_id },

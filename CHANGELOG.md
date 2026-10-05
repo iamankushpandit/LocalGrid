@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A board can be given its identity over the cable
+
+`identity new <board> <unix seconds> <index> [name] [replace]` on both consoles: the board mints its own
+ID from its MAC, the time it is told and its own random bytes - what `tools/flash.py --new-id` does from
+the PC - and writes the identity partition itself. The role comes from the firmware, never from the
+caller. A board that already has an identity keeps it unless the last word is `replace`. This is the
+second thing a web flasher needs (D96): a board the bench has never seen can now be set up with nothing
+but a serial line.
+
+On the bench: the Hosyond refused without `replace`, refused a lower-case board code and an index out
+of range, then minted a new identity, restarted, verified it against its own MAC and came back online
+as device 2. **Its ID is now `LG-H-HY3-CB54KHSXJ6`**, and the device map says so.
+
 ### A device holds its grid's keys (D96): the first step to a web flasher
 
 - **`firmware/common/lg_gridkeys.c`**: both firmwares read the Wi-Fi passphrase and keys from the

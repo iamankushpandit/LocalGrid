@@ -2,10 +2,14 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_console.h"
 #include "esp_mac.h"
+#include "esp_random.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lg_crypto.h"
@@ -186,6 +190,118 @@ esp_err_t lg_identity_load(lg_identity_t *out)
                       "against this board.", out->id);
     }
     return ESP_OK;
+}
+
+esp_err_t lg_identity_mint(const char *role, const char *board, uint32_t created, uint32_t index,
+                           const char *name, char *id_out, size_t id_len)
+{
+    bool node = role != NULL && strcmp(role, "N") == 0;
+    if (role == NULL || (!node && strcmp(role, "H") != 0) || board == NULL || strlen(board) != 3 ||
+        created == 0 || id_out == NULL || id_len < LG_IDENTITY_ID_MAX ||
+        (node ? index > 15u : (index < 1u || index > 32u))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < 3; i++) {
+        char c = board[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (node && (name == NULL || name[0] == '\0' || strlen(name) >= LG_IDENTITY_NAME_MAX)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t raw[16];
+    char nonce[LG_IDENTITY_NONCE_MAX];
+    esp_fill_random(raw, sizeof(raw));
+    for (size_t i = 0; i < sizeof(raw); i++) {
+        snprintf(nonce + i * 2u, 3, "%02x", raw[i]);
+    }
+    uint8_t mac[6];
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = lg_identity_compute_id(role, board, mac, created, nonce, id_out, id_len);
+    lg_secure_zero(mac, sizeof(mac));
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_flash_init_partition(PARTITION);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        err = nvs_flash_erase_partition(PARTITION);   /* blank, or laid out by an older tool */
+        if (err == ESP_OK) {
+            err = nvs_flash_init_partition(PARTITION);
+        }
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    nvs_handle_t h;
+    err = nvs_open_from_partition(PARTITION, NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    (void)nvs_erase_all(h);
+    err = nvs_set_str(h, "id", id_out);
+    err = err == ESP_OK ? nvs_set_str(h, "role", role) : err;
+    err = err == ESP_OK ? nvs_set_str(h, "board", board) : err;
+    err = err == ESP_OK ? nvs_set_u32(h, "created", created) : err;
+    err = err == ESP_OK ? nvs_set_str(h, "nonce", nonce) : err;
+    if (node) {
+        err = err == ESP_OK ? nvs_set_u8(h, "node_idx", (uint8_t)index) : err;
+        err = err == ESP_OK ? nvs_set_str(h, "node_name", name) : err;
+    } else {
+        err = err == ESP_OK ? nvs_set_u32(h, "device_idx", index) : err;
+    }
+    err = err == ESP_OK ? nvs_commit(h) : err;
+    nvs_close(h);
+    return err;
+}
+
+static const char *s_console_role = "H";
+
+static void mint_restart(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+}
+
+static int cmd_identity(int argc, char **argv)
+{
+    if (argc < 5 || strcmp(argv[1], "new") != 0) {
+        printf("LGIDNEW: usage: identity new <board> <unix seconds> <index> [name] [replace]\n");
+        return 0;
+    }
+    bool replace = strcmp(argv[argc - 1], "replace") == 0;
+    lg_identity_t have;
+    if (lg_identity_load(&have) == ESP_OK && have.present && !replace) {
+        printf("LGIDNEW: refused: this board is already %s; add the word replace to give it a new identity\n", have.id);
+        return 0;
+    }
+    const char *name = (argc >= 6 && !(argc == 6 && replace)) ? argv[5] : "";
+    char id[LG_IDENTITY_ID_MAX];
+    esp_err_t err = lg_identity_mint(s_console_role, argv[2], (uint32_t)strtoul(argv[3], NULL, 10),
+                                     (uint32_t)strtoul(argv[4], NULL, 10), name, id, sizeof(id));
+    if (err != ESP_OK) {
+        printf("LGIDNEW: refused: %s\n", err == ESP_ERR_INVALID_ARG
+               ? "a three-character board code, the time in Unix seconds, and an index in range are needed"
+               : esp_err_to_name(err));
+        return 0;
+    }
+    printf("LGIDNEW: %s, restarting\n", id);
+    xTaskCreate(mint_restart, "lgidnew", 2048, NULL, 1, NULL);
+    return 0;
+}
+
+void lg_identity_register_console(const char *role)
+{
+    s_console_role = role != NULL && strcmp(role, "N") == 0 ? "N" : "H";
+    const esp_console_cmd_t cmd = {
+        .command = "identity",
+        .help = "identity new <board> <unix seconds> <index> [name] [replace]: give this board its identity (D96)",
+        .func = cmd_identity,
+    };
+    (void)esp_console_cmd_register(&cmd);
 }
 
 void lg_identity_print(const lg_identity_t *id)
