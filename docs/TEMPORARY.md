@@ -84,7 +84,15 @@ network at all, and the admin password to log in. The fault budget is bounded an
 so it cannot be raised from the network. And the armed window closes by itself unless renewed, so
 losing contact ends a run rather than sustaining it.
 
-### T3 — Firmware replaceable with only the admin password (D81)
+### T3 — Firmware replaceable with only the admin password (D81) — **closed by D97, 2026-10-05**
+
+**How it was closed.** Not by the bootloader's signing, as proposed below, but one layer up: `POST
+/api/update` now takes a signed update file (`docs/firmware-updates.md`) and hands it to `lg_fwupdate`,
+which refuses anything not signed by the release key the access point was given, not for an access
+point, not for this chip, or not newer than what runs - on the first 192 bytes, before anything is
+erased. The admin page no longer writes an image itself. `tools/check_release.py` accepts either
+mechanism. What the bootloader's own signing would add is protection against somebody with a cable,
+which this does not attempt. The original entry follows for the record.
 
 **What.** `POST /api/update` takes a raw image and makes it bootable.
 

@@ -65,13 +65,18 @@ def check_t2_chaos_over_network():
 def check_t3_unsigned_ota():
     """
     T3 is hardened rather than removed: OTA stays, but an AP must not accept just any image. Satisfied
-    by signed images (or full secure boot) being enabled in the AP's build.
+    in either of two ways: the bootloader's signed images (or full secure boot) enabled in the AP's
+    build, or - what D97 built - the upload going through lg_fwupdate, which refuses any file not signed
+    by the release key the AP was given, and the admin page never writing an image itself.
     """
     cfg = read("firmware/node/sdkconfig.defaults")
     signed = re.search(r"^CONFIG_SECURE_(SIGNED_APP|BOOT)\w*=y", cfg, re.MULTILINE)
-    if "/api/update" in read("firmware/node/main/web_admin.c") and not signed:
-        return ["firmware upload is enabled but images are not signed "
-                "(set CONFIG_SECURE_SIGNED_APP_NO_SECURE_BOOT=y, or full secure boot)"]
+    web = read("firmware/node/main/web_admin.c")
+    through_fwu = "lg_fwu_begin(" in web and "esp_ota_begin(" not in web and "esp_ota_write(" not in web
+    checks_signature = "lg_ecdsa_p256_verify(" in read("firmware/common/lg_fwupdate.c")
+    if "/api/update" in web and not signed and not (through_fwu and checks_signature):
+        return ["firmware upload is enabled but images are not signed: route it through lg_fwupdate (D97), "
+                "or set CONFIG_SECURE_SIGNED_APP_NO_SECURE_BOOT=y, or full secure boot"]
     return []
 
 
