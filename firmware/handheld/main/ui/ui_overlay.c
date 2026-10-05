@@ -235,6 +235,13 @@ uint32_t ui_notify_unread_total(void)
     return total;
 }
 
+void ui_notify_mark_all_seen(void)
+{
+    for (size_t i = 0; i < CONVS_TRACKED; i++) {
+        s.convs[i].unread = 0;
+    }
+}
+
 void ui_notify_mark_seen(uint8_t scope, uint32_t target)
 {
     tracked_t *c = slot_for(scope, target, false);

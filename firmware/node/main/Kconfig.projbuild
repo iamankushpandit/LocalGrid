@@ -42,6 +42,18 @@ menu "LocalGrid AP"
             An A/B switch, off by default. It is kept only if a measurement on the AP shows the
             memory comes back and the GPS still sets grid time with no more bad sentences.
 
+    config LG_NODE_LORA_SPARE_RELAY
+        bool "Experiment: do not repeat over LoRa a flood whose sender already reaches every peer here"
+        default n
+        help
+            With ESP-NOW down, every AP that receives a flood over LoRa repeats it to its other LoRa
+            peers, so three APs in earshot of one another transmit each message three times on a
+            channel that carries one frame every few seconds. With this on, an AP that received the
+            frame over LoRa does not repeat it when the sender's last HELLO listed every LoRa peer
+            this AP has. Alerts are always repeated.
+
+            An A/B switch, off by default: kept only if a run with ESP-NOW off loses fewer messages.
+
     config LG_NODE_BLE_ADV
         bool "Advertise LocalGrid discovery over BLE"
         default y

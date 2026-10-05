@@ -1790,6 +1790,18 @@ class Chaos:
         rec = {k: v for k, v in p.items() if k != "mono"}
         self.probes.append(rec)
         self.event("probe", **rec)
+        # An access point with ESP-NOW and LoRa both off has no path to the others: that is what the
+        # lora_blind round sets up on purpose, and a message between a handheld on it and one elsewhere
+        # cannot arrive. It is recorded on the probe and is not a finding (five such on 2026-10-04).
+        cut_off = set()
+        for f in p["faults_at_send"]:
+            name, _, what = f.partition(" (")
+            if "backbone off" in what and "LoRa off" in what and name in self.by_name:
+                cut_off.add(self.by_name[name].index)
+        if (p["clean"] and result != "delivered" and p["sender_node"] != p["receiver_node"]
+                and cut_off & {p["sender_node"], p["receiver_node"]}):
+            rec["expected"] = "an end was on an access point this round had cut off from the others"
+            return
         if p["clean"] and result != "delivered":
             self.finding(f"{p['kind']} message {p['token']} {p['sender']} -> {p['receiver']} {result} "
                          f"while both were registered (APs {p['sender_node']} and {p['receiver_node']}"

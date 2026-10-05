@@ -54,6 +54,8 @@ typedef struct {
     uint32_t target;
 } conv_ref_t;
 
+#define CONVS_MARK_ALL 9   /* the row id of "Mark all read"; conversation rows are id 0 */
+
 static struct {
     uint32_t   shown;
     conv_ref_t refs[SLIST_ROWS];
@@ -76,7 +78,18 @@ static uint32_t convs_build(bool rebuild)
     slist_begin("Messages", false, false);
     uint8_t n = 0;
     char value[SLIST_VALUE_MAX];
-    uint32_t unread = ui_notify_unread(LG_SCOPE_BROADCAST, LG_TARGET_ALL);
+    /*
+     * One touch for every thread (D94; owner, 2026-10-04: opening each conversation in turn to clear
+     * its count "is very difficult"). Shown only while something is unread, at the top where it is the
+     * first thing under the thumb. It clears the counts on this handheld and tells nobody anything: a
+     * read receipt still goes only for a message that was actually put on the screen (D58).
+     */
+    uint32_t unread = ui_notify_unread_total();
+    if (unread > 0) {
+        snprintf(value, sizeof(value), "%" PRIu32 " new", unread);
+        slist_add(ROW_ACTION, "Mark all read", value, CONVS_MARK_ALL, 0);
+    }
+    unread = ui_notify_unread(LG_SCOPE_BROADCAST, LG_TARGET_ALL);
     if (unread) {
         snprintf(value, sizeof(value), "%" PRIu32 " new", unread);
     } else {
@@ -175,7 +188,12 @@ void ui_convs_touch(int16_t x, int16_t y, bool down)
     } else if (ev.type == SLIST_ROW && ev.id == 0 && ev.arg < SLIST_ROWS) {
         const conv_ref_t *c = &s_convs.refs[ev.arg];
         ui_go(NAV_CHAT, c->scope, c->target, slist_row(ev.index)->label);
-    } else if ((ev.type == SLIST_HOLD || ev.type == SLIST_HOLD_END) && ev.arg >= 0 && ev.arg < SLIST_ROWS) {
+    } else if (ev.type == SLIST_ROW && ev.id == CONVS_MARK_ALL) {
+        ESP_LOGI("UI", "[UI] Mark all read: %" PRIu32 " unread cleared", ui_notify_unread_total());
+        ui_notify_mark_all_seen();
+        ui_convs_refresh();
+    } else if ((ev.type == SLIST_HOLD || ev.type == SLIST_HOLD_END) && ev.id == 0 && ev.arg >= 0 &&
+               ev.arg < SLIST_ROWS) {
         const conv_ref_t *c = &s_convs.refs[ev.arg];
         hold_talk(&ev, c->scope, c->target);
     }

@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### "Mark all read" on the Messages list (D94), a LoRa experiment that is off, and three clean hours
+
+- **Handheld:** the Messages list shows "Mark all read" with the unread count at the top whenever
+  anything is unread; one touch clears every thread's count. It sends no read receipts (D58 stands).
+  Built for every handheld target; **not yet seen on a screen**.
+- **`LG_NODE_LORA_SPARE_RELAY`, a new switch, off by default.** With ESP-NOW down, every AP that receives
+  a flood over LoRa repeats it, so three APs in earshot put each message on the air three times. On, an
+  AP does not repeat a LoRa flood when the sender's own HELLO already lists every LoRa peer it has;
+  alerts are always repeated. To be kept only if a LoRa-only run loses fewer messages with it.
+- **chaos.py** records, instead of raising as a finding, a message lost between a handheld on an access
+  point the round had cut off on both radios and one elsewhere.
+- **Soak on the final build**, `chaos-runs/20261004-175817`, stopped by hand after 2 h 52 min to free the
+  boards for the LoRa work: 14 rounds, 14 recovered; no crash, brownout or unasked restart; one refusal;
+  14 handheld moves, median 7.5 s, worst 13.1 s. 220 of 228 messages delivered; every loss was in a
+  round with ESP-NOW switched off.
+
 ### The final build measured: six handhelds on one access point, and voice to one, a group and everyone
 
 `docs/chaos/2026-10-04-day-run.md` has the whole day.

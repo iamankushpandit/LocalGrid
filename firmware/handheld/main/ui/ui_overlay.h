@@ -45,3 +45,5 @@ bool ui_overlay_ack(void);
 uint32_t ui_notify_unread(uint8_t scope, uint32_t target);
 uint32_t ui_notify_unread_total(void);
 void     ui_notify_mark_seen(uint8_t scope, uint32_t target);
+/* Every conversation at once: the "Mark all read" row on the Messages list (D94). */
+void     ui_notify_mark_all_seen(void);

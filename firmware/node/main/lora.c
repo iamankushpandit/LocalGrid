@@ -86,6 +86,7 @@ typedef struct {
     uint32_t last_ms;
     int8_t   rssi;
     int8_t   snr;
+    uint8_t  hears;      /* bit i: this AP's last HELLO listed AP i as a neighbour (LG_MAX_NODES is 8) */
 } lora_peer_t;
 
 static struct {
@@ -137,6 +138,9 @@ static struct {
     uint32_t frames_out, frames_in, frames_first, parts_out, parts_in, parts_dropped;
     uint32_t seal_fail, airtime_ms, retries, refused_big, heard_ms;
     uint32_t gave_way;   /* housekeeping frames that waited rather than crowd the air */
+    bool     relaying;   /* a frame that arrived over LoRa is being handled right now ... */
+    uint16_t relay_src;  /* ... from this AP */
+    uint32_t relays_spared;   /* floods not repeated over LoRa because their sender reaches everyone here */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -859,6 +863,29 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
     if (!needed) {
         return;
     }
+#if CONFIG_LG_NODE_LORA_SPARE_RELAY
+    /*
+     * An experiment (off by default). A frame that came in over LoRa was put on the air by an AP that
+     * lists its own neighbours in every HELLO; if every LoRa peer here is one of them, that AP has
+     * already sent it to them itself, and repeating it only puts a second and third copy on a channel
+     * that carries one frame every few seconds. Measured on 2026-10-04 with ESP-NOW off on two of three
+     * APs: each sent about 25 parts and received about 10, and the four-slot queue dropped 2 to 8 a
+     * round. Alerts are never spared: they go everywhere, twice if need be.
+     */
+    if (policy != LORA_SEND_ALWAYS && !force && L.relaying && L.relay_src == except_node &&
+        except_node < LG_MAX_NODES) {
+        bool somebody_new = false;
+        for (uint16_t i = 0; i < LG_MAX_NODES && i < 8u; i++) {
+            if (L.peers[i].up && i != except_node && !(L.peers[except_node].hears & (1u << i))) {
+                somebody_new = true;
+            }
+        }
+        if (!somebody_new) {
+            L.relays_spared++;
+            return;
+        }
+    }
+#endif
     L.force_once = false;
     bool alert = policy == LORA_SEND_ALWAYS;
     if (L.broadcast_ok && reachable > 1u) {
@@ -936,12 +963,17 @@ static void handle_hello(uint16_t src, const lg_env_t *e, const uint8_t *body, i
     p->last_ms = now;
     p->rssi = rssi;
     p->snr = snr;
+    uint8_t hears = 0;
     for (uint8_t i = 0; i < count; i++) {
         const uint8_t *q = body + LG_HELLO_LEN + 1u + i * 6u;
+        if (lg_rd16(q) < 8u) {
+            hears |= (uint8_t)(1u << lg_rd16(q));
+        }
         if (lg_rd16(q) == L.index && lg_rd32(q + 2) == g_app.boot) {
             peer_up(src, rssi, snr);
         }
     }
+    p->hears = hears;
 }
 
 /*
@@ -1064,7 +1096,10 @@ static void deliver(const lora_rx_t *r, uint32_t now)
          * duplicate counter standing still is exactly "this one arrived here over LoRa first".
          */
         uint32_t dup_before = g_app.core.stats.duplicates;
+        L.relay_src = src;
+        L.relaying = true;
         L.on_frame(src, inner, n);   /* exactly the path an ESP-NOW frame takes */
+        L.relaying = false;
         if (g_app.core.stats.duplicates == dup_before) {
             L.frames_first++;
         }
@@ -1231,6 +1266,7 @@ void lora_print(void)
            " | airtime %" PRIu32 " ms | module restarts %u\n", t.seal_fail, t.queue_depth, t.queue_high,
            t.queue_dropped, t.retries, t.airtime_ms, t.restarts);
     printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
+    printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
     printf("  one full part is about %" PRIu32 " ms on the air; it can take a %u-byte payload%s;"
            " live voice never comes this way\n", lora_airtime_ms(LORA_PART_B64_MAX),
            (unsigned)lora_txq_capacity(&L.txq),
