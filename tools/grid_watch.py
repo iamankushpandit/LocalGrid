@@ -2009,6 +2009,8 @@ function showMapMode(pins) {
   $("loc-plan").toggleAttribute("hidden", online);
   $("map-mode").textContent = online
     ? "Map tiles from OpenStreetMap, fetched by this tool for the squares shown. The grid itself has no Internet and never sees them."
+    : tilesRefused
+    ? "No map tiles: OpenStreetMap is refusing this tool's requests under its tile usage policy (osm.wiki/Blocked), and it is not asked again until the tool is restarted. The plan below is drawn here from the coordinates, with distances and bearings; coordinates and the link work either way."
     : "No map tiles: this laptop has no Internet, or the tile server did not answer. The plan below is drawn here from the coordinates, with distances and bearings; coordinates and the link work either way.";
 }
 
@@ -2659,7 +2661,7 @@ function renderTraffic(list, sec, status) {
 }
 
 /* ---- polling ---- */
-let lastHistory = null, tilesEnabled = true, tilesOnline = null;
+let lastHistory = null, tilesEnabled = true, tilesOnline = null, tilesRefused = false;
 const CLUSTER_AT = 3;          /* more than this at one spot becomes a cluster you can open */
 const openSpots = new Set();   /* clusters the reader has opened, by their place on the map */
 
@@ -2668,7 +2670,7 @@ async function poll() {
     const r = await fetch("state.json?tab=" + tab, { cache: "no-store" });
     const s = await r.json();
     failures = 0;
-    tilesEnabled = s.tiles.enabled; tilesOnline = s.tiles.online;
+    tilesEnabled = s.tiles.enabled; tilesOnline = s.tiles.online; tilesRefused = !!s.tiles.refused;
     const auth = s.auth || {}, link = s.link || {};
     lastLoggedIn = !!auth.logged_in;
     $("login-msg").className = "msg " + (auth.state === "failed" ? "err" : auth.state === "ok" ? "ok" : "");
@@ -2721,13 +2723,21 @@ ICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role=
 # tent is the three APs and their backbone, the waves the radio, the pale circle a handheld.
 
 TILE_HOST = "https://tile.openstreetmap.org"
-TILE_UA = "LocalGrid-grid-watch/1.0 (offline network monitor; one laptop, no bulk downloads)"
+# Who is asking, as OpenStreetMap's tile usage policy wants it said: the application, its version, and
+# where its makers can be found. Until 2026-10-05 this read "LocalGrid-grid-watch/1.0 (offline network
+# monitor; one laptop, no bulk downloads)", and every tile came back as the "Access blocked" notice: the
+# server refuses that description (the name alone was served, the name with "(offline network monitor)"
+# was not), because "offline" is what a map downloader calls itself, and bulk downloading is what the
+# policy forbids. The grid is offline; this tool downloads nothing in bulk. Say what it is, not that.
+TILE_UA = "LocalGrid-grid-watch/1.1 (+https://github.com/iamankushpandit/LocalGrid)"
 TILE_CACHE_MAX = 512             # tiles kept in memory; nothing is written to disk
 TILE_MAX_INFLIGHT = 2            # OpenStreetMap's tile policy: no heavy parallel fetching
 TILE_RETRY_S = 15.0              # after a failure, stop asking for a while (offline laptop)
-TILE_SAME_LIMIT = 2              # the same picture for this many squares means the server refused us: its
-                                 # "Access blocked" notice came twice among timeouts on 2026-10-05 and was
-                                 # shown as if it were the map
+TILE_SAME_LIMIT = 4              # the same picture for this many squares in a row means refusal, for a
+                                 # server that does not say so in a header. Not fewer: two squares of
+                                 # open ground at a close zoom are honestly the same picture.
+TILE_REFUSED_HEADER = "X-Blocked"   # what OpenStreetMap sends with its "Access blocked" picture, and a
+                                    # success code: the picture is not a tile and must not be shown as one
 
 
 class TileCache:
@@ -2739,8 +2749,9 @@ class TileCache:
     z/x/y grid numbers and nothing else: no coordinate, no query string, and no referrer.
     """
 
-    def __init__(self, enabled=True):
+    def __init__(self, enabled=True, fetch=None):
         self.enabled = enabled
+        self.fetch = fetch or self._fetch   # (z, x, y) -> (headers, body); the self-check passes its own
         self.lock = threading.Lock()
         self.cache = collections.OrderedDict()
         self.inflight = threading.Semaphore(TILE_MAX_INFLIGHT)
@@ -2751,10 +2762,22 @@ class TileCache:
         self.fetched = 0
         self.online = None
 
+    @staticmethod
+    def _fetch(z, x, y):
+        import urllib.request
+        # The application's name and nothing else that could be read as a person or a place: no
+        # Referer (the page is on 127.0.0.1 and names nothing), no cookie, no query string.
+        req = urllib.request.Request(f"{TILE_HOST}/{z}/{x}/{y}.png",
+                                     headers={"User-Agent": TILE_UA, "Accept": "image/png"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return r.headers, r.read(1024 * 1024)
+
     def get(self, z, x, y):
-        """Returns PNG bytes, or None when this laptop cannot reach the tile server."""
+        """Returns PNG bytes, or None when this laptop cannot reach the tile server or was refused."""
         if not self.enabled or not (0 <= z <= 19 and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
             return None
+        if self.refused:
+            return None      # a server that has said no is not asked again until the tool is restarted
         key = (z, x, y)
         with self.lock:
             hit = self.cache.get(key)
@@ -2763,21 +2786,20 @@ class TileCache:
                 return hit
             if time.time() - self.failed_at < TILE_RETRY_S:
                 return None
-        import urllib.error
-        import urllib.request
-        req = urllib.request.Request(f"{TILE_HOST}/{z}/{x}/{y}.png",
-                                     headers={"User-Agent": TILE_UA, "Accept": "image/png",
-                                              "Referer": ""})
         with self.inflight:
             try:
-                with urllib.request.urlopen(req, timeout=6) as r:
-                    body = r.read(1024 * 1024)
+                headers, body = self.fetch(z, x, y)
             except Exception:
                 with self.lock:
                     self.failed_at = time.time()
                     self.online = False
                 return None
         with self.lock:
+            if headers is not None and headers.get(TILE_REFUSED_HEADER):
+                # Said outright. One refusal is enough, and nothing more is asked of that server.
+                self.refused = True
+                self.online = False
+                return None
             # OpenStreetMap refuses a client it does not want by serving an "Access blocked"
             # picture with a success code (seen on this laptop's network, 2026-09-20). The give-away
             # is one identical picture for every different square, so count the repeats and treat it
@@ -3635,6 +3657,37 @@ def self_check():
         srv.server_close()
 
     failed = [n for n, ok in results if not ok]
+    # The tile fetcher, with a server that is not there: what it says of itself, and what it does when told no.
+    check("the tile request names the application, its version and where to find its makers, and does not call "
+          "itself an offline anything",
+          re.fullmatch(r"LocalGrid-grid-watch/\d+\.\d+ \(\+https://[^ )]+\)", TILE_UA) is not None
+          and "offline" not in TILE_UA.lower())
+    asked = []
+
+    def fake(z, x, y):
+        asked.append((z, x, y))
+        if x == 9:
+            return {TILE_REFUSED_HEADER: "Access denied."}, b"the notice, not a tile"
+        return {}, b"tile %d/%d/%d" % (z, x, y)
+
+    tc = TileCache(fetch=fake)
+    check("a tile is fetched once and then served from memory",
+          tc.get(12, 1, 1) == b"tile 12/1/1" and tc.get(12, 1, 1) == b"tile 12/1/1" and asked == [(12, 1, 1)]
+          and tc.online is True and tc.refused is False)
+    check("a refusal said in a header is not shown as a tile, and the server is not asked again",
+          tc.get(12, 9, 1) is None and tc.refused is True and tc.online is False
+          and tc.get(12, 2, 1) is None and tc.get(12, 9, 1) is None and asked == [(12, 1, 1), (12, 9, 1)])
+    check("after a refusal nothing is served as a map, not even what came before: the plan is the whole view",
+          tc.get(12, 1, 1) is None)
+    plain = TileCache(fetch=lambda z, x, y: ({}, b"the same picture every time"))
+    got = [plain.get(15, x, 0) for x in range(TILE_SAME_LIMIT + 1)]
+    check("a server that answers every square with one picture is taken as refusing, after a few and not two",
+          got[1] is not None and got[TILE_SAME_LIMIT - 1] is None and plain.refused is True)
+    import inspect
+    check("the tile request carries no Referer and no cookie",
+          "Referer" not in inspect.getsource(TileCache._fetch).replace("no\n        # Referer", "")
+          and "Cookie" not in inspect.getsource(TileCache._fetch))
+
     print(f"\nSELF-CHECK: {'PASS' if not failed else 'FAIL'} "
           f"({len(results) - len(failed)} of {len(results)} checks)")
     return 0 if not failed else 1

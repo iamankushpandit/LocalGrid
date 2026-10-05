@@ -54,14 +54,25 @@ The grid has no Internet. The watching laptop may, and the Map tab uses it if it
 
 - **With Internet:** OpenStreetMap tiles, with a marker for every AP and handheld. Tiles are
   fetched by this tool (not by the browser) so it can send a proper `User-Agent` and take only the
-  squares the open map needs — no API key, no bulk downloading, nothing written to disk.
+  squares the open map needs — no API key, no bulk downloading, nothing written to disk. The tool
+  names itself as OpenStreetMap's [tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
+  asks: application, version, and the project's address. If the server refuses anyway it says so with
+  its "Access blocked" notice; the tool recognises that, shows the plan instead, says why under the
+  map, and asks for nothing more until it is restarted.
 - **Without Internet, or when tiles fail:** a plan drawn on this laptop, with everyone placed
   relative to MAIN, north up, with distances and bearings, plus the coordinates as text and a
   copyable link to open the position in a map later.
 
-**No coordinate ever leaves this laptop.** A tile is asked for by its z/x/y grid square, there is
-no query string, the page sends no referrer, and the map link is text to copy, not a link the page
-follows. `--no-map-tiles` switches tile fetching off altogether; the plan is then always drawn.
+**No coordinate leaves this laptop unless you press a button that says it will.** A tile is asked
+for by its z/x/y grid square, there is no query string, no referrer is sent, and the map link is text
+to copy, not a link the page follows. The one exception is the pair of buttons beside each step of a
+trail (D99), which open that step in OpenStreetMap or Google Maps: pressing one sends that one
+coordinate to that website, as the line above the table says. `--no-map-tiles` switches tile fetching
+off altogether; the plan is then always drawn.
+
+**One thing the policy asks that this tool does not do:** keep tiles for at least a week. They are kept
+in memory for as long as the tool runs and never written to disk, because the tiles a laptop holds say
+where its grid is. A long watch therefore asks for each square once; every new start asks again.
 
 ## Traffic and performance
 
@@ -241,7 +252,7 @@ grid. That is why an AP is only called "not heard" after 45 s; the quiet spell i
 | After erasing an AP's flash, its status stops | its boot counter went back; restart the tool |
 | "has no admin link service" | that AP runs firmware older than D70 |
 | "did not answer in time; it may be busy" | an AP takes one watcher at a time; try again |
-| The Map tab shows the plan, not tiles | this laptop has no Internet, or `--no-map-tiles` is on |
+| The Map tab shows the plan, not tiles | this laptop has no Internet, `--no-map-tiles` is on, or OpenStreetMap refused the tool (the line under the map says which) |
 
 ## Details `docs/ble-link.md` does not spell out
 

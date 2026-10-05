@@ -5,6 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### OpenStreetMap was refusing the dashboard's map tiles
+
+- **Cause, measured:** the tool called itself "LocalGrid-grid-watch/1.0 (offline network monitor; one
+  laptop, no bulk downloads)". OpenStreetMap served the bare name and refused the name with "(offline
+  network monitor)" after it: "offline" is what a map downloader calls itself, which its tile policy
+  forbids. Every square came back as the "Access blocked" notice with a success code.
+- **`tools/grid_watch.py` now names itself as the policy asks** - application, version, the project's
+  address - and no longer sends an empty `Referer`.
+- **A refusal is recognised from the `X-Blocked` header** that comes with the notice: it is never drawn
+  as a tile, the plan is shown instead with the reason under it, and that server is not asked again
+  until the tool is restarted. The same-picture test stays as a backstop, back at four in a row.
+- Not changed: tiles are kept in memory only, where the policy asks for a week's cache; the docs say so
+  and why. `--self-check`: 86 of 86.
+
 ### A screen asked for while the screen saver was up was drawn over the rain
 
 - **Found by the owner:** remnants of a screen showing through the screen saver. A screen *change* -
