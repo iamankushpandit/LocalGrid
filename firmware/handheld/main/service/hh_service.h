@@ -126,6 +126,7 @@ typedef struct {
     char           name[HH_NAME_MAX];
     int            node;                     /* node registered with or being joined, -1 none */
     char           node_ssid[HH_SSID_MAX];
+    uint32_t       on_ap_since_ms;           /* esp_timer ms when this session registered; 0 when not online */
     /*
      * D80: the AP this handheld is reaching over LoRa, -1 when none. Separate from `node` above,
      * which means an AP there is a Wi-Fi session with or being joined - over LoRa there is no
@@ -331,6 +332,43 @@ bool hh_service_own_position(hh_position_t *out);
 
 /* Last known position of a device (handheld index) or HH_SUBJECT_MAIN; false if unknown. */
 bool hh_service_position(uint32_t subject, hh_position_t *out);
+
+/*
+ * Trails (D99): a person's last few steps. A handheld with a GPS keeps its own - a point each time it
+ * has moved about ten metres, the newest LG_TRAIL_POINTS of them - and, unless sharing is switched
+ * off, sends them to the grid, where every AP keeps a copy that outlives this handheld. Somebody
+ * else's trail is asked for when a screen wants it. RAM only, like positions; never logged.
+ */
+typedef struct {
+    int32_t  lat_u;
+    int32_t  lon_u;
+    uint32_t fix_time;       /* Unix s */
+    uint32_t age_s;          /* by this handheld's clock; 0 if unknown */
+} hh_trail_point_t;
+
+typedef struct {
+    uint8_t          n;                     /* points in use; 0 none */
+    hh_trail_point_t pt[LG_TRAIL_POINTS];   /* [0] is the newest */
+} hh_trail_t;
+
+/* This handheld's own trail, or the last answer to hh_service_trail_request for device. False, and
+ * n 0, when there is none. */
+bool hh_service_trail(uint32_t device, hh_trail_t *out);
+
+/* Asks the grid for device's trail; hh_service_trail has it when hh_service_trail_version changes.
+ * Asking again fetches a newer one. Asking for this handheld's own does nothing. Any task. */
+void hh_service_trail_request(uint32_t device);
+
+/* Goes up whenever a trail hh_service_trail can return has changed. */
+uint32_t hh_service_trail_version(void);
+
+/* Whether this handheld sends its trail to the grid. On unless switched off; kept across restarts. */
+bool hh_service_trail_share(void);
+void hh_service_set_trail_share(bool on);
+
+/* Bench only (console `trail test`): replaces this handheld's trail with a made-up walk of `steps`
+ * points that ends where it is now, so a trail can be tested on a desk. */
+void hh_service_trail_test(uint8_t steps);
 
 /* A GPS is fitted and talking (for the Status screen: "GPS: 7 satellites" / "no fix"). */
 bool hh_service_gps(uint8_t *sats, bool *fix);

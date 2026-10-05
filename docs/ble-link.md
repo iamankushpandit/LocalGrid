@@ -82,6 +82,8 @@ chunks in order.
 | 0x83 `STATUS` | AP to client | the same bytes as `GET /api/status` (JSON), including positions |
 | 0x04 `GET_HISTORY` | client to AP | — |
 | 0x84 `HISTORY` | AP to client | the same bytes as `GET /api/history` (packed records, D49) |
+| 0x0C `GET_TRAILS` | client to AP | — |
+| 0x8C `TRAILS` | AP to client | the same bytes as `GET /api/trails` (D99): a header of 8 bytes (layout 1, how many trails, the AP's grid time) and each trail as `LG_T_TRAIL` carries it. An AP on older firmware answers `ERROR` |
 | 0x05 `GET_TRAFFIC` | client to AP | — |
 | 0x85 `TRAFFIC` | AP to client | packed counters and rates, below |
 | 0xC0 `ERROR` | AP to client | code (u8) and a short reason |

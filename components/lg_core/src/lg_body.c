@@ -226,6 +226,52 @@ int lg_position_slot(const lg_roster_t *r, uint32_t subject)
     return ui >= 0 && ui < (int)LG_MAX_DEVICES ? ui : -1;
 }
 
+size_t lg_trail_enc(const lg_trail_t *t, uint8_t *out)
+{
+    uint8_t count = t->count < LG_TRAIL_POINTS - 1u ? t->count : (uint8_t)(LG_TRAIL_POINTS - 1u);
+    lg_wr32(out, t->subject);
+    lg_wr32(out + 4, (uint32_t)t->lat_u);
+    lg_wr32(out + 8, (uint32_t)t->lon_u);
+    lg_wr32(out + 12, t->fix_time);
+    out[16] = count;
+    uint8_t *p = out + LG_TRAIL_HDR_LEN;
+    for (uint8_t i = 0; i < count; i++, p += LG_TRAIL_POINT_LEN) {
+        lg_wr16(p, (uint16_t)t->older[i].dlat);
+        lg_wr16(p + 2, (uint16_t)t->older[i].dlon);
+        lg_wr16(p + 4, t->older[i].age_s);
+    }
+    return LG_TRAIL_HDR_LEN + (size_t)count * LG_TRAIL_POINT_LEN;
+}
+
+bool lg_trail_dec(const uint8_t *body, size_t len, lg_trail_t *out)
+{
+    if (body == NULL || out == NULL || len < LG_TRAIL_HDR_LEN || body[16] > LG_TRAIL_POINTS - 1u ||
+        len != LG_TRAIL_HDR_LEN + (size_t)body[16] * LG_TRAIL_POINT_LEN) {
+        return false;
+    }
+    lg_trail_t t;
+    memset(&t, 0, sizeof(t));
+    t.subject  = lg_rd32(body);
+    t.lat_u    = (int32_t)lg_rd32(body + 4);
+    t.lon_u    = (int32_t)lg_rd32(body + 8);
+    t.fix_time = lg_rd32(body + 12);
+    t.count    = body[16];
+    if (t.subject == 0 || (t.subject & LG_NODE_ID_BASE) != 0 || !lg_position_valid(t.lat_u, t.lon_u, t.fix_time)) {
+        return false;   /* an AP stays where it is put: it has a position and no trail */
+    }
+    const uint8_t *p = body + LG_TRAIL_HDR_LEN;
+    for (uint8_t i = 0; i < t.count; i++, p += LG_TRAIL_POINT_LEN) {
+        t.older[i].dlat  = (int16_t)lg_rd16(p);
+        t.older[i].dlon  = (int16_t)lg_rd16(p + 2);
+        t.older[i].age_s = lg_rd16(p + 4);
+        if (i > 0 && t.older[i].age_s < t.older[i - 1u].age_s) {
+            return false;   /* most recent first, or it is not a path */
+        }
+    }
+    *out = t;
+    return true;
+}
+
 size_t lg_time_sync_enc_v2(const lg_time_sync_t *v, uint8_t *out)
 {
     lg_wr32(out, v->grid_time);

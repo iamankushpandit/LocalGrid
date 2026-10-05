@@ -24,6 +24,7 @@ typedef enum {
     ROW_NOTE,      /* wrapped muted text */
     ROW_CHECK,     /* a checkbox and label */
     ROW_FIELD,     /* a one-line text field: value, or label as placeholder */
+    ROW_PLOT,      /* a picture the screen paints itself (slist_plot); arg is its height */
 } slist_kind_t;
 
 typedef enum { BTN_MAIN, BTN_PLAIN, BTN_DANGER } slist_button_t;
@@ -66,6 +67,11 @@ void slist_begin(const char *title, bool back, bool plus);
 void slist_tabs(const char *const *names, uint8_t n, uint8_t selected);
 
 slist_row_t *slist_add(slist_kind_t kind, const char *label, const char *value, int16_t id, int32_t arg);
+
+/* Who paints ROW_PLOT rows: called with the row's box in screen coordinates, already cleared, and the
+ * list's clip. Set after slist_begin, which forgets the last one. */
+typedef void (*slist_plot_t)(const lg_canvas_t *canvas, const lg_rect_t *clip, const lg_rect_t *box);
+void slist_plot(slist_plot_t painter);
 
 /* Lays the rows out and draws the whole screen. bottom: pixels kept free at the bottom (a
  * keyboard). keep_scroll: stay where the reader was. */

@@ -242,6 +242,57 @@ const lg_position_t *lg_client_position(const lg_client_t *c, uint32_t subject)
     return &c->positions[slot];
 }
 
+/* ---- trails (D99) --------------------------------------------------------- */
+
+int lg_client_send_trail(lg_client_t *c, const lg_trail_t *trail)
+{
+    if (c == NULL || trail == NULL || trail->count > LG_TRAIL_POINTS - 1u ||
+        !lg_position_valid(trail->lat_u, trail->lon_u, trail->fix_time)) {
+        return LG_ERR_ARG;
+    }
+    lg_trail_t mine = *trail;
+    mine.subject = c->device;
+    uint8_t body[LG_TRAIL_LEN_MAX];
+    size_t blen = lg_trail_enc(&mine, body);
+    lg_env_t e;
+    base_env(c, &e, LG_T_TRAIL, LG_SCOPE_SYSTEM, c->device);
+    return send_frame(c, &e, body, blen) ? LG_OK : LG_ERR_SHORT;
+}
+
+int lg_client_request_trail(lg_client_t *c, uint32_t subject)
+{
+    if (c == NULL || subject == 0) {
+        return LG_ERR_ARG;
+    }
+    if (c->trail_want != subject) {
+        c->trail_want = subject;
+        memset(&c->trail, 0, sizeof(c->trail));
+    }
+    uint8_t body[LG_TRAIL_REQ_LEN];
+    lg_wr32(body, subject);
+    lg_env_t e;
+    base_env(c, &e, LG_T_TRAIL_REQ, LG_SCOPE_SYSTEM, subject);
+    return send_frame(c, &e, body, sizeof(body)) ? LG_OK : LG_ERR_SHORT;
+}
+
+const lg_trail_t *lg_client_trail(const lg_client_t *c, uint32_t subject)
+{
+    return c != NULL && subject != 0 && c->trail.fix_time != 0 && c->trail.subject == subject ? &c->trail : NULL;
+}
+
+static void handle_trail(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
+{
+    lg_trail_t t;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_trail_dec(body, e->body_len, &t)) {
+        return;
+    }
+    if (t.subject != c->trail_want || t.fix_time <= c->trail.fix_time) {
+        return;   /* not the one asked for, or no newer than the one held */
+    }
+    c->trail = t;
+    emit(c, LG_CEV_TRAIL, t.subject);
+}
+
 static void handle_position(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
 {
     lg_position_t pos;
@@ -1104,6 +1155,9 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         break;
     case LG_T_POSITION:
         handle_position(c, &e, body);
+        break;
+    case LG_T_TRAIL:
+        handle_trail(c, &e, body);
         break;
     default:
         break;

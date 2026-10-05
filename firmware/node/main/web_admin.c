@@ -110,6 +110,19 @@ typedef struct {
 } pos_snapshot_t;
 
 /*
+ * GET /api/trails (D99, D49): the trails this AP holds, as bytes for the browser to draw. Layout 1:
+ *     0  u8   layout (1)
+ *     1  u8   trails that follow
+ *     2  u16  reserved, 0
+ *     4  u32  this AP's grid time when the copy was made, Unix seconds: ages are measured from it
+ *     8  the trails, back to back, each exactly as LG_T_TRAIL carries it (lg_body.h): 17 + 6 x count
+ *        bytes, self-describing by its count byte at offset 16
+ * RAM only, like the core's table, and behind the login like the positions.
+ */
+#define TRAILS_HEADER 8u
+#define TRAILS_MAX    (TRAILS_HEADER + LG_TRAIL_SLOTS * LG_TRAIL_LEN_MAX)
+
+/*
  * Two copies of the snapshot and no more (MAIN has no PSRAM, and each copy is about 3.8 KB):
  * the one the core task publishes, and the web task's own. The core task fills the published one
  * in place under the lock (a few hundred microseconds, once a second); a handler copies it out
@@ -129,6 +142,8 @@ static struct {
     int64_t           window_end_us;
     snapshot_t        snap;
     pos_snapshot_t    pos;
+    uint8_t           trails[TRAILS_MAX];   /* /api/trails as it will be sent; under lock */
+    uint16_t          trails_len;
     snapshot_t        view;       /* web task only */
     pos_snapshot_t    view_pos;   /* web task only */
     node_settings_t   cfg;        /* web task only */
@@ -200,6 +215,19 @@ void web_admin_publish_snapshot(void)
     lora_traffic(&s->lora);
     s->n_lora = lora_peer_info(s->lora_peers, LG_MAX_NODES, now);
     strncpy(s->lora_version, lora_version(), sizeof(s->lora_version) - 1);
+
+    /* D99: the trails held, already in the bytes /api/trails sends. */
+    memset(w.trails, 0, TRAILS_HEADER);
+    w.trails[0] = 1u;
+    lg_wr32(w.trails + 4, s->grid_time);
+    size_t tn = TRAILS_HEADER;
+    for (size_t i = 0; i < LG_TRAIL_SLOTS; i++) {
+        if (g_app.core.trails[i].fix_time != 0) {
+            tn += lg_trail_enc(&g_app.core.trails[i], w.trails + tn);
+            w.trails[1]++;
+        }
+    }
+    w.trails_len = (uint16_t)tn;
 
     pos_snapshot_t *ps = &w.pos;
     memset(ps, 0, sizeof(*ps));
@@ -1019,6 +1047,50 @@ bool web_admin_emit_status(const web_sink_t *sink, uint32_t wait_ms)
     return ok;
 }
 
+_Static_assert(TRAILS_MAX <= JOUT_BUF, "the trails no longer fit the response buffer");
+
+static bool emit_trails(const web_sink_t *sink)
+{
+    uint8_t *out = (uint8_t *)s_jo.buf;
+    xSemaphoreTake(w.lock, portMAX_DELAY);
+    size_t n = w.trails_len;
+    memcpy(out, w.trails, n);
+    xSemaphoreGive(w.lock);
+    if (n < TRAILS_HEADER) {   /* asked before the first snapshot: an empty answer, well formed */
+        memset(out, 0, TRAILS_HEADER);
+        out[0] = 1u;
+        n = TRAILS_HEADER;
+    }
+    return sink->write(sink->ctx, out, n);
+}
+
+static esp_err_t h_trails(httpd_req_t *req)
+{
+    if (session_from_request(req) == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to see grid status.");
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    web_sink_t sink = { .ctx = req, .write = httpd_sink_write };
+    xSemaphoreTake(w.emit, portMAX_DELAY);
+    bool ok = emit_trails(&sink);
+    xSemaphoreGive(w.emit);
+    if (!ok) {
+        return ESP_FAIL;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+bool web_admin_emit_trails(const web_sink_t *sink, uint32_t wait_ms)
+{
+    if (w.emit == NULL || xSemaphoreTake(w.emit, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+        return false;
+    }
+    bool ok = emit_trails(sink);
+    xSemaphoreGive(w.emit);
+    return ok;
+}
+
 bool web_admin_emit_history(const web_sink_t *sink, uint32_t wait_ms)
 {
     if (w.emit == NULL || xSemaphoreTake(w.emit, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
@@ -1394,6 +1466,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/password", .method = HTTP_POST, .handler = h_password },
         { .uri = "/api/status",   .method = HTTP_GET,  .handler = h_status },
         { .uri = "/api/history",  .method = HTTP_GET,  .handler = h_history },
+        { .uri = "/api/trails",   .method = HTTP_GET,  .handler = h_trails },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
         { .uri = "/api/update",   .method = HTTP_POST, .handler = h_update },

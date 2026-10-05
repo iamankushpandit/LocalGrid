@@ -31,5 +31,8 @@ void ui_request_cmd(ui_cmd_t cmd, int arg, const char *text);
 /* From any task: open a conversation (lg_envelope scope and target) with this title. */
 void ui_open_chat(uint8_t scope, uint32_t target, const char *title);
 
+/* Opens a person's trail (D99), from any task. */
+void ui_request_trail(uint32_t device);
+
 /* The UI task's least unused stack so far, in bytes. */
 uint32_t ui_stack_headroom(void);

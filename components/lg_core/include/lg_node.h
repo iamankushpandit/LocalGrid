@@ -157,6 +157,8 @@ typedef struct {
     lg_presence_entry_t presence[LG_MAX_DEVICES];
     lg_name_t           names[LG_MAX_DEVICES];              /* indexed by roster user index; version 0 = none */
     lg_position_t       positions[LG_POS_SLOTS];            /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
+    lg_trail_t          trails[LG_TRAIL_SLOTS];             /* fix_time 0 = empty; RAM only (D99) */
+    uint32_t            trail_evictions;                    /* a full table gave its stalest trail to a fresher one */
     uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
     bool                has_broadcast[LG_MAX_DEVICES];
     lg_dedup_entry_t    dedup_slots[LG_NODE_DEDUP_SLOTS];
@@ -318,6 +320,24 @@ const lg_position_t *lg_node_position(const lg_node_t *n, uint32_t subject);
 /* Copies up to max held positions into out, handhelds by roster order then APs by index.
  * Returns how many were written. */
 size_t lg_node_positions(const lg_node_t *n, lg_position_t *out, size_t max);
+
+/*
+ * Trails (D99). A handheld sends its own TRAIL as it moves; the AP keeps the newest per person in a
+ * table of LG_TRAIL_SLOTS, in RAM only, and floods a newer one to every AP, so the copy outlives the
+ * handheld that made it. An older or equal one is dropped and not passed on. When the table is full a
+ * trail fresher than the stalest one held replaces it (counted in trail_evictions); one that is not
+ * fresher is dropped. Trails are not pushed to handhelds: one that wants a trail asks with TRAIL_REQ
+ * and is sent what this AP holds. Every trail held is flooded when a neighbour link comes up.
+ *
+ * A trail's newest point is also a position: it is kept as the person's position if newer than the
+ * one held and pushed to the attached handhelds, which is how a handheld reaching the grid over LoRa
+ * alone tells it where it is.
+ */
+
+/* The trail held for a handheld, or NULL. */
+const lg_trail_t *lg_node_trail(const lg_node_t *n, uint32_t subject);
+/* How many trails are held. */
+size_t lg_node_trail_count(const lg_node_t *n);
 
 #ifdef __cplusplus
 }

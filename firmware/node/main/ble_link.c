@@ -78,8 +78,11 @@ enum {
     OP_FAULT = 0x0A,
     /* D91: start the admin page for a window. Not temporary - this is how the page is reached now. */
     OP_WEB = 0x0B,
+    /* D99: the admin page's /api/trails bytes, so the laptop can draw where people walked. */
+    OP_GET_TRAILS = 0x0C,
     OP_SESSION = 0x80, OP_HELLO_OK = 0x81, OP_LOGIN_OK = 0x82, OP_STATUS = 0x83, OP_HISTORY = 0x84,
     OP_TRAFFIC = 0x85, OP_CHAOS = 0x86, OP_CHAOS_LOG_DATA = 0x89, OP_FAULT_OK = 0x8A, OP_WEB_OK = 0x8B,
+    OP_TRAILS = 0x8C,
     OP_ERROR = 0xC0, OP_LOGIN_FAIL = 0xC2,
 };
 enum { ERR_LOGIN = 1, ERR_BUSY = 2, ERR_BAD = 3, ERR_VERSION = 4, ERR_INTERNAL = 5 };
@@ -450,6 +453,18 @@ static void do_status(bool history)
     (void)reply_end(&r);
 }
 
+static void do_trails(void)
+{
+    reply_t r;
+    reply_begin(&r, OP_TRAILS);
+    web_sink_t sink = { .ctx = &r, .write = reply_write };
+    if (!web_admin_emit_trails(&sink, 400u) && !r.failed) {
+        (void)send_error_code(ERR_BUSY, "busy, ask again");
+        return;
+    }
+    (void)reply_end(&r);
+}
+
 static void do_traffic(void)
 {
     static uint8_t rec[TRAFFIC_RECORD_MAX];   /* link task only; not on its stack */
@@ -709,7 +724,7 @@ static void handle_request(const link_chunk_t *c)
         (void)send_error_code(ERR_BAD, "say hello first");
         return;
     }
-    if ((op == OP_GET_STATUS || op == OP_GET_HISTORY || op == OP_GET_TRAFFIC ||
+    if ((op == OP_GET_STATUS || op == OP_GET_HISTORY || op == OP_GET_TRAFFIC || op == OP_GET_TRAILS ||
          op == OP_CHAOS_GET || op == OP_CHAOS_ARM || op == OP_CHAOS_DISARM ||
          op == OP_CHAOS_LOG || op == OP_FAULT || op == OP_WEB) && !L.logged_in) {
         (void)send_error_code(ERR_LOGIN, "log in first");
@@ -721,6 +736,7 @@ static void handle_request(const link_chunk_t *c)
     case OP_GET_STATUS:  do_status(false); break;
     case OP_GET_HISTORY: do_status(true); break;
     case OP_GET_TRAFFIC: do_traffic(); break;
+    case OP_GET_TRAILS:  do_trails(); break;
     case OP_CHAOS_GET:    do_chaos_status(); break;
     case OP_CHAOS_ARM:    do_chaos_arm(body, (size_t)n); break;
     case OP_CHAOS_DISARM: do_chaos_disarm(); break;

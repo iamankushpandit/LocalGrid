@@ -38,6 +38,10 @@
              background: var(--danger); border: 3px solid #fff; box-shadow: 0 0 0 2px var(--danger); }
   .loc-pin.hh { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-width: 2px; background: var(--accent);
                 box-shadow: 0 0 0 2px var(--accent-ink); }
+  .loc-step { position: absolute; width: 9px; height: 9px; margin: -5px 0 0 -5px; border-radius: 50%;
+              background: #2f7bff; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .55); }
+  .loc-path { position: absolute; height: 3px; margin-top: -2px; background: #2f7bff; transform-origin: 0 50%;
+              box-shadow: 0 0 0 1px rgba(255, 255, 255, .8); }
   .loc-label { position: absolute; transform: translate(-50%, 10px); padding: 0 5px; border-radius: 4px; white-space: nowrap;
                font-size: 12px; font-weight: 600; color: var(--text); background: var(--surface); border: 1px solid var(--line); }
   .loc-offline { position: absolute; left: 0; right: 0; top: 0; padding: 8px 12px; font-size: 13px;
@@ -194,6 +198,7 @@
         <tbody id="loc-body"></tbody>
       </table>
     </div>
+    <div id="loc-trails"></div>
     <p class="hint">Positions stay in memory on the APs and handhelds, never in flash, and are shown only here, behind the login.</p>
   </section>
 
@@ -499,12 +504,14 @@
   /* Map tiles come from OpenStreetMap to this browser, never through the AP: with no Internet on
    * this device they fail, and the note over the map says why. The pins are drawn either way.
    * The zoom is the closest (17 at most, 10 at least) that fits every pin, centred on them all. */
-  function drawMap(pins) {
+  function drawMap(pins, walks) {
     const box = $("loc-tiles"), layer = $("loc-pins");
     const w = box.clientWidth || 320, h = box.clientHeight || 260, margin = 40;
-    let z = 17, lo, hi;
+    /* A trail's steps are ten metres apart, so with one to show the map may go two levels closer. */
+    let z = walks.length ? 19 : 17, lo, hi;
+    const fit = [...pins, ...walks.flatMap((k) => k.pts)];
     for (; z >= 10; z--) {
-      const pts = pins.map((p) => worldPx(p.lat, p.lon, z));
+      const pts = fit.map((p) => worldPx(p.lat, p.lon, z));
       lo = { x: Math.min(...pts.map((p) => p.x)), y: Math.min(...pts.map((p) => p.y)) };
       hi = { x: Math.max(...pts.map((p) => p.x)), y: Math.max(...pts.map((p) => p.y)) };
       if (hi.x - lo.x <= w - 2 * margin && hi.y - lo.y <= h - 2 * margin) break;
@@ -528,6 +535,26 @@
       }
     }
     layer.textContent = "";
+    /* D99: each trail as a line through its steps, under the pins. The newest step is the person's pin. */
+    for (const k of walks) {
+      const at = k.pts.map((p) => { const q = worldPx(p.lat, p.lon, z); return { x: q.x - left, y: q.y - top }; });
+      for (let i = 0; i + 1 < at.length; i++) {
+        const dx = at[i + 1].x - at[i].x, dy = at[i + 1].y - at[i].y;
+        const seg = document.createElement("div");
+        seg.className = "loc-path";
+        seg.style.left = `${at[i].x}px`; seg.style.top = `${at[i].y}px`;
+        seg.style.width = `${Math.hypot(dx, dy)}px`;
+        seg.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+        layer.append(seg);
+      }
+      for (let i = 1; i < at.length; i++) {
+        const dot = document.createElement("div");
+        dot.className = "loc-step";
+        dot.style.left = `${Math.round(at[i].x)}px`; dot.style.top = `${Math.round(at[i].y)}px`;
+        dot.title = `${k.name}, step ${at.length - i} of ${at.length}, ${new Date(k.pts[i].t * 1000).toLocaleTimeString()}`;
+        layer.append(dot);
+      }
+    }
     for (const p of [...pins].sort((a, b) => a.ap - b.ap)) {   /* APs last, so they sit on top */
       const q = worldPx(p.lat, p.lon, z), x = `${Math.round(q.x - left)}px`, y = `${Math.round(q.y - top)}px`;
       const dot = document.createElement("div");
@@ -579,8 +606,12 @@
 
     /* About 10 m: GPS jitter does not reload the map. */
     const box = $("loc-tiles");
-    const key = `${box.clientWidth}x${box.clientHeight};` + pins.map((p) => `${p.ap ? "a" : "h"}${p.id}@${p.lat.toFixed(4)},${p.lon.toFixed(4)}:${p.name}`).sort().join(";");
-    if (key !== mapKey) { mapKey = key; drawMap(pins); }
+    /* D99: the trails this AP holds, named from the positions (a trail's newest step is one). */
+    const walks = (s.trails || []).map((k) => ({ ...k,
+      name: (pins.find((p) => !p.ap && p.id === k.subject) || {}).name || `Handheld ${k.subject}` }));
+    const key = walks.map((k) => `t${k.subject}:${k.pts.length}@${k.pts[0].t}`).join(";") +
+      `${box.clientWidth}x${box.clientHeight};` + pins.map((p) => `${p.ap ? "a" : "h"}${p.id}@${p.lat.toFixed(4)},${p.lon.toFixed(4)}:${p.name}`).sort().join(";");
+    if (key !== mapKey) { mapKey = key; drawMap(pins, walks); }
 
     const rows = [...pins].sort((a, b) => (b.ap - a.ap) || (a.id - b.id)).map((p) => {
       let from = "--";
@@ -595,6 +626,50 @@
         `<td style="font-family:var(--mono)">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td><td>${from}</td><td>${age}</td></tr>`;
     });
     $("loc-body").innerHTML = rows.join("");
+
+    /* Every step of every trail with its coordinates and a way onto a real map. */
+    $("loc-trails").innerHTML = walks.map((k) => {
+      const n = k.pts.length;
+      const steps = k.pts.map((p, i) => {
+        const la = p.lat.toFixed(6), lo = p.lon.toFixed(6);
+        return `<tr><td>${n - i}${i === 0 ? ' <span class="dim">last</span>' : i === n - 1 ? ' <span class="dim">first</span>' : ""}</td>` +
+          `<td>${new Date(p.t * 1000).toLocaleTimeString()} <span class="dim">${fmtAge(Math.round(now - p.t))}</span></td>` +
+          `<td style="font-family:var(--mono)">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td>` +
+          `<td><a href="https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=19/${la}/${lo}" target="_blank" rel="noopener">OpenStreetMap</a> ` +
+          `<a href="https://www.google.com/maps/search/?api=1&query=${la},${lo}" target="_blank" rel="noopener">Google Maps</a></td></tr>`;
+      });
+      return `<h2>${escHtml(k.name)}'s last ${n === 1 ? "step" : n + " steps"}</h2>` +
+        (n === 1 ? '<p class="hint" style="margin-top:0">Only one step is known, so there is no direction to give yet.</p>' : "") +
+        `<div class="table"><table><thead><tr><th>Step</th><th>When</th><th>Coordinates</th><th>On a map</th></tr></thead>` +
+        `<tbody>${steps.join("")}</tbody></table></div>`;
+    }).join("");
+  }
+
+  // /api/trails is bytes (D49, D99); the layout is documented at TRAILS_HEADER in web_admin.c.
+  function decodeTrails(v) {
+    const out = [];
+    if (v.byteLength < 8 || v.getUint8(0) !== 1) return out;
+    let o = 8;
+    for (let i = 0; i < v.getUint8(1) && o + 17 <= v.byteLength; i++) {
+      const count = v.getUint8(o + 16);
+      if (o + 17 + 6 * count > v.byteLength) break;
+      const lat = v.getInt32(o + 4, true), lon = v.getInt32(o + 8, true), t = v.getUint32(o + 12, true);
+      const pts = [{ lat: lat / 1e6, lon: lon / 1e6, t }];   /* newest first */
+      for (let k = 0; k < count; k++) {
+        const q = o + 17 + 6 * k;
+        pts.push({ lat: (lat + v.getInt16(q, true) * 10) / 1e6, lon: (lon + v.getInt16(q + 2, true) * 10) / 1e6,
+                   t: t - v.getUint16(q + 4, true) });
+      }
+      out.push({ subject: v.getUint32(o, true), pts });
+      o += 17 + 6 * count;
+    }
+    return out;
+  }
+
+  async function fetchTrails() {
+    if (window.LG_MOCK_API) return [];
+    const res = await fetch("/api/trails", { credentials: "same-origin" });
+    return res.ok ? decodeTrails(new DataView(await res.arrayBuffer())) : [];
   }
 
   $("loc-copy").addEventListener("click", async () => {
@@ -1019,6 +1094,7 @@
     }
     const hist = await history().catch(() => null);
     if (hist) { s.aps = hist.aps; s.incidents = hist.incidents; s.time_set = hist.time_set; }
+    s.trails = await fetchTrails().catch(() => []);
     gridTime = s.grid_time; lastStatusAt = performance.now(); renderClock();
     const pill = $("time-pill");
     if (!s.grid_time) {

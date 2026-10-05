@@ -105,6 +105,9 @@ bool lglh_type_allowed(const uint8_t *frame, size_t len)
     }
     switch (e.type) {
     case LG_T_POSITION:         /* where the sender is: the emergency case this radio exists for */
+    case LG_T_TRAIL:            /* ... and the last steps that got them there (D99): an AP takes a
+                                 * handheld's word only for that handheld's own, as with a position */
+    case LG_T_TRAIL_REQ:        /* a searcher out of Wi-Fi range asking for someone's trail */
     case LG_T_PRESENCE_UPDATE:  /* that they are alive and which AP they were last on */
     case LG_T_TEXT:             /* short text, including an SOS or urgent broadcast and an all clear */
     case LG_T_MSG_ACK:          /* so a sender learns their message landed */

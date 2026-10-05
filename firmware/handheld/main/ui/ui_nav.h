@@ -20,6 +20,7 @@ typedef enum {
     NAV_SETTINGS,      /* target: the tab */
     NAV_WHICH_AP,
     NAV_LORA_POWER,
+    NAV_TRAIL,         /* target: whose trail, a device index (D99) */
     NAV_RENAME,
     NAV_CALIBRATE,
 } ui_nav_t;
@@ -54,6 +55,10 @@ void ui_which_ap_refresh(void);
 void ui_lora_power_open(uint16_t w, uint16_t h);
 void ui_lora_power_touch(int16_t x, int16_t y, bool down);
 void ui_lora_power_refresh(void);
+
+void ui_trail_open(uint16_t w, uint16_t h, uint32_t device);
+void ui_trail_touch(int16_t x, int16_t y, bool down);
+void ui_trail_refresh(void);
 
 void ui_rename_open(uint16_t w, uint16_t h);
 void ui_rename_touch(int16_t x, int16_t y, bool down);

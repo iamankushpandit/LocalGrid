@@ -26,6 +26,14 @@ void ui_overlay_screen_painted(void);
  * over to it, D62). True when it started. */
 bool ui_overlay_saver_now(uint32_t now_ms);
 
+/*
+ * A screen is about to be drawn because something asked for one (the console, a button), not because
+ * a finger touched the panel. If the screen saver has the panel it is put away first, with no redraw
+ * (the new screen is the redraw), and the saver's idle clock starts again. Returns false when an alert
+ * covers the panel: nothing may draw under that, and the caller waits.
+ */
+bool ui_overlay_make_way(uint32_t now_ms);
+
 /* Takes the new-message banner away without a redraw: the lock screen is about to cover it. */
 void ui_overlay_drop_banner(void);
 

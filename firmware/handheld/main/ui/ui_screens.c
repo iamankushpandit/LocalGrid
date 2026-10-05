@@ -5,6 +5,7 @@
  * tap is never lost to one.
  */
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -737,17 +738,20 @@ static struct {
 
 _Static_assert(SLIST_ROWS <= 64, "the Status screen keeps a bit per row");
 
-static void stat_put(slist_kind_t kind, const char *label, const char *value, bool warn)
+enum { STAT_TRAIL = 40 };   /* a row that opens someone's trail; arg is the device */
+
+static void stat_row(slist_kind_t kind, const char *label, const char *value, bool warn, int16_t id, int32_t arg)
 {
     label = label != NULL ? label : "";
     value = value != NULL ? value : "";
     if (s_stat.building) {
-        slist_add(kind, label, value, -1, 0)->warn = warn;
+        slist_add(kind, label, value, id, arg)->warn = warn;
         return;
     }
     slist_row_t *r = slist_row(s_stat.index);
     uint8_t i = s_stat.index++;
-    if (!s_stat.same || r == NULL || r->kind != (uint8_t)kind || strcmp(r->label, label) != 0) {
+    if (!s_stat.same || r == NULL || r->kind != (uint8_t)kind || strcmp(r->label, label) != 0 || r->id != id ||
+        r->arg != arg) {
         s_stat.same = false;
         return;
     }
@@ -761,6 +765,11 @@ static void stat_put(slist_kind_t kind, const char *label, const char *value, bo
     snprintf(r->value, sizeof(r->value), "%s", value);
     r->warn = warn;
     s_stat.dirty |= (uint64_t)1u << i;
+}
+
+static void stat_put(slist_kind_t kind, const char *label, const char *value, bool warn)
+{
+    stat_row(kind, label, value, warn, -1, 0);
 }
 
 static const char *link_word(hh_link_t link)
@@ -877,10 +886,14 @@ static void stat_location(const hh_status_t *st)
     } else {
         stat_put(ROW_FACT, "MAIN", "not known", true);
     }
-    if (!have_own) {
-        return;   /* distances need this handheld's own fix */
+    hh_trail_t mine;
+    if (hh_service_trail(st->device, &mine)) {
+        snprintf(value, sizeof(value), "%u step%s", mine.n, mine.n == 1 ? "" : "s");
+        stat_row(ROW_ACTION, "My trail", value, false, STAT_TRAIL, (int32_t)st->device);
     }
-    /* Other handhelds with known positions, freshest first, at most STATUS_NEARBY_MAX. */
+    /* Other handhelds with known positions, freshest first, at most STATUS_NEARBY_MAX. Each row opens
+     * that person's trail (D99). With no fix of our own there is no distance to give, so the row says
+     * how long ago they were placed: a handheld without a GPS can still go looking. */
     nearby_t near[STATUS_NEARBY_MAX];
     uint8_t n = 0;
     for (uint8_t i = 0; i < st->n_people; i++) {
@@ -907,18 +920,23 @@ static void stat_location(const hh_status_t *st)
     if (n == 0) {
         return;
     }
-    stat_put(ROW_SECTION, "Nearby", NULL, false);
+    stat_put(ROW_SECTION, have_own ? "Nearby" : "People with a position", NULL, false);
     for (uint8_t k = 0; k < n; k++) {
         const hh_position_t *p = &near[k].pos;
-        ui_geo_where_text(own.lat_u, own.lon_u, p->lat_u, p->lon_u, where, sizeof(where));
-        if (p->age_s > STATUS_STALE_S) {
-            char age[16];
-            ui_geo_age_text(p->age_s, age, sizeof(age));
-            snprintf(value, sizeof(value), "%s, %s ago", where, age);
+        char age[16];
+        ui_geo_age_text(p->age_s, age, sizeof(age));
+        if (!have_own) {
+            snprintf(value, sizeof(value), "%s ago", age);
         } else {
-            snprintf(value, sizeof(value), "%s", where);
+            ui_geo_where_text(own.lat_u, own.lon_u, p->lat_u, p->lon_u, where, sizeof(where));
+            if (p->age_s > STATUS_STALE_S) {
+                snprintf(value, sizeof(value), "%s, %s ago", where, age);
+            } else {
+                snprintf(value, sizeof(value), "%s", where);
+            }
         }
-        stat_put(ROW_FACT, st->people[near[k].person].name, value, p->age_s > STATUS_STALE_S);
+        stat_row(ROW_ACTION, st->people[near[k].person].name, value, p->age_s > STATUS_STALE_S, STAT_TRAIL,
+                 (int32_t)st->people[near[k].person].device);
     }
 }
 
@@ -940,7 +958,7 @@ static void stat_lora(void)
     char value[SLIST_VALUE_MAX];
     stat_put(ROW_SECTION, "LoRa", NULL, false);
     if (!l.fitted) {
-        stat_put(ROW_FACT, "Module", "none answered: check the wiring", true);
+        stat_put(ROW_FACT, "Module", "no answer: check the wiring", true);
         return;
     }
     if (l.off) {
@@ -1047,7 +1065,7 @@ void ui_status_refresh(void)
         return;
     }
     for (uint8_t i = 0; s_stat.dirty != 0u && i < slist_count(); i++) {
-        if (s_stat.dirty & (1u << i)) {
+        if (s_stat.dirty & ((uint64_t)1u << i)) {
             slist_repaint_row(i);
         }
     }
@@ -1056,7 +1074,10 @@ void ui_status_refresh(void)
 void ui_status_touch(int16_t x, int16_t y, bool down)
 {
     slist_event_t ev;
-    slist_touch(x, y, down, &ev);   /* nothing to tap: the rows only scroll, and the house goes home */
+    slist_touch(x, y, down, &ev);   /* the rows scroll and the house goes home; a person opens their trail */
+    if (ev.type == SLIST_ROW && ev.id == STAT_TRAIL) {
+        ui_go(NAV_TRAIL, 0, (uint32_t)ev.arg, NULL);
+    }
 }
 
 /* ---- which AP ---- */
@@ -1172,6 +1193,292 @@ void ui_lora_power_touch(int16_t x, int16_t y, bool down)
     } else if (ev.type == SLIST_ROW && ev.id == 31) {
         hh_service_set_lora_power((int)ev.arg);
         ui_lora_power_refresh();
+    }
+}
+
+/* ---- a person's trail (D99) ----
+ *
+ * Their last few steps: a small picture with north up, and the same points in words. Somebody else's
+ * trail is fetched from the grid when the page opens and again every TRAIL_ASK_MS while it is open;
+ * this handheld's own is its own record. Opened from a person's row on Status.
+ */
+#define TRAIL_ASK_MS       10000u
+#define TRAIL_ASK_LORA_MS  60000u   /* on LoRa alone every answer is two parts of airtime */
+#define TRAIL_SPAN_MIN_M   20.0f    /* the picture never zooms in past this: closer is GPS noise */
+enum { TRAIL_SHARE = 50 };
+
+static struct {
+    uint32_t   device;
+    bool       own;
+    hh_trail_t t;          /* what the picture draws: the trail as last built */
+    uint32_t   shown;
+    uint32_t   asked_ms;
+} s_trail;
+
+static uint32_t ui_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Each point in metres east and north of the newest, and the larger side of the box they fill. */
+static float trail_project(const hh_trail_t *t, float *x, float *y, float *mid_x, float *mid_y)
+{
+    const float m_per_u = 0.111195f;
+    float kx = cosf((float)t->pt[0].lat_u * 1.7453293e-8f) * m_per_u;
+    float min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    for (uint8_t i = 0; i < t->n; i++) {
+        x[i] = (float)(t->pt[i].lon_u - t->pt[0].lon_u) * kx;
+        y[i] = (float)(t->pt[i].lat_u - t->pt[0].lat_u) * m_per_u;
+        min_x = x[i] < min_x ? x[i] : min_x;
+        max_x = x[i] > max_x ? x[i] : max_x;
+        min_y = y[i] < min_y ? y[i] : min_y;
+        max_y = y[i] > max_y ? y[i] : max_y;
+    }
+    *mid_x = (min_x + max_x) / 2;
+    *mid_y = (min_y + max_y) / 2;
+    float span = max_x - min_x > max_y - min_y ? max_x - min_x : max_y - min_y;
+    return span > TRAIL_SPAN_MIN_M ? span : TRAIL_SPAN_MIN_M;
+}
+
+static void trail_line(const lg_canvas_t *c, const lg_rect_t *clip, int x0, int y0, int x1, int y1)
+{
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int dy = y1 > y0 ? y0 - y1 : y1 - y0;
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        lg_paint_pixel(c, clip, (int16_t)x0, (int16_t)y0, C_MUTED, 255);
+        if (x0 == x1 && y0 == y1) {
+            return;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void trail_dot(const lg_canvas_t *c, const lg_rect_t *clip, int x, int y, int size, lg_color_t color)
+{
+    lg_rect_t dot = { (int16_t)(x - size / 2), (int16_t)(y - size / 2), (int16_t)size, (int16_t)size };
+    lg_paint_panel(c, clip, &dot, color, C_SURFACE, color, 0, (uint8_t)(size / 2));
+}
+
+static void trail_plot(const lg_canvas_t *c, const lg_rect_t *clip, const lg_rect_t *box)
+{
+    lg_paint_panel(c, clip, box, C_SURFACE, C_BG, C_OUTLINE, 1, 6);
+    lg_paint_text(c, clip, (int16_t)(box->x + 6), (int16_t)(box->y + 4), F_SMALL, NULL, C_MUTED, "N", 1);
+    const hh_trail_t *t = &s_trail.t;
+    if (t->n < 2) {
+        return;   /* one step is a place, not a path: the page says so in words and draws no picture */
+    }
+    float x[LG_TRAIL_POINTS], y[LG_TRAIL_POINTS], mid_x, mid_y;
+    float span = trail_project(t, x, y, &mid_x, &mid_y);
+    int side = (box->w < box->h ? box->w : box->h) - 2 * UI_TRAIL_MARGIN;
+    float scale = (float)side / span;
+    int px[LG_TRAIL_POINTS], py[LG_TRAIL_POINTS];
+    for (uint8_t i = 0; i < t->n; i++) {
+        px[i] = box->x + box->w / 2 + (int)((x[i] - mid_x) * scale);
+        py[i] = box->y + box->h / 2 - (int)((y[i] - mid_y) * scale);   /* north is up */
+    }
+    for (uint8_t i = 0; i + 1u < t->n; i++) {
+        trail_line(c, clip, px[i], py[i], px[i + 1u], py[i + 1u]);
+    }
+    for (uint8_t i = t->n; i-- > 1u;) {
+        trail_dot(c, clip, px[i], py[i], UI_TRAIL_DOT, C_TEXT);
+    }
+    trail_dot(c, clip, px[0], py[0], UI_TRAIL_DOT_NEW, C_ACCENT);   /* last, so nothing covers it */
+    /* The two ends named, so the dots read as a walk with a direction: each word on the side of its dot
+     * that has the room. */
+    for (int end = 0; end < 2; end++) {
+        uint8_t i = end == 0 ? 0u : (uint8_t)(t->n - 1u);
+        const char *word = end == 0 ? "last" : "first";
+        int16_t tw = lg_draw_text_width(F_TINY, NULL, word);
+        int16_t lh = F_TINY->line_height;
+        if (end == 1) {
+            /* A walk that came back to where it began has its two ends on one spot: one word, not two
+             * written over each other. */
+            int ddx = px[i] - px[0], ddy = py[i] - py[0];
+            if (ddx > -(tw + 2 * UI_TRAIL_DOT_NEW) && ddx < tw + 2 * UI_TRAIL_DOT_NEW && ddy > -lh && ddy < lh) {
+                break;
+            }
+        }
+        int16_t tx = (int16_t)(px[i] + UI_TRAIL_DOT_NEW);
+        if (tx + tw > box->x + box->w - 4) {
+            tx = (int16_t)(px[i] - UI_TRAIL_DOT_NEW - tw);
+        }
+        int16_t ty = (int16_t)(py[i] - lh / 2);
+        tx = tx < box->x + 4 ? (int16_t)(box->x + 4) : tx;
+        ty = ty < box->y + 2 ? (int16_t)(box->y + 2) : ty;
+        ty = ty + lh > box->y + box->h - 2 ? (int16_t)(box->y + box->h - 2 - lh) : ty;
+        lg_paint_text(c, clip, tx, ty, F_TINY, NULL, end == 0 ? C_ACCENT : C_MUTED, word, strlen(word));
+    }
+}
+
+static const char *trail_name(const hh_status_t *st, uint32_t device)
+{
+    for (uint8_t i = 0; i < st->n_people; i++) {
+        if (st->people[i].device == device) {
+            return st->people[i].name;
+        }
+    }
+    return "They";
+}
+
+static uint32_t trail_build(bool rebuild)
+{
+    const hh_status_t *st = ui_status();
+    hh_trail_t t;
+    bool have = hh_service_trail(s_trail.device, &t);
+    hh_position_t own;
+    bool have_own = hh_service_own_position(&own) && own.valid;
+    uint32_t sig = mix(2166136261u, hh_service_trail_version());
+    sig = mix(sig, have_own ? (uint32_t)(own.lat_u / 50) ^ (uint32_t)(own.lon_u / 50) : 1u);   /* about 5 m */
+    sig = mix(mix(sig, have ? t.pt[0].age_s / 30u : 0u), hh_service_trail_share() ? 1u : 0u);
+    sig = mix(sig, (uint32_t)st->link);
+    if (!rebuild) {
+        return sig;
+    }
+    s_trail.t = t;
+    const char *name = trail_name(st, s_trail.device);
+    char line[SLIST_VALUE_MAX];
+    char where[32], age[16], dist[16];
+    slist_begin(s_trail.own ? "My trail" : "Trail", true, false);
+    slist_plot(trail_plot);
+    if (!have) {
+        if (s_trail.own) {
+            slist_add(ROW_NOTE, NULL, "No steps yet. One is added each time this handheld's GPS has moved about 10 m.",
+                      -1, 0);
+        } else {
+            if (st->link != HH_LINK_ONLINE && st->link != HH_LINK_LORA) {
+                /* nothing was asked: saying "none known" would be a guess */
+                snprintf(line, sizeof(line), "Not connected, so %s's trail cannot be fetched now.", name);
+            } else {
+                snprintf(line, sizeof(line), "No trail is known for %s. It needs a GPS on their handheld.", name);
+            }
+            slist_add(ROW_NOTE, NULL, line, -1, 0);
+            hh_position_t p;
+            if (hh_service_position(s_trail.device, &p) && p.valid) {
+                ui_geo_age_text(p.age_s, age, sizeof(age));
+                if (have_own) {
+                    ui_geo_where_text(own.lat_u, own.lon_u, p.lat_u, p.lon_u, where, sizeof(where));
+                    snprintf(line, sizeof(line), "Last placed %s of you, %s ago.", where, age);
+                } else {
+                    ui_geo_coord_text(p.lat_u, p.lon_u, where, sizeof(where));
+                    snprintf(line, sizeof(line), "Last placed at %s, %s ago.", where, age);
+                }
+                slist_add(ROW_NOTE, NULL, line, -1, 0);
+            }
+        }
+    } else {
+        /* How long ago, when this handheld can tell: with no clock of its own an age would be made up. */
+        char ago[24] = "";
+        if (t.pt[0].age_s != 0) {
+            ui_geo_age_text(t.pt[0].age_s, age, sizeof(age));
+            snprintf(ago, sizeof(ago), ", %s ago", age);
+        }
+        if (s_trail.own) {
+            snprintf(line, sizeof(line), "Your last %u step%s%s.", t.n, t.n == 1 ? "" : "s", ago);
+        } else if (have_own) {
+            ui_geo_where_text(own.lat_u, own.lon_u, t.pt[0].lat_u, t.pt[0].lon_u, where, sizeof(where));
+            snprintf(line, sizeof(line), "%s was %s of you%s.", name, where, ago);
+        } else {
+            snprintf(line, sizeof(line), "%s was last placed here%s.", name, ago);
+        }
+        slist_add(ROW_NOTE, NULL, line, -1, 0);
+        if (t.n == 1) {
+            slist_add(ROW_NOTE, NULL, "Only this one step is known: no direction to give yet.", -1, 0);
+        }
+        if (t.n >= 2) {
+            uint32_t walked = 0;
+            for (uint8_t i = 0; i + 1u < t.n; i++) {
+                walked += ui_geo_distance_m(t.pt[i].lat_u, t.pt[i].lon_u, t.pt[i + 1u].lat_u, t.pt[i + 1u].lon_u);
+            }
+            const hh_trail_point_t *first = &t.pt[t.n - 1u];
+            ui_geo_distance_text(walked, dist, sizeof(dist));
+            ui_geo_age_text(t.pt[0].fix_time - first->fix_time, age, sizeof(age));
+            snprintf(line, sizeof(line), "Heading %s: %s over %s.",
+                     ui_geo_compass(ui_geo_bearing_deg(first->lat_u, first->lon_u, t.pt[0].lat_u, t.pt[0].lon_u)),
+                     dist, age);
+            slist_add(ROW_NOTE, NULL, line, -1, 0);
+        }
+        if (t.n >= 2) {
+            slist_add(ROW_PLOT, NULL, NULL, -1, UI_TRAIL_H);
+            float x[LG_TRAIL_POINTS], y[LG_TRAIL_POINTS], mid_x, mid_y;
+            ui_geo_distance_text((uint32_t)trail_project(&t, x, y, &mid_x, &mid_y), dist, sizeof(dist));
+            snprintf(line, sizeof(line), "North is up. The picture is %s across, from first step to last.", dist);
+            slist_add(ROW_NOTE, NULL, line, -1, 0);
+        }
+        /* Every step with its coordinates (owner, 2026-10-05: without them the picture "just looks
+         * like a graph"): something to read out, write down or type into a map. */
+        slist_add(ROW_SECTION, "Steps, newest first", NULL, -1, 0);
+        for (uint8_t i = 0; i < t.n; i++) {
+            char label[SLIST_LABEL_MAX];
+            if (i == 0) {
+                snprintf(label, sizeof(label), "Newest");
+            } else {
+                /* in seconds for the first couple of minutes: these are steps, and "1 min" twice says less */
+                uint32_t back = t.pt[0].fix_time - t.pt[i].fix_time;
+                if (back < 180u) {
+                    snprintf(age, sizeof(age), "%" PRIu32 " s", back);
+                } else {
+                    ui_geo_age_text(back, age, sizeof(age));
+                }
+                snprintf(label, sizeof(label), "%s earlier", age);
+            }
+            ui_geo_coord_text(t.pt[i].lat_u, t.pt[i].lon_u, where, sizeof(where));
+            slist_add(ROW_FACT, label, where, -1, 0);
+        }
+    }
+    if (s_trail.own) {
+        slist_add(ROW_CHECK, "Share my trail with the grid", NULL, TRAIL_SHARE, 0)->checked = hh_service_trail_share();
+        slist_add(ROW_NOTE, NULL, "Shared, anyone on the grid can open it to find you. It is kept only while "
+                                  "devices stay on.", -1, 0);
+    }
+    return sig;
+}
+
+void ui_trail_open(uint16_t w, uint16_t h, uint32_t device)
+{
+    s_w = w;
+    s_h = h;
+    s_trail.device = device;
+    s_trail.own = device == ui_status()->device;
+    s_trail.asked_ms = ui_ms();
+    hh_service_trail_request(device);
+    s_trail.shown = trail_build(true);
+    slist_show(w, h, 0, false);
+}
+
+void ui_trail_refresh(void)
+{
+    uint32_t now = ui_ms();
+    if (!s_trail.own &&
+        now - s_trail.asked_ms >= (ui_status()->link == HH_LINK_LORA ? TRAIL_ASK_LORA_MS : TRAIL_ASK_MS)) {
+        s_trail.asked_ms = now;
+        hh_service_trail_request(s_trail.device);
+    }
+    if (trail_build(false) != s_trail.shown) {
+        s_trail.shown = trail_build(true);
+        slist_update();
+    }
+}
+
+void ui_trail_touch(int16_t x, int16_t y, bool down)
+{
+    slist_event_t ev;
+    slist_touch(x, y, down, &ev);
+    if (ev.type == SLIST_BACK) {
+        ui_go(NAV_STATUS, 0, 0, NULL);
+    } else if (ev.type == SLIST_ROW && ev.id == TRAIL_SHARE) {
+        hh_service_set_trail_share(!hh_service_trail_share());
+        ui_trail_refresh();
     }
 }
 

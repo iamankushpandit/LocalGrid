@@ -5,6 +5,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A screen asked for while the screen saver was up was drawn over the rain
+
+- **Found by the owner:** remnants of a screen showing through the screen saver. A screen *change* -
+  from the console, in this case the agent's own test commands - painted the new screen while the saver
+  held the panel, and the rain carried on over it. The saver now gives way to a screen that is asked
+  for and starts its idle clock again; an alert does not give way, and the change waits for it.
+- The table of screen names used in the `[UI] Screen:` log line had fallen two behind the list of
+  screens; it is checked against it at build time now.
+
+### The home screen: a clock of its own, and how long on this AP
+
+- **The time has its own box, with AM or PM**, beside "LocalGrid" where the screen is wide enough for
+  both and the battery (320 pixels), and at the right of the line below where it is not (240).
+- **The line under the title says how long this handheld has been on its AP** - "Big Pepa on Fuji for
+  12 min" - where it used to end in the time, which read as part of the sentence. Where the clock
+  shares the line it shortens itself ("On Fuji for 12 min") rather than lose its end.
+- **The screen saver is two lines, not four:** "Bluey on Everest", then "12:14 PM   98%". A third line
+  appears only when there are new messages, and says how many; it no longer says "no messages".
+- `ui log` on the home screen prints both boxes and what the line needs, so this was read back from
+  all six handhelds.
+
+### Breadcrumb trail: a person's last steps, kept by every AP (D99)
+
+- **Protocol:** `LG_T_TRAIL` (0x25) and `LG_T_TRAIL_REQ` (0x26) in `lg_core`, with a table of four
+  trails on each AP. Newest fix wins, a full table gives up its stalest, and a trail's newest point is
+  taken as the handheld's position. `DESIGN_REVIEW.md` has the layout.
+- **Handheld:** a point every ten metres moved, the newest sixteen kept in RAM, sent as the trail grows;
+  over LoRa at most once a minute when there is no Wi-Fi. A restarted handheld takes its earlier steps
+  back from the grid.
+- **Screens:** people with a position are rows on Status that open their trail, with or without a GPS
+  on the handheld looking; `My trail` on one that has a GPS, with the switch that stops sharing it.
+  The page draws the steps north-up with the ends named and lists every step with its coordinates. The
+  list widget gained a row a screen paints itself.
+- **On a real map:** `GET /api/trails` on the admin page and `GET_TRAILS` on the BLE admin link carry
+  the trails an AP holds as bytes. The admin page and `tools/grid_watch.py` draw each as a line through
+  its steps on their OpenStreetMap view and list each step with its coordinates and a way to open it in
+  OpenStreetMap or Google Maps.
+- **Edge cases:** one step (a place, no picture), a loop, no clock, not connected, asking over LoRa,
+  and GPS jumps or poor fixes, which are not recorded as steps.
+- **`grid_watch.py`:** its plan view, the one a laptop without Internet relies on, was never shown: it
+  is an SVG element and was un-hidden through a property SVG does not have. Fixed. It also gives up on
+  map tiles after two identical pictures, not four, having shown OpenStreetMap's "Access blocked" notice
+  as if it were the map.
+- **Consoles:** `trail`, `trail <device>`, `trail ask|show <device>`, `trail share on|off`, and
+  `trail test <steps>`, which walks a made-up trail so this can be tested on a desk; `trails` on an AP
+  says whose it holds and how old, never where.
+- **LoRa:** a handheld may send its trail and ask for one; between APs a trail waits for spare room.
+- **On the bench:** a walk on one handheld was held by all three APs, opened from a handheld on another
+  AP, survived its author restarting and an AP restarting, and arrived over LoRa from a handheld with
+  Wi-Fi off in 4 to 7 s; the dashboard pulled two trails from an AP over BLE and drew them.
+  `LG_TESTS_RESULT: PASS`, 4375 checks; `grid_watch.py --self-check`, 80 of 80. Not walked outdoors
+  yet, and the admin page's drawing not seen in a browser on the grid.
+
 ### Handhelds showed UTC on a grid that knew its zone only by name (D100)
 
 - **Found by the owner:** a handheld's clock read 15:14 when it was 10:14. Every AP held the zone's

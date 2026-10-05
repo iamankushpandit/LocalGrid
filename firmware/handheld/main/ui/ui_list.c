@@ -46,6 +46,7 @@ static struct {
     uint32_t          down_ms;
     bool              holding;        /* a talk row held past SLIST_HOLD_MS: talking */
     bool              hold_refused;   /* ...but the talk did not start; the lift is ignored */
+    slist_plot_t      plot;           /* paints ROW_PLOT rows, NULL none */
 } s = { .pressed = -1 };
 
 static uint32_t now_ms(void)
@@ -62,6 +63,12 @@ void slist_begin(const char *title, bool back, bool plus)
     s.n_tabs = 0;
     s.n = 0;
     s.pressed = -1;
+    s.plot = NULL;
+}
+
+void slist_plot(slist_plot_t painter)
+{
+    s.plot = painter;
 }
 
 void slist_tabs(const char *const *names, uint8_t n, uint8_t selected)
@@ -112,6 +119,7 @@ static void layout(void)
         case ROW_BUTTON:  r->h = BUTTON_H; break;
         case ROW_CHECK:   r->h = CHECK_H; break;
         case ROW_FIELD:   r->h = FIELD_H; break;
+        case ROW_PLOT:    r->h = (int16_t)r->arg; break;
         case ROW_NOTE: {
             uint16_t starts[NOTE_LINES + 1];
             uint8_t lines = lg_text_wrap(F_SMALL, F_EMOJI, r->value, content_w(), starts, NOTE_LINES);
@@ -253,6 +261,11 @@ static void paint_row(const lg_canvas_t *c, uint8_t i)
         }
         break;
     }
+    case ROW_PLOT:
+        if (s.plot != NULL) {
+            s.plot(c, &s.list, &box);
+        }
+        break;
     default:
         break;
     }
@@ -528,7 +541,7 @@ void slist_redraw(void)
 
 void slist_log(void)
 {
-    static const char *const KINDS[] = { "section", "fact", "action", "choice", "button", "note", "check", "field" };
+    static const char *const KINDS[] = { "section", "fact", "action", "choice", "button", "note", "check", "field", "plot" };
     printf("LIST \"%s\" %ux%u rows %u, content %d px in %d, scrolled %d\n", s.title, s.w, s.h, s.n, s.content_h,
            s.list.h, s.scroll);
     for (uint8_t i = 0; i < s.n; i++) {
@@ -540,13 +553,16 @@ void slist_log(void)
             uint8_t lines = lg_text_wrap(F_SMALL, F_EMOJI, r->value, content_w(), starts, NOTE_LINES + 1);
             mark = lines > NOTE_LINES || strlen(r->value) >= SLIST_VALUE_MAX - 1 ? "  CUT SHORT" : "";
         } else if (r->kind == ROW_ACTION || r->kind == ROW_FACT) {
-            /* label and value side by side: measured at the larger font, with a gap between */
-            char both[SLIST_LABEL_MAX + SLIST_VALUE_MAX + 4];
-            snprintf(both, sizeof(both), "%s   %s", r->label, r->value);
-            mark = lg_text_wrap(F_BODY, F_EMOJI, both, (int16_t)(content_w() - 26), starts, 2) > 1 ? "  TOO WIDE" : "";
+            /* label and value side by side, each measured in the font and with the padding paint_row
+             * gives it, and a gap between them */
+            bool action = r->kind == ROW_ACTION;
+            int16_t used = (int16_t)(lg_draw_text_width(action ? F_BODY : F_SMALL, F_EMOJI, r->label) +
+                                     lg_draw_text_width(F_SMALL, F_EMOJI, r->value) + (action ? 8 + 2 + 18 : 2 + 2) +
+                                     UI_PAD);
+            mark = r->value[0] != '\0' && used > content_w() ? "  TOO WIDE" : "";
         }
         bool both_set = r->label[0] != 0 && r->value[0] != 0;
-        printf("LIST %2u %-7s y %4d h %3d  %s%s%s%s\n", i, r->kind < 8 ? KINDS[r->kind] : "?", r->y, r->h, r->label,
+        printf("LIST %2u %-7s y %4d h %3d  %s%s%s%s\n", i, r->kind < 9 ? KINDS[r->kind] : "?", r->y, r->h, r->label,
                both_set ? " | " : "", r->value, mark);
     }
 }

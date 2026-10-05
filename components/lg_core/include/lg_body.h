@@ -158,6 +158,51 @@ bool   lg_position_valid(int32_t lat_u, int32_t lon_u, uint32_t fix_time);
 int    lg_position_slot(const lg_roster_t *r, uint32_t subject);
 
 /*
+ * TRAIL (D99): handheld -> its AP, AP -> APs (flooded), AP -> a handheld that asked. SYSTEM scope.
+ * A person's last few steps: where they are now and up to fifteen points before it, each a few
+ * metres from the next, so somebody looking for them can see which way they went.
+ *     0  u32  subject    the handheld whose trail it is; never an AP
+ *     4  i32  lat_u      the newest point, microdegrees
+ *     8  i32  lon_u
+ *    12  u32  fix_time   Unix seconds of the newest point, >= LG_POS_TIME_MIN: the version, newer wins
+ *    16  u8   count      older points that follow, 0..LG_TRAIL_POINTS-1, the most recent of them first
+ *    17  count x 6 bytes:
+ *          i16 dlat, i16 dlon   from the newest point, in units of LG_TRAIL_UNIT_U microdegrees
+ *                               (about 1.1 m of latitude; +-36 km)
+ *          u16 age              seconds before the newest point; 65535 means that long or longer
+ * Exactly 17 + 6 x count bytes, and ages never decrease down the list. Only a handheld sets its own
+ * trail. Like positions (D65), trails live in RAM only and are never written to flash.
+ *
+ * TRAIL_REQ (D99): handheld -> its AP. SYSTEM scope.
+ *     0  u32  subject    whose trail is wanted
+ * Exactly 4 bytes. The AP answers with the TRAIL it holds for subject, or not at all.
+ */
+#define LG_TRAIL_HDR_LEN    17u
+#define LG_TRAIL_POINT_LEN  6u
+#define LG_TRAIL_LEN_MAX    (LG_TRAIL_HDR_LEN + LG_TRAIL_POINT_LEN * (LG_TRAIL_POINTS - 1u))
+#define LG_TRAIL_UNIT_U     10
+#define LG_TRAIL_AGE_MAX    65535u
+#define LG_TRAIL_REQ_LEN    4u
+typedef struct {
+    int16_t  dlat;       /* from the newest point, LG_TRAIL_UNIT_U microdegrees north */
+    int16_t  dlon;       /* ... and east */
+    uint16_t age_s;      /* seconds before the newest point */
+} lg_trail_point_t;
+typedef struct {
+    uint32_t         subject;
+    int32_t          lat_u;      /* the newest point */
+    int32_t          lon_u;
+    uint32_t         fix_time;   /* of the newest point: the version; 0 in an empty slot */
+    uint8_t          count;      /* entries of older[] in use */
+    lg_trail_point_t older[LG_TRAIL_POINTS - 1u];
+} lg_trail_t;
+
+/* Writes LG_TRAIL_HDR_LEN + 6 x count bytes (count clamped to what fits) and returns the length. */
+size_t lg_trail_enc(const lg_trail_t *t, uint8_t *out);
+/* Exact length for its count, a handheld subject, coordinates and fix time in range, ages in order. */
+bool   lg_trail_dec(const uint8_t *body, size_t len, lg_trail_t *out);
+
+/*
  * TIME_SYNC: AP -> APs (flooded), AP -> its handhelds.
  *   u32 grid time, Unix seconds | u16 milliseconds into that second (0..999) |
  *   u8 quality | u8 stratum | u8 flags (LG_TIME_FROM_*)

@@ -32,6 +32,7 @@
 #include "ui_chat.h"
 #include "ui_nav.h"
 #include "ui_list.h"
+#include "ui_geo.h"
 #include "ui_lock.h"
 #include "ui_overlay.h"
 #include "ui_theme.h"
@@ -56,6 +57,7 @@ typedef enum {
     SCREEN_SETTINGS,
     SCREEN_WHICH_AP,
     SCREEN_LORA_POWER,
+    SCREEN_TRAIL,
     SCREEN_RENAME,
 } screen_t;
 
@@ -74,6 +76,7 @@ static struct {
     screen_t    screen;
     lg_box_t    heading;
     lg_box_t    subline;
+    lg_box_t    clock;            /* the time, in a box of its own */
     tile_t      tiles[TILE_COUNT];
     int         pressed;          /* launcher tile, -1 none */
     hh_status_t st;
@@ -147,6 +150,11 @@ static void build_launcher(void)
     s.heading.pad = PAD;
     s.subline = text_box(0, PAD + 28, (int16_t)s.w, 18, &lg_font_montserrat_12, C_MUTED, C_BG, LG_ALIGN_LEFT, "Starting");
     s.subline.pad = PAD;
+    s.clock = text_box(0, 0, 0, UI_CLOCK_H, F_BODY, C_TEXT, C_SURFACE, LG_ALIGN_CENTER, "");
+    s.clock.outside = C_BG;
+    s.clock.border = C_OUTLINE;
+    s.clock.border_w = 1;
+    s.clock.radius = 6;
 
     static const char *icons[TILE_COUNT] = { LG_SYMBOL_ENVELOPE, LG_SYMBOL_LIST, LG_SYMBOL_WIFI, LG_SYMBOL_SETTINGS };
     static const char *titles[TILE_COUNT] = { "Messages", "Groups", "Status", "Settings" };
@@ -178,9 +186,28 @@ static void show_launcher(void)
     s.screen = SCREEN_LAUNCHER;
     lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
     lg_draw_fill(&all, C_BG);
-    (void)ui_bar_place((int16_t)(s.w - PAD), s.heading.rect.y, s.heading.rect.h);
+    int16_t bar_left = ui_bar_place((int16_t)(s.w - PAD), s.heading.rect.y, s.heading.rect.h);
+    /*
+     * The clock sits beside the title when the screen is wide enough for both and the battery; on a
+     * narrow one it goes at the right of the line below, and that line gives up the room. Measured,
+     * not assumed: the widest time, the title as drawn, and wherever the bar says it begins.
+     */
+    int16_t clock_w = (int16_t)(lg_draw_text_width(s.clock.font, NULL, "12:00 AM") + 2 * UI_CLOCK_PAD);
+    int16_t title_end = (int16_t)(PAD + UI_LOGO_SIZE + 6 + lg_draw_text_width(s.heading.font, NULL, s.heading.text));
+    s.subline.rect.w = (int16_t)s.w;
+    if (title_end + 2 * GAP + clock_w <= bar_left) {
+        s.clock.rect = (lg_rect_t){ (int16_t)(bar_left - GAP - clock_w),
+                                    (int16_t)(s.heading.rect.y + (s.heading.rect.h - UI_CLOCK_H) / 2), clock_w,
+                                    UI_CLOCK_H };
+    } else {
+        s.clock.rect = (lg_rect_t){ (int16_t)(s.w - PAD - clock_w),
+                                    (int16_t)(s.subline.rect.y + (s.subline.rect.h - UI_CLOCK_H) / 2), clock_w,
+                                    UI_CLOCK_H };
+        s.subline.rect.w = (int16_t)(s.clock.rect.x - GAP);
+    }
     lg_draw_region(&s.heading.rect, paint_heading, &s.heading);
     lg_draw_box(&s.subline);
+    lg_draw_box(&s.clock);
     for (int i = 0; i < TILE_COUNT; i++) {
         draw_tile(&s.tiles[i], false);
     }
@@ -286,6 +313,7 @@ static void refresh(void)
     case SCREEN_SETTINGS:   ui_settings_refresh(); return;
     case SCREEN_WHICH_AP:   ui_which_ap_refresh(); return;
     case SCREEN_LORA_POWER: ui_lora_power_refresh(); return;
+    case SCREEN_TRAIL:      ui_trail_refresh(); return;
     case SCREEN_STATUS:     ui_status_refresh(); return;
     case SCREEN_RENAME:     return;
     default:                break;
@@ -295,9 +323,35 @@ static void refresh(void)
     hh_local_time(st->grid_time, &lt);   /* D67: the grid's zone */
     uint32_t day = (uint32_t)(lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec);
     if (s.screen == SCREEN_LAUNCHER) {
+        /* The time has a box of its own, with AM or PM: beside a name and an AP it read as part of them. */
+        char clock[16];
+        if (st->grid_time == 0) {
+            snprintf(clock, sizeof(clock), "--:--");
+        } else {
+            unsigned hour = (unsigned)(day / 3600u);
+            snprintf(clock, sizeof(clock), "%u:%02u %s", hour % 12u == 0u ? 12u : hour % 12u, (unsigned)(day / 60u % 60u),
+                     hour < 12u ? "AM" : "PM");
+        }
+        lg_draw_set_text(&s.clock, clock);
         if (st->link == HH_LINK_ONLINE) {
-            snprintf(text, sizeof(text), "%s on %s, %02u:%02u", st->name, st->node_ssid, (unsigned)(day / 3600u),
-                     (unsigned)(day / 60u % 60u));
+            /* How long this handheld has been on that AP: what a number after "on Fuji" is taken to mean. */
+            uint32_t on_s = st->on_ap_since_ms != 0 ? (now - st->on_ap_since_ms) / 1000u : 0u;
+            if (on_s < 60u) {
+                snprintf(text, sizeof(text), "%s on %s", st->name, st->node_ssid);
+            } else {
+                char how_long[16];
+                ui_geo_age_text(on_s, how_long, sizeof(how_long));
+                snprintf(text, sizeof(text), "%s on %s for %s", st->name, st->node_ssid, how_long);
+                /* Where the clock shares this line there is less of it: say less rather than lose the
+                 * end, which is the part that changes. This handheld's own name goes first. */
+                int16_t room = (int16_t)(s.subline.rect.w - 2 * s.subline.pad);
+                if (lg_draw_text_width(s.subline.font, s.subline.fallback, text) > room) {
+                    snprintf(text, sizeof(text), "On %s for %s", st->node_ssid, how_long);
+                }
+                if (lg_draw_text_width(s.subline.font, s.subline.fallback, text) > room) {
+                    snprintf(text, sizeof(text), "%s, %s", st->node_ssid, how_long);
+                }
+            }
             s.subline.fg = st->time_restricted ? C_WARNING : C_ACCENT;
         } else if (st->link == HH_LINK_LORA) {
             /*
@@ -306,11 +360,9 @@ static void refresh(void)
              * question - and on LoRa it may be a different AP from the one Wi-Fi would have chosen.
              */
             if (st->lora_peer_ssid[0] != '\0') {
-                snprintf(text, sizeof(text), "%s on LoRa via %s, %02u:%02u", st->name,
-                         st->lora_peer_ssid, (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u));
+                snprintf(text, sizeof(text), "%s on LoRa via %s", st->name, st->lora_peer_ssid);
             } else {
-                snprintf(text, sizeof(text), "%s on LoRa, %02u:%02u", st->name,
-                         (unsigned)(day / 3600u), (unsigned)(day / 60u % 60u));
+                snprintf(text, sizeof(text), "%s on LoRa", st->name);
             }
             s.subline.fg = C_WARNING;
         } else {
@@ -381,14 +433,26 @@ static void apply_nav(void)
     if (!s.nav_pending || ui_lock_active()) {
         return;   /* while locked a screen change waits, and is made when the lock is released */
     }
+    /*
+     * A screen never draws under what covers the panel. The loop already holds the refresh back while
+     * the saver or an alert is up, but a screen *change* came through here regardless - asked for by
+     * the console, it painted the new screen straight over the rain, and the rain then ran on top of
+     * it (owner, 2026-10-05: "we can still see the remnants of the front screen"). The saver gives way
+     * to it; an alert does not, and the change waits until the alert is answered.
+     */
+    if (!ui_overlay_make_way((uint32_t)(esp_timer_get_time() / 1000))) {
+        return;
+    }
     if (s.unit) {
         s.nav_pending = false;   /* an alert unit has only its own screens */
         return;
     }
     s.nav_pending = false;
     s.pressed = -1;
+    /* One name for each ui_nav_t, in its order: a screen added there is added here. */
     static const char *const NAMES[] = { "home", "status", "conversations", "chat", "groups", "group editor",
-                                         "settings", "which AP", "rename", "calibration" };
+                                         "settings", "which AP", "LoRa power", "trail", "rename", "calibration" };
+    _Static_assert(sizeof(NAMES) / sizeof(NAMES[0]) == NAV_CALIBRATE + 1, "a name for every screen");
     ESP_LOGI(TAG, "[UI] Screen: %s%s%s; free %" PRIu32 " KB", NAMES[s.nav_to], s.nav_title[0] ? " " : "",
              s.nav_title, (uint32_t)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024u));
     lg_draw_scroll_area(0, 0);   /* every screen starts unscrolled; list screens set their own area */
@@ -430,6 +494,10 @@ static void apply_nav(void)
         s.screen = SCREEN_LORA_POWER;
         ui_lora_power_open(s.w, s.h);
         break;
+    case NAV_TRAIL:
+        s.screen = SCREEN_TRAIL;
+        ui_trail_open(s.w, s.h, s.nav_target);
+        break;
     case NAV_RENAME:
         s.screen = SCREEN_RENAME;
         ui_rename_open(s.w, s.h);
@@ -457,6 +525,7 @@ static void on_tap(int16_t x, int16_t y, bool down)
     case SCREEN_SETTINGS:   ui_settings_touch(x, y, down); return;
     case SCREEN_WHICH_AP:   ui_which_ap_touch(x, y, down); return;
     case SCREEN_LORA_POWER: ui_lora_power_touch(x, y, down); return;
+    case SCREEN_TRAIL:      ui_trail_touch(x, y, down); return;
     case SCREEN_STATUS:     ui_status_touch(x, y, down); return;
     case SCREEN_RENAME:     ui_rename_touch(x, y, down); return;
     default:                break;
@@ -506,7 +575,7 @@ static void handle_request(const ui_req_t *r)
         ui_go(NAV_CHAT, r->scope, r->target, r->text);
         break;
     case UI_GO:
-        ui_go((ui_nav_t)r->arg, 0, 0, NULL);
+        ui_go((ui_nav_t)r->arg, 0, r->target, NULL);
         break;
     case UI_TAP: {
         int16_t x = (int16_t)(r->arg >> 16);
@@ -552,6 +621,16 @@ static void handle_request(const ui_req_t *r)
     case UI_LOG:
         if (s.unit) {
             ui_unit_log();
+        }
+        if (s.screen == SCREEN_LAUNCHER) {
+            /* the home screen's two lines, with where each sits, so a layout can be checked over serial */
+            printf("HOME %ux%u title ends %d, bar from %d; clock [%s] at %d,%d %dx%d; line [%s] at %d,%d %dx%d needs %d\n",
+                   s.w, s.h,
+                   (int)(PAD + UI_LOGO_SIZE + 6 + lg_draw_text_width(s.heading.font, NULL, s.heading.text)),
+                   (int)ui_bar_spare_rect().x, s.clock.text, s.clock.rect.x, s.clock.rect.y, s.clock.rect.w,
+                   s.clock.rect.h, s.subline.text, s.subline.rect.x, s.subline.rect.y, s.subline.rect.w,
+                   s.subline.rect.h,
+                   (int)(lg_draw_text_width(s.subline.font, s.subline.fallback, s.subline.text) + 2 * s.subline.pad));
         }
         ui_chat_log();
         slist_log();
@@ -730,6 +809,15 @@ void ui_open_chat(uint8_t scope, uint32_t target, const char *title)
     }
     ui_req_t req = { .cmd = UI_CHAT, .scope = scope, .target = target };
     snprintf(req.text, sizeof(req.text), "%s", title != NULL ? title : "");
+    (void)xQueueSend(s_requests, &req, 0);
+}
+
+void ui_request_trail(uint32_t device)
+{
+    if (s_requests == NULL) {
+        return;
+    }
+    ui_req_t req = { .cmd = UI_GO, .arg = (int)NAV_TRAIL, .target = device };
     (void)xQueueSend(s_requests, &req, 0);
 }
 

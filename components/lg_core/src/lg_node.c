@@ -127,7 +127,9 @@ static uint8_t traffic_class(uint8_t type, uint8_t scope)
     case LG_T_GROUPS:
     case LG_T_GROUP_EDIT:
     case LG_T_GRID_STATE:       return (uint8_t)LG_TC_ANNOUNCE;
-    case LG_T_POSITION:         return (uint8_t)LG_TC_POSITION;
+    case LG_T_POSITION:
+    case LG_T_TRAIL:
+    case LG_T_TRAIL_REQ:        return (uint8_t)LG_TC_POSITION;
     case LG_T_TIME_SYNC:
     case LG_T_TIME_ZONE:        return (uint8_t)LG_TC_TIME;
     default:                    return (uint8_t)LG_TC_OTHER;
@@ -483,6 +485,110 @@ static void handle_client_position(lg_node_t *n, uint32_t session_device, const 
     if (held != NULL) {
         flood_position(n, held);
         push_position_to_local_clients(n, held, session_device);
+    }
+}
+
+/* ---- trails (D99) --------------------------------------------------------- */
+
+/* Keeps t if it is newer than the one held for that person, or there is room, or it is fresher than
+ * the stalest trail in a full table. Returns the slot taken, or NULL. */
+static const lg_trail_t *trail_take(lg_node_t *n, const lg_trail_t *t)
+{
+    lg_trail_t *mine = NULL;
+    lg_trail_t *empty = NULL;
+    lg_trail_t *stalest = NULL;
+    for (size_t i = 0; i < LG_TRAIL_SLOTS; i++) {
+        lg_trail_t *s = &n->trails[i];
+        if (s->fix_time == 0) {
+            if (empty == NULL) {
+                empty = s;
+            }
+        } else if (s->subject == t->subject) {
+            mine = s;
+        } else if (stalest == NULL || s->fix_time < stalest->fix_time) {
+            stalest = s;
+        }
+    }
+    lg_trail_t *slot = mine;
+    if (mine != NULL) {
+        if (t->fix_time <= mine->fix_time) {
+            return NULL;
+        }
+    } else if (empty != NULL) {
+        slot = empty;
+    } else if (stalest != NULL && t->fix_time > stalest->fix_time) {
+        slot = stalest;
+        n->trail_evictions++;
+    } else {
+        return NULL;
+    }
+    *slot = *t;
+    return slot;
+}
+
+static void send_trail_to_client(lg_node_t *n, uint32_t device, const lg_trail_t *t)
+{
+    uint8_t body[LG_TRAIL_LEN_MAX];
+    size_t blen = lg_trail_enc(t, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_TRAIL, LG_SCOPE_SYSTEM, t->subject);
+    send_client(n, device, &e, body, blen);
+}
+
+static void flood_trail(lg_node_t *n, const lg_trail_t *t)
+{
+    uint8_t body[LG_TRAIL_LEN_MAX];
+    size_t blen = lg_trail_enc(t, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_TRAIL, LG_SCOPE_SYSTEM, t->subject);
+    e.ttl = LG_TTL_DEFAULT;
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, buf, sizeof(buf));
+    if (flen < 0) {
+        return;
+    }
+    (void)lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq);
+    flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+}
+
+/* A trail's newest point is where the person is. Every AP works this out from the trail itself, so
+ * it is pushed to this AP's handhelds and not flooded a second time as a POSITION. */
+static void trail_gives_position(lg_node_t *n, const lg_trail_t *t, uint32_t except_device)
+{
+    lg_position_t pos = { .subject = t->subject, .lat_u = t->lat_u, .lon_u = t->lon_u, .fix_time = t->fix_time };
+    const lg_position_t *held = position_take(n, &pos);
+    if (held != NULL) {
+        push_position_to_local_clients(n, held, except_device);
+    }
+}
+
+static void handle_client_trail(lg_node_t *n, uint32_t session_device, const lg_env_t *e, const uint8_t *body)
+{
+    lg_trail_t t;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_trail_dec(body, e->body_len, &t)) {
+        n->stats.malformed++;
+        return;
+    }
+    if (t.subject != session_device || lg_roster_user(n->roster, t.subject) == NULL) {
+        n->stats.rejected++;   /* a handheld draws only its own trail */
+        return;
+    }
+    const lg_trail_t *held = trail_take(n, &t);
+    if (held != NULL) {
+        flood_trail(n, held);
+        trail_gives_position(n, held, session_device);
+    }
+}
+
+static void handle_client_trail_req(lg_node_t *n, uint32_t session_device, const lg_env_t *e, const uint8_t *body)
+{
+    if (e->scope != LG_SCOPE_SYSTEM || e->body_len != LG_TRAIL_REQ_LEN) {
+        n->stats.malformed++;
+        return;
+    }
+    const lg_trail_t *held = lg_node_trail(n, lg_rd32(body));
+    if (held != NULL) {
+        send_trail_to_client(n, session_device, held);
     }
 }
 
@@ -1090,6 +1196,12 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
     case LG_T_POSITION:
         handle_client_position(n, *session_device, &e, body);
         break;
+    case LG_T_TRAIL:
+        handle_client_trail(n, *session_device, &e, body);
+        break;
+    case LG_T_TRAIL_REQ:
+        handle_client_trail_req(n, *session_device, &e, body);
+        break;
     default:
         break;  /* unknown or not client-originated: ignored */
     }
@@ -1280,6 +1392,20 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         }
         break;
     }
+    case LG_T_TRAIL: {
+        lg_trail_t trail;
+        if (e.scope != LG_SCOPE_SYSTEM || !lg_trail_dec(body, e.body_len, &trail)) {
+            n->stats.malformed++;
+            break;
+        }
+        /* As for positions: only a newer trail goes further. */
+        const lg_trail_t *held = trail_take(n, &trail);
+        if (held != NULL) {
+            trail_gives_position(n, held, 0);
+            forward(n, &e, body, from_node);
+        }
+        break;
+    }
     case LG_T_TIME_SYNC: {
         lg_time_sync_t t;
         if (!lg_time_sync_dec(body, e.body_len, &t)) {
@@ -1347,6 +1473,11 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor)
     for (size_t i = 0; i < LG_POS_SLOTS; i++) {
         if (n->positions[i].fix_time != 0) {
             flood_position(n, &n->positions[i]);
+        }
+    }
+    for (size_t i = 0; i < LG_TRAIL_SLOTS; i++) {
+        if (n->trails[i].fix_time != 0) {
+            flood_trail(n, &n->trails[i]);
         }
     }
 }
@@ -1496,6 +1627,25 @@ const lg_position_t *lg_node_position(const lg_node_t *n, uint32_t subject)
         return NULL;
     }
     return &n->positions[slot];
+}
+
+const lg_trail_t *lg_node_trail(const lg_node_t *n, uint32_t subject)
+{
+    for (size_t i = 0; n != NULL && i < LG_TRAIL_SLOTS; i++) {
+        if (n->trails[i].fix_time != 0 && n->trails[i].subject == subject) {
+            return &n->trails[i];
+        }
+    }
+    return NULL;
+}
+
+size_t lg_node_trail_count(const lg_node_t *n)
+{
+    size_t k = 0;
+    for (size_t i = 0; n != NULL && i < LG_TRAIL_SLOTS; i++) {
+        k += n->trails[i].fix_time != 0 ? 1u : 0u;
+    }
+    return k;
 }
 
 size_t lg_node_positions(const lg_node_t *n, lg_position_t *out, size_t max)

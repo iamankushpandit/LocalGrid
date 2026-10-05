@@ -34,3 +34,14 @@
 #define UI_PAD     6
 #define UI_GAP     4
 #define UI_HEAD_H  30
+
+/* The home screen's clock: a box of its own beside the title, or under the battery where the title
+ * leaves no room for it. */
+#define UI_CLOCK_H        22
+#define UI_CLOCK_PAD      7
+
+/* The picture of a trail (D99). */
+#define UI_TRAIL_H        150   /* its row in a list */
+#define UI_TRAIL_MARGIN   12    /* kept clear inside it, so a dot never touches the edge */
+#define UI_TRAIL_DOT      5     /* a step */
+#define UI_TRAIL_DOT_NEW  9     /* the newest step */

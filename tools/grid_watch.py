@@ -255,6 +255,7 @@ OP_HELLO, OP_LOGIN, OP_GET_STATUS, OP_GET_HISTORY, OP_GET_TRAFFIC = 0x01, 0x02, 
 OP_CHAOS_GET, OP_CHAOS_ARM, OP_CHAOS_DISARM, OP_CHAOS_LOG = 0x06, 0x07, 0x08, 0x09
 OP_FAULT, OP_FAULT_OK = 0x0A, 0x8A   # D90: one fault, now, named by the laptop (TEMPORARY T6)
 OP_WEB, OP_WEB_OK = 0x0B, 0x8B       # D91: start the admin page for a window of minutes
+OP_GET_TRAILS, OP_TRAILS = 0x0C, 0x8C    # D99: the admin page's /api/trails bytes
 OP_SESSION = 0x80                # the one unsealed message: the session both nonces are built from
 OP_HELLO_OK, OP_LOGIN_OK, OP_STATUS, OP_HISTORY, OP_TRAFFIC = 0x81, 0x82, 0x83, 0x84, 0x85
 OP_CHAOS, OP_CHAOS_LOG_DATA = 0x86, 0x89
@@ -266,7 +267,8 @@ OP_NAMES = {OP_SESSION: "SESSION", OP_HELLO: "HELLO", OP_LOGIN: "LOGIN", OP_GET_
             OP_LOGIN_FAIL: "LOGIN_FAIL",
             OP_CHAOS_GET: "CHAOS_GET", OP_CHAOS_ARM: "CHAOS_ARM", OP_CHAOS_DISARM: "CHAOS_DISARM",
             OP_CHAOS_LOG: "CHAOS_LOG", OP_CHAOS: "CHAOS", OP_CHAOS_LOG_DATA: "CHAOS_LOG_DATA",
-            OP_FAULT: "FAULT", OP_FAULT_OK: "FAULT_OK", OP_WEB: "WEB", OP_WEB_OK: "WEB_OK"}
+            OP_FAULT: "FAULT", OP_FAULT_OK: "FAULT_OK", OP_WEB: "WEB", OP_WEB_OK: "WEB_OK",
+            OP_GET_TRAILS: "GET_TRAILS", OP_TRAILS: "TRAILS"}
 
 # The chaos journal, as the AP packs it (D49, firmware/node/main/chaos_log.h).
 CHAOS_REC_LEN = 16
@@ -451,6 +453,38 @@ HIST_AP = 76
 HIST_AVAIL_MINUTES = 120
 HIST_INCIDENT = 16
 INCIDENT_KINDS = ["down", "restarted", "link", "unexplained"]
+
+
+TRAILS_HEADER = 8
+TRAIL_HEADER = 17
+TRAIL_POINT = 6
+TRAIL_UNIT_U = 10      # an older step's offset from the newest, in micro-degrees
+
+
+def decode_trails(blob):
+    """GET /api/trails, layout 1 (TRAILS_HEADER in firmware/node/main/web_admin.c): each trail as
+    LG_T_TRAIL carries it. Returns the people, each with their steps newest first, in the same
+    micro-degrees the positions use."""
+    b = bytes(blob)
+    if len(b) < TRAILS_HEADER or b[0] != 1:
+        raise LinkError("trail bytes are not layout 1")
+    i32 = lambda o: int.from_bytes(b[o:o + 4], "little", signed=True)
+    u32 = lambda o: int.from_bytes(b[o:o + 4], "little")
+    i16 = lambda o: int.from_bytes(b[o:o + 2], "little", signed=True)
+    u16 = lambda o: int.from_bytes(b[o:o + 2], "little")
+    out, o = [], TRAILS_HEADER
+    for _ in range(b[1]):
+        if o + TRAIL_HEADER > len(b) or o + TRAIL_HEADER + TRAIL_POINT * b[o + 16] > len(b):
+            raise LinkError("trail bytes end inside a trail")
+        lat, lon, t, count = i32(o + 4), i32(o + 8), u32(o + 12), b[o + 16]
+        pts = [{"lat_u": lat, "lon_u": lon, "t": t}]
+        for k in range(count):
+            q = o + TRAIL_HEADER + TRAIL_POINT * k
+            pts.append({"lat_u": lat + i16(q) * TRAIL_UNIT_U, "lon_u": lon + i16(q + 2) * TRAIL_UNIT_U,
+                        "t": t - u16(q + 4)})
+        out.append({"subject": u32(o), "pts": pts})
+        o += TRAIL_HEADER + TRAIL_POINT * count
+    return out
 
 
 def decode_history(blob):
@@ -1227,7 +1261,14 @@ async def pull_once(session, auth, data, ap_name, want_traffic):
         data.note("error", message)
         return False
     body = await session.ask(OP_GET_STATUS, OP_STATUS)
-    data.store("status", json.loads(body.decode("utf-8")), ap_name)
+    status = json.loads(body.decode("utf-8"))
+    try:
+        # D99: where people walked, kept with the positions it belongs beside. An AP on firmware
+        # from before trails answers "unknown request", and the map is then as it was.
+        status["trails"] = decode_trails(await session.ask(OP_GET_TRAILS, OP_TRAILS))
+    except LinkError:
+        status["trails"] = []
+    data.store("status", status, ap_name)
     body = await session.ask(OP_GET_HISTORY, OP_HISTORY)
     data.store("history", decode_history(body), ap_name)
     if want_traffic:
@@ -1416,6 +1457,10 @@ PAGE = r"""<!doctype html>
   .loc-tiles { position: absolute; inset: 0; }
   .loc-tiles img { position: absolute; width: 256px; height: 256px; }
   .loc-pins { position: absolute; inset: 0; }
+  .loc-step { position: absolute; width: 9px; height: 9px; margin: -5px 0 0 -5px; border-radius: 50%;
+              background: #2f7bff; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .55); }
+  .loc-path { position: absolute; height: 3px; margin-top: -2px; background: #2f7bff; transform-origin: 0 50%;
+              box-shadow: 0 0 0 1px rgba(255, 255, 255, .8); }
   .loc-tie { position: absolute; height: 1px; background: var(--muted); transform-origin: 0 0; opacity: .7; }
   .loc-cluster { position: absolute; transform: translate(-50%, -50%); min-width: 26px; height: 26px;
     border-radius: 13px; background: var(--accent); color: var(--accent-ink); font-size: 13px;
@@ -1540,6 +1585,7 @@ PAGE = r"""<!doctype html>
           <tbody id="loc-body"></tbody>
         </table>
       </div>
+      <div id="loc-trails"></div>
       <p class="hint">Positions stay in memory on the APs and handhelds, never in flash, and are shown only here, behind the login. This laptop never sends a coordinate anywhere: map tiles are the only thing fetched, and a tile is asked for by its grid square.</p>
     </div>
   </section>
@@ -1798,14 +1844,17 @@ function dms(v, pos, neg) {
 }
 
 let mapKey = "", tilesWork = null;
+let mapWalks = [];   /* D99: the trails being drawn, each { subject, name, pts: [{lat, lon, t}] }, newest first */
 /* Tiles come through this tool (/tile/z/x/y.png), which asks OpenStreetMap with a proper
    User-Agent and fetches only the squares this map shows. No coordinate is ever in a URL. */
 function drawTiles(pins) {
   const box = $("loc-tiles"), layer = $("loc-pins");
   const w = box.clientWidth || 600, h = box.clientHeight || 320, margin = 46;
-  let z = 17, lo, hi;
+  /* A trail's steps are ten metres apart, so with one to show the map may go two levels closer. */
+  let z = mapWalks.length ? 19 : 17, lo, hi;
+  const fit = [...pins, ...mapWalks.flatMap(k => k.pts)];
   for (; z >= 10; z--) {
-    const pts = pins.map(p => worldPx(p.lat, p.lon, z));
+    const pts = fit.map(p => worldPx(p.lat, p.lon, z));
     lo = { x: Math.min(...pts.map(p => p.x)), y: Math.min(...pts.map(p => p.y)) };
     hi = { x: Math.max(...pts.map(p => p.x)), y: Math.max(...pts.map(p => p.y)) };
     if (hi.x - lo.x <= w - 2 * margin && hi.y - lo.y <= h - 2 * margin) break;
@@ -1836,6 +1885,24 @@ function drawTiles(pins) {
   }
   if (!wanted) { tilesWork = false; showMapMode(pins); }
   layer.replaceChildren();
+  /* D99: each trail as a line through its steps, under the pins. The newest step is the person's pin. */
+  for (const k of mapWalks) {
+    const at = k.pts.map(p => { const q = worldPx(p.lat, p.lon, z); return { x: q.x - left, y: q.y - top }; });
+    for (let i = 0; i + 1 < at.length; i++) {
+      const dx = at[i + 1].x - at[i].x, dy = at[i + 1].y - at[i].y;
+      const seg = el("div", "loc-path");
+      seg.style.left = at[i].x + "px"; seg.style.top = at[i].y + "px";
+      seg.style.width = Math.hypot(dx, dy) + "px";
+      seg.style.transform = "rotate(" + Math.atan2(dy, dx) + "rad)";
+      layer.append(seg);
+    }
+    for (let i = 1; i < at.length; i++) {
+      const dot = el("div", "loc-step");
+      dot.style.left = Math.round(at[i].x) + "px"; dot.style.top = Math.round(at[i].y) + "px";
+      dot.title = k.name + ", step " + (at.length - i) + " of " + at.length + ", " + new Date(k.pts[i].t * 1000).toLocaleTimeString();
+      layer.append(dot);
+    }
+  }
   /*
    * Devices in the same room land on the same few pixels - a handheld two metres from MAIN is two
    * pixels away, and consumer GPS scatters them by more than they are really apart. One marker
@@ -1895,12 +1962,14 @@ function drawPlan(pins, main) {
   svg.replaceChildren();
   const W = 600, H = 320, cx = W / 2, cy = H / 2;
   const ref = main || pins[0];
-  const pts = pins.map(p => {
+  const place = p => {
     const db = distBearing(ref, p);
     const a = db.brg * Math.PI / 180;
     return { p, dx: db.d * Math.sin(a), dy: -db.d * Math.cos(a), d: db.d, brg: db.brg };
-  });
-  const span = Math.max(20, ...pts.map(q => Math.hypot(q.dx, q.dy)));
+  };
+  const pts = pins.map(place);
+  const walked = mapWalks.map(k => k.pts.map(place));   /* D99: the trails, on the same plan */
+  const span = Math.max(20, ...pts.map(q => Math.hypot(q.dx, q.dy)), ...walked.flat().map(q => Math.hypot(q.dx, q.dy)));
   const scale = (Math.min(W, H) / 2 - 50) / span;                  /* pixels per metre */
   for (const r of [0.25, 0.5, 1]) {
     svg.append(svgEl("circle", { cx, cy, r: span * scale * r, class: "ring" }));
@@ -1910,6 +1979,15 @@ function drawPlan(pins, main) {
   svg.append(svgEl("line", { x1: cx, y1: 18, x2: cx, y2: H - 18, class: "axis" }));
   svg.append(svgEl("line", { x1: 18, y1: cy, x2: W - 18, y2: cy, class: "axis" }));
   svg.append(Object.assign(svgEl("text", { x: cx + 5, y: 16, class: "dim" }), { textContent: "N" }));
+  for (const steps of walked) {
+    if (steps.length > 1) {
+      svg.append(svgEl("polyline", { points: steps.map(q => (cx + q.dx * scale) + "," + (cy + q.dy * scale)).join(" "),
+        fill: "none", stroke: "#2f7bff", "stroke-width": 2.5 }));
+    }
+    for (const q of steps.slice(1)) {
+      svg.append(svgEl("circle", { cx: cx + q.dx * scale, cy: cy + q.dy * scale, r: 3.5, fill: "#2f7bff", stroke: "#fff" }));
+    }
+  }
   for (const q of pts.sort((a, b) => a.p.ap - b.p.ap)) {
     const x = cx + q.dx * scale, y = cy + q.dy * scale;
     svg.append(svgEl("circle", { cx: x, cy: y, r: q.p.ap ? 7 : 5,
@@ -1926,7 +2004,9 @@ function drawPlan(pins, main) {
 function showMapMode(pins) {
   const online = tilesWork === true;
   $("loc-map").hidden = !online;
-  $("loc-plan").hidden = online;
+  /* An SVG element has no `hidden` property, only the attribute: assigning the property left the plan
+     hidden for ever, which is the one view a laptop with no Internet has. */
+  $("loc-plan").toggleAttribute("hidden", online);
   $("map-mode").textContent = online
     ? "Map tiles from OpenStreetMap, fetched by this tool for the squares shown. The grid itself has no Internet and never sees them."
     : "No map tiles: this laptop has no Internet, or the tile server did not answer. The plan below is drawn here from the coordinates, with distances and bearings; coordinates and the link work either way.";
@@ -1971,7 +2051,12 @@ function renderMap(status, sec) {
     $("loc-ref").textContent = "Where MAIN is is not known: it has no GPS fix, or this AP has not heard it yet.";
     $("loc-link").textContent = "";
   }
-  const key = tab + ";" + ($("loc-tiles").clientWidth) + ";" + pins.map(p => (p.ap ? "a" : "h") + p.id + "@" + p.lat.toFixed(4) + "," + p.lon.toFixed(4) + ":" + p.name).sort().join(";");
+  /* D99: the trails this AP holds, named from the positions (a trail's newest step is one). */
+  mapWalks = (status.trails || []).map(k => ({ subject: k.subject,
+    name: (pins.find(p => !p.ap && p.id === k.subject) || {}).name || ("Handheld " + k.subject),
+    pts: k.pts.map(p => ({ lat: p.lat_u / 1e6, lon: p.lon_u / 1e6, t: p.t })) }));
+  const key = mapWalks.map(k => "t" + k.subject + ":" + k.pts.length + "@" + k.pts[0].t).join(";") +
+    tab + ";" + ($("loc-tiles").clientWidth) + ";" + pins.map(p => (p.ap ? "a" : "h") + p.id + "@" + p.lat.toFixed(4) + "," + p.lon.toFixed(4) + ":" + p.name).sort().join(";");
   if (key !== mapKey) {
     mapKey = key;
     drawPlan(pins, main);
@@ -1990,6 +2075,42 @@ function renderMap(status, sec) {
     cell(tr, from);
     cell(tr, p.live ? "live" : fmtAge(p.fix_time > 0 ? Math.round(now - p.fix_time) : -1));
     body.append(tr);
+  }
+  /*
+   * Every step of every trail with its coordinates, and two buttons that open that spot on a real map
+   * (owner, 2026-10-05: "you should be able to use open maps or Google Maps to be able to show exactly
+   * on the map where they are"). No address with a coordinate in it is in the page: one is made when a
+   * button is pressed, and pressing it is the person choosing to send that one coordinate to that
+   * map's website - which the line above the table says.
+   */
+  const trails = $("loc-trails"); trails.replaceChildren();
+  for (const k of mapWalks) {
+    const n = k.pts.length;
+    trails.append(el("h3", "", k.name + "'s last " + (n === 1 ? "step" : n + " steps")));
+    trails.append(el("p", "hint", (n === 1 ? "Only one step is known, so there is no direction to give yet. " : "") +
+      "Opening a step on a map needs Internet on this laptop and sends that one coordinate to the map's website."));
+    const table = el("table"), head = el("tr"), tb = el("tbody");
+    for (const h of ["Step", "When", "Coordinates", "Open on a map"]) head.append(el("th", "", h));
+    const thead = el("thead"); thead.append(head);
+    k.pts.forEach((p, i) => {
+      const tr = el("tr"), la = p.lat.toFixed(6), lo = p.lon.toFixed(6);
+      cell(tr, (n - i) + (i === 0 ? " (last)" : i === n - 1 ? " (first)" : ""));
+      cell(tr, new Date(p.t * 1000).toLocaleTimeString() + ", " + fmtAge(Math.round(now - p.t)));
+      cell(tr, p.lat.toFixed(5) + ", " + p.lon.toFixed(5), "mono");
+      const open = el("td");
+      for (const [label, make] of [
+        ["OpenStreetMap", () => "https://www.openstreetmap.org/?mlat=" + la + "&mlon=" + lo + "#map=19/" + la + "/" + lo],
+        ["Google Maps", () => "https://www.google.com/maps/search/?api=1&query=" + la + "," + lo]]) {
+        const b = el("button", "act ghost", label);
+        b.addEventListener("click", () => window.open(make(), "_blank", "noopener,noreferrer"));
+        open.append(b, " ");
+      }
+      tr.append(open);
+      tb.append(tr);
+    });
+    table.append(thead, tb);
+    const wrap = el("div", "table"); wrap.append(table);
+    trails.append(wrap);
   }
 }
 
@@ -2604,7 +2725,9 @@ TILE_UA = "LocalGrid-grid-watch/1.0 (offline network monitor; one laptop, no bul
 TILE_CACHE_MAX = 512             # tiles kept in memory; nothing is written to disk
 TILE_MAX_INFLIGHT = 2            # OpenStreetMap's tile policy: no heavy parallel fetching
 TILE_RETRY_S = 15.0              # after a failure, stop asking for a while (offline laptop)
-TILE_SAME_LIMIT = 4              # the same picture for this many squares means the server refused us
+TILE_SAME_LIMIT = 2              # the same picture for this many squares means the server refused us: its
+                                 # "Access blocked" notice came twice among timeouts on 2026-10-05 and was
+                                 # shown as if it were the map
 
 
 class TileCache:
@@ -2843,7 +2966,7 @@ class MockAP:
     """One AP's side of the admin link. Chunks small on purpose, to exercise reassembly."""
 
     def __init__(self, key, password=MOCK_PASSWORD, ap=0, boot=41, session=0x9C3A,
-                 status=b"{}", history=b"", traffic=b"", chunk=24):
+                 status=b"{}", history=b"", traffic=b"", trails=None, chunk=24):
         self.key = key
         self.ap = ap
         self.boot = boot
@@ -2851,6 +2974,7 @@ class MockAP:
         self.status = status
         self.history = history
         self.traffic = traffic
+        self.trails = trails         # None: an AP from before D99, which does not know the request
         self.chunk = chunk
         self.hash = login_hash(password, MOCK_SALT, MOCK_ITERATIONS)
         self.rx = 0
@@ -2903,6 +3027,8 @@ class MockAP:
             await self._reply(OP_HISTORY, self.history)
         elif opcode == OP_GET_TRAFFIC:
             await self._reply(OP_TRAFFIC, self.traffic)
+        elif opcode == OP_GET_TRAILS and self.trails is not None:
+            await self._reply(OP_TRAILS, self.trails)
         else:
             await self._reply(OP_ERROR, bytes([2]) + b"unknown request")
 
@@ -3098,10 +3224,21 @@ def sample_traffic_blob(voice_dropped=12, heap_min=18 * 1024, queue_high=17, lor
     return bytes(out)
 
 
-async def run_mock_link(key, auth, data, password_ok=True, want_traffic=True, ap_name="MAIN"):
+def sample_trails_blob():
+    """One trail as an AP sends it: Priya's newest step where her position is, and two before it."""
+    out = bytearray([1, 1, 0, 0]) + (1789699940).to_bytes(4, "little")
+    out += (3).to_bytes(4, "little") + (47625100).to_bytes(4, "little", signed=True)
+    out += (13048900).to_bytes(4, "little", signed=True) + (1789699800).to_bytes(4, "little") + bytes([2])
+    for dlat, dlon, age in ((-9, -12, 8), (-18, -20, 17)):
+        out += dlat.to_bytes(2, "little", signed=True) + dlon.to_bytes(2, "little", signed=True)
+        out += age.to_bytes(2, "little")
+    return bytes(out)
+
+
+async def run_mock_link(key, auth, data, password_ok=True, want_traffic=True, ap_name="MAIN", trails=True):
     """The whole conversation against MockAP, with no radio and no AP."""
     mock = MockAP(key, status=sample_status_json(), history=sample_history_blob(),
-                  traffic=sample_traffic_blob())
+                  traffic=sample_traffic_blob(), trails=sample_trails_blob() if trails else None)
     session = LinkSession(key, mock.write)
     mock.notify = session.feed
     mock.subscribe()
@@ -3313,8 +3450,8 @@ def self_check():
           link.snapshot(t0, False)["sections"] == {})
     auth.set_password(MOCK_PASSWORD)
     mock, sess, ok = asyncio.run(run_mock_link(lk, auth, link))
-    check("HELLO, LOGIN, GET_STATUS, GET_HISTORY and GET_TRAFFIC all ran in order",
-          ok and mock.seen == [OP_HELLO, OP_LOGIN, OP_GET_STATUS, OP_GET_HISTORY, OP_GET_TRAFFIC])
+    check("HELLO, LOGIN, GET_STATUS, GET_TRAILS, GET_HISTORY and GET_TRAFFIC all ran in order",
+          ok and mock.seen == [OP_HELLO, OP_LOGIN, OP_GET_STATUS, OP_GET_TRAILS, OP_GET_HISTORY, OP_GET_TRAFFIC])
     check("the session the AP picked is used, and each direction counts its own messages",
           sess.session == mock.session and sess.tx_counter == mock.rx and sess.rx_counter == mock.tx)
     lone = LinkSession(lk, None)
@@ -3338,6 +3475,23 @@ def self_check():
     check("positions decode in micro-degrees, APs and handhelds apart",
           pos["MAIN"]["ap"] and abs(pos["MAIN"]["lat_u"] / 1e6 - 47.62345) < 1e-6
           and not pos["Priya"]["ap"] and pos["Priya"]["sats"] == 7)
+
+    walk = stat["trails"]
+    check("the /api/trails bytes decode: whose, the newest step where their position is, the ones before it",
+          len(walk) == 1 and walk[0]["subject"] == 3 and len(walk[0]["pts"]) == 3
+          and walk[0]["pts"][0] == {"lat_u": pos["Priya"]["lat_u"], "lon_u": pos["Priya"]["lon_u"], "t": 1789699800}
+          and walk[0]["pts"][2] == {"lat_u": 47625100 - 180, "lon_u": 13048900 - 200, "t": 1789699800 - 17})
+    for bad in (b"", b"\x02" + bytes(7), sample_trails_blob()[:-1]):
+        try:
+            decode_trails(bad)
+            refused = False
+        except LinkError:
+            refused = True
+        check("trail bytes that are short, another layout or cut off are refused", refused)
+    old_link = LinkData()
+    _, _, old_ok = asyncio.run(run_mock_link(lk, auth, old_link, trails=False))
+    check("an AP from before trails still answers everything else, with no trails",
+          old_ok and old_link.snapshot(t0, True)["sections"]["status"]["data"]["trails"] == [])
 
     hist = served["history"]["data"]
     check("the /api/history bytes decode: three APs, names, uptime, last restart",

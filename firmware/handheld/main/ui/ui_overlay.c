@@ -66,9 +66,14 @@ static const char *TAG = "UI";
  */
 #define RAIN_FADE_STOPS   4
 #define LABEL_CHARS_MAX   40     /* letters per label line: HH_NAME_MAX plus room for "LoRa to " */
-#define LABEL_LINES       4      /* this handheld's name, its access point, the grid's time, battery and messages */
-#define LABEL_CLOCK       2      /* the line that holds the time */
-#define LABEL_FACTS       3      /* the line that holds the battery and the messages waiting */
+/*
+ * Two lines, and a third only when something is waiting (owner, 2026-10-05: "It shouldn't take four
+ * lines to be able to tell that"): who and where - "Bluey on Fuji" - then the time and the battery,
+ * then the count of new messages when there are any.
+ */
+#define LABEL_LINES       3
+#define LABEL_CLOCK       1      /* the line that holds the time and the battery */
+#define LABEL_FACTS       2      /* the line that holds the messages waiting; empty when there are none */
 #define LABEL_REST        2      /* the ramp stop a label letter settles at: readable, plainly green */
 #define LABEL_DECAY_STEPS 3      /* rain steps between one stop and the next on the way down */
 #define CONVS_TRACKED     (LG_MAX_DEVICES + LG_MAX_GROUPS + 1)
@@ -169,11 +174,12 @@ static struct {
      */
     char      who[HH_NAME_MAX];
     char      ap[HH_SSID_MAX + 12];
+    char      line0[HH_NAME_MAX + HH_SSID_MAX + 14];   /* the two as the one line that is drawn */
     /*
      * The grid's time, as a third line drawn exactly like the two names (owner, 2026-10-04): hours and
      * minutes as the launcher shows them, or "time not set" when the grid has none (D6).
      */
-    char      clock[16];
+    char      clock[32];
     /*
      * The battery and the messages that have arrived and not been looked at (owner, 2026-10-04), drawn
      * the same way. With the saver on nobody is looking, so that count is what has come in since.
@@ -286,6 +292,16 @@ static void hide_banner(void)
         s.banner = false;
         ui_redraw_current();
     }
+}
+
+bool ui_overlay_make_way(uint32_t now_ms)
+{
+    if (s.cover == OV_SAVER) {
+        s.cover = OV_NONE;
+        woke_ms = now_ms;   /* or the rain is back before the screen asked for has been looked at */
+        ESP_LOGI(TAG, "[UI] Screen saver off: a screen was asked for");
+    }
+    return s.cover == OV_NONE;
 }
 
 void ui_overlay_screen_painted(void)
@@ -599,9 +615,9 @@ static void show_saver(uint32_t now)
     }
     s.rain_ms = now;
     s.label_on = false;
-    s.who[0] = s.ap[0] = s.clock[0] = s.facts[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
+    s.who[0] = s.ap[0] = s.line0[0] = s.clock[0] = s.facts[0] = '\0';   /* forces saver_label_tick to paint them on the first step */
     saver_label_tick();
-    ESP_LOGI(TAG, "[UI] Screen saver on: %s %s, %s, %s", s.who, s.ap, s.clock, s.facts);
+    ESP_LOGI(TAG, "[UI] Screen saver on: [%s] [%s] [%s]", s.line0, s.clock, s.facts);
 }
 
 /*
@@ -628,7 +644,7 @@ static uint8_t utf8_len(uint8_t lead)
 
 static const char *label_text(uint8_t line)
 {
-    return line == 0u ? s.who : line == 1u ? s.ap : line == LABEL_CLOCK ? s.clock : s.facts;
+    return line == 0u ? s.line0 : line == LABEL_CLOCK ? s.clock : s.facts;
 }
 
 /* One letter, in the colour its level says. */
@@ -822,26 +838,33 @@ static void saver_label_tick(void)
     } else {
         struct tm lt;
         hh_local_time(st->grid_time, &lt);   /* D67: the grid's zone */
-        snprintf(clock, sizeof(clock), "%02u:%02u", (unsigned)lt.tm_hour % 100u, (unsigned)lt.tm_min % 100u);
+        unsigned hour = (unsigned)lt.tm_hour % 24u;
+        snprintf(clock, sizeof(clock), "%u:%02u %s", hour % 12u == 0u ? 12u : hour % 12u, (unsigned)lt.tm_min % 60u,
+                 hour < 12u ? "AM" : "PM");
+    }
+    int8_t batt = hh_service_battery_percent();
+    if (batt >= 0) {   /* no sense pin on this board: nothing to say (D62) */
+        size_t at = strlen(clock);
+        snprintf(clock + at, sizeof(clock) - at, "   %d%%", (int)batt);
     }
     char facts[sizeof(s.facts)];
     char msgs[20];
     uint32_t unread = ui_notify_unread_total();
     if (unread == 0) {
-        snprintf(msgs, sizeof(msgs), "%s", "no messages");
+        msgs[0] = '\0';   /* nothing new is nothing to say (owner, 2026-10-05) */
     } else {
-        snprintf(msgs, sizeof(msgs), "%" PRIu32 " %s", unread > 999u ? 999u : unread,
+        snprintf(msgs, sizeof(msgs), "%" PRIu32 " new %s", unread > 999u ? 999u : unread,
                  unread == 1 ? "message" : "messages");
     }
-    int8_t batt = hh_service_battery_percent();
-    if (batt >= 0) {
-        snprintf(facts, sizeof(facts), "%d%%   %s", (int)batt, msgs);
-    } else {
-        snprintf(facts, sizeof(facts), "%s", msgs);   /* no sense pin on this board: nothing to say (D62) */
-    }
+    snprintf(facts, sizeof(facts), "%s", msgs);
     if (strcmp(who, s.who) != 0 || strcmp(ap, s.ap) != 0 || !s.label_on) {
         snprintf(s.who, sizeof(s.who), "%s", who);
         snprintf(s.ap, sizeof(s.ap), "%s", ap);
+        /* One line. A name and an AP too long for the screen together keep the AP, which is the news. */
+        snprintf(s.line0, sizeof(s.line0), "%s %s", who, ap);
+        if (lg_draw_text_width(&lg_font_montserrat_16, NULL, s.line0) > (int16_t)s.w - 8) {
+            snprintf(s.line0, sizeof(s.line0), "%s", ap);
+        }
         snprintf(s.clock, sizeof(s.clock), "%s", clock);
         snprintf(s.facts, sizeof(s.facts), "%s", facts);
         saver_label_paint();

@@ -301,6 +301,13 @@ static void test_policy(void)
     CHECK(!lora_is_alert_frame(frame, n));
     n = make_frame(LG_T_NAME, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 12);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
+    /* D99: a trail waits for room between APs, and a handheld may send one and ask for one. */
+    n = make_frame(LG_T_TRAIL, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), LG_TRAIL_LEN_MAX);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
+    CHECK(lglh_type_allowed(frame, n));
+    n = make_frame(LG_T_TRAIL_REQ, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), LG_TRAIL_REQ_LEN);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    CHECK(lglh_type_allowed(frame, n));
     /* An urgent one still goes at once: the class never outranks an alert. */
     n = make_frame(LG_T_GRID_STATE, LG_SCOPE_SYSTEM, LG_FLAG_URGENT, frame, sizeof(frame), 40);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_ALWAYS);

@@ -154,6 +154,7 @@ typedef enum {
     LG_CEV_VOICE_REFUSED,    /* value: lg_ack_status_t an AP refused our voice with (D61) */
     LG_CEV_POSITION,         /* value: subject whose position is newer (device, or LG_NODE_ID_BASE | node) (D65) */
     LG_CEV_TIME_ZONE,        /* value: length of the new zone; lg_client_time_zone has it (D67) */
+    LG_CEV_TRAIL,            /* value: the person whose trail, asked for, has arrived or is newer (D99) */
 } lg_client_event_type_t;
 
 typedef struct {
@@ -217,6 +218,8 @@ typedef struct {
     lg_voice_seen_t    voice_seen[LG_MAX_DEVICES];   /* newest voice per author, by roster user index */
     lg_position_t      positions[LG_POS_SLOTS];      /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
     char               tz[LG_TZ_MAX + 1];            /* D67: the grid's POSIX TZ from the AP; "" none yet */
+    uint32_t           trail_want;                   /* D99: whose trail was last asked for, 0 none */
+    lg_trail_t         trail;                        /* ... and the newest answer; fix_time 0 = none; RAM only */
 } lg_client_t;
 
 void lg_client_init(lg_client_t *c, uint32_t device, uint32_t boot, const uint8_t *pubkey,
@@ -340,6 +343,24 @@ int lg_client_send_position(lg_client_t *c, int32_t lat_u, int32_t lon_u, uint32
 
 /* The newest position known for subject (device, or LG_NODE_ID_BASE | node), or NULL. */
 const lg_position_t *lg_client_position(const lg_client_t *c, uint32_t subject);
+
+/*
+ * Trails (D99), RAM only. A handheld keeps its own last steps (the caller does: the core holds no
+ * copy) and sends them with lg_client_send_trail as it moves; subject is set to this handheld. Sent
+ * once with no retry, and offered to the transport with or without a session, so a handheld on LoRa
+ * alone can still say where it has been. Returns LG_OK, LG_ERR_ARG (coordinates or fix time out of
+ * range, more than LG_TRAIL_POINTS - 1 older points), or LG_ERR_SHORT (no session took it).
+ *
+ * A trail is fetched, not pushed: lg_client_request_trail asks the AP for one person's trail and
+ * LG_CEV_TRAIL says when it, or a newer one asked for again, has arrived. One is held at a time:
+ * asking for a different person forgets the last. A handheld may ask for its own, which is how one
+ * that restarted gets back the steps it walked before (D53). Returns LG_OK, LG_ERR_ARG (subject 0),
+ * or LG_ERR_SHORT.
+ */
+int lg_client_send_trail(lg_client_t *c, const lg_trail_t *trail);
+int lg_client_request_trail(lg_client_t *c, uint32_t subject);
+/* The trail last received for subject, or NULL. */
+const lg_trail_t *lg_client_trail(const lg_client_t *c, uint32_t subject);
 
 #ifdef __cplusplus
 }

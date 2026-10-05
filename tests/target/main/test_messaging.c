@@ -1167,6 +1167,293 @@ static void test_positions(void)
     sim_destroy(s);
 }
 
+/* ---- trails (D99) ---- */
+
+/* Sends a frame of a SYSTEM-family type on a client's session, as a handheld would, with any body. */
+static void send_session_frame(sim_t *s, int client, uint8_t type, const uint8_t *body, size_t body_len,
+                               uint8_t scope, uint32_t target, uint32_t seq)
+{
+    lg_env_t e = {
+        .type = type, .scope = scope, .target = target,
+        .origin_id = s->clients[client].client.device, .origin_boot = 1, .origin_seq = seq,
+    };
+    uint8_t frame[LG_FRAME_MAX];
+    int len = lg_frame_build(&e, body, body_len, frame, sizeof(frame));
+    CHECK(len > 0);
+    int node = s->clients[client].node;
+    lg_node_on_session_frame(&s->nodes[node].node, &s->clients[client].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+}
+
+/* A trail as another AP would flood it, handed to `node` as if from its neighbour `from`. */
+static void backbone_trail(sim_t *s, int node, uint16_t from, const lg_trail_t *t, uint32_t seq)
+{
+    uint8_t body[LG_TRAIL_LEN_MAX];
+    size_t blen = lg_trail_enc(t, body);
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.major = LG_PROTO_MAJOR;
+    e.minor = LG_PROTO_MINOR;
+    e.type = LG_T_TRAIL;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.target = t->subject;
+    e.ttl = LG_TTL_DEFAULT;
+    e.origin_id = LG_NODE_ID_BASE | from;
+    e.origin_node = from;
+    e.origin_boot = 1;
+    e.origin_seq = seq;
+    uint8_t frame[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, frame, sizeof(frame));
+    CHECK(flen > 0);
+    lg_node_on_backbone_frame(&s->nodes[node].node, from, frame, (size_t)flen);
+    CHECK(sim_pump(s));
+}
+
+static bool trail_is(const lg_trail_t *t, uint32_t subject, int32_t lat, int32_t lon, uint32_t fix, uint8_t count)
+{
+    return t != NULL && t->subject == subject && t->lat_u == lat && t->lon_u == lon && t->fix_time == fix &&
+           t->count == count;
+}
+
+static void test_trail_body(void)
+{
+    lg_trail_t t = {
+        .subject = LG_PROTO_EMMA, .lat_u = -33868800, .lon_u = -151209300, .fix_time = T0, .count = 3,
+        .older = { { -9, 12, 7 }, { -20, 30, 15 }, { 32767, -32768, 65535 } },
+    };
+    uint8_t wire[LG_TRAIL_LEN_MAX + 8];
+    lg_trail_t back;
+    CHECK_EQ(LG_TRAIL_LEN_MAX, 107u);
+    CHECK_EQ(lg_trail_enc(&t, wire), 17u + 18u);
+    CHECK(lg_trail_dec(wire, 35, &back));
+    CHECK(trail_is(&back, LG_PROTO_EMMA, -33868800, -151209300, T0, 3));
+    CHECK(back.older[0].dlat == -9 && back.older[0].dlon == 12 && back.older[0].age_s == 7);
+    CHECK(back.older[2].dlat == 32767 && back.older[2].dlon == -32768 && back.older[2].age_s == 65535);
+    CHECK_EQ(wire[16], 3);
+    CHECK_EQ(wire[17], 0xF7);   /* -9, little-endian */
+    CHECK_EQ(wire[18], 0xFF);
+    CHECK_EQ(wire[21], 7);
+    CHECK(!lg_trail_dec(wire, 34, &back));
+    CHECK(!lg_trail_dec(wire, 36, &back));
+    CHECK(!lg_trail_dec(wire, 16, &back));
+
+    /* Just the newest point is a trail too; so is a full one, and one more than full is not. */
+    lg_trail_t one = t;
+    one.count = 0;
+    CHECK_EQ(lg_trail_enc(&one, wire), 17u);
+    CHECK(lg_trail_dec(wire, 17, &back));
+    CHECK_EQ(back.count, 0);
+    lg_trail_t full = t;
+    full.count = LG_TRAIL_POINTS - 1u;
+    for (unsigned i = 0; i < LG_TRAIL_POINTS - 1u; i++) {
+        full.older[i] = (lg_trail_point_t){ (int16_t)i, (int16_t)-i, (uint16_t)(i * 9u) };
+    }
+    CHECK_EQ(lg_trail_enc(&full, wire), LG_TRAIL_LEN_MAX);
+    CHECK(lg_trail_dec(wire, LG_TRAIL_LEN_MAX, &back));
+    CHECK_EQ(back.older[14].age_s, 126);
+    full.count = 99;   /* the encoder never writes past what a trail holds */
+    CHECK_EQ(lg_trail_enc(&full, wire), LG_TRAIL_LEN_MAX);
+    memset(wire + LG_TRAIL_LEN_MAX, 0, 6);
+    wire[16] = LG_TRAIL_POINTS;
+    CHECK(!lg_trail_dec(wire, LG_TRAIL_LEN_MAX + 6u, &back));
+
+    lg_trail_t bad = t;
+    bad.subject = 0;
+    (void)lg_trail_enc(&bad, wire);
+    CHECK(!lg_trail_dec(wire, 35, &back));
+    bad = t;
+    bad.subject = LG_NODE_ID_BASE | 1u;   /* an AP has a position and no trail */
+    (void)lg_trail_enc(&bad, wire);
+    CHECK(!lg_trail_dec(wire, 35, &back));
+    bad = t;
+    bad.lat_u = 90000001;
+    (void)lg_trail_enc(&bad, wire);
+    CHECK(!lg_trail_dec(wire, 35, &back));
+    bad = t;
+    bad.fix_time = LG_POS_TIME_MIN - 1u;
+    (void)lg_trail_enc(&bad, wire);
+    CHECK(!lg_trail_dec(wire, 35, &back));
+    bad = t;
+    bad.older[1].age_s = 6;   /* younger than the point before it */
+    (void)lg_trail_enc(&bad, wire);
+    CHECK(!lg_trail_dec(wire, 35, &back));
+}
+
+/* D99: a handheld's last steps are held by every AP, outlive the handheld, and are fetched on request. */
+static void test_trails(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_trail_t walk = {
+        .lat_u = LAT0, .lon_u = LON0, .fix_time = T0, .count = 2, .older = { { -9, 0, 8 }, { -18, 3, 17 } },
+    };
+
+    /* Arguments are checked before anything is sent. */
+    lg_trail_t bad = walk;
+    bad.lat_u = 90000001;
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), &bad), LG_ERR_ARG);
+    bad = walk;
+    bad.count = LG_TRAIL_POINTS;
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), &bad), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), NULL), LG_ERR_ARG);
+    CHECK_EQ(lg_client_request_trail(cl(s, DAD), 0), LG_ERR_ARG);
+
+    /* Dad walks on A. Every AP holds his trail; no handheld is sent it unasked. */
+    walk.subject = 77;   /* whatever the caller wrote: the handheld signs its own */
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), &walk), LG_OK);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_trail_t *held = lg_node_trail(&s->nodes[i].node, LG_PROTO_DAD);
+        CHECK(trail_is(held, LG_PROTO_DAD, LAT0, LON0, T0, 2));
+        CHECK(held != NULL && held->older[1].dlat == -18 && held->older[1].dlon == 3 && held->older[1].age_s == 17);
+        CHECK_EQ(lg_node_trail_count(&s->nodes[i].node), 1u);
+        /* ... and its newest point is where he is: the way a handheld on LoRa alone is placed */
+        CHECK(pos_is(lg_node_position(&s->nodes[i].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0));
+    }
+    for (int i = 0; i < SIM_CLIENTS; i++) {
+        CHECK_EQ(s->clients[i].trail_events, 0u);
+        CHECK(lg_client_trail(cl(s, i), LG_PROTO_DAD) == NULL);
+    }
+    CHECK_EQ(s->clients[EMMA].position_events, 1u);
+    CHECK_EQ(s->clients[RANGER].position_events, 1u);
+    CHECK_EQ(s->clients[DAD].position_events, 0u);   /* not echoed to the one who walked it */
+    CHECK(pos_is(lg_client_position(cl(s, EMMA), LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0));
+
+    /* Emma, two hops away, asks for it. */
+    CHECK_EQ(lg_client_request_trail(cl(s, EMMA), LG_PROTO_DAD), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].trail_events, 1u);
+    CHECK_EQ(s->clients[EMMA].last_trail, LG_PROTO_DAD);
+    const lg_trail_t *got = lg_client_trail(cl(s, EMMA), LG_PROTO_DAD);
+    CHECK(trail_is(got, LG_PROTO_DAD, LAT0, LON0, T0, 2));
+    CHECK(got != NULL && got->older[0].dlat == -9 && got->older[0].age_s == 8);
+    CHECK(lg_client_trail(cl(s, EMMA), LG_PROTO_ALEX) == NULL);
+    CHECK_EQ(s->clients[ALEX].trail_events, 0u);   /* only the one who asked */
+
+    /* Asking again with nothing new says nothing; asking for someone with no trail gets no answer. */
+    CHECK_EQ(lg_client_request_trail(cl(s, EMMA), LG_PROTO_DAD), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].trail_events, 1u);
+    CHECK_EQ(lg_client_request_trail(cl(s, RANGER), LG_PROTO_ALEX), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[RANGER].trail_events, 0u);
+
+    /* An older or equal trail goes nowhere and changes nothing. */
+    uint32_t fwd = s->nodes[0].node.stats.forwarded;
+    lg_trail_t stale = walk;
+    stale.lat_u = LAT0 + 500;
+    stale.fix_time = T0 - 5u;
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), &stale), LG_OK);
+    CHECK(sim_pump(s));
+    stale.fix_time = T0;
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), &stale), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.forwarded, fwd);
+    CHECK(trail_is(lg_node_trail(&s->nodes[2].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0, 2));
+
+    /* A newer one replaces it on every AP, once, even with every backbone frame delivered twice. */
+    lg_trail_t next = {
+        .lat_u = LAT0 + 90, .lon_u = LON0, .fix_time = T0 + 9u, .count = 3,
+        .older = { { -9, 0, 9 }, { -18, 0, 17 }, { -27, 3, 26 } },
+    };
+    s->duplicate_backbone = true;
+    CHECK_EQ(lg_client_send_trail(cl(s, DAD), &next), LG_OK);
+    CHECK(sim_pump(s));
+    s->duplicate_backbone = false;
+    for (int i = 0; i < SIM_NODES; i++) {
+        CHECK(trail_is(lg_node_trail(&s->nodes[i].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 90, LON0, T0 + 9u, 3));
+        CHECK_EQ(lg_node_trail_count(&s->nodes[i].node), 1u);
+    }
+    CHECK_EQ(s->clients[EMMA].trail_events, 1u);   /* still not pushed */
+    CHECK_EQ(s->clients[EMMA].position_events, 2u);   /* but where he is now, is */
+    CHECK_EQ(lg_client_request_trail(cl(s, EMMA), LG_PROTO_DAD), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].trail_events, 2u);
+    CHECK(trail_is(lg_client_trail(cl(s, EMMA), LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 90, LON0, T0 + 9u, 3));
+
+    /* Asking for someone else forgets the one held. */
+    CHECK_EQ(lg_client_request_trail(cl(s, EMMA), LG_PROTO_ALEX), LG_OK);
+    CHECK(lg_client_trail(cl(s, EMMA), LG_PROTO_DAD) == NULL);
+    CHECK(sim_pump(s));
+
+    /* Refusals: drawing someone else's trail, a body the wrong length, a scope other than system. */
+    uint32_t rejected = s->nodes[0].node.stats.rejected;
+    uint32_t malformed = s->nodes[0].node.stats.malformed;
+    uint8_t body[LG_TRAIL_LEN_MAX + 4];
+    lg_trail_t spoof = { .subject = LG_PROTO_EMMA, .lat_u = 1, .lon_u = 1, .fix_time = T0 + 999u };
+    size_t blen = lg_trail_enc(&spoof, body);
+    send_session_frame(s, DAD, LG_T_TRAIL, body, blen, LG_SCOPE_SYSTEM, LG_PROTO_EMMA, 9201);
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected + 1);
+    CHECK(lg_node_trail(&s->nodes[0].node, LG_PROTO_EMMA) == NULL);
+    CHECK(lg_node_position(&s->nodes[0].node, LG_PROTO_EMMA) == NULL);
+    lg_trail_t mine = { .subject = LG_PROTO_DAD, .lat_u = 1, .lon_u = 1, .fix_time = T0 + 999u, .count = 1 };
+    blen = lg_trail_enc(&mine, body);
+    send_session_frame(s, DAD, LG_T_TRAIL, body, blen - 1u, LG_SCOPE_SYSTEM, LG_PROTO_DAD, 9202);
+    send_session_frame(s, DAD, LG_T_TRAIL, body, blen, LG_SCOPE_DIRECT, LG_PROTO_DAD, 9203);
+    send_session_frame(s, DAD, LG_T_TRAIL_REQ, body, LG_TRAIL_REQ_LEN + 1u, LG_SCOPE_SYSTEM, LG_PROTO_DAD, 9204);
+    send_session_frame(s, DAD, LG_T_TRAIL_REQ, body, LG_TRAIL_REQ_LEN, LG_SCOPE_DIRECT, LG_PROTO_DAD, 9205);
+    CHECK_EQ(s->nodes[0].node.stats.malformed, malformed + 4);
+    CHECK(trail_is(lg_node_trail(&s->nodes[0].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 90, LON0, T0 + 9u, 3));
+
+    /* A handheld with no session still offers its trail to the radio; "no session took it" is the answer. */
+    sim_detach(s, ALEX);
+    lg_trail_t alex = { .lat_u = LAT0, .lon_u = LON0 + 40, .fix_time = T0 + 20u };
+    CHECK_EQ(lg_client_send_trail(cl(s, ALEX), &alex), LG_ERR_SHORT);
+    CHECK(lg_node_trail(&s->nodes[1].node, LG_PROTO_ALEX) == NULL);
+    sim_attach(s, ALEX, 1);
+
+    /* A split grid: a trail walked on one side reaches the other when the link comes back. */
+    sim_link(s, 1, 2, false);
+    CHECK_EQ(lg_client_send_trail(cl(s, ALEX), &alex), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(trail_is(lg_node_trail(&s->nodes[0].node, LG_PROTO_ALEX), LG_PROTO_ALEX, LAT0, LON0 + 40, T0 + 20u, 0));
+    CHECK(lg_node_trail(&s->nodes[2].node, LG_PROTO_ALEX) == NULL);
+    sim_link(s, 1, 2, true);
+    CHECK(trail_is(lg_node_trail(&s->nodes[2].node, LG_PROTO_ALEX), LG_PROTO_ALEX, LAT0, LON0 + 40, T0 + 20u, 0));
+    CHECK(pos_is(lg_node_position(&s->nodes[2].node, LG_PROTO_ALEX), LG_PROTO_ALEX, LAT0, LON0 + 40, T0 + 20u));
+
+    /* A handheld that restarted asks for its own trail and has its steps back (D53). */
+    sim_detach(s, DAD);
+    sim_attach(s, DAD, 0);
+    CHECK(lg_client_trail(cl(s, DAD), LG_PROTO_DAD) == NULL);
+    CHECK_EQ(lg_client_request_trail(cl(s, DAD), LG_PROTO_DAD), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].trail_events, 1u);
+    CHECK(trail_is(lg_client_trail(cl(s, DAD), LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 90, LON0, T0 + 9u, 3));
+
+    /* The handheld is gone; what it walked is still on the AP it was never attached to. */
+    sim_detach(s, DAD);
+    CHECK(trail_is(lg_node_trail(&s->nodes[2].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 90, LON0, T0 + 9u, 3));
+    CHECK_EQ(lg_client_request_trail(cl(s, EMMA), LG_PROTO_DAD), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK(trail_is(lg_client_trail(cl(s, EMMA), LG_PROTO_DAD), LG_PROTO_DAD, LAT0 + 90, LON0, T0 + 9u, 3));
+
+    /* A full table: the stalest trail gives way to a fresher one, and to nothing staler than itself. */
+    lg_node_t *c = &s->nodes[2].node;
+    lg_trail_t other = { .subject = 11, .lat_u = LAT0, .lon_u = LON0, .fix_time = T0 + 30u };
+    backbone_trail(s, 2, 1, &other, 9301);
+    other.subject = 12;
+    other.fix_time = T0 + 31u;
+    backbone_trail(s, 2, 1, &other, 9302);
+    CHECK_EQ(lg_node_trail_count(c), LG_TRAIL_SLOTS);   /* Dad, Alex, 11, 12 */
+    CHECK_EQ(c->trail_evictions, 0u);
+    other.subject = 13;
+    other.fix_time = T0 + 9u;   /* no fresher than the stalest held, Dad's */
+    backbone_trail(s, 2, 1, &other, 9303);
+    CHECK(lg_node_trail(c, 13) == NULL);
+    CHECK_EQ(c->trail_evictions, 0u);
+    other.fix_time = T0 + 40u;
+    backbone_trail(s, 2, 1, &other, 9304);
+    CHECK(trail_is(lg_node_trail(c, 13), 13, LAT0, LON0, T0 + 40u, 0));
+    CHECK(lg_node_trail(c, LG_PROTO_DAD) == NULL);   /* the stalest went */
+    CHECK(lg_node_trail(c, LG_PROTO_ALEX) != NULL);
+    CHECK_EQ(lg_node_trail_count(c), LG_TRAIL_SLOTS);
+    CHECK_EQ(c->trail_evictions, 1u);
+    sim_destroy(s);
+}
+
 /* D65: a handheld reading GPS now gives time to an AP that has none, and never overrides one set. */
 static void test_position_time(void)
 {
@@ -2965,6 +3252,8 @@ void test_messaging(void)
     test_position_body();
     test_positions();
     test_position_time();
+    test_trail_body();
+    test_trails();
     test_voice_body();
     test_voice_compact();
     test_voice_group();

@@ -882,6 +882,7 @@ static void print_devices(void)
 static bool s_gps_owns;   /* this AP's authority came from the GPS, not from a hand */
 static void gps_time(const node_cmd_t *cmd);
 static void print_gps(void);
+static void print_trails(void);
 
 static void handle_command(const node_cmd_t *cmd)
 {
@@ -955,6 +956,9 @@ static void handle_command(const node_cmd_t *cmd)
         break;
     case NODE_CMD_LORA:
         lora_print();
+        break;
+    case NODE_CMD_TRAILS:
+        print_trails();
         break;
     case NODE_CMD_LORA_TEST: {
         if (!lora_fitted()) {
@@ -1060,6 +1064,22 @@ static void gps_time(const node_cmd_t *cmd)
         ESP_LOGW("TIME", "[TIME] Stepped grid time by %+" PRId64 " ms to the GPS", diff);
     } else {
         g_app.time_slew_ms = (int32_t)diff;
+    }
+}
+
+/* D99. Who, how many points and how old: where they walked is never printed (D65). */
+static void print_trails(void)
+{
+    uint32_t now = app_grid_time();
+    printf("Trails held: %u of %u; %" PRIu32 " given up to a fresher one\n", (unsigned)lg_node_trail_count(&g_app.core),
+           (unsigned)LG_TRAIL_SLOTS, g_app.core.trail_evictions);
+    for (size_t i = 0; i < LG_TRAIL_SLOTS; i++) {
+        const lg_trail_t *t = &g_app.core.trails[i];
+        if (t->fix_time == 0) {
+            continue;
+        }
+        printf("  device %" PRIu32 ": %u points over %u s, newest %" PRIu32 " s old\n", t->subject, t->count + 1u,
+               t->count > 0 ? t->older[t->count - 1u].age_s : 0u, now > t->fix_time ? now - t->fix_time : 0u);
     }
 }
 

@@ -406,6 +406,8 @@ Four layers, each independently versioned:
 | 0x22 | PRESENCE_DIGEST | SYSTEM | node → nodes (every 30 s) |
 | 0x23 | NAME | SYSTEM | client → node, node → nodes (flood), node → clients. A handheld's chosen name, versioned, newest wins (D50). Body: u32 device, u32 version, u8 length, 1..23 bytes of UTF-8 |
 | 0x24 | POSITION | SYSTEM | client → node, node → nodes (flood), node → clients. A handheld's or AP's GPS fix, newest fix_time wins, RAM only (D65). Body, 18 bytes: u32 subject (device, or 0x80000000 \| AP), i32 lat µdeg, i32 lon µdeg, u32 fix_time (≥ 1700000000), u8 sats, u8 flags (0x01 LIVE: fix_time is the sender's GPS clock now; an AP with no time takes it as carried) |
+| 0x25 | TRAIL | SYSTEM | client → node, node → nodes (flood), node → a client that asked. A handheld's last few steps, newest fix_time wins, RAM only (D99). Body, 17 + 6 × count bytes: u32 subject (a handheld, never an AP), i32 lat µdeg and i32 lon µdeg of the newest point, u32 fix_time of it (≥ 1700000000), u8 count of older points (0 to 15), then per older point, most recent first: i16 dlat, i16 dlon from the newest point in units of 10 µdeg, u16 seconds before the newest point (65535 = that or more). An AP keeps four and takes the newest point as that handheld's position |
+| 0x26 | TRAIL_REQ | SYSTEM | client → node. Body, 4 bytes: u32 subject. The AP answers with the TRAIL it holds for subject, or not at all (D99) |
 | 0x30 | TEXT_MESSAGE | DIRECT / GROUP / BROADCAST | any |
 | 0x31 | MESSAGE_ACK | DIRECT | any |
 | 0x40 | CONFIG_ANNOUNCE | SYSTEM | master → nodes |

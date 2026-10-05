@@ -19,6 +19,7 @@
 #include "lg_envelope.h"
 #include "ui_main.h"
 #include "ui_nav.h"
+#include "ui_geo.h"
 #include "hh_service.h"
 #include "hh_lora.h"
 #include "voice/hh_voice.h"
@@ -1311,8 +1312,63 @@ static int cmd_gps(int argc, char **argv)
     return 0;
 }
 
+/*
+ * trail: this handheld's last steps (D99), or with a device number the trail last fetched for that
+ * person (`trail ask <device>` fetches). Its own are printed as coordinates, on request like `gps`;
+ * someone else's only as steps back from their newest point.
+ */
+static int cmd_trail(int argc, char **argv)
+{
+    uint32_t me = console_status()->device;
+    if (argc == 3 && strcmp(argv[1], "share") == 0 && (strcmp(argv[2], "on") == 0 || strcmp(argv[2], "off") == 0)) {
+        hh_service_set_trail_share(strcmp(argv[2], "on") == 0);
+    } else if (argc == 3 && strcmp(argv[1], "test") == 0) {
+        hh_service_trail_test((uint8_t)strtoul(argv[2], NULL, 10));
+        printf("Made-up walk asked for; `trail` shows it\n");
+        return 0;
+    } else if (argc == 3 && strcmp(argv[1], "ask") == 0) {
+        hh_service_trail_request((uint32_t)strtoul(argv[2], NULL, 10));
+        printf("Asked the grid for device %s's trail; `trail %s` shows what came\n", argv[2], argv[2]);
+        return 0;
+    } else if (argc == 3 && strcmp(argv[1], "show") == 0) {
+        ui_request_trail((uint32_t)strtoul(argv[2], NULL, 10));   /* asked of the UI task, which draws */
+        return 0;
+    } else if (argc >= 2 && (argv[1][0] < '0' || argv[1][0] > '9')) {
+        printf("usage: trail | trail <device> | trail ask <device> | trail show <device> | trail share on|off | "
+               "trail test <steps>\n");
+        return 1;
+    }
+    uint32_t who = argc >= 2 && argv[1][0] >= '0' && argv[1][0] <= '9' ? (uint32_t)strtoul(argv[1], NULL, 10) : me;
+    hh_trail_t t;
+    if (!hh_service_trail(who, &t)) {
+        printf("TRAIL %" PRIu32 ": none%s\n", who, who == me ? "" : " held here (trail ask fetches it)");
+    } else {
+        printf("TRAIL %" PRIu32 ": %u point(s), newest %" PRIu32 " s old\n", who, t.n, t.pt[0].age_s);
+        for (uint8_t i = 0; i < t.n; i++) {
+            char where[32];
+            if (who == me) {
+                ui_geo_coord_text(t.pt[i].lat_u, t.pt[i].lon_u, where, sizeof(where));
+            } else if (i == 0) {
+                snprintf(where, sizeof(where), "newest");
+            } else {
+                ui_geo_where_text(t.pt[0].lat_u, t.pt[0].lon_u, t.pt[i].lat_u, t.pt[i].lon_u, where, sizeof(where));
+            }
+            printf("TRAIL  %2u  %5" PRIu32 " s earlier  %s\n", i, t.pt[0].fix_time - t.pt[i].fix_time, where);
+        }
+    }
+    printf("Sharing: %s\n", hh_service_trail_share() ? "on, the grid is sent this handheld's trail"
+                                                      : "off, the trail stays on this handheld");
+    return 0;
+}
+
 static esp_err_t gps_register(void)
 {
+    const esp_console_cmd_t trail = {
+        .command = "trail",
+        .help = "trail | <device> | ask <device> | show <device> | share on|off | test <steps>: last steps (D99)",
+        .func = cmd_trail,
+    };
+    (void)esp_console_cmd_register(&trail);
     const esp_console_cmd_t cmd = {
         .command = "gps",
         .help = "gps [raw]: this handheld's GPS, heard, fix, satellites, clock source (D65); raw dumps what arrives",

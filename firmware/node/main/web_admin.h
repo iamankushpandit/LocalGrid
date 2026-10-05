@@ -60,3 +60,5 @@ typedef struct {
 
 bool web_admin_emit_status(const web_sink_t *sink, uint32_t wait_ms);
 bool web_admin_emit_history(const web_sink_t *sink, uint32_t wait_ms);
+/* The bytes of GET /api/trails (D99), layout in web_admin.c. */
+bool web_admin_emit_trails(const web_sink_t *sink, uint32_t wait_ms);

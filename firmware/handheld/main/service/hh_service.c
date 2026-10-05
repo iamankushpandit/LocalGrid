@@ -124,6 +124,7 @@ static const char *TAG = "NET";
 #define NVS_NAMESPACE         "lghh"
 #define NVS_KEY_WIFI_OFF      "wifi_off"   /* D78: the Wi-Fi switch, in this service's own store */
 #define NVS_KEY_LORA_DBM      "lora_dbm"   /* D98: LoRa transmit power */
+#define NVS_KEY_TRAIL_OFF     "trail_off"  /* D99: 1 when this handheld keeps its trail to itself */
 
 #define MIN_U32(a, b) ((a) < (b) ? (a) : (b))
 #define MAX_U32(a, b) ((a) > (b) ? (a) : (b))
@@ -155,6 +156,8 @@ typedef enum {
     EV_RENAME,
     EV_GPS,          /* D65: the GPS task has a new fix, or lost one; read hh_gps_state */
     EV_WIFI_SWITCH,  /* D78: value 1 turns this handheld's Wi-Fi on, 0 off so LoRa can be tested */
+    EV_TRAIL_REQ,    /* D99: value is the device whose trail a screen wants */
+    EV_TRAIL_TEST,   /* D99, bench: value is how many made-up steps to walk */
 } ev_type_t;
 
 typedef struct {
@@ -286,6 +289,8 @@ static struct {
 } s = { .sock = -1, .joining = -1, .last_node = -1, .preferred = -1 };
 
 static volatile bool s_scanning;
+
+static uint32_t s_on_ap_since_ms;   /* when the session in use registered: the home screen says how long ago */
 
 static uint32_t now_ms(void)
 {
@@ -679,6 +684,244 @@ static void position_step(uint32_t now)
     }
 }
 
+/* ---- the trail (D99) ----
+ *
+ * The last few steps, for whoever has to come looking. A point is added when the GPS says this
+ * handheld has moved TRAIL_STEP_M from the last one - on distance and never on a timer, so sitting
+ * still for an hour does not push the walk that led here out of the sixteen points (owner,
+ * 2026-10-05: "I want to keep the last ones ... their last few steps help better").
+ *
+ * It is sent whole each time it grows, at most every TRAIL_SEND_MS, and again now and then unchanged
+ * so an AP that restarted has it back. With no session but a LoRa peer it still goes, far less often:
+ * that is the handheld that has walked out of Wi-Fi range, which is the one a trail is for. Its
+ * newest point places the handheld too, so LoRa needs no separate position.
+ *
+ * RAM only, and never logged (D65).
+ */
+#define TRAIL_STEP_M          10.0f
+#define TRAIL_FRESH_MS        5000u      /* only a fix this young becomes a point */
+#define TRAIL_HDOP_MAX_C      500u       /* ... and only one the GPS itself calls better than poor: indoors a
+                                          * receiver wanders tens of metres, and that is not walking */
+#define TRAIL_SPEED_MAX_MS    60.0f      /* a step faster than this (216 km/h) is the GPS jumping */
+#define TRAIL_SEND_MS         10000u     /* a grown trail goes at most this often over Wi-Fi */
+#define TRAIL_SEND_LORA_MS    60000u     /* ... and over LoRa, where it is two parts of airtime */
+#define TRAIL_RESEND_MS       120000u    /* unchanged, for an AP that restarted */
+#define TRAIL_RESEND_LORA_MS  300000u
+
+typedef struct {
+    int32_t  lat_u, lon_u;
+    uint32_t t;                           /* Unix s of the fix */
+} trail_pt_t;
+
+static struct {
+    trail_pt_t pt[LG_TRAIL_POINTS];       /* [0] newest; service task writes, under s.lock */
+    uint8_t    n;
+    bool       off;                       /* kept to itself: recorded and shown here, not sent */
+    bool       changed;                   /* grown since it was last sent */
+    bool       due;                       /* send at the next chance: set at registration */
+    bool       sent_any;
+    uint32_t   sent_ms;
+    uint32_t   version;                   /* guarded by s.lock */
+    lg_trail_t seen;                      /* guarded by s.lock: the last trail asked for */
+} tr;
+
+static bool trail_add(int32_t lat_u, int32_t lon_u, uint32_t t)
+{
+    if (!lg_position_valid(lat_u, lon_u, t)) {
+        return false;
+    }
+    if (tr.n > 0) {
+        float moved = moved_m(lat_u, lon_u, tr.pt[0].lat_u, tr.pt[0].lon_u);
+        if (t <= tr.pt[0].t || moved < TRAIL_STEP_M || moved / (float)(t - tr.pt[0].t) > TRAIL_SPEED_MAX_MS) {
+            return false;   /* an older fix, not a step yet, or a jump no one could have made */
+        }
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    memmove(&tr.pt[1], &tr.pt[0], (LG_TRAIL_POINTS - 1u) * sizeof(tr.pt[0]));
+    tr.pt[0] = (trail_pt_t){ lat_u, lon_u, t };
+    if (tr.n < LG_TRAIL_POINTS) {
+        tr.n++;
+    }
+    tr.version++;
+    xSemaphoreGive(s.lock);
+    tr.changed = true;
+    s.dirty = true;
+    return true;
+}
+
+/* The points as the wire carries them: the newest whole, the rest as small steps back from it. A
+ * point too far from the newest to write that way ends the list: a jump like that is not a walk. */
+static void trail_body(lg_trail_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->lat_u = tr.pt[0].lat_u;
+    out->lon_u = tr.pt[0].lon_u;
+    out->fix_time = tr.pt[0].t;
+    for (uint8_t i = 1; i < tr.n; i++) {
+        int32_t dlat = (tr.pt[i].lat_u - tr.pt[0].lat_u) / LG_TRAIL_UNIT_U;
+        int32_t dlon = (tr.pt[i].lon_u - tr.pt[0].lon_u) / LG_TRAIL_UNIT_U;
+        if (dlat < INT16_MIN || dlat > INT16_MAX || dlon < INT16_MIN || dlon > INT16_MAX) {
+            break;
+        }
+        uint32_t age = tr.pt[0].t - tr.pt[i].t;
+        out->older[out->count++] = (lg_trail_point_t){
+            (int16_t)dlat, (int16_t)dlon, (uint16_t)(age < LG_TRAIL_AGE_MAX ? age : LG_TRAIL_AGE_MAX),
+        };
+    }
+}
+
+static void trail_send(uint32_t now)
+{
+    if (tr.off || tr.n == 0 || (s.link != HH_LINK_ONLINE && !hh_lora_has_peer())) {
+        return;
+    }
+    lg_trail_t t;
+    trail_body(&t);
+    /* LG_ERR_SHORT with no session means only that no session took it: the radio was offered it. */
+    int rc = lg_client_send_trail(&s.client, &t);
+    tr.sent_any = true;
+    tr.sent_ms = now;
+    tr.changed = false;
+    tr.due = false;
+    if (rc < 0 && rc != LG_ERR_SHORT) {
+        ESP_LOGW("TIME", "[GPS] Trail not sent: %s", lg_err_str(rc));
+    }
+}
+
+/* Every pass of the service loop: a new point if this handheld has moved, and the trail sent when due. */
+static void trail_step(uint32_t now)
+{
+    if (gp.rx >= 0) {
+        hh_gps_state_t g;
+        hh_gps_state(&g);
+        if (g.fix && g.has_pos && g.fix_age_ms < TRAIL_FRESH_MS &&
+            g.hdop_c <= TRAIL_HDOP_MAX_C) {   /* 0: the module gave none, which is not a reason to refuse */
+            (void)trail_add(g.lat_u, g.lon_u, g.last_unix);
+        }
+    }
+    if (tr.off || tr.n == 0) {
+        return;
+    }
+    bool online = s.link == HH_LINK_ONLINE;
+    if (!online && !hh_lora_has_peer()) {
+        return;
+    }
+    uint32_t since = now - tr.sent_ms;
+    if ((tr.due && online) || !tr.sent_any || (tr.changed && since >= (online ? TRAIL_SEND_MS : TRAIL_SEND_LORA_MS)) ||
+        since >= (online ? TRAIL_RESEND_MS : TRAIL_RESEND_LORA_MS)) {
+        trail_send(now);
+    }
+}
+
+/*
+ * This handheld's own trail, back from the grid (D53). A handheld that restarts has forgotten its
+ * steps, and the first new one would replace the grid's copy of the walk with a single point - at the
+ * moment a restart most likely means a flat battery was changed somewhere out of sight. So it asks at
+ * registration, and what comes is put behind whatever it has recorded since: only points older than
+ * its own oldest, so nothing it knows better is overwritten.
+ */
+static void trail_restore(const lg_trail_t *t)
+{
+    uint8_t before = tr.n;
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    for (int i = -1; i < (int)t->count && tr.n < LG_TRAIL_POINTS; i++) {
+        trail_pt_t p = { t->lat_u, t->lon_u, t->fix_time };
+        if (i >= 0) {
+            p.lat_u += (int32_t)t->older[i].dlat * LG_TRAIL_UNIT_U;
+            p.lon_u += (int32_t)t->older[i].dlon * LG_TRAIL_UNIT_U;
+            p.t -= t->older[i].age_s;
+        }
+        if (tr.n == 0 || p.t < tr.pt[tr.n - 1u].t) {
+            tr.pt[tr.n++] = p;
+        }
+    }
+    tr.version++;
+    xSemaphoreGive(s.lock);
+    if (tr.n != before) {
+        tr.changed = before != 0;   /* joined to newer steps: the grid is sent the whole of it */
+        s.dirty = true;
+        ESP_LOGI("TIME", "[GPS] Trail: %u earlier step(s) back from the grid", tr.n - before);
+    }
+}
+
+/* LG_CEV_TRAIL: the trail a screen asked for has come. Copied where other tasks can read it. */
+static void trail_mirror(uint32_t subject)
+{
+    const lg_trail_t *t = lg_client_trail(&s.client, subject);
+    if (subject == s.client.device) {
+        if (t != NULL) {
+            trail_restore(t);
+        }
+        return;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    if (t != NULL) {
+        tr.seen = *t;
+    } else {
+        memset(&tr.seen, 0, sizeof(tr.seen));
+    }
+    tr.version++;
+    xSemaphoreGive(s.lock);
+    s.dirty = true;
+}
+
+/* EV_TRAIL_REQ */
+static void trail_ask(uint32_t subject)
+{
+    if (subject == 0 || subject == s.client.device) {
+        return;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    if (tr.seen.subject != subject) {
+        memset(&tr.seen, 0, sizeof(tr.seen));   /* the last person's trail is not this one's */
+        tr.seen.subject = subject;
+        tr.version++;
+    }
+    xSemaphoreGive(s.lock);
+    (void)lg_client_request_trail(&s.client, subject);
+}
+
+/*
+ * EV_TRAIL_TEST, from the console only. A desk does not walk, so this writes a walk that does: `steps`
+ * points twelve metres apart and eight seconds apart, bending as it goes, ending now at this
+ * handheld's fix - or at MAIN's position on a handheld with no GPS or no fix. It replaces the trail,
+ * and it is sent like a real one, so everything after this handheld is tested as it runs.
+ */
+static void trail_test(uint8_t steps)
+{
+    hh_gps_state_t g;
+    hh_gps_state(&g);
+    int32_t lat = 0, lon = 0;
+    if (gp.rx >= 0 && g.fix && g.has_pos) {
+        lat = g.lat_u;
+        lon = g.lon_u;
+    } else if (gp.pos[LG_MAX_DEVICES].fix_time != 0) {
+        lat = gp.pos[LG_MAX_DEVICES].lat_u;
+        lon = gp.pos[LG_MAX_DEVICES].lon_u;
+    } else {
+        ESP_LOGW("TIME", "[GPS] Trail test needs a place to end: no fix here and MAIN's position is not known");
+        return;
+    }
+    time_t now_s = time(NULL);
+    if (now_s < (time_t)LG_POS_TIME_MIN) {
+        ESP_LOGW("TIME", "[GPS] Trail test needs the time");
+        return;
+    }
+    steps = steps < 1u ? 1u : steps > 40u ? 40u : steps;
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    tr.n = 0;
+    tr.version++;
+    xSemaphoreGive(s.lock);
+    for (int back = (int)steps - 1; back >= 0; back--) {
+        /* about 12 m a step: north-east at first, swinging east for the last third */
+        int32_t dlat = back * 80 - (back > 2 * (int)steps / 3 ? (back - 2 * (int)steps / 3) * 60 : 0);
+        int32_t dlon = back * 90;
+        (void)trail_add(lat - dlat, lon - dlon, (uint32_t)now_s - (uint32_t)back * 8u);
+    }
+    ESP_LOGI("TIME", "[GPS] Trail test: a made-up walk of %u steps, %u kept", steps, tr.n);
+    trail_send(now_ms());
+}
+
 /* EV_GPS: the clock follows a fresh fix, and the screens hear about a change. */
 static void gps_update(void)
 {
@@ -852,6 +1095,11 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             s.avoid_for_ms[(int)ev->value] = 0;
         }
         gp.pos_due = true;   /* D65: our position at registration, from the service loop */
+        tr.due = true;       /* D99: and where we have been */
+        if (tr.n < LG_TRAIL_POINTS) {
+            (void)lg_client_request_trail(&s.client, s.client.device);   /* ... as far as the grid remembers (D53) */
+        }
+        s_on_ap_since_ms = now_ms() | 1u;   /* never 0, which means "not on one" */
         set_problem("");
         ESP_LOGI("GRID", "[GRID] Registered with node %" PRIu32 " as device %" PRIu32 " (%s)", ev->value, s.device,
                  roster_name(s.device));
@@ -956,6 +1204,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         break;
     case LG_CEV_POSITION:
         position_mirror(ev->value);   /* D65; never logged */
+        break;
+    case LG_CEV_TRAIL:
+        trail_mirror(ev->value);      /* D99; never logged */
         break;
     case LG_CEV_GROUP_REFUSED:
         snprintf(s.group_problem, sizeof(s.group_problem), "%s",
@@ -1589,6 +1840,12 @@ static void handle_event(const ev_t *ev, uint32_t now)
     case EV_GPS:
         gps_update();
         break;
+    case EV_TRAIL_REQ:
+        trail_ask((uint32_t)ev->value);
+        break;
+    case EV_TRAIL_TEST:
+        trail_test((uint8_t)ev->value);
+        break;
     case EV_WIFI_SWITCH: {
         bool off = ev->value != 0;
         uint32_t seconds = (uint32_t)ev->id[0];   /* 0: the sticky field-test switch */
@@ -1666,6 +1923,7 @@ static void drain_send_queue(void)
     while (s.send_queue != NULL && xQueueReceive(s.send_queue, &req, 0) == pdTRUE) {
         if (req.urgent && req.scope == LG_SCOPE_BROADCAST) {
             (void)send_own_position(now_ms());   /* D65: where the emergency is, just ahead of it */
+            trail_send(now_ms());                /* D99: and how they got there */
         }
         uint16_t flags = LG_FLAG_ACK_REQUESTED | (req.urgent ? LG_FLAG_URGENT : 0) |
                          (req.all_clear ? LG_FLAG_ALL_CLEAR : 0);
@@ -2001,6 +2259,7 @@ static void step(uint32_t now)
         }
     }
     position_step(now);   /* the outbox tick is above, so it runs with Wi-Fi off too */
+    trail_step(now);
 }
 
 static void publish(void)
@@ -2020,6 +2279,7 @@ static void publish(void)
     int node = s.link == HH_LINK_ONLINE ? (int)s.client.node : s.joining;
     st->node = node;
     st->node_ssid[0] = '\0';
+    st->on_ap_since_ms = s.link == HH_LINK_ONLINE ? s_on_ap_since_ms : 0;
     memset(st->ip, 0, sizeof(st->ip));
     if (node >= 0 && node < HH_MAX_NODES) {
         snprintf(st->node_ssid, sizeof(st->node_ssid), "%s", s.cand[node].ssid);
@@ -2358,6 +2618,15 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
             nvs_close(h);
         }
         hh_lora_set_power(dbm);   /* D98: before the module is configured, so it starts at this power */
+    }
+    {
+        nvs_handle_t h;
+        uint8_t off = 0;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+            (void)nvs_get_u8(h, NVS_KEY_TRAIL_OFF, &off);
+            nvs_close(h);
+        }
+        tr.off = off != 0;   /* D99 */
     }
     if (lp.rx >= 0 && lg_gridkeys()->ready) {
         esp_err_t lerr = hh_lora_start(lp.rx, lp.tx, lp.rst, s.device, s.boot, s_lora_hh_key,
@@ -2747,6 +3016,85 @@ bool hh_service_position(uint32_t subject, hh_position_t *out)
     out->sats = p.sats;
     out->age_s = age_of(p.fix_time);
     return true;
+}
+
+/* ---- trails (D99): readers on any task ---- */
+
+bool hh_service_trail(uint32_t device, hh_trail_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (s.lock == NULL || device == 0) {
+        return false;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    if (device == s.client.device) {
+        out->n = tr.n;
+        for (uint8_t i = 0; i < tr.n; i++) {
+            out->pt[i] = (hh_trail_point_t){ tr.pt[i].lat_u, tr.pt[i].lon_u, tr.pt[i].t, 0 };
+        }
+    } else if (tr.seen.subject == device && tr.seen.fix_time != 0) {
+        const lg_trail_t *t = &tr.seen;
+        out->pt[0] = (hh_trail_point_t){ t->lat_u, t->lon_u, t->fix_time, 0 };
+        out->n = 1;
+        for (uint8_t i = 0; i < t->count && out->n < LG_TRAIL_POINTS; i++) {
+            out->pt[out->n++] = (hh_trail_point_t){
+                t->lat_u + (int32_t)t->older[i].dlat * LG_TRAIL_UNIT_U,
+                t->lon_u + (int32_t)t->older[i].dlon * LG_TRAIL_UNIT_U,
+                t->fix_time - t->older[i].age_s, 0,
+            };
+        }
+    }
+    xSemaphoreGive(s.lock);
+    for (uint8_t i = 0; i < out->n; i++) {
+        out->pt[i].age_s = age_of(out->pt[i].fix_time);
+    }
+    return out->n > 0;
+}
+
+void hh_service_trail_request(uint32_t device)
+{
+    if (s.queue != NULL) {
+        ev_t ev = { .type = EV_TRAIL_REQ, .value = (int32_t)device };
+        xQueueSend(s.queue, &ev, 0);
+    }
+}
+
+uint32_t hh_service_trail_version(void)
+{
+    if (s.lock == NULL) {
+        return 0;
+    }
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    uint32_t v = tr.version;
+    xSemaphoreGive(s.lock);
+    return v;
+}
+
+bool hh_service_trail_share(void)
+{
+    return !tr.off;
+}
+
+void hh_service_set_trail_share(bool on)
+{
+    tr.off = !on;
+    tr.due = on;   /* switched back on: the grid gets it at the next chance */
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_u8(h, NVS_KEY_TRAIL_OFF, on ? 0u : 1u) == ESP_OK) {
+            (void)nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    ESP_LOGI("TIME", "[GPS] Trail %s", on ? "shared with the grid" : "kept on this handheld only");
+}
+
+void hh_service_trail_test(uint8_t steps)
+{
+    if (s.queue != NULL) {
+        ev_t ev = { .type = EV_TRAIL_TEST, .value = steps };
+        xQueueSend(s.queue, &ev, 0);
+    }
 }
 
 bool hh_service_gps(uint8_t *sats, bool *fix)
