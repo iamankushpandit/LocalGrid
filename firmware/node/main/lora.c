@@ -1333,6 +1333,8 @@ void lora_print(void)
     printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
     printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
     printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
+    printf("  messages the queue had no room for (the rest of its drops were routine): %" PRIu32 "\n",
+           L.txq.dropped_messages);
     printf("  one full part is about %" PRIu32 " ms on the air; it can take a %u-byte payload%s;"
            " live voice never comes this way\n", lora_airtime_ms(LORA_PART_B64_MAX),
            (unsigned)lora_txq_capacity(&L.txq),

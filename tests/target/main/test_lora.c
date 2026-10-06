@@ -510,6 +510,7 @@ static void test_queue(void)
     CHECK(!lora_txq_would_take(&q, LORA_RANK_ALERT, LORA_SMALL_MAX + 1u));   /* nothing here is that big */
     CHECK(!lora_txq_would_take(&q, LORA_RANK_ROUTINE, 0));
     CHECK_EQ(q.dropped, 5);   /* as it was after the alert took a message's place: asking counted nothing */
+    CHECK_EQ(q.dropped_messages, 2);   /* the two messages that gave way, counted apart from routine drops */
     CHECK_EQ(q.depth, 4);
     for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
         if (q.slots[i].in_use && !q.slots[i].alert) {

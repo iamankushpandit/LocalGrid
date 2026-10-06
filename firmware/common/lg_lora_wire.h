@@ -312,6 +312,7 @@ typedef struct {
     lora_txq_slot_t slots[LORA_TXQ_SLOTS];
     uint32_t        next_order;
     uint32_t        dropped;    /* payloads the queue could not hold, never an alert already in it */
+    uint32_t        dropped_messages;   /* how many of those were a person's message or above, not routine */
     uint16_t        depth;
     uint16_t        high;       /* high-water mark of depth */
 } lora_txq_t;

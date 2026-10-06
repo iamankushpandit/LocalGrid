@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### An AP no longer takes a handheld that has a session elsewhere (D80)
+
+- **Found by a chaos run, with no fault active:** a direct message between two registered handhelds was
+  lost. The recipient had moved between APs early in the run and, in the half second without Wi-Fi,
+  announced itself over LoRa. That frame is a second on the air and arrived after it had registered
+  again; the AP that heard it claimed the handheld as "reachable by LoRa, through me", no other AP
+  agreed, and nothing settled it. For 90 minutes that AP sent every direct message for the handheld
+  over LoRa alone: 28 arrived and one did not.
+- An AP hearing a handheld over LoRa leaves it alone while an AP that is up has a session with it.
+- Two APs holding different answers at the same epoch now agree: a session beats a frame heard over
+  LoRa, which beats nothing. An AP whose live session is contradicted announces it at once.
+- A handheld held over LoRa alone is in an AP's periodic presence announcement, as one with a session is.
+- `lora` on an AP's console says how many of the queue's drops were messages rather than routine
+  traffic, so a LoRa-only loss can be told from the rule working.
+
 ### The admin page test covers the whole page, and found two bugs in it
 
 - **`tools/test_admin_page.py`** now makes three visits in a fresh browser each: an AP nobody has set

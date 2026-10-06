@@ -1265,6 +1265,18 @@ void lg_node_mark_lora_reachable(lg_node_t *n, uint32_t device)
     if (p->state == LG_PRES_LORA && p->node != n->self && ap_alive(n, p->node)) {
         return;
     }
+    /*
+     * Nor while an AP that is still up holds a session with it. A handheld between two APs is without
+     * Wi-Fi for half a second and says so over LoRa; that frame is a second on the air, so it lands
+     * after the handheld has registered with its new AP. Claiming it here on the strength of that
+     * sent everything this AP had for it out over LoRa alone, for as long as the session lasted, and
+     * no other AP agreed (Everest and Jolly, 2026-10-05: one direct message lost with no fault on the
+     * grid). A session says more than a frame heard. If the session is in fact dead, its AP says so
+     * when it notices, and the next frame heard here is then taken (apply_presence).
+     */
+    if (p->state == LG_PRES_ONLINE && p->node != n->self && ap_alive(n, p->node)) {
+        return;
+    }
     p->state = LG_PRES_LORA;
     p->node  = n->self;
     flood_presence(n, p);
@@ -1279,6 +1291,12 @@ void lg_node_on_session_closed(lg_node_t *n, uint32_t device)
         flood_presence(n, p);
         notify_local_clients(n, p, device);
     }
+}
+
+/* What a presence state is worth against another AP's at the same epoch: a session, a frame heard, nothing. */
+static uint8_t presence_rank(uint8_t state)
+{
+    return state == LG_PRES_ONLINE ? 2u : state == LG_PRES_LORA ? 1u : 0u;
 }
 
 static void apply_presence(lg_node_t *n, const lg_presence_t *pr)
@@ -1297,7 +1315,16 @@ static void apply_presence(lg_node_t *n, const lg_presence_t *pr)
      */
     bool lora_tie = pr->epoch == p->epoch && pr->node != p->node && pr->state == LG_PRES_LORA &&
                     p->state == LG_PRES_LORA && (pr->node < p->node || !ap_alive(n, p->node));
-    if (pr->epoch > p->epoch || (pr->epoch == p->epoch && pr->node == p->node) || lora_tie) {
+    /*
+     * A LoRa claim carries the epoch of the session before it, since a frame heard over LoRa brings none
+     * of its own, so two APs can hold different answers at one epoch and neither used to give way: the
+     * grid stayed split until the handheld next registered. The stronger answer wins - a session over a
+     * frame heard, a frame heard over nothing - which is also what lets an AP take over, by LoRa, a
+     * handheld whose AP has just said its session ended.
+     */
+    bool stronger = pr->epoch == p->epoch && pr->node != p->node &&
+                    presence_rank(pr->state) > presence_rank(p->state);
+    if (pr->epoch > p->epoch || (pr->epoch == p->epoch && pr->node == p->node) || lora_tie || stronger) {
         /* Presence is announced again every LG_PRESENCE_ANNOUNCE_MS (D48), so most updates repeat what this
          * AP already holds; only a change is worth a frame to each local handheld. */
         bool changed = pr->epoch != p->epoch || pr->node != p->node || pr->state != p->state ||
@@ -1309,6 +1336,10 @@ static void apply_presence(lg_node_t *n, const lg_presence_t *pr)
         if (changed) {
             notify_local_clients(n, p, 0);
         }
+    } else if (pr->epoch == p->epoch && pr->node != p->node && is_local_online(n, p)) {
+        /* Another AP claims a handheld that has a session here, and is wrong. Say so now, rather than
+         * leave it wrong until the next periodic announcement: it cannot hear this AP's session. */
+        flood_presence(n, p);
     }
 }
 
@@ -1587,7 +1618,9 @@ void lg_node_announce_presence(lg_node_t *n)
 {
     for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
         const lg_presence_entry_t *p = &n->presence[i];
-        if (p->in_use && p->node == n->self && p->state == LG_PRES_ONLINE) {
+        /* A handheld held over LoRa alone is announced like one with a session (D48): an AP that
+         * restarted, or missed the claim, would otherwise not learn of it until the handheld moved. */
+        if (p->in_use && p->node == n->self && (p->state == LG_PRES_ONLINE || p->state == LG_PRES_LORA)) {
             flood_presence(n, p);
         }
     }

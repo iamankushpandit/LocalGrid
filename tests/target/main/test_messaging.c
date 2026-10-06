@@ -2844,6 +2844,94 @@ static void test_presence_lora_voice_refused(void)
 }
 
 /*
+ * A LoRa frame heard from a handheld that has a session is not a reason to take it (D80).
+ *
+ * The bench found this on 2026-10-05. A handheld moving between APs is without Wi-Fi for half a second
+ * and announces itself over LoRa; the frame is a second on the air and arrives after it has registered
+ * again. The AP that heard it claimed the handheld, no other AP agreed, and nothing ever settled it:
+ * for the rest of a 90 minute run that AP sent every direct message for the handheld out over LoRa
+ * alone, and one did not arrive.
+ */
+static void test_lora_frame_does_not_take_a_session(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    /* Emma has a session on node 2. Node 1 is its neighbour and hears her late announcement. */
+    lg_node_mark_lora_reachable(&s->nodes[1].node, LG_PROTO_EMMA);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[i].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_ONLINE && pe->node == 2);
+    }
+    /*
+     * Node 0 cannot see node 2, so it cannot know that AP is up and does claim her. The AP with her
+     * session answers at once and every AP, the claimant included, is back to the truth without
+     * waiting for a periodic announcement.
+     */
+    lg_node_mark_lora_reachable(&s->nodes[0].node, LG_PROTO_EMMA);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[i].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_ONLINE && pe->node == 2);
+    }
+    /* And a direct message from node 0 goes to her AP and is acknowledged. */
+    int slot = lg_client_send_text(cl(s, DAD), LG_SCOPE_DIRECT, LG_PROTO_EMMA, 0, TXT("Still there?"));
+    CHECK(slot >= 0);
+    CHECK(sim_pump(s));
+    CHECK(newest_is(s, EMMA, "Still there?"));
+    CHECK_EQ(cl(s, DAD)->outbox[slot].state, LG_OUT_DELIVERED);
+
+    /*
+     * A split left by an older build, or by a refutation that was lost: one AP holds "LoRa, through
+     * me" at the same epoch as the session. The periodic announcement from her AP settles it.
+     */
+    for (size_t k = 0; k < LG_MAX_DEVICES; k++) {
+        lg_presence_entry_t *p = &s->nodes[1].node.presence[k];
+        if (p->in_use && p->device == LG_PROTO_EMMA) {
+            p->state = LG_PRES_LORA;
+            p->node  = 1;
+        }
+    }
+    lg_node_announce_presence(&s->nodes[2].node);
+    CHECK(sim_pump(s));
+    {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[1].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_ONLINE && pe->node == 2);
+    }
+
+    /*
+     * Her session ends, and her AP says so. Now a frame heard over LoRa is the best anyone has: the AP
+     * that hears it takes her, at the epoch of the session that ended, and every AP agrees.
+     */
+    sim_detach(s, EMMA);
+    CHECK(sim_pump(s));
+    CHECK_EQ(presence_state_of(s, 0, LG_PROTO_EMMA), LG_PRES_OFFLINE);
+    lg_node_mark_lora_reachable(&s->nodes[1].node, LG_PROTO_EMMA);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[i].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_LORA && pe->node == 1);
+    }
+    /* An AP that missed the claim learns it from the periodic announcement (D48). */
+    for (size_t k = 0; k < LG_MAX_DEVICES; k++) {
+        lg_presence_entry_t *p = &s->nodes[0].node.presence[k];
+        if (p->in_use && p->device == LG_PROTO_EMMA) {
+            p->state = LG_PRES_OFFLINE;
+            p->node  = 2;
+        }
+    }
+    lg_node_announce_presence(&s->nodes[1].node);
+    CHECK(sim_pump(s));
+    {
+        const lg_presence_entry_t *pe = lg_node_presence(&s->nodes[0].node, LG_PROTO_EMMA);
+        CHECK(pe != NULL && pe->state == LG_PRES_LORA && pe->node == 1);
+    }
+    sim_destroy(s);
+}
+
+/*
  * D77, D80: a handheld reachable only over LoRa can originate, not only receive.
  *
  * The bench found this on 2026-09-30. With a handheld's Wi-Fi switched off (D78) a message sent to it
@@ -3338,6 +3426,7 @@ void test_messaging(void)
     test_presence_lora_voice_refused();
     test_lora_announce();
     test_lora_only_can_originate();
+    test_lora_frame_does_not_take_a_session();
     test_lora_only_acknowledges();
     test_lora_only_retry_is_paced();
     test_old_alert_is_restamped();

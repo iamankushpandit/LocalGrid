@@ -460,9 +460,15 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
         }
         if (slot == NULL) {
             q->dropped++;   /* nothing here may be dropped for this one: refuse the newcomer */
+            if (rank >= LORA_RANK_MESSAGE) {
+                q->dropped_messages++;
+            }
             return NULL;
         }
         q->dropped++;
+        if (slot->rank >= LORA_RANK_MESSAGE) {
+            q->dropped_messages++;   /* routine traffic giving way is the rule working; this is a loss */
+        }
     }
     slot->in_use = true;
     slot->alert = rank >= LORA_RANK_ALERT;
