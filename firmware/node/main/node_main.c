@@ -240,6 +240,12 @@ static void io_on_fw(void *ctx, uint16_t from_node, uint8_t type, const uint8_t 
     fw_spread_on_frame(from_node, type, body, len);   /* D101 */
 }
 
+static void io_on_fw_client(void *ctx, uint32_t device, const uint8_t *body, size_t len)
+{
+    (void)ctx;
+    fw_spread_on_client_get(device, body, len);   /* D107 */
+}
+
 static void io_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
 {
     (void)ctx;
@@ -281,6 +287,75 @@ static void io_on_name(void *ctx, const lg_name_t *name)
     }
     ESP_LOGI(TAG, "[GRID] Device %" PRIu32 " is now called \"%s\" (version %" PRIu32 ")%s", name->device, name->text,
              name->version, err == ESP_OK ? "" : ", not saved");
+}
+
+/*
+ * Trails live in flash too (D106): the blob is each trail held, as its wire body behind a length
+ * byte. Saved when something has changed and not more often than once a minute, because a person
+ * walking adds a step every few seconds and flash is not for that; what a power cut can lose is the
+ * last minute of a walk, never the walk.
+ */
+#define TRAILS_SAVE_MS 60000u
+
+static void trails_save_if_due(uint32_t now)
+{
+    static uint32_t saved_changes;
+    static uint32_t saved_ms;
+    static bool     saved_once;
+    if (g_app.core.trail_changes == saved_changes || (saved_once && now - saved_ms < TRAILS_SAVE_MS)) {
+        return;
+    }
+    static uint8_t blob[LG_TRAIL_SLOTS * (1u + LG_TRAIL_LEN_MAX)];   /* core task only */
+    size_t used = 0;
+    for (size_t i = 0; i < LG_TRAIL_SLOTS; i++) {
+        const lg_trail_t *t = lg_node_trail_at(&g_app.core, i);
+        if (t != NULL) {
+            size_t n = lg_trail_enc(t, blob + used + 1u);
+            blob[used] = (uint8_t)n;
+            used += 1u + n;
+        }
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("lg", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, "trails", blob, used);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    saved_changes = g_app.core.trail_changes;
+    saved_ms = now;
+    saved_once = true;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "[GRID] Trails not saved to flash: %s", esp_err_to_name(err));   /* never where they lead */
+    }
+}
+
+static void load_trails(void)
+{
+    static uint8_t blob[LG_TRAIL_SLOTS * (1u + LG_TRAIL_LEN_MAX)];
+    size_t len = sizeof(blob);
+    nvs_handle_t h;
+    if (nvs_open("lg", NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    esp_err_t err = nvs_get_blob(h, "trails", blob, &len);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return;
+    }
+    unsigned loaded = 0;
+    for (size_t at = 0; at + 1u <= len;) {
+        size_t rec = blob[at];
+        lg_trail_t t;
+        if (rec == 0 || at + 1u + rec > len || !lg_trail_dec(blob + at + 1u, rec, &t)) {
+            break;   /* a damaged tail loses only what follows it */
+        }
+        loaded += lg_node_restore_trail(&g_app.core, &t) ? 1u : 0u;
+        at += 1u + rec;
+    }
+    ESP_LOGI(TAG, "[GRID] Loaded %u trail(s) from flash", loaded);   /* how many, never whose or where (D65) */
 }
 
 static void load_names(void)
@@ -1145,6 +1220,7 @@ static void core_task(void *arg)
         lora_poll(now);   /* D71: frames that crossed on the second backbone, and its heartbeat */
         gps_poll();       /* empty unless the polled-GPS experiment is built in */
         fw_spread_tick(now);   /* D101: an update passing between APs, a piece a pass */
+        trails_save_if_due(now);   /* D106 */
 #if NODE_BLE_ADV_ENABLED
         ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */
 #endif
@@ -1250,6 +1326,7 @@ void app_main(void)
         .time_now = io_time_now,
         .on_grid_state = io_on_grid_state,
         .on_fw = io_on_fw,
+        .on_fw_client = io_on_fw_client,
         .on_groups_changed = io_on_groups_changed,
         .on_client_time = io_on_client_time,
         .on_name = io_on_name,
@@ -1263,6 +1340,7 @@ void app_main(void)
     }
     lg_node_init(&g_app.core, g_app.index, g_app.boot, &g_app.roster, &io);
     load_names();
+    load_trails();   /* D106 */
 
     /*
      * The clock this AP had before it restarted (D60). The RTC counted the seconds it was away, so

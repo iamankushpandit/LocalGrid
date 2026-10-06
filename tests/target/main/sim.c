@@ -135,6 +135,15 @@ static void n_on_fw(void *ctx, uint16_t from_node, uint8_t type, const uint8_t *
     sn->fw_first = body[0];
 }
 
+static void n_on_fw_client(void *ctx, uint32_t device, const uint8_t *body, size_t len)
+{
+    sim_node_t *sn = ctx;
+    sn->fwc_count++;
+    sn->fwc_device = device;
+    sn->fwc_len = len;
+    sn->fwc_first = body[0];
+}
+
 static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
 {
     sim_node_t *sn = ctx;
@@ -247,6 +256,15 @@ static uint32_t c_local_time(void *ctx)
     return ((sim_client_t *)ctx)->clock;
 }
 
+static void c_on_fw(void *ctx, uint8_t type, const uint8_t *body, size_t len)
+{
+    sim_client_t *sc = ctx;
+    sc->fw_count++;
+    sc->fw_type = type;
+    sc->fw_len = len;
+    sc->fw_first = body[0];
+}
+
 static void c_set_time(void *ctx, uint32_t t)
 {
     ((sim_client_t *)ctx)->clock = t;
@@ -311,6 +329,7 @@ sim_t *sim_create(void)
             .time_now = n_time_now,
             .on_grid_state = n_on_grid_state,
             .on_fw = n_on_fw,
+            .on_fw_client = n_on_fw_client,
             .on_groups_changed = n_on_groups_changed,
             .on_client_time = n_on_client_time,
             .on_name = n_on_name,
@@ -340,6 +359,7 @@ sim_t *sim_create(void)
             .now_ms = c_now,
             .local_time = c_local_time,
             .set_time = c_set_time,
+            .on_fw = c_on_fw,
             .seal = c_seal,
             .open = c_open,
             .on_groups_removed = c_groups_removed,

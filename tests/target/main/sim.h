@@ -51,6 +51,10 @@ typedef struct {
     uint8_t   fw_type;
     size_t    fw_len;
     uint8_t   fw_first;            /* the last one's first body byte */
+    uint32_t  fwc_count;           /* D107: FW_GET frames from a handheld with a session here */
+    uint32_t  fwc_device;
+    size_t    fwc_len;
+    uint8_t   fwc_first;
     uint16_t  grid_state_origin;   /* origin node of the last one */
     uint8_t   grid_state_last[LG_GRID_STATE_MAX];
     size_t    grid_state_len;
@@ -98,6 +102,10 @@ typedef struct {
     uint32_t    trail_events;     /* LG_CEV_TRAIL (D99) */
     uint32_t    last_trail;       /* its subject */
     uint32_t    tz_events;        /* LG_CEV_TIME_ZONE (D67) */
+    uint32_t    fw_count;         /* D107: FW_OFFER and FW_DATA from this handheld's AP */
+    uint8_t     fw_type;
+    size_t      fw_len;
+    uint8_t     fw_first;
     lg_e2e_t    e2e;
     lg_client_t client;
 } sim_client_t;

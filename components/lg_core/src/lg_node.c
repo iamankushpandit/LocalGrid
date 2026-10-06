@@ -523,7 +523,23 @@ static const lg_trail_t *trail_take(lg_node_t *n, const lg_trail_t *t)
         return NULL;
     }
     *slot = *t;
+    n->trail_changes++;
     return slot;
+}
+
+bool lg_node_restore_trail(lg_node_t *n, const lg_trail_t *t)
+{
+    if (n == NULL || t == NULL || t->subject == 0 || (t->subject & LG_NODE_ID_BASE) != 0 ||
+        t->count > LG_TRAIL_POINTS - 1u || !lg_position_valid(t->lat_u, t->lon_u, t->fix_time) ||
+        lg_roster_user(n->roster, t->subject) == NULL) {
+        return false;
+    }
+    return trail_take(n, t) != NULL;
+}
+
+const lg_trail_t *lg_node_trail_at(const lg_node_t *n, size_t i)
+{
+    return n != NULL && i < LG_TRAIL_SLOTS && n->trails[i].fix_time != 0 ? &n->trails[i] : NULL;
 }
 
 static void send_trail_to_client(lg_node_t *n, uint32_t device, const lg_trail_t *t)
@@ -1202,6 +1218,14 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
     case LG_T_TRAIL_REQ:
         handle_client_trail_req(n, *session_device, &e, body);
         break;
+    case LG_T_FW_GET:
+        /* D107: a handheld asking for bytes of the update this AP carries for it. Its own, by its own
+         * session, and never passed on; what the bytes are worth is the release key's to say. */
+        if (e.origin_id == *session_device && e.scope == LG_SCOPE_SYSTEM && e.body_len != 0 &&
+            e.body_len <= LG_FW_BODY_MAX && n->io.on_fw_client != NULL) {
+            n->io.on_fw_client(n->io.ctx, *session_device, body, e.body_len);
+        }
+        break;
     default:
         break;  /* unknown or not client-originated: ignored */
     }
@@ -1696,6 +1720,22 @@ int lg_node_send_fw(lg_node_t *n, uint16_t node, uint8_t type, const uint8_t *bo
         n->io.backbone_unicast(n->io.ctx, node, buf, (size_t)flen);
     }
     note_out(n, e.type, e.scope, (size_t)flen);
+    return LG_OK;
+}
+
+int lg_node_send_fw_client(lg_node_t *n, uint32_t device, uint8_t type, const uint8_t *body, size_t len)
+{
+    if (n == NULL || body == NULL || len == 0 || len > LG_FW_BODY_MAX || device == 0 ||
+        (type != LG_T_FW_OFFER && type != LG_T_FW_DATA)) {
+        return LG_ERR_ARG;
+    }
+    if (!is_local_online(n, presence_find(n, device))) {
+        return LG_ERR_SHORT;
+    }
+    lg_env_t e;
+    env_from_node(n, &e, type, LG_SCOPE_SYSTEM, device);
+    e.ttl = 1;
+    send_client(n, device, &e, body, len);
     return LG_OK;
 }
 

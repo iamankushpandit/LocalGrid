@@ -167,6 +167,8 @@ typedef struct {
      * `problem` is empty, because nothing is wrong. The radio is stopped, not merely unassociated.
      */
     bool           wifi_off;
+    uint32_t       fw_serial;                /* D107: an update being taken from the AP, or waiting to restart; 0 none */
+    uint8_t        fw_percent;               /* how much of it has arrived; 100 once it is in its slot */
 } hh_status_t;
 
 /* Starts the service task. On failure the snapshot carries the problem for the screen. */

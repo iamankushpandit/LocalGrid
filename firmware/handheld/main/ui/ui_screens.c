@@ -87,6 +87,10 @@ static uint32_t convs_build(bool rebuild)
      */
     uint32_t unread = ui_notify_unread_total();
     if (unread > 0) {
+        /* And a tick in the header, which is what the owner first asked for (2026-10-04, again
+         * 2026-10-06): it is there wherever the list is scrolled to. The row stays, because it says
+         * in words what the tick does. */
+        slist_icon(LG_SYMBOL_OK);
         snprintf(value, sizeof(value), "%" PRIu32 " new", unread);
         slist_add(ROW_ACTION, "Mark all read", value, CONVS_MARK_ALL, 0);
     }
@@ -189,7 +193,7 @@ void ui_convs_touch(int16_t x, int16_t y, bool down)
     } else if (ev.type == SLIST_ROW && ev.id == 0 && ev.arg < SLIST_ROWS) {
         const conv_ref_t *c = &s_convs.refs[ev.arg];
         ui_go(NAV_CHAT, c->scope, c->target, slist_row(ev.index)->label);
-    } else if (ev.type == SLIST_ROW && ev.id == CONVS_MARK_ALL) {
+    } else if ((ev.type == SLIST_ROW && ev.id == CONVS_MARK_ALL) || ev.type == SLIST_PLUS) {
         ESP_LOGI("UI", "[UI] Mark all read: %" PRIu32 " unread cleared", ui_notify_unread_total());
         ui_notify_mark_all_seen();
         ui_convs_refresh();
@@ -994,6 +998,14 @@ static void stat_rows(void)
     const hh_status_t *st = ui_status();
     char value[SLIST_VALUE_MAX];
     stat_put(ROW_FACT, "Name", st->name, false);
+    if (st->fw_serial != 0) {   /* D107: an update arriving from the AP, said while it is happening */
+        if (st->fw_percent >= 100u) {
+            snprintf(value, sizeof(value), "serial %" PRIu32 ": restarting soon", st->fw_serial);
+        } else {
+            snprintf(value, sizeof(value), "serial %" PRIu32 ": %u%%", st->fw_serial, (unsigned)st->fw_percent);
+        }
+        stat_put(ROW_FACT, "Update", value, false);
+    }
     /* On LoRa is not a fault: it is the second radio doing its job, so it is not shown as a warning. */
     stat_put(ROW_FACT, "Link", link_word(st->link),
              st->link != HH_LINK_ONLINE && st->link != HH_LINK_LORA);

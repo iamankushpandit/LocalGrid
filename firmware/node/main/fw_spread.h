@@ -36,6 +36,8 @@ void fw_spread_on_frame(uint16_t from_node, uint8_t type, const uint8_t *body, s
 
 /* A backbone link came up: what this AP holds is offered at the next tick. Core task. */
 void fw_spread_on_neighbor_up(uint16_t node);
+/* D107: an FW_GET from a handheld with a session here, for the handheld update this AP carries. */
+void fw_spread_on_client_get(uint32_t device, const uint8_t *body, size_t len);
 
 /* Every pass of the core loop: offers, the next request, retries, and the restart into a finished
  * update. Core task. */

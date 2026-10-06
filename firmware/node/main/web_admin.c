@@ -1317,6 +1317,12 @@ static esp_err_t h_update(httpd_req_t *req)
                  lg_fwu_reason());
         return send_error(req, "400 Bad Request", why);
     }
+    if (lg_fwu_finished_carried()) {   /* D107: a handheld's update, kept and handed on, never run here */
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+            "{\"ok\":true,\"slot\":\"carried\",\"note\":\"That is a handheld update. This access point is "
+            "carrying it and will offer it to handhelds and to the other access points. Nothing restarts here.\"}");
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req,
         "{\"ok\":true,\"slot\":\"pending\",\"note\":\"Restart this access point to run the new firmware. "

@@ -24,6 +24,8 @@ static struct {
     char              title[SLIST_LABEL_MAX];
     bool              back;
     bool              plus;
+    const char       *plus_glyph;     /* what is drawn in the + slot: a + unless the screen chose its own */
+    bool              plus_shown;     /* whether the header on screen has that slot filled */
     const char *const *tabs;
     uint8_t           n_tabs;
     uint8_t           tab;
@@ -59,11 +61,18 @@ void slist_begin(const char *title, bool back, bool plus)
     snprintf(s.title, sizeof(s.title), "%s", title);
     s.back = back;
     s.plus = plus;
+    s.plus_glyph = LG_SYMBOL_PLUS;
     s.tabs = NULL;
     s.n_tabs = 0;
     s.n = 0;
     s.pressed = -1;
     s.plot = NULL;
+}
+
+void slist_icon(const char *glyph)
+{
+    s.plus = glyph != NULL;
+    s.plus_glyph = glyph != NULL ? glyph : LG_SYMBOL_PLUS;
 }
 
 void slist_plot(slist_plot_t painter)
@@ -304,7 +313,7 @@ static void paint_header(const lg_canvas_t *c, void *ctx)
         text_in(c, &s.head_icon, F_ICON, C_ACCENT, LG_SYMBOL_LEFT, LG_ALIGN_CENTER, 0);
     }
     if (s.plus) {
-        text_in(c, &s.plus_icon, F_ICON, C_ACCENT, LG_SYMBOL_PLUS, LG_ALIGN_CENTER, 0);
+        text_in(c, &s.plus_icon, F_ICON, C_ACCENT, s.plus_glyph, LG_ALIGN_CENTER, 0);
     }
     if (s.n_tabs) {
         int16_t tw = (int16_t)(s.w / s.n_tabs);
@@ -330,6 +339,7 @@ void slist_show(uint16_t w, uint16_t h, int16_t bottom, bool keep_scroll)
     int16_t edge = (int16_t)(s.back ? w - 40 : w - UI_PAD);
     s.head_icon = s.back ? (lg_rect_t){ edge, 0, 40, UI_HEAD_H } : (lg_rect_t){ 0, 0, 0, 0 };
     s.plus_icon = (lg_rect_t){ (int16_t)(edge - 40), 0, 40, UI_HEAD_H };
+    s.plus_shown = s.plus;
     s.title_right = ui_bar_place(s.plus ? s.plus_icon.x : edge, 0, UI_HEAD_H);
     s.title_left = ui_bar_home(0, UI_HEAD_H);
     s.list = (lg_rect_t){ 0, top, (int16_t)w, (int16_t)(h - top - bottom) };
@@ -347,6 +357,10 @@ void slist_show(uint16_t w, uint16_t h, int16_t bottom, bool keep_scroll)
 
 void slist_update(void)
 {
+    if (s.plus != s.plus_shown) {
+        slist_show(s.w, s.h, s.bottom, true);   /* the header gained or lost its icon: place it again */
+        return;
+    }
     layout();
     if (s.scroll > max_scroll()) {
         s.scroll = max_scroll();

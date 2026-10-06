@@ -17,6 +17,7 @@
 #include "hh_lora.h"
 #include "hh_mem.h"
 #include "hh_service.h"
+#include "lg_fwupdate.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -125,6 +126,7 @@ static const char *TAG = "NET";
 #define NVS_KEY_WIFI_OFF      "wifi_off"   /* D78: the Wi-Fi switch, in this service's own store */
 #define NVS_KEY_LORA_DBM      "lora_dbm"   /* D98: LoRa transmit power */
 #define NVS_KEY_TRAIL_OFF     "trail_off"  /* D99: 1 when this handheld keeps its trail to itself */
+#define NVS_KEY_TRAIL         "trail"      /* D106: this handheld's own steps, as the wire body */
 
 #define MIN_U32(a, b) ((a) < (b) ? (a) : (b))
 #define MAX_U32(a, b) ((a) > (b) ? (a) : (b))
@@ -707,6 +709,7 @@ static void position_step(uint32_t now)
 #define TRAIL_SEND_LORA_MS    60000u     /* ... and over LoRa, where it is two parts of airtime */
 #define TRAIL_RESEND_MS       120000u    /* unchanged, for an AP that restarted */
 #define TRAIL_RESEND_LORA_MS  300000u
+#define TRAIL_SAVE_MS         30000u     /* D106: to flash when it has grown, and not more often than this */
 
 typedef struct {
     int32_t  lat_u, lon_u;
@@ -721,6 +724,9 @@ static struct {
     bool       due;                       /* send at the next chance: set at registration */
     bool       sent_any;
     uint32_t   sent_ms;
+    bool       unsaved;                   /* D106: grown since it was last written to flash */
+    bool       saved_any;
+    uint32_t   saved_ms;
     uint32_t   version;                   /* guarded by s.lock */
     lg_trail_t seen;                      /* guarded by s.lock: the last trail asked for */
 } tr;
@@ -745,6 +751,7 @@ static bool trail_add(int32_t lat_u, int32_t lon_u, uint32_t t)
     tr.version++;
     xSemaphoreGive(s.lock);
     tr.changed = true;
+    tr.unsaved = true;
     s.dirty = true;
     return true;
 }
@@ -788,9 +795,64 @@ static void trail_send(uint32_t now)
     }
 }
 
+/*
+ * D106: this handheld's own steps, in its own flash, so one found with a flat battery - or after every
+ * AP has gone dark too - still says where it went. Written when the trail has grown and not more often
+ * than every half minute: a person walking adds a step every few seconds, and what a dead battery can
+ * cost is the last half minute of a walk. Kept whether or not the trail is shared with the grid; that
+ * setting is about what leaves this handheld.
+ */
+static void trail_save_if_due(uint32_t now)
+{
+    if (!tr.unsaved || tr.n == 0 || (tr.saved_any && now - tr.saved_ms < TRAIL_SAVE_MS)) {
+        return;
+    }
+    lg_trail_t t;
+    trail_body(&t);
+    t.subject = s.device;
+    uint8_t body[LG_TRAIL_LEN_MAX];
+    size_t len = lg_trail_enc(&t, body);
+    nvs_handle_t h;
+    esp_err_t err = len == 0 ? ESP_FAIL : nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, NVS_KEY_TRAIL, body, len);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    tr.unsaved = false;
+    tr.saved_any = true;
+    tr.saved_ms = now;
+    if (err != ESP_OK) {
+        ESP_LOGW("TIME", "[GPS] Trail not saved to flash: %s", esp_err_to_name(err));
+    }
+}
+
+static void trail_restore(const lg_trail_t *t, const char *from);
+
+/* D106: at start-up, before anything is recorded, so new steps go in front of the ones kept. */
+static void trail_load(void)
+{
+    uint8_t body[LG_TRAIL_LEN_MAX];
+    size_t len = sizeof(body);
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    esp_err_t err = nvs_get_blob(h, NVS_KEY_TRAIL, body, &len);
+    nvs_close(h);
+    lg_trail_t t;
+    if (err == ESP_OK && lg_trail_dec(body, len, &t)) {
+        trail_restore(&t, "its own flash");
+        tr.unsaved = false;
+    }
+}
+
 /* Every pass of the service loop: a new point if this handheld has moved, and the trail sent when due. */
 static void trail_step(uint32_t now)
 {
+    trail_save_if_due(now);
     if (gp.rx >= 0) {
         hh_gps_state_t g;
         hh_gps_state(&g);
@@ -820,7 +882,7 @@ static void trail_step(uint32_t now)
  * registration, and what comes is put behind whatever it has recorded since: only points older than
  * its own oldest, so nothing it knows better is overwritten.
  */
-static void trail_restore(const lg_trail_t *t)
+static void trail_restore(const lg_trail_t *t, const char *from)
 {
     uint8_t before = tr.n;
     xSemaphoreTake(s.lock, portMAX_DELAY);
@@ -839,8 +901,9 @@ static void trail_restore(const lg_trail_t *t)
     xSemaphoreGive(s.lock);
     if (tr.n != before) {
         tr.changed = before != 0;   /* joined to newer steps: the grid is sent the whole of it */
+        tr.unsaved = true;
         s.dirty = true;
-        ESP_LOGI("TIME", "[GPS] Trail: %u earlier step(s) back from the grid", tr.n - before);
+        ESP_LOGI("TIME", "[GPS] Trail: %u earlier step(s) back from %s", tr.n - before, from);
     }
 }
 
@@ -850,7 +913,7 @@ static void trail_mirror(uint32_t subject)
     const lg_trail_t *t = lg_client_trail(&s.client, subject);
     if (subject == s.client.device) {
         if (t != NULL) {
-            trail_restore(t);
+            trail_restore(t, "the grid");
         }
         return;
     }
@@ -1052,6 +1115,183 @@ static uint32_t io_local_time(void *ctx)
     return s.time_set ? (uint32_t)(mono_s() + s.time_offset_s) : 0;
 }
 
+/* ---- an update from this handheld's AP (D107) ----
+ *
+ * An AP that carries a signed handheld update offers it over the session; a handheld it is for, and
+ * newer than what it runs, asks for it 512 bytes at a time and gives every byte to lg_fwupdate, which
+ * believes none of it until the release key's signature over the first 192 bytes has passed. The AP is
+ * a courier, exactly as a neighbouring AP is to an AP (D101).
+ *
+ * D97's rules for installing without being asked: never while a talk is flowing or within five
+ * minutes of an urgent message either way, never below 30 % battery, only over Wi-Fi. The AP serves
+ * one handheld at a time, so two never restart together.
+ */
+#define FWF_LAYOUT          1u
+#define FWF_OFFER_LEN       16u
+#define FWF_GET_LEN         16u
+#define FWF_DATA_HEADER     12u
+#define FWF_CHUNK           512u
+#define FWF_RETRY_MS        1500u
+#define FWF_RETRIES         20u
+#define FWF_REFUSED_WAIT_MS 600000u
+#define FWF_FAILED_WAIT_MS  120000u
+#define FWF_MIN_BATTERY     30
+#define FWF_QUIET_MS        300000u
+#define FWF_RESTART_MS      3000u
+
+static struct {
+    bool     fetching;
+    uint32_t serial;
+    size_t   file_len;
+    size_t   have;
+    uint32_t asked_ms;
+    uint8_t  retries;
+    uint32_t started_ms;
+    uint32_t wait_serial;      /* an update not to ask for again until wait_until_ms */
+    uint32_t wait_until_ms;
+    uint32_t restart_at_ms;    /* nonzero: the update is in its slot; restart then, if idle */
+    uint32_t quiet_until_ms;   /* nonzero: something urgent passed; nothing is installed before this */
+} fw;
+
+static bool fw_idle(uint32_t now)
+{
+    int8_t pct = hh_service_battery_percent();
+    if (s.voice_awake || (pct >= 0 && pct < FWF_MIN_BATTERY)) {
+        return false;
+    }
+    return fw.quiet_until_ms == 0 || (int32_t)(now - fw.quiet_until_ms) >= 0;
+}
+
+static void fw_request(uint32_t now)
+{
+    /* The signed 192 bytes first and alone, so the update is judged before any of the image is asked for. */
+    size_t want = fw.have < LG_FWU_PREFIX_LEN ? LG_FWU_PREFIX_LEN - fw.have : fw.file_len - fw.have;
+    if (want > FWF_CHUNK) {
+        want = FWF_CHUNK;
+    }
+    uint8_t body[FWF_GET_LEN] = { FWF_LAYOUT, 'H', lg_fwu_this_chip(), 0 };
+    lg_wr32(body + 4, fw.serial);
+    lg_wr32(body + 8, (uint32_t)fw.have);
+    lg_wr16(body + 12, (uint16_t)want);
+    (void)lg_client_send_fw_get(&s.client, body, sizeof(body));
+    fw.asked_ms = now;
+}
+
+static void fw_give_up(uint32_t now, const char *why, uint32_t wait_ms)
+{
+    ESP_LOGW(TAG, "[GRID] Update serial %" PRIu32 " given up at %u of %u bytes: %s", fw.serial, (unsigned)fw.have,
+             (unsigned)fw.file_len, why);
+    lg_fwu_abort();
+    fw.fetching = false;
+    fw.wait_serial = fw.serial;
+    fw.wait_until_ms = now + wait_ms;
+    s.dirty = true;
+}
+
+static void io_fw(void *ctx, uint8_t type, const uint8_t *b, size_t len)
+{
+    (void)ctx;
+    uint32_t now = now_ms();
+    if (type == LG_T_FW_OFFER) {
+        if (len != FWF_OFFER_LEN || b[0] != FWF_LAYOUT || b[1] != 'H' || b[2] != lg_fwu_this_chip()) {
+            return;   /* for another kind of handheld */
+        }
+        uint32_t serial = lg_rd32(b + 4);
+        uint32_t file_len = lg_rd32(b + 8);
+        if (fw.fetching || fw.restart_at_ms != 0 || serial <= lg_fwu_running_serial() ||
+            file_len <= LG_FWU_PREFIX_LEN || s.link != HH_LINK_ONLINE || !fw_idle(now) ||
+            lg_fwu_progress(NULL, NULL)) {
+            return;   /* busy, already as new, not the moment, or the cable is giving it one */
+        }
+        if (serial == fw.wait_serial && (int32_t)(now - fw.wait_until_ms) < 0) {
+            return;
+        }
+        if (lg_fwu_begin('H') != ESP_OK) {
+            return;
+        }
+        fw.fetching = true;
+        fw.serial = serial;
+        fw.file_len = file_len;
+        fw.have = 0;
+        fw.retries = 0;
+        fw.started_ms = now;
+        ESP_LOGW(TAG, "[GRID] The AP offers update serial %" PRIu32 ", newer than this handheld's %" PRIu32
+                      ": asking for it", serial, lg_fwu_running_serial());
+        s.dirty = true;
+        fw_request(now);
+        return;
+    }
+    if (type != LG_T_FW_DATA || !fw.fetching || len <= FWF_DATA_HEADER || b[0] != FWF_LAYOUT ||
+        lg_rd32(b + 4) != fw.serial || lg_rd32(b + 8) != fw.have) {
+        return;   /* not the piece asked for: a late answer to a request already repeated */
+    }
+    size_t n = len - FWF_DATA_HEADER;
+    size_t taken = 0;
+    if (fw.have + n > fw.file_len) {
+        fw_give_up(now, "more arrived than was offered", FWF_REFUSED_WAIT_MS);
+        return;
+    }
+    if (!lg_fwu_progress(&taken, NULL) || taken != fw.have) {
+        fw.fetching = false;   /* the console took the update slot for a file of its own */
+        return;
+    }
+    if (lg_fwu_write(b + FWF_DATA_HEADER, n) != ESP_OK) {
+        fw.fetching = false;   /* lg_fwupdate has already let go of it, and said why */
+        fw.wait_serial = fw.serial;
+        fw.wait_until_ms = now + FWF_REFUSED_WAIT_MS;
+        ESP_LOGW(TAG, "[GRID] Update from the AP not taken: %s", lg_fwu_reason());
+        s.dirty = true;
+        return;
+    }
+    fw.have += n;
+    fw.retries = 0;
+    if ((fw.have * 20u / fw.file_len) != ((fw.have - n) * 20u / fw.file_len)) {
+        s.dirty = true;   /* the Status row moves in steps of five in a hundred */
+    }
+    if (fw.have < fw.file_len) {
+        fw_request(now);
+        return;
+    }
+    fw.fetching = false;
+    s.dirty = true;
+    if (lg_fwu_finish() != ESP_OK) {
+        fw.wait_serial = fw.serial;
+        fw.wait_until_ms = now + FWF_REFUSED_WAIT_MS;
+        ESP_LOGW(TAG, "[GRID] Update from the AP not installed: %s", lg_fwu_reason());
+        return;
+    }
+    ESP_LOGW(TAG, "[GRID] Update serial %" PRIu32 " taken from the AP in %" PRIu32 " s; restarting into it when idle",
+             fw.serial, (now - fw.started_ms) / 1000u);
+    fw.restart_at_ms = (now + FWF_RESTART_MS) | 1u;
+}
+
+/* Every pass of the service loop. */
+static void fw_step(uint32_t now)
+{
+    if (fw.restart_at_ms != 0) {
+        if ((int32_t)(now - fw.restart_at_ms) >= 0 && fw_idle(now)) {
+            ESP_LOGW(TAG, "[GRID] Restarting into update serial %" PRIu32, fw.serial);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
+        }
+        return;
+    }
+    if (!fw.fetching) {
+        return;
+    }
+    if (s.link != HH_LINK_ONLINE) {
+        fw_give_up(now, "the session with the AP that offered it ended", 0);   /* the next AP offers it again */
+    } else if (now - fw.asked_ms >= FWF_RETRY_MS) {
+        if (!lg_fwu_progress(NULL, NULL)) {
+            fw.fetching = false;
+        } else if (++fw.retries > FWF_RETRIES) {
+            fw_give_up(now, "the AP stopped answering", FWF_FAILED_WAIT_MS);
+        } else {
+            fw_request(now);
+        }
+    }
+}
+
 static void io_set_time(void *ctx, uint32_t unix_s)
 {
     (void)ctx;
@@ -1142,6 +1382,9 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
             m->origin_boot = in->boot;
             m->read_sent = false;
             m->urgent = (in->flags & LG_FLAG_URGENT) != 0;
+            if (m->urgent) {
+                fw.quiet_until_ms = (now_ms() + FWF_QUIET_MS) | 1u;   /* D107: no update restarts under an alert */
+            }
             m->all_clear = (in->flags & LG_FLAG_ALL_CLEAR) != 0;
             m->grid_time = in->grid_time;
             ring_set_text(m, (const char *)in->text, in->len);
@@ -1921,6 +2164,9 @@ static void drain_send_queue(void)
 {
     static send_req_t req;
     while (s.send_queue != NULL && xQueueReceive(s.send_queue, &req, 0) == pdTRUE) {
+        if (req.urgent) {
+            fw.quiet_until_ms = (now_ms() + FWF_QUIET_MS) | 1u;   /* D107: no update restarts under an alert */
+        }
         if (req.urgent && req.scope == LG_SCOPE_BROADCAST) {
             (void)send_own_position(now_ms());   /* D65: where the emergency is, just ahead of it */
             trail_send(now_ms());                /* D99: and how they got there */
@@ -2260,6 +2506,7 @@ static void step(uint32_t now)
     }
     position_step(now);   /* the outbox tick is above, so it runs with Wi-Fi off too */
     trail_step(now);
+    fw_step(now);         /* D107 */
 }
 
 static void publish(void)
@@ -2280,6 +2527,9 @@ static void publish(void)
     st->node = node;
     st->node_ssid[0] = '\0';
     st->on_ap_since_ms = s.link == HH_LINK_ONLINE ? s_on_ap_since_ms : 0;
+    st->fw_serial = fw.fetching || fw.restart_at_ms != 0 ? fw.serial : 0;   /* D107 */
+    st->fw_percent = fw.restart_at_ms != 0 ? 100u
+                   : fw.fetching && fw.file_len != 0 ? (uint8_t)(fw.have * 100u / fw.file_len) : 0u;
     memset(st->ip, 0, sizeof(st->ip));
     if (node >= 0 && node < HH_MAX_NODES) {
         snprintf(st->node_ssid, sizeof(st->node_ssid), "%s", s.cand[node].ssid);
@@ -2596,6 +2846,7 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
         .now_ms = io_now_ms,
         .local_time = io_local_time,
         .set_time = io_set_time,
+        .on_fw = io_fw,   /* D107 */
         .seal = io_seal,
         .open = io_open,
         .on_groups_removed = io_groups_removed,
@@ -2627,6 +2878,7 @@ esp_err_t hh_service_start(const lg_identity_t *identity)
             nvs_close(h);
         }
         tr.off = off != 0;   /* D99 */
+        trail_load();        /* D106 */
     }
     if (lp.rx >= 0 && lg_gridkeys()->ready) {
         esp_err_t lerr = hh_lora_start(lp.rx, lp.tx, lp.rst, s.device, s.boot, s_lora_hh_key,

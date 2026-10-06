@@ -50,6 +50,8 @@ typedef struct {
     bool     (*is_neighbor)(void *ctx, uint16_t node);
     /* D101: an FW_OFFER, FW_GET or FW_DATA from the neighbour from_node, body unread. May be NULL. */
     void     (*on_fw)(void *ctx, uint16_t from_node, uint8_t type, const uint8_t *body, size_t len);
+    /* D107: an FW_GET from a handheld with a session here, body unread. May be NULL. */
+    void     (*on_fw_client)(void *ctx, uint32_t device, const uint8_t *body, size_t len);
     uint32_t (*now_ms)(void *ctx);
     uint32_t (*grid_time)(void *ctx);  /* Unix seconds, 0 when grid time is unset */
     /* Optional. A diagnostic echo arrived; hops = backbone hops travelled. */
@@ -159,7 +161,8 @@ typedef struct {
     lg_presence_entry_t presence[LG_MAX_DEVICES];
     lg_name_t           names[LG_MAX_DEVICES];              /* indexed by roster user index; version 0 = none */
     lg_position_t       positions[LG_POS_SLOTS];            /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
-    lg_trail_t          trails[LG_TRAIL_SLOTS];             /* fix_time 0 = empty; RAM only (D99) */
+    lg_trail_t          trails[LG_TRAIL_SLOTS];             /* fix_time 0 = empty; the glue keeps a copy in flash (D106) */
+    uint32_t            trail_changes;                      /* counts every trail taken, so the glue knows to save */
     uint32_t            trail_evictions;                    /* a full table gave its stalest trail to a fresher one */
     uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
     bool                has_broadcast[LG_MAX_DEVICES];
@@ -344,6 +347,22 @@ size_t lg_node_positions(const lg_node_t *n, lg_position_t *out, size_t max);
  */
 int lg_node_send_fw(lg_node_t *n, uint16_t node, uint8_t type, const uint8_t *body, size_t len);
 
+/*
+ * D107: sends an FW_OFFER or FW_DATA to one handheld that has a session on this AP, so an AP can hand a
+ * handheld the signed update it carries for it. Only over a session: the frame is one the LoRa policy
+ * never sends, and a handheld known only over LoRa is not offered one. A handheld answers with FW_GET,
+ * which comes to io.on_fw_client; an FW_OFFER or FW_DATA from a handheld is ignored. Returns LG_OK,
+ * LG_ERR_ARG (another type, no body, too long, no such device) or LG_ERR_SHORT (it has no session here).
+ */
+int lg_node_send_fw_client(lg_node_t *n, uint32_t device, uint8_t type, const uint8_t *body, size_t len);
+
+/*
+ * A trail read back from this AP's own storage at start-up (D106). Taken like any other - the newer of
+ * two wins - but told to nobody: it is shared when a link comes up, as every trail held is.
+ */
+bool lg_node_restore_trail(lg_node_t *n, const lg_trail_t *t);
+/* The trail in slot `i` of the table, or NULL if that slot is empty. For saving them all. */
+const lg_trail_t *lg_node_trail_at(const lg_node_t *n, size_t i);
 /* The trail held for a handheld, or NULL. */
 const lg_trail_t *lg_node_trail(const lg_node_t *n, uint32_t subject);
 /* How many trails are held. */

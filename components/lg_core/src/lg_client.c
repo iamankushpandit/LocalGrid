@@ -275,6 +275,20 @@ int lg_client_request_trail(lg_client_t *c, uint32_t subject)
     return send_frame(c, &e, body, sizeof(body)) ? LG_OK : LG_ERR_SHORT;
 }
 
+int lg_client_send_fw_get(lg_client_t *c, const uint8_t *body, size_t len)
+{
+    if (c == NULL || body == NULL || len == 0 || len > LG_FW_BODY_MAX) {
+        return LG_ERR_ARG;
+    }
+    if (!c->connected || !c->registered) {
+        return LG_ERR_SHORT;   /* not put to a radio that could never carry the answer */
+    }
+    lg_env_t e;
+    base_env(c, &e, LG_T_FW_GET, LG_SCOPE_SYSTEM, 0);
+    e.ttl = 1;
+    return send_frame(c, &e, body, len) ? LG_OK : LG_ERR_SHORT;
+}
+
 const lg_trail_t *lg_client_trail(const lg_client_t *c, uint32_t subject)
 {
     return c != NULL && subject != 0 && c->trail.fix_time != 0 && c->trail.subject == subject ? &c->trail : NULL;
@@ -1158,6 +1172,14 @@ void lg_client_on_frame(lg_client_t *c, const uint8_t *frame, size_t len)
         break;
     case LG_T_TRAIL:
         handle_trail(c, &e, body);
+        break;
+    case LG_T_FW_OFFER:
+    case LG_T_FW_DATA:
+        /* D107: only from this handheld's own AP, over its session, addressed to it. */
+        if (c->registered && e.scope == LG_SCOPE_SYSTEM && e.target == c->device && (e.origin_id & LG_NODE_ID_BASE) != 0 &&
+            e.body_len != 0 && e.body_len <= LG_FW_BODY_MAX && c->io.on_fw != NULL) {
+            c->io.on_fw(c->io.ctx, e.type, body, e.body_len);
+        }
         break;
     default:
         break;

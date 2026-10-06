@@ -32,7 +32,12 @@ static struct {
     esp_ota_handle_t ota;
     lg_sha256_ctx_t hash;
     const char     *reason;
+    bool            carry;            /* D107: a handheld's update, kept in the spare slot and never booted */
+    bool            carried_done;     /* the last file finished was one of those */
+    size_t          erased;           /* bytes of the spare slot erased so far for it */
 } u = { .reason = "" };
+
+#define CARRY_SECTOR 4096u
 
 const char *lg_fwu_reason(void)
 {
@@ -174,6 +179,101 @@ int lg_fwu_held_read(size_t offset, uint8_t *out, size_t len)
     return (int)len;
 }
 
+/* ---- carrying a handheld's update (D107) ---- */
+
+static struct {
+    bool          known;
+    bool          ok;
+    uint8_t       prefix[LG_FWU_PREFIX_LEN];
+    lg_fwu_info_t info;
+    const esp_partition_t *slot;
+} carried;
+
+static void carried_load(void)
+{
+    if (carried.known) {
+        return;
+    }
+    carried.known = true;
+    carried.ok = false;
+    carried.slot = esp_ota_get_next_update_partition(NULL);
+    nvs_handle_t h;
+    char label[17] = "";
+    size_t len = sizeof(carried.prefix);
+    size_t llen = sizeof(label);
+    if (carried.slot == NULL || nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    bool got = nvs_get_blob(h, "c_hdr", carried.prefix, &len) == ESP_OK && len == sizeof(carried.prefix) &&
+               nvs_get_str(h, "c_slot", label, &llen) == ESP_OK;
+    nvs_close(h);
+    /* The file is in the slot it was written to only while that is still the spare one. */
+    if (!got || strcmp(label, carried.slot->label) != 0 || memcmp(carried.prefix, "LGFW", 4) != 0 ||
+        carried.prefix[4] != 1) {
+        return;
+    }
+    parse_header(carried.prefix, &carried.info);
+    carried.ok = carried.info.role == 'H' && carried.info.serial != 0 && carried.info.image_len != 0 &&
+                 carried.info.image_len <= carried.slot->size;
+}
+
+/* The spare slot is about to be written: whatever was carried in it is no longer whole. */
+static void carried_forget(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_erase_key(h, "c_hdr");
+        (void)nvs_erase_key(h, "c_slot");
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+    carried.known = false;
+}
+
+bool lg_fwu_carried(lg_fwu_info_t *out, size_t *file_len)
+{
+    carried_load();
+    if (!carried.ok || (u.active && u.checked)) {
+        return false;   /* nothing, or the slot is being written this moment */
+    }
+    if (out != NULL) {
+        *out = carried.info;
+    }
+    if (file_len != NULL) {
+        *file_len = LG_FWU_PREFIX_LEN + carried.info.image_len;
+    }
+    return true;
+}
+
+int lg_fwu_carried_read(size_t offset, uint8_t *out, size_t len)
+{
+    if (out == NULL || !lg_fwu_carried(NULL, NULL)) {
+        return -1;
+    }
+    size_t total = LG_FWU_PREFIX_LEN + carried.info.image_len;
+    if (offset >= total) {
+        return 0;
+    }
+    if (len > total - offset) {
+        len = total - offset;
+    }
+    size_t done = 0;
+    if (offset < LG_FWU_PREFIX_LEN) {
+        done = LG_FWU_PREFIX_LEN - offset < len ? LG_FWU_PREFIX_LEN - offset : len;
+        memcpy(out, carried.prefix + offset, done);
+    }
+    if (done < len &&
+        esp_partition_read(carried.slot, offset + done - LG_FWU_PREFIX_LEN, out + done, len - done) != ESP_OK) {
+        return -1;
+    }
+    return (int)len;
+}
+
+bool lg_fwu_finished_carried(void)
+{
+    return u.carried_done;
+}
+
 static esp_err_t refuse(esp_err_t err, const char *why)
 {
     u.reason = why;
@@ -186,11 +286,14 @@ static esp_err_t refuse(esp_err_t err, const char *why)
 void lg_fwu_abort(void)
 {
     if (u.active && u.checked) {
-        (void)esp_ota_abort(u.ota);
+        if (!u.carry) {
+            (void)esp_ota_abort(u.ota);
+        }
         lg_sha256_abort(&u.hash);
     }
     u.active = false;
     u.checked = false;
+    u.carry = false;
     u.have = 0;
 }
 
@@ -203,8 +306,48 @@ esp_err_t lg_fwu_begin(char role)
     u.role = role;
     u.have = 0;
     u.checked = false;
+    u.carry = false;
+    u.carried_done = false;
     u.reason = "";
     u.active = true;
+    return ESP_OK;
+}
+
+/*
+ * D107: the signed header says this is a handheld's firmware and this is an access point. It is kept,
+ * not run: written raw to the spare slot (the OTA calls would refuse an image built for another chip,
+ * and would be right to), hashed as it arrives, and never made bootable.
+ */
+static esp_err_t carry_begin(void)
+{
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running != NULL && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        return refuse(ESP_ERR_INVALID_STATE, "this access point's own new firmware is still on trial, and the spare "
+                                             "slot is its way back; give it the handheld update again in a few minutes");
+    }
+    lg_fwu_info_t have;
+    if (lg_fwu_carried(&have, NULL) && u.info.serial <= have.serial) {
+        return refuse(ESP_ERR_INVALID_VERSION, "it is not newer than the handheld update this access point already carries");
+    }
+    u.target = esp_ota_get_next_update_partition(NULL);
+    if (u.target == NULL) {
+        return refuse(ESP_ERR_NOT_FOUND, "this access point has no spare firmware slot to carry it in");
+    }
+    if (u.info.image_len == 0 || u.info.image_len > u.target->size) {
+        return refuse(ESP_ERR_INVALID_SIZE, "the image does not fit the spare slot");
+    }
+    carried_forget();
+    if (lg_sha256_begin(&u.hash) != 0) {
+        return refuse(ESP_FAIL, "the image could not be checked");
+    }
+    u.carry = true;
+    u.erased = 0;
+    u.checked = true;
+    ESP_LOGW(TAG, "[GRID] Handheld update %s (serial %u, chip %u), %u bytes, signed by the release key: "
+                  "carrying it in %s for handhelds, not running it",
+             u.info.version, (unsigned)u.info.serial, u.info.chip, (unsigned)u.info.image_len, u.target->label);
     return ESP_OK;
 }
 
@@ -227,6 +370,9 @@ static esp_err_t check_prefix(void)
     /* Signed, so the header can be believed. */
     parse_header(h, &u.info);
     if (u.info.role != u.role) {
+        if (u.role == 'N' && u.info.role == 'H') {
+            return carry_begin();   /* D107: an access point carries a handheld's update */
+        }
         return refuse(ESP_ERR_NOT_SUPPORTED, u.role == 'N' ? "it is firmware for a handheld, and this is an access point"
                                                            : "it is firmware for an access point, and this is a handheld");
     }
@@ -243,6 +389,7 @@ static esp_err_t check_prefix(void)
     if (u.info.image_len == 0 || u.info.image_len > u.target->size) {
         return refuse(ESP_ERR_INVALID_SIZE, "the image does not fit the update slot");
     }
+    carried_forget();   /* D107: this access point's own update takes the slot a handheld's was carried in */
     /* Erased a sector at a time as the image arrives, not all at once here: erasing a megabyte up
      * front holds the calling task for seconds, and since D101 that task can be an AP's core task. */
     if (esp_ota_begin(u.target, OTA_WITH_SEQUENTIAL_WRITES, &u.ota) != ESP_OK) {
@@ -282,7 +429,17 @@ esp_err_t lg_fwu_write(const uint8_t *data, size_t len)
         if (done + len > u.info.image_len) {
             return refuse(ESP_ERR_INVALID_SIZE, "more arrived than the header said the image holds");
         }
-        if (esp_ota_write(u.ota, data, len) != ESP_OK || lg_sha256_update(&u.hash, data, len) != 0) {
+        if (u.carry) {
+            while (u.erased < done + len) {   /* a sector at a time, as it is reached */
+                if (esp_partition_erase_range(u.target, u.erased, CARRY_SECTOR) != ESP_OK) {
+                    return refuse(ESP_FAIL, "the spare slot could not be erased");
+                }
+                u.erased += CARRY_SECTOR;
+            }
+            if (esp_partition_write(u.target, done, data, len) != ESP_OK || lg_sha256_update(&u.hash, data, len) != 0) {
+                return refuse(ESP_FAIL, "the image could not be written");
+            }
+        } else if (esp_ota_write(u.ota, data, len) != ESP_OK || lg_sha256_update(&u.hash, data, len) != 0) {
             return refuse(ESP_FAIL, "the image could not be written");
         }
         u.have += len;
@@ -301,9 +458,39 @@ esp_err_t lg_fwu_finish(void)
     }
     uint8_t digest[32];
     if (lg_sha256_finish(&u.hash, digest) != 0 || memcmp(digest, u.info.sha256, 32) != 0) {
-        (void)esp_ota_abort(u.ota);
+        if (!u.carry) {
+            (void)esp_ota_abort(u.ota);
+        }
         u.checked = false;
         return refuse(ESP_ERR_INVALID_CRC, "the image is not the one that was signed");
+    }
+    if (u.carry) {
+        /* Whole, and the one that was signed. Said to be carried only now, so a file that stopped
+         * halfway is never handed to anybody. */
+        nvs_handle_t ch;
+        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &ch);
+        if (err == ESP_OK) {
+            err = nvs_set_blob(ch, "c_hdr", u.prefix, sizeof(u.prefix));
+            if (err == ESP_OK) {
+                err = nvs_set_str(ch, "c_slot", u.target->label);
+            }
+            if (err == ESP_OK) {
+                err = nvs_commit(ch);
+            }
+            nvs_close(ch);
+        }
+        u.checked = false;
+        if (err != ESP_OK) {
+            return refuse(ESP_FAIL, "the handheld update could not be recorded as carried");
+        }
+        carried.known = false;
+        ESP_LOGW(TAG, "[GRID] Handheld update %s (serial %u) is carried in %s and will be offered to handhelds",
+                 u.info.version, (unsigned)u.info.serial, u.target->label);
+        u.active = false;
+        u.carry = false;
+        u.carried_done = true;
+        u.reason = "";
+        return ESP_OK;
     }
     if (esp_ota_end(u.ota) != ESP_OK) {
         u.checked = false;
@@ -400,7 +587,9 @@ static int cmd_update(int argc, char **argv)
         }
     } else if (strcmp(argv[1], "end") == 0) {
         esp_err_t err = lg_fwu_finish();
-        if (err == ESP_OK) {
+        if (err == ESP_OK && lg_fwu_finished_carried()) {
+            printf("LGFWU: ok, carried for handhelds; this access point keeps running its own firmware\n");
+        } else if (err == ESP_OK) {
             printf("LGFWU: ok, restarting into the new firmware\n");
             xTaskCreate(restart_soon, "lgfwu", 2048, NULL, 1, NULL);
         } else {

@@ -171,7 +171,8 @@ int    lg_position_slot(const lg_roster_t *r, uint32_t subject);
  *                               (about 1.1 m of latitude; +-36 km)
  *          u16 age              seconds before the newest point; 65535 means that long or longer
  * Exactly 17 + 6 x count bytes, and ages never decrease down the list. Only a handheld sets its own
- * trail. Like positions (D65), trails live in RAM only and are never written to flash.
+ * trail. Unlike positions (D65), trails are also kept in flash, by the handheld that walked them and by
+ * every AP that holds a copy (D106): a device found after everything went dark still says where it went.
  *
  * TRAIL_REQ (D99): handheld -> its AP. SYSTEM scope.
  *     0  u32  subject    whose trail is wanted

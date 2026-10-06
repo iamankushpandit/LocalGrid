@@ -64,6 +64,8 @@ typedef struct {
 /* Starts a new set of rows. back: a back arrow at the header's right (SLIST_BACK); every list also
  * has the house at its left, which goes home without the screen seeing it. plus: a + too. */
 void slist_begin(const char *title, bool back, bool plus);
+/* After slist_begin: an icon of the screen's own in the + slot (one of LG_SYMBOL_*), reported as SLIST_PLUS. */
+void slist_icon(const char *glyph);
 void slist_tabs(const char *const *names, uint8_t n, uint8_t selected);
 
 slist_row_t *slist_add(slist_kind_t kind, const char *label, const char *value, int16_t id, int32_t arg);

@@ -1280,6 +1280,54 @@ static void test_trail_body(void)
 }
 
 /* D99: a handheld's last steps are held by every AP, outlive the handheld, and are fetched on request. */
+/*
+ * D106: an AP that starts up is given the trails it had kept in flash. They are taken like any other
+ * - the newer of two wins, a made-up one is refused - told to nobody at the time, and shared when a
+ * link comes up, which is how the one AP that kept a walk gives it back to a grid that lost it.
+ */
+static void test_trails_from_flash(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_node_t *n = &s->nodes[1].node;
+    lg_trail_t kept = {
+        .subject = LG_PROTO_DAD, .lat_u = LAT0, .lon_u = LON0, .fix_time = T0, .count = 1, .older = { { -9, 0, 8 } },
+    };
+    uint32_t changes = n->trail_changes;
+    CHECK(lg_node_restore_trail(n, &kept));
+    CHECK_EQ(n->trail_changes, changes + 1u);
+    CHECK(trail_is(lg_node_trail(n, LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0, 1));
+    CHECK(trail_is(lg_node_trail_at(n, 0), LG_PROTO_DAD, LAT0, LON0, T0, 1));
+    CHECK(lg_node_trail_at(n, 1) == NULL);
+    CHECK(lg_node_trail_at(n, LG_TRAIL_SLOTS) == NULL);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_trail(&s->nodes[0].node, LG_PROTO_DAD) == NULL);   /* told to nobody when it was read back */
+
+    CHECK(!lg_node_restore_trail(n, &kept));          /* the same one again is not newer */
+    lg_trail_t bad = kept;
+    bad.subject = 0;
+    CHECK(!lg_node_restore_trail(n, &bad));
+    bad = kept;
+    bad.subject = LG_NODE_ID_BASE | 1u;               /* an AP has a position and no trail */
+    CHECK(!lg_node_restore_trail(n, &bad));
+    bad = kept;
+    bad.lat_u = 90000001;
+    CHECK(!lg_node_restore_trail(n, &bad));
+    bad = kept;
+    bad.count = LG_TRAIL_POINTS;
+    CHECK(!lg_node_restore_trail(n, &bad));
+    CHECK(!lg_node_restore_trail(n, NULL));
+    CHECK_EQ(n->trail_changes, changes + 1u);         /* none of those counted as a change to save */
+
+    /* A neighbour link comes up: what was kept is handed over, as every trail held is. */
+    lg_node_on_neighbor_up(n, 0);
+    CHECK(sim_pump(s));
+    CHECK(trail_is(lg_node_trail(&s->nodes[0].node, LG_PROTO_DAD), LG_PROTO_DAD, LAT0, LON0, T0, 1));
+    sim_destroy(s);
+}
+
 static void test_trails(void)
 {
     sim_t *s = make_chain();
@@ -1455,6 +1503,71 @@ static void test_trails(void)
 }
 
 /* D101: update frames go one hop between APs, are never passed on, and never come from a handheld. */
+/*
+ * D107: an AP hands a handheld the update it carries for it. Offer and data go to one handheld over
+ * its session; the handheld asks with FW_GET; and each of the three is taken only from where it may
+ * come - never passed on, never from another handheld, never to or from one without a session.
+ */
+static void test_fw_to_a_handheld(void)
+{
+    sim_t *s = make_chain();   /* Dad on A; Emma on C */
+    if (s == NULL) {
+        return;
+    }
+    static uint8_t body[LG_FW_BODY_MAX + 1u];
+    memset(body, 0x6B, sizeof(body));
+    lg_node_t *a = &s->nodes[0].node;
+
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_DAD, LG_T_FW_GET, body, 16), LG_ERR_ARG);   /* an AP never asks a handheld */
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_DAD, LG_T_FW_OFFER, body, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_DAD, LG_T_FW_DATA, body, LG_FW_BODY_MAX + 1u), LG_ERR_ARG);
+    CHECK_EQ(lg_node_send_fw_client(a, 0, LG_T_FW_OFFER, body, 16), LG_ERR_ARG);
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_EMMA, LG_T_FW_OFFER, body, 16), LG_ERR_SHORT);   /* her session is on C */
+
+    /* The offer reaches Dad and nobody else, and no AP is handed it. */
+    body[0] = 0x51;
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_DAD, LG_T_FW_OFFER, body, 16), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].fw_count, 1u);
+    CHECK_EQ(s->clients[DAD].fw_type, LG_T_FW_OFFER);
+    CHECK_EQ(s->clients[DAD].fw_len, 16u);
+    CHECK_EQ(s->clients[DAD].fw_first, 0x51);
+    CHECK_EQ(s->clients[EMMA].fw_count, 0u);
+    CHECK_EQ(s->nodes[1].fw_count, 0u);
+
+    /* Dad asks; his AP is handed it with his number, and it goes no further. */
+    CHECK_EQ(lg_client_send_fw_get(cl(s, DAD), body, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_fw_get(cl(s, DAD), NULL, 16), LG_ERR_ARG);
+    body[0] = 0x52;
+    CHECK_EQ(lg_client_send_fw_get(cl(s, DAD), body, 16), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].fwc_count, 1u);
+    CHECK_EQ(s->nodes[0].fwc_device, LG_PROTO_DAD);
+    CHECK_EQ(s->nodes[0].fwc_len, 16u);
+    CHECK_EQ(s->nodes[0].fwc_first, 0x52);
+    CHECK_EQ(s->nodes[1].fwc_count, 0u);
+    CHECK_EQ(s->nodes[1].fw_count, 0u);
+    CHECK_EQ(s->nodes[0].fw_count, 0u);   /* and not mistaken for a neighbour's request */
+
+    /* The bytes come back. (The simulated radio carries frames up to 320 bytes; the largest body is
+     * checked on the AP-to-AP path, which builds the same frame.) */
+    body[0] = 0x53;
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_DAD, LG_T_FW_DATA, body, 200), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[DAD].fw_count, 2u);
+    CHECK_EQ(s->clients[DAD].fw_type, LG_T_FW_DATA);
+    CHECK_EQ(s->clients[DAD].fw_len, 200u);
+    CHECK_EQ(s->clients[DAD].fw_first, 0x53);
+
+    /* A handheld with no session asks nobody, and nothing is put to a radio for it. */
+    sim_detach(s, DAD);
+    CHECK(sim_pump(s));
+    CHECK_EQ(lg_client_send_fw_get(cl(s, DAD), body, 16), LG_ERR_SHORT);
+    CHECK_EQ(lg_node_send_fw_client(a, LG_PROTO_DAD, LG_T_FW_OFFER, body, 16), LG_ERR_SHORT);
+    CHECK_EQ(s->nodes[0].fwc_count, 1u);
+    sim_destroy(s);
+}
+
 static void test_fw_frames(void)
 {
     sim_t *s = make_chain();   /* A - B - C */
@@ -3452,7 +3565,9 @@ void test_messaging(void)
     test_position_time();
     test_trail_body();
     test_trails();
+    test_trails_from_flash();
     test_fw_frames();
+    test_fw_to_a_handheld();
     test_voice_body();
     test_voice_compact();
     test_voice_group();

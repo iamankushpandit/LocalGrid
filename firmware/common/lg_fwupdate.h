@@ -72,6 +72,22 @@ void lg_fwu_running_version(char out[LG_FWU_VERSION_MAX + 1u]);
 bool lg_fwu_held(lg_fwu_info_t *out, size_t *file_len);
 int  lg_fwu_held_read(size_t offset, uint8_t *out, size_t len);
 
+/*
+ * Carrying a handheld's update (D107). An access point given a signed update for a *handheld* cannot
+ * run it and does not try: it checks the signature and the image exactly as it would its own, keeps the
+ * file in its spare firmware slot without making it bootable, and hands it to handhelds and to other
+ * access points. It happens by itself: lg_fwu_begin('N') followed by a file whose signed header says
+ * 'H' is carried, by whatever road the file came. After such a file lg_fwu_finish returns ESP_OK and
+ * lg_fwu_finished_carried is true, and the caller must not restart.
+ *
+ * One at a time, for one chip: the spare slot holds one image. A newer serial replaces what is carried.
+ * An access point's own update is written to the same slot and displaces it. Nothing is carried while
+ * this access point's own firmware is still on trial, because the spare slot is then its way back.
+ */
+bool lg_fwu_finished_carried(void);
+bool lg_fwu_carried(lg_fwu_info_t *out, size_t *file_len);
+int  lg_fwu_carried_read(size_t offset, uint8_t *out, size_t len);
+
 /* This chip's code in an update header. */
 uint8_t lg_fwu_this_chip(void);
 

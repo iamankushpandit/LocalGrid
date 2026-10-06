@@ -172,6 +172,10 @@ typedef struct {
      * messages have already left the outbox and inbox; the glue deletes its own copies (D52). */
     void     (*on_groups_removed)(void *ctx, const uint16_t *removed, size_t removed_n);
     void     (*set_time)(void *ctx, uint32_t unix_s);
+    /* Optional (D107). An FW_OFFER or FW_DATA from this handheld's AP, body unread: the glue decides
+     * whether to ask for the update and gives every byte to lg_fwupdate, which believes none of it
+     * until the release key's signature has passed. */
+    void     (*on_fw)(void *ctx, uint8_t type, const uint8_t *body, size_t len);
     /*
      * End-to-end encryption for 1:1 messages. seal writes pt_len + 16 bytes and
      * returns that length; open writes ct_len - 16 bytes and returns that length.
@@ -358,6 +362,11 @@ const lg_position_t *lg_client_position(const lg_client_t *c, uint32_t subject);
  * or LG_ERR_SHORT.
  */
 int lg_client_send_trail(lg_client_t *c, const lg_trail_t *trail);
+/*
+ * D107: asks this handheld's AP for bytes of the update it offered (FW_GET; the body is the glue's).
+ * Only with a registered session: LG_ERR_SHORT without one, and it is never offered to LoRa.
+ */
+int lg_client_send_fw_get(lg_client_t *c, const uint8_t *body, size_t len);
 int lg_client_request_trail(lg_client_t *c, uint32_t subject);
 /* The trail last received for subject, or NULL. */
 const lg_trail_t *lg_client_trail(const lg_client_t *c, uint32_t subject);

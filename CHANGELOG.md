@@ -5,6 +5,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A handheld takes its update from its access point (D107)
+
+- An access point given a signed handheld update keeps it in its spare firmware slot, never runs it,
+  passes it to the other access points, and offers it to every handheld with a session.
+- A handheld it is for fetches it over Wi-Fi 512 bytes at a time, checks it with the release key as
+  any update is checked, and restarts into it when idle: not in a talk, not within five minutes of an
+  urgent message, not below 30 % battery. One handheld per access point at a time.
+- Status shows an `Update` row while one is arriving. `spread` on an AP says what it carries.
+- One handheld image at a time, for one chip; an access point's own update displaces it.
+
+### A trail survives every device being switched off (D106)
+
+- A handheld keeps its own trail in flash, and every access point keeps the trails it holds, written
+  when a trail has grown and at most every 30 s (handheld) or 60 s (access point).
+- A handheld that starts puts new steps in front of the ones it kept. An access point that starts
+  reads its trails back and shares them when a link comes up.
+- This reverses D65 for trails, on the owner's instruction: a found device says where it went.
+
+### A tick in the Messages header marks everything read (D94)
+
+- The header of the Messages list shows a tick whenever something is unread; touching it does what
+  the "Mark all read" row does. The row stays.
+
 ### A message ESP-NOW could not deliver goes to LoRa at once (D105)
 
 - A text or a delivery report whose send to another access point fails is handed to the LoRa backbone
