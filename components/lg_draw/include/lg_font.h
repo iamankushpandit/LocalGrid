@@ -57,6 +57,14 @@ extern const lg_font_t lg_font_montserrat_16;
 extern const lg_font_t lg_font_montserrat_20;
 extern const lg_font_t lg_font_montserrat_28;
 
+/*
+ * The handheld's own icons (tools/build_icon_font.py), sized to sit beside lg_font_montserrat_16 and
+ * given to a text call as its fallback font. Private use code points U+E000 and U+E001, as UTF-8.
+ */
+extern const lg_font_t lg_font_icons_16;
+#define LG_ICON_HANDHELD "\xEE\x80\x80"
+#define LG_ICON_GRID     "\xEE\x80\x81"   /* the LocalGrid mark: three APs in a tent, waves over the top one */
+
 /* Font Awesome icons carried in the Montserrat fonts, as UTF-8 (the code points LVGL used). */
 #define LG_SYMBOL_BACKSPACE "\xEF\x95\x9A"
 #define LG_SYMBOL_BATTERY_FULL  "\xEF\x89\x80"

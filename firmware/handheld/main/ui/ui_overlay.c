@@ -174,7 +174,7 @@ static struct {
      */
     char      who[HH_NAME_MAX];
     char      ap[HH_SSID_MAX + 12];
-    char      line0[HH_NAME_MAX + HH_SSID_MAX + 14];   /* the two as the one line that is drawn */
+    char      line0[HH_NAME_MAX + HH_SSID_MAX + 24];   /* the two as the one line that is drawn */
     /*
      * The grid's time, as a third line drawn exactly like the two names (owner, 2026-10-04): hours and
      * minutes as the launcher shows them, or "time not set" when the grid has none (D6).
@@ -657,6 +657,7 @@ static void label_char_paint(uint8_t line, uint8_t i)
     b.rect = (lg_rect_t){ s.lchar[line][i].x, lr->y, s.lchar[line][i].w, lr->h };
     b.bg = b.outside = C_BG;
     b.font = &lg_font_montserrat_16;
+    b.fallback = &lg_font_icons_16;
     b.fg = rain_colour(s.lchar[line][i].lvl);
     b.align = LG_ALIGN_CENTER;
     uint8_t n = s.lchar[line][i].len;
@@ -697,7 +698,7 @@ static void label_line_layout(uint8_t line, const char *old)
         uint8_t len = utf8_len((uint8_t)src[off]);
         memcpy(one, src + off, len);
         one[len] = '\0';
-        int16_t w = lg_draw_text_width(font, NULL, one);
+        int16_t w = lg_draw_text_width(font, &lg_font_icons_16, one);
         s.lchar[line][n].off = (uint8_t)off;
         s.lchar[line][n].len = len;
         s.lchar[line][n].w = (uint8_t)(w > 255 ? 255 : w < 1 ? 1 : w);
@@ -815,7 +816,7 @@ static void saver_label_tick(void)
     char ap[HH_SSID_MAX + 12];
     snprintf(who, sizeof(who), "%s", st->name[0] != '\0' ? st->name : "This handheld");
     if (st->link == HH_LINK_ONLINE && st->node >= 0 && st->node_ssid[0] != '\0') {
-        snprintf(ap, sizeof(ap), "on %s", st->node_ssid);
+        snprintf(ap, sizeof(ap), "%s", st->node_ssid);   /* the icon before it says "on" (owner, 2026-10-06) */
     } else if (st->link == HH_LINK_LORA) {
         /*
          * D80: on LoRa there is no session, so "on <AP>" would be the one thing that is not true - but
@@ -864,10 +865,13 @@ static void saver_label_tick(void)
     if (strcmp(who, s.who) != 0 || strcmp(ap, s.ap) != 0 || !s.label_on) {
         snprintf(s.who, sizeof(s.who), "%s", who);
         snprintf(s.ap, sizeof(s.ap), "%s", ap);
-        /* One line. A name and an AP too long for the screen together keep the AP, which is the news. */
-        snprintf(s.line0, sizeof(s.line0), "%s %s", who, ap);
-        if (lg_draw_text_width(&lg_font_montserrat_16, NULL, s.line0) > (int16_t)s.w - 8) {
-            snprintf(s.line0, sizeof(s.line0), "%s", ap);
+        /*
+         * One line: a handheld and its name, the LocalGrid mark and its AP (owner, 2026-10-06). A name
+         * and an AP too long for the screen together keep the AP, which is the news.
+         */
+        snprintf(s.line0, sizeof(s.line0), LG_ICON_HANDHELD " %s   " LG_ICON_GRID " %s", who, ap);
+        if (lg_draw_text_width(&lg_font_montserrat_16, &lg_font_icons_16, s.line0) > (int16_t)s.w - 8) {
+            snprintf(s.line0, sizeof(s.line0), LG_ICON_GRID " %s", ap);
         }
         snprintf(s.clock, sizeof(s.clock), "%s", clock);
         snprintf(s.facts, sizeof(s.facts), "%s", facts);
@@ -1213,7 +1217,8 @@ void ui_overlay_log(uint32_t now_ms, uint32_t last_touch_ms)
              woke_ms != 0 ? now_ms - woke_ms : 0u, lg_bsp_setting_get_bool("saver", true) ? "on" : "off",
              ui_notify_unread_total());
     if (s.cover == OV_SAVER) {   /* what the label says, with its width against the screen's: icons are 3 bytes each */
-        ESP_LOGI(TAG, "[UI] Saver label: [%s] [%s] [%s], widest %d of %u px", s.line0, s.clock, s.facts,
-                 (int)lg_draw_text_width(&lg_font_montserrat_16, NULL, s.clock), (unsigned)s.w);
+        ESP_LOGI(TAG, "[UI] Saver label: [%s] [%s] [%s], widths %d and %d of %u px", s.line0, s.clock, s.facts,
+                 (int)lg_draw_text_width(&lg_font_montserrat_16, &lg_font_icons_16, s.line0),
+                 (int)lg_draw_text_width(&lg_font_montserrat_16, &lg_font_icons_16, s.clock), (unsigned)s.w);
     }
 }

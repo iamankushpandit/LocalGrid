@@ -9,6 +9,7 @@ idf_component_register(SRCS src/lg_draw.c
                             fonts/lg_font_montserrat_20.c
                             fonts/lg_font_montserrat_28.c
                             fonts/lg_font_matrix_12.c
+                            fonts/lg_font_icons_16.c
                             fonts/lg_font_emoji_14.c
                             fonts/lg_font_emoji_20.c
                        INCLUDE_DIRS include

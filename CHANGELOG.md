@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 - The battery figure has a battery beside it, drawn as full as the battery is (five steps).
 - New messages are an envelope and the count, not "61 new messages". Nothing is shown when there are none.
+- The first line is a handheld icon and the handheld's name, then the LocalGrid mark and the AP's name,
+  in place of "Bluey on Fuji". The two icons are the project's own, drawn by `tools/build_icon_font.py`
+  into `lg_font_icons_16`; the UI fonts' Font Awesome set has neither.
 
 ### An AP no longer takes a handheld that has a session elsewhere (D80)
 
