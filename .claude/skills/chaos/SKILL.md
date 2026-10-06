@@ -99,21 +99,14 @@ relinks the image: after committing, flash every board once so they all match.
 If no group holds every handheld under test, the harness makes one called `chaos` so group messages and
 group voice are exercised; it stays on the grid and the next run reuses it.
 
-## Access points on battery: faults over BLE (D90)
+## Access points with no cable are watched, not faulted (D103)
 
-When no access point is on USB, the harness finds them over BLE and **asks each one for its faults**
-with `--admin-password <pw>` (or `LG_ADMIN_PASSWORD` in the environment). Nothing is armed and no
-schedule lives on the AP: `chaos.py` stays the one scheduler, with the same seed and the same plan, and
-an AP victim's `hold` becomes **`ble_bb_off`** (its backbone off for the window, handhelds kept) and its
-`pulse` becomes **`ble_restart`**. Every fault restores itself on the AP's own clock, so a harness that
-dies leaves nothing broken. Each fault is confirmed from the beacons - a restart moves the boot counter,
-a backbone-off drops the link count - and an AP that acknowledges and does nothing is a finding. The
-power-out fault is still out of reach without a cable (D82). Without the password the APs are watched
-and not faulted, and the run says so.
-
-```bash
-python tools/chaos.py --live --lora --until-aps-die --hours 24 --admin-password <pw>
-```
+An access point is faulted through its cable and no other way. The firmware that let an AP be armed or
+faulted over Wi-Fi or BLE (D82, D83, D85, D90) was removed on 2026-10-05, once the bench could reach
+every AP by cable again. When no access point is on USB the harness still **watches** them over BLE -
+the sealed status beacons, read-only - so a restart or a brownout during the run is recorded and a
+message lost to one is not blamed on the grid; it injects nothing into them. The handheld rounds
+(`lora_handheld`, `no_net`, pulses and holds of handhelds) run as usual.
 
 ## Was the backup needed? (the audit that runs always)
 
@@ -200,4 +193,4 @@ The grid counts as steady when all of these are true:
 
 - Heap is reported as the lowest value seen. The trend over the night has to be read from the hourly `nodes` and `mem` output in the raw logs.
 - A port that comes back under a new COM name is searched for only among ports that did not exist when the run started.
-- **With the APs on battery, a run proves LoRa carried the handheld leg and cannot yet prove it carried between APs.** The AP rounds need a cable; arming the APs' own chaos build over BLE (`tools/chaos_ble.py`, D85) injects a backbone-off fault but reports no LoRa counters, so the grid surviving is visible and "LoRa carried it" is not. Closing that needs the LoRa counters in the chaos journal or the BLE beacon.
+- **With the APs on battery, a run proves LoRa carried the handheld leg and cannot prove it carried between APs.** The AP rounds need a cable, and nothing else can take an AP's backbone away (D103).

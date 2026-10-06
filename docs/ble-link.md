@@ -82,6 +82,8 @@ chunks in order.
 | 0x83 `STATUS` | AP to client | the same bytes as `GET /api/status` (JSON), including positions |
 | 0x04 `GET_HISTORY` | client to AP | — |
 | 0x84 `HISTORY` | AP to client | the same bytes as `GET /api/history` (packed records, D49) |
+| 0x0B `WEB` | client to AP | minutes (u16 LE; 0 = the AP's default of 15, at most 120) |
+| 0x8B `WEB_OK` | AP to client | seconds left in the window (u16 LE). The admin page is now being served (D91) |
 | 0x0C `GET_TRAILS` | client to AP | — |
 | 0x8C `TRAILS` | AP to client | the same bytes as `GET /api/trails` (D99): a header of 8 bytes (layout 1, how many trails, the AP's grid time) and each trail as `LG_T_TRAIL` carries it. An AP on older firmware answers `ERROR` |
 | 0x05 `GET_TRAFFIC` | client to AP | — |
@@ -106,8 +108,13 @@ sealed.
 `GET_TRAFFIC` before a successful `LOGIN` answers `ERROR` "log in first", like the other two.
 
 `GET_STATUS` and `GET_HISTORY` before a successful `LOGIN` answer `ERROR` "log in first". Nothing
-in this link writes: there is no setup, no settings, no groups, no time setting, no password
-change. Those stay on the admin page over Wi-Fi.
+in this link writes to the grid: there is no setup, no settings, no groups, no time setting, no
+password change. Those stay on the admin page over Wi-Fi. The one request that changes anything is
+`WEB`, and what it changes is whether that page is being served for the next few minutes.
+
+Opcodes 0x06 to 0x0A, with replies 0x86, 0x89 and 0x8A, are **retired and not to be reused**. They
+were chaos control and a fault on request (D85, D90), allowed while the bench's access points had no
+cable and removed by D103. An AP answers one with `ERROR` "unknown request".
 
 The bodies are **the admin page's own responses**, so the watcher and the admin page cannot drift
 apart, and a new field on the admin page appears in the watcher as soon as it knows how to show
@@ -315,9 +322,11 @@ This holds by construction, not by politeness:
   anyway (an AP cannot read them either).
 - **No push-to-talk.** Voice frames (`LG_T_VOICE`) never leave the Wi-Fi side. There is no opcode
   for audio, and the beacon carries none.
-- **Read-only.** No opcode writes anything, so a watcher cannot send, announce, change settings,
-  add a group, set the time, or raise an alert. The grid's only inputs stay the handhelds and the
-  admin page over Wi-Fi.
+- **Read-only, but for one switch.** No opcode writes anything to the grid, so a watcher cannot send,
+  announce, change settings, add a group, set the time, raise an alert, or take a radio or an access
+  point out. With the admin password it can ask an AP to serve its admin page for a few minutes (D91);
+  the page itself still needs the grid's Wi-Fi passphrase to reach. The grid's only inputs stay the
+  handhelds and the admin page over Wi-Fi.
 - **Not a member.** The watcher has no device ID, never registers with an AP, never holds a
   grid identity key, and is never shown on a handheld or the admin page as a participant.
 - **A lost paired phone** shows beacon status only, until someone types the admin password.

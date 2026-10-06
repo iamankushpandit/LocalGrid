@@ -31,8 +31,6 @@
 #include "backbone.h"
 #include "lora.h"
 #include "services/gatt/ble_svc_gatt.h"
-#include "chaos_log.h"    /* D85, temporary: TEMPORARY.md T5 */
-#include "chaos_self.h"
 #include "settings.h"
 #include "traffic.h"
 #include "web_admin.h"
@@ -65,23 +63,16 @@ static const char *TAG = "BLE";
 enum {
     OP_HELLO = 0x01, OP_LOGIN = 0x02, OP_GET_STATUS = 0x03, OP_GET_HISTORY = 0x04, OP_GET_TRAFFIC = 0x05,
     /*
-     * D85, TEMPORARY (docs/TEMPORARY.md T5): chaos control. These four are the only opcodes on this
-     * link that change anything. They exist because the owner asked for a chaos run startable from
-     * the phone once the APs are on battery and have no cable, and they come out before release.
+     * 0x06 to 0x0A are retired and must not be given out again: they were chaos control and a fault
+     * on request (D85, D90), taken out by D103 once the bench could reach every AP by cable. A client
+     * that still sends one is answered "unknown request", like any other.
      */
-    OP_CHAOS_GET = 0x06, OP_CHAOS_ARM = 0x07, OP_CHAOS_DISARM = 0x08, OP_CHAOS_LOG = 0x09,
-    /*
-     * D90, TEMPORARY (docs/TEMPORARY.md T6): one fault, now, named by the laptop. This is what
-     * D82's self-scheduler should have been: the faults themselves were always in every build as
-     * console hooks, and only the *scheduling* needed a special image.
-     */
-    OP_FAULT = 0x0A,
-    /* D91: start the admin page for a window. Not temporary - this is how the page is reached now. */
+    /* D91: start the admin page for a window: the one request on this link that changes anything. */
     OP_WEB = 0x0B,
     /* D99: the admin page's /api/trails bytes, so the laptop can draw where people walked. */
     OP_GET_TRAILS = 0x0C,
     OP_SESSION = 0x80, OP_HELLO_OK = 0x81, OP_LOGIN_OK = 0x82, OP_STATUS = 0x83, OP_HISTORY = 0x84,
-    OP_TRAFFIC = 0x85, OP_CHAOS = 0x86, OP_CHAOS_LOG_DATA = 0x89, OP_FAULT_OK = 0x8A, OP_WEB_OK = 0x8B,
+    OP_TRAFFIC = 0x85, OP_WEB_OK = 0x8B,
     OP_TRAILS = 0x8C,
     OP_ERROR = 0xC0, OP_LOGIN_FAIL = 0xC2,
 };
@@ -480,100 +471,6 @@ static void do_traffic(void)
     }
 }
 
-/* ---- D90: one fault, now, asked for by the laptop. TEMPORARY: TEMPORARY.md T6. -----------------
- *
- * The access point already knew how to break itself. `bb off <seconds>`, `lora off <seconds>` and
- * `lora reset` are ordinary console commands in console_cmds.c, in every build, and each one
- * restores itself from the AP's own clock. What the chaos build of D82 added was not the faults - it
- * was an autonomous *scheduler*, and then everything needed to make an unsupervised scheduler safe:
- * a compiled-in seed, a fault budget counted in NVS, a dead-man window in grid time, and a journal.
- *
- * That machinery existed because D83 had refused to put control on BLE, so the schedule had to live
- * on the device. D85 reversed that refusal and put arming on BLE anyway, and nobody went back to ask
- * whether the scheduler was still needed. It was not. The owner asked the obvious question on
- * 2026-10-03 - "BLE should be used for sending commands to the APs to introduce faults, why are we
- * not doing that?" - and this is the answer to it.
- *
- * With the laptop naming each fault, the safety argument gets *shorter* rather than longer:
- *   - **The password is already proved on this link.** OP_LOGIN is an HMAC over a random 32-byte
- *     challenge keyed by the stored password hash, and every chunk is sealed with K_link besides.
- *   - **Every fault is its own dead-man switch.** The hooks restore themselves from the AP's clock
- *     and the window is capped at LG_FAULT_MAX_S, so a laptop that closes, a link that drops or a
- *     harness that crashes cannot leave a radio off. No separate deadline is needed.
- *   - **Nothing is autonomous, so nothing needs a budget.** Stop asking and the faults stop. The
- *     NVS counter existed only because a restart could otherwise let an AP restart itself forever.
- *   - **The allow-list is three radios and a restart.** No opcode here can change the grid, read a
- *     message, or alter a setting.
- *
- * The honest cost, and why this is still temporary: unlike the chaos build, this is in **every**
- * image, so an ordinary access point now carries a remote "break yourself" opcode behind the admin
- * password. That is a smaller surface than T1+T2+T5 together and a wider one than a build flag, and
- * it comes out before release like the rest.
- */
-enum {
-    FAULT_BACKBONE_OFF = 0x01,   /* bb off <seconds> */
-    FAULT_LORA_OFF     = 0x02,   /* lora off <seconds> */
-    FAULT_LORA_RESET   = 0x03,   /* lora reset: the module, not the radio's state */
-    FAULT_RESTART      = 0x04,   /* the one fault that cannot restore itself, because it is a restart */
-};
-
-static void fault_restart_cb(void *arg)
-{
-    (void)arg;
-    ESP_LOGW(TAG, "[GRID] Restarting now: a fault asked for over the admin link (D90)");
-    esp_restart();
-}
-
-static void do_fault(const uint8_t *body, size_t len)
-{
-    if (len != 3u) {
-        (void)send_error_code(ERR_BAD, "a fault is three bytes: kind, then seconds");
-        return;
-    }
-    uint8_t kind = body[0];
-    uint32_t seconds = lg_rd16(body + 1);
-    if (seconds == 0u || seconds > LG_FAULT_MAX_S) {
-        seconds = LG_FAULT_MAX_S;   /* the same clamp the console applies, for the same reason */
-    }
-    switch (kind) {
-    case FAULT_BACKBONE_OFF:
-        lgbb_disable(seconds);
-        break;
-    case FAULT_LORA_OFF:
-        lora_disable(seconds);
-        break;
-    case FAULT_LORA_RESET:
-        lora_request_reset();
-        seconds = 0u;
-        break;
-    case FAULT_RESTART:
-        break;   /* answered first, then restarted below: a restart eats the reply */
-    default:
-        (void)send_error_code(ERR_BAD, "unknown fault; 1 backbone, 2 LoRa, 3 LoRa reset, 4 restart");
-        return;
-    }
-    uint8_t rec[3];
-    rec[0] = kind;
-    lg_wr16(rec + 1, (uint16_t)seconds);
-    (void)send_short(OP_FAULT_OK, rec, sizeof(rec));
-    if (kind == FAULT_RESTART) {
-        /*
-         * Late enough for the reply to have gone out, so the laptop records the fault it asked for
-         * rather than a dropped link it has to guess about. A one-shot timer rather than a delay
-         * here, because this runs in the link's own callback.
-         */
-        static esp_timer_handle_t timer;
-        if (timer == NULL) {
-            const esp_timer_create_args_t args = { .callback = fault_restart_cb, .name = "lgfault" };
-            if (esp_timer_create(&args, &timer) != ESP_OK) {
-                fault_restart_cb(NULL);
-                return;
-            }
-        }
-        (void)esp_timer_start_once(timer, 600000);   /* 600 ms */
-    }
-}
-
 /* ---- D91: the admin page, on request ---------------------------------------------------------- */
 static void do_web(const uint8_t *body, size_t len)
 {
@@ -589,98 +486,6 @@ static void do_web(const uint8_t *body, size_t len)
     uint8_t rec[2];
     lg_wr16(rec, (uint16_t)web_admin_window_left_s());
     (void)send_short(OP_WEB_OK, rec, sizeof(rec));
-}
-
-/* ---- D85: chaos, from the phone, behind the admin password. TEMPORARY: TEMPORARY.md T5. --------
- *
- * Why this is on BLE at all, having been refused once. D83 put chaos control on Wi-Fi and recorded
- * that BLE was "deliberately not" used, because D70 says a watcher can never take part and because
- * Wi-Fi plus the admin password is two secrets where BLE is one. That reasoning still holds as
- * reasoning - and it was applied against an explicit instruction, which is the part that was wrong.
- * The owner asked for a run startable from the phone, said plainly that it breaks earlier decisions,
- * and accepted that for as long as the bench cannot power its own access points.
- *
- * What keeps it honest while it is here:
- *   - **The admin password is already proved on this link.** OP_LOGIN is an HMAC over a random
- *     32-byte challenge keyed by the stored password hash, so these opcodes inherit real
- *     authentication rather than inventing one, and every chunk is sealed with K_link besides.
- *   - **Arming is refused unless the firmware is a chaos build** (CONFIG_LG_NODE_CHAOS), so a
- *     production AP has nothing to arm: the code is not in the image at all.
- *   - **The dead-man window is unchanged** - chaos_self_arm still refuses when the grid has no time,
- *     still caps the window, and the run still stops itself when nobody renews it. Losing the phone
- *     ends a run; it cannot sustain one.
- *   - **The fault budget is still counted in flash**, so it cannot be raised from here.
- *   - **Reading the journal works in every build**, because a run ends by putting an ordinary image
- *     back over the air and that is exactly when the journal is wanted.
- *
- * Bodies are packed binary (D49): the device holds bytes, the phone makes text.
- */
-static void do_chaos_status(void)
-{
-    uint8_t rec[12];
-    uint32_t left = chaos_self_window_left_s();
-    uint8_t flags = 0;
-    if (chaos_self_available()) { flags |= 0x01u; }
-    if (chaos_self_armed_now()) { flags |= 0x02u; }
-    if (chaos_log_full())       { flags |= 0x04u; }
-    rec[0] = flags;
-    rec[1] = (uint8_t)CHAOS_MAX_FAULTS;
-    lg_wr16(rec + 2, (uint16_t)(left > 65535u ? 65535u : left));
-    lg_wr32(rec + 4, chaos_self_count());
-    lg_wr32(rec + 8, chaos_log_count());
-    reply_t r;
-    reply_begin(&r, OP_CHAOS);
-    if (reply_write(&r, rec, sizeof(rec))) {
-        (void)reply_end(&r);
-    }
-}
-
-static void do_chaos_arm(const uint8_t *body, size_t len)
-{
-    if (len != 2u) {
-        (void)send_error_code(ERR_BAD, "arm takes two bytes: minutes");
-        return;
-    }
-    if (!chaos_self_available()) {
-        (void)send_error_code(ERR_BAD, "this is an ordinary build; it cannot attack itself");
-        return;
-    }
-    uint16_t minutes = lg_rd16(body);
-    if (minutes == 0u) {
-        (void)send_error_code(ERR_BAD, "a window of zero minutes arms nothing");
-        return;
-    }
-    if (!chaos_self_arm((uint32_t)minutes)) {
-        /* Nearly always the clock: without grid time the deadline cannot be enforced, so the AP
-         * could not promise to stop, and refusing is the only safe answer. */
-        (void)send_error_code(ERR_BAD, "the grid needs a time set before chaos can be armed");
-        return;
-    }
-    ESP_LOGW(TAG, "[BLE] Chaos armed for %u minute(s) from the admin link (D85)", (unsigned)minutes);
-    do_chaos_status();
-}
-
-static void do_chaos_disarm(void)
-{
-    chaos_self_disarm();
-    ESP_LOGW(TAG, "[BLE] Chaos disarmed from the admin link (D85)");
-    do_chaos_status();
-}
-
-/* The journal from record `from`, as many whole records as one reply can hold. */
-static void do_chaos_log(const uint8_t *body, size_t len)
-{
-    if (len != 4u) {
-        (void)send_error_code(ERR_BAD, "the journal takes four bytes: the first record wanted");
-        return;
-    }
-    static uint8_t batch[32u * CHAOS_LOG_REC_LEN];   /* link task only; not on its stack */
-    size_t n = chaos_log_read(lg_rd32(body), sizeof(batch) / CHAOS_LOG_REC_LEN, batch, sizeof(batch));
-    reply_t r;
-    reply_begin(&r, OP_CHAOS_LOG_DATA);
-    if (reply_write(&r, batch, n * CHAOS_LOG_REC_LEN)) {
-        (void)reply_end(&r);
-    }
 }
 
 static void handle_request(const link_chunk_t *c)
@@ -725,8 +530,7 @@ static void handle_request(const link_chunk_t *c)
         return;
     }
     if ((op == OP_GET_STATUS || op == OP_GET_HISTORY || op == OP_GET_TRAFFIC || op == OP_GET_TRAILS ||
-         op == OP_CHAOS_GET || op == OP_CHAOS_ARM || op == OP_CHAOS_DISARM ||
-         op == OP_CHAOS_LOG || op == OP_FAULT || op == OP_WEB) && !L.logged_in) {
+         op == OP_WEB) && !L.logged_in) {
         (void)send_error_code(ERR_LOGIN, "log in first");
         return;
     }
@@ -737,11 +541,6 @@ static void handle_request(const link_chunk_t *c)
     case OP_GET_HISTORY: do_status(true); break;
     case OP_GET_TRAFFIC: do_traffic(); break;
     case OP_GET_TRAILS:  do_trails(); break;
-    case OP_CHAOS_GET:    do_chaos_status(); break;
-    case OP_CHAOS_ARM:    do_chaos_arm(body, (size_t)n); break;
-    case OP_CHAOS_DISARM: do_chaos_disarm(); break;
-    case OP_CHAOS_LOG:    do_chaos_log(body, (size_t)n); break;
-    case OP_FAULT:        do_fault(body, (size_t)n); break;
     case OP_WEB:          do_web(body, (size_t)n); break;
     default:
         (void)send_error_code(ERR_BAD, "unknown request");

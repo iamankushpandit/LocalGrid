@@ -5,6 +5,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The admin page test covers the whole page, and found two bugs in it
+
+- **`tools/test_admin_page.py`** now makes three visits in a fresh browser each: an AP nobody has set
+  up, through setup and every tab (the clock and setting the time, the map and a trail, the AP table,
+  LoRa and its power, availability, the outage log and its filter, handhelds, making, changing and
+  removing a group, who may announce, changing the password), then out, back in with the old password
+  and the new, and a session the AP ends under the page; an AP already set up, opened at a tab's own
+  address; and an AP that does not answer. 109 checks. The stand-in AP keeps the state a real one does.
+  One handheld's name in its data is markup, and the page must show it as text and run none of it.
+- **Bug: the LoRa card appeared on every tab.** Each refresh un-hid it wherever the reader was.
+- **Bug: the open tab was never kept in the address**, so a reload always landed on Overview. The
+  page's own `history()` function hid the browser's `history`, and the failure was caught and dropped.
+- The zone rule the page works out is checked against the AP's own table (D100).
+
+### A LoRa heartbeat no longer starves behind messages (D102)
+
+- Found by the low-power chaos run: an access point carrying a LoRa-only handheld had its heartbeat
+  refused by a queue full of messages, three times running, and its neighbours dropped the link for
+  three minutes. A heartbeat now asks first (`lora_txq_would_take`) and tries again in half a second.
+  `lora` on an AP's console counts how often it waited.
+- The run itself, every radio at low power: 4 of 4 rounds recovered, no findings, 56 of 56 messages
+  between registered handhelds delivered across 204 s and 283 s with the Wi-Fi backbone off.
+
+### Chaos control is out of the firmware (D103)
+
+- **Removed:** the AP build that broke itself on a schedule (`chaos_self.c`, `chaos_log.c`, the
+  `LG_NODE_CHAOS` options, the `chaos` console command, the journal's flash partition); arming it from the
+  admin page (`/api/chaos`, `/api/chaoslog`); arming it over BLE (four opcodes); and `OP_FAULT`, a fault on
+  request over BLE, which was in every image. About 1,200 lines of firmware.
+- **Why now:** each named the same condition for its removal, a bench that reaches every AP by cable.
+  Three chaos runs on 2026-10-05, eleven hours, were driven over USB and used none of it.
+- **The BLE admin link is read-only again**, but for asking an AP to serve its admin page (D91). The five
+  opcode numbers are retired.
+- **Tools:** `tools/chaos.py` watches uncabled access points and injects nothing into them;
+  `--admin-password` is gone. `tools/chaos_ble.py` is replaced by `tools/web_on.py`, which keeps only the
+  admin-page request. `tools/grid_watch.py` no longer knows the retired opcodes.
+- **Kept:** the console's `bb off`, `lora off`, `lora reset` and a handheld's `wifi off`, which need a
+  cable and restore themselves.
+- `tools/check_release.py`: T1, T2, T5 and T6 gone.
+
 ### A signed update passes from one access point to the next (D101)
 
 - **`firmware/node/main/fw_spread.c`**: an AP running a signed update offers it; an older neighbour

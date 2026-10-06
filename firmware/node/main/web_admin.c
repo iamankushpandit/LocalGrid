@@ -12,8 +12,6 @@
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"   /* D81: the admin page can replace this AP's firmware */
 #include "lg_fwupdate.h"   /* D97: and only with a signed update file */
-#include "chaos_log.h"    /* D83 */
-#include "chaos_self.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -1325,78 +1323,6 @@ static esp_err_t h_update(httpd_req_t *req)
         "If it does not come up, the previous firmware is kept and restored automatically.\"}");
 }
 
-/* ---- D83: chaos, armed from the admin page --------------------------------
- *
- * Why this is not a new hole. Until D81 the argument was that the console lived only on a physical
- * USB cable. That stopped being true when this page gained a firmware upload: anyone with the admin
- * password can already replace the whole image, and an image can do anything chaos can. The boundary
- * is now the admin password, not the cable, and these endpoints grant no capability that /api/update
- * does not already grant - they only make it convenient. Written up in docs/chaos-engineering.md.
- *
- * What still keeps it safe:
- *   - the chaos code is not in an ordinary build at all (CONFIG_LG_NODE_CHAOS), so a production AP
- *     has nothing here to reach;
- *   - two secrets are needed, not one: the grid's WPA2 passphrase to be on this network, and the
- *     admin password to log in;
- *   - arming opens a window that CLOSES BY ITSELF unless renewed, so losing contact ends a run;
- *   - the fault budget is bounded and counted in flash, so it cannot be raised from here.
- *
- * The journal is served as packed binary (D49): the device holds bytes, the browser makes text.
- */
-static esp_err_t h_chaos(httpd_req_t *req)
-{
-    admin_session_t *s = session_from_request(req);
-    if (s == NULL) {
-        return send_error(req, "401 Unauthorized", "Log in to control chaos testing.");
-    }
-    if (req->method == HTTP_GET) {
-        /* Status, and the journal in the same shape the console prints. */
-        char json[320];
-        snprintf(json, sizeof(json),
-                 "{\"available\":%s,\"armed\":%s,\"window_s\":%" PRIu32 ",\"faults\":%" PRIu32
-                 ",\"max_faults\":%u,\"journal\":%" PRIu32 ",\"journal_full\":%s}",
-                 chaos_self_available() ? "true" : "false",
-                 chaos_self_armed_now() ? "true" : "false",
-                 chaos_self_window_left_s(), chaos_self_count(), (unsigned)CHAOS_MAX_FAULTS,
-                 chaos_log_count(), chaos_log_full() ? "true" : "false");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, json);
-    }
-    if (!csrf_ok(req, s)) {
-        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
-    }
-    if (!chaos_self_available()) {
-        return send_error(req, "409 Conflict",
-                          "This is an ordinary build; it cannot attack itself. Upload a chaos build first.");
-    }
-    char body[ADMIN_BODY_MAX];
-    if (!read_body(req, body, sizeof(body))) {
-        return send_error(req, "400 Bad Request", "A request body is required.");
-    }
-    uint64_t minutes = 0;
-    bool want_disarm = strstr(body, "\"disarm\"") != NULL;
-    if (want_disarm) {
-        chaos_self_disarm();
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":true,\"armed\":false}");
-    }
-    if (!json_uint64(body, "minutes", &minutes) || minutes == 0) {
-        return send_error(req, "400 Bad Request", "How many minutes to arm for is required.");
-    }
-    if (!chaos_self_arm((uint32_t)minutes)) {
-        return send_error(req, "409 Conflict",
-                          "Chaos could not be armed. The grid needs a time set, so the window can be "
-                          "enforced and the run can stop itself.");
-    }
-    char json[192];
-    snprintf(json, sizeof(json),
-             "{\"ok\":true,\"armed\":true,\"window_s\":%" PRIu32 ",\"faults\":%" PRIu32 ",\"max_faults\":%u,"
-             "\"note\":\"Renew before the window closes, or this run stops by itself.\"}",
-             chaos_self_window_left_s(), chaos_self_count(), (unsigned)CHAOS_MAX_FAULTS);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, json);
-}
-
 /*
  * D98: this AP's LoRa transmit power, from the admin page. {"power":"full"|"medium"|"low"}. It is this
  * AP's own setting - how close it sits to its neighbours is a fact about this AP - so it is kept here
@@ -1430,37 +1356,12 @@ static esp_err_t h_lora(httpd_req_t *req)
 }
 
 /*
- * The journal, packed binary, from record ?from=N. Available in every build, because a run ends by
- * putting an ordinary image back over the air and that is exactly when it is read (D83).
- */
-static esp_err_t h_chaos_log(httpd_req_t *req)
-{
-    admin_session_t *s = session_from_request(req);
-    if (s == NULL) {
-        return send_error(req, "401 Unauthorized", "Log in to read the chaos journal.");
-    }
-    uint32_t from = 0;
-    char query[48];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        char val[16];
-        if (httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK) {
-            from = (uint32_t)strtoul(val, NULL, 10);
-        }
-    }
-    /* One buffer, sent in batches: an AP has no heap for a whole journal and the reader pages anyway. */
-    static uint8_t batch[64u * CHAOS_LOG_REC_LEN];
-    size_t n = chaos_log_read(from, sizeof(batch) / CHAOS_LOG_REC_LEN, batch, sizeof(batch));
-    httpd_resp_set_type(req, "application/octet-stream");
-    return httpd_resp_send(req, (const char *)batch, n * CHAOS_LOG_REC_LEN);
-}
-
-/*
  * The state the snapshot and its emitter need, without an HTTP server.
  *
- * Split out because a chaos build does not start the server (D85) but the BLE admin link still
- * reads the same snapshot through the same emitter - and these two mutexes used to be created
- * inside web_admin_start(). Skipping the server therefore left them NULL and the AP panicked on
- * the first publish, every boot, about 1.1 s in. Safe to call twice.
+ * Split out because the server runs only while somebody has asked for it (D91) but the BLE admin
+ * link reads the same snapshot through the same emitter all the time - and these two mutexes used to
+ * be created inside web_admin_start(). An AP that had not started the server therefore had them NULL
+ * and panicked on the first publish, every boot, about 1.1 s in. Safe to call twice.
  */
 esp_err_t web_admin_init(void)
 {
@@ -1504,9 +1405,6 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
         { .uri = "/api/update",   .method = HTTP_POST, .handler = h_update },
-        { .uri = "/api/chaos",    .method = HTTP_GET,  .handler = h_chaos },
-        { .uri = "/api/chaos",    .method = HTTP_POST, .handler = h_chaos },
-        { .uri = "/api/chaoslog", .method = HTTP_GET,  .handler = h_chaos_log },
     };
     const size_t n_routes = sizeof(routes) / sizeof(routes[0]);
 

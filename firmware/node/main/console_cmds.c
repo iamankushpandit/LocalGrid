@@ -13,7 +13,6 @@
 #include "lg_power.h"
 #include "gps.h"
 #include "backbone.h"
-#include "chaos_self.h"
 #include "lora.h"
 #include "node_app.h"
 #include "sdkconfig.h"
@@ -209,27 +208,6 @@ static int cmd_lora(int argc, char **argv)
     return 1;
 }
 
-/* The ESP-NOW backbone's chaos hook, the mirror of `lora off` (docs/lora.md). Console only. */
-static int cmd_chaos(int argc, char **argv)
-{
-    if (argc > 1 && strcmp(argv[1], "stop") == 0) {
-        chaos_self_stop();
-        printf("Chaos stopped; it stays stopped across a restart.\n");
-        return 0;
-    }
-    if (argc > 1 && strcmp(argv[1], "clear") == 0) {
-        chaos_self_clear();
-        printf("Chaos budget cleared; a fresh run starts now.\n");
-        return 0;
-    }
-    if (argc > 1) {
-        printf("chaos | chaos stop | chaos clear\n");
-        return 1;
-    }
-    chaos_self_print();
-    return 0;
-}
-
 /* web | web on [minutes] | web off: the admin page, which runs only while asked for (D91). */
 static int cmd_web(int argc, char **argv)
 {
@@ -258,6 +236,7 @@ static int cmd_web(int argc, char **argv)
     return argc > 1 ? 1 : 0;
 }
 
+/* The ESP-NOW backbone's chaos hook, the mirror of `lora off` (docs/lora.md). Console only. */
 static int cmd_bb(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "off") == 0) {
@@ -305,7 +284,6 @@ void console_start(void)
         { .command = "spread",  .help = "The signed update this AP can pass to its neighbours, or is fetching from one (D101)", .func = cmd_spread },
         { .command = "trails",  .help = "Whose last steps this AP holds: how many points and how old, never where (D99)", .func = cmd_trails },
         { .command = "lora",    .help = "The LoRa backbone (D71): status; lora send, off/on, reset, power [full|medium|low], broadcast on|off, at <cmd>", .func = cmd_lora },
-{ .command = "chaos",     .help = "chaos | stop | clear: this AP's self-chaos schedule (D82)", .func = cmd_chaos },
         { .command = "bb",      .help = "bb | bb off [seconds] | bb on: stop using the ESP-NOW backbone, for chaos runs", .func = cmd_bb },
         { .command = "web",     .help = "web | web on [minutes] | web off: the admin page, only while asked for (D91)", .func = cmd_web },
         { .command = "groups",  .help = "Groups, their members, and the table's version (D52)", .func = cmd_groups },

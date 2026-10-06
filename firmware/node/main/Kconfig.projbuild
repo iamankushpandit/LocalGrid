@@ -1,35 +1,5 @@
 menu "LocalGrid AP"
 
-    config LG_NODE_CHAOS
-        bool "Break this access point on purpose, on a schedule (self-chaos, D82)"
-        default n
-        help
-            NEVER turn this on for an access point anyone depends on. The AP takes its own
-            backbone down, its own LoRa down, and restarts itself, on a seeded schedule, so a
-            chaos run works once the APs are on battery and have no serial cable (D81). The
-            laptop only watches, over the BLE status beacon (D68).
-
-            Bounded: at most CHAOS_MAX_FAULTS faults, counted in NVS so a restart cannot reset
-            the budget, and every radio outage restores itself. `chaos stop` on the console ends
-            it for good; `chaos clear` starts a fresh run.
-
-    config LG_NODE_CHAOS_NO_WEB
-        bool "In a chaos build, do not start the web admin server (frees heap for the BLE link)"
-        depends on LG_NODE_CHAOS
-        default y
-        help
-            A chaos run on battery is driven over BLE (D85), and the BLE admin link is only
-            offered when the AP has about 13 KB of heap free (D70). These APs run at 8 to 13 KB
-            once handhelds attach, so the link is never offered and the run cannot be started.
-
-            The web server's task stack alone is 6 KB, and during a BLE-driven run on battery
-            nobody is on the AP's Wi-Fi to use it. Not starting it frees enough heap for the
-            link to be offered at all.
-
-            Turn this off to keep D83's Wi-Fi control (POST /api/chaos) in a chaos build. The
-            snapshot the BLE link reads is still published either way: only the HTTP server is
-            skipped, not the emitter it shares with the link.
-
     config LG_NODE_GPS_POLLED
         bool "Experiment: read the GPS from the core task's loop instead of a task of its own"
         default n

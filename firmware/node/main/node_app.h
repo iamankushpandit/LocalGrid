@@ -29,16 +29,6 @@
 #else
 #define NODE_BLE_ADV_ENABLED  0
 #endif
-/*
- * D82: a build that breaks itself on purpose, for chaos testing once the APs are on battery and have
- * no serial cable. Off unless a build asks for it, and never flashed to an access point anyone
- * depends on. Enable with: idf.py -DNODE_CHAOS=1 build, or add -DNODE_CHAOS_ENABLED=1 to the build.
- */
-#ifdef CONFIG_LG_NODE_CHAOS
-#define NODE_CHAOS_ENABLED    1
-#else
-#define NODE_CHAOS_ENABLED    0
-#endif
 #ifdef CONFIG_LG_NODE_PMF_CAPABLE
 #define NODE_PMF_CAPABLE      1
 #else

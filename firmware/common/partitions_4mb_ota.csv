@@ -20,7 +20,3 @@ otadata,    data, ota,     0x10000,  0x2000
 ota_0,      app,  ota_0,   0x20000,  0x180000
 ota_1,      app,  ota_1,   0x1a0000, 0x180000
 lgid,       data, nvs,     0x320000, 0x3000
-# D83: the chaos journal. Written only by a self-chaos build (D82), read by every AP build, because
-# a run ends by putting an ordinary image back and you want to read the journal after that. 64 KB is
-# 4096 records of 16 bytes, and a bounded run writes a few hundred, so it never wraps.
-chaoslog,   data, 0x40,    0x324000, 0x10000

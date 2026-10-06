@@ -11,7 +11,6 @@
 #include <time.h>
 
 #include "backbone.h"
-#include "chaos_self.h"
 #include "ble_adv.h"
 #include "ble_link.h"
 #include "ble_status.h"
@@ -1146,7 +1145,6 @@ static void core_task(void *arg)
         lora_poll(now);   /* D71: frames that crossed on the second backbone, and its heartbeat */
         gps_poll();       /* empty unless the polled-GPS experiment is built in */
         fw_spread_tick(now);   /* D101: an update passing between APs, a piece a pass */
-        chaos_self_poll(now);   /* D82: inert in an ordinary build */
 #if NODE_BLE_ADV_ENABLED
         ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */
 #endif
@@ -1344,11 +1342,6 @@ void app_main(void)
     if (g_app.index == 0 && CONFIG_LG_NODE_GPS_RX_GPIO >= 0) {
         (void)gps_start(CONFIG_LG_NODE_GPS_RX_GPIO);   /* D63: MAIN only */
     }
-    /*
-     * D82: arm the self-chaos schedule, if this is one of those builds. After the radios and the core
-     * task, so the first fault cannot land on a half-started AP.
-     */
-    chaos_self_start(g_app.index, g_app.boot);
     console_start();
 
     /*

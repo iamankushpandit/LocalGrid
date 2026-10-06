@@ -31,13 +31,19 @@ battery fixes the power and takes their serial cable away, and everything below 
 > Nothing about the release blocker changes. `tools/check_release.py` still fails on a release tag
 > while any of this is in the tree, which is the point of it not being a promise.
 
+> **Update, 2026-10-05: T1, T2, T5 and T6 are removed (D103).** The access points stayed on this
+> bench, on USB, and three chaos runs that day - eleven hours - were driven entirely by cable. That was
+> the condition each of the four named, so the code is out: not behind a build option, gone. What each
+> entry below says about itself is kept as the record of what was conceded and why. T3 was closed by
+> D97. Only T4 remains, and it is expected to stay.
+
 ## The register
 
 > **2026-10-03, D90:** T1's self-scheduler, T2's Wi-Fi arming and T5's BLE arming are **superseded** by
 > T6, one fault on request over BLE. `tools/chaos.py` no longer needs an armed access point: it asks for
 > each fault itself. The three can now be removed on their own terms, with nothing waiting on them.
 
-### T1 — Chaos code inside the AP firmware (D82)
+### T1 — Chaos code inside the AP firmware (D82) — **removed by D103, 2026-10-05**
 
 **What.** `firmware/node/main/chaos_self.c`: an AP that takes its own backbone down, takes its own
 LoRa down, and restarts itself on a seeded schedule.
@@ -59,7 +65,7 @@ full serial logs.
 **How to check it is gone.** `strings build/lg_node.bin | grep SELF-CHAOS` finds nothing, and
 `grep -r LG_NODE_CHAOS firmware/` finds nothing.
 
-### T2 — Chaos armed over the network (D83)
+### T2 — Chaos armed over the network (D83) — **removed by D103, 2026-10-05**
 
 **What.** `POST /api/chaos` on the admin page arms, renews and disarms a chaos run; `GET /api/chaoslog`
 reads the journal back.
@@ -113,7 +119,7 @@ runs a grid, and independently of the bench.
 
 **How to check.** An unsigned image is refused by the bootloader on a board with signing enabled.
 
-### T5 — Chaos armed over BLE (D85)
+### T5 — Chaos armed over BLE (D85) — **removed by D103, 2026-10-05**
 
 **What.** Four opcodes on the BLE admin link — `OP_CHAOS_GET`, `OP_CHAOS_ARM`, `OP_CHAOS_DISARM`,
 `OP_CHAOS_LOG`. They are the **only** opcodes on that link that change anything.
@@ -148,7 +154,7 @@ claim that nothing on this link writes.
 **How to check it is gone.** `python tools/check_release.py --release` passes, and
 `grep -c OP_CHAOS firmware/node/main/ble_link.c` finds nothing.
 
-### T6 — One fault on request, over BLE (D90)
+### T6 — One fault on request, over BLE (D90) — **removed by D103, 2026-10-05**
 
 **What.** One opcode on the BLE admin link, `OP_FAULT` (kind, seconds): backbone off, LoRa off, LoRa
 reset, or restart, performed now, by the access point that receives it. It replaces the self-scheduler

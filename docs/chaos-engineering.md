@@ -103,47 +103,37 @@ voltage. All of that was built just
 to make development bearable — but it meant a full control and observability surface already existed
 across every node, with no new hardware and no changes to the firmware.
 
-**The boundary moved, and this section used to claim otherwise.** It said the control surface
-"exists only on the physical USB cable". That stopped being true on 2026-09-30, and pretending
-otherwise would be the worst of both worlds, so here is what changed and why.
+**The control surface exists only on the physical USB cable.** That sentence was true when this was
+first written, stopped being true on 2026-09-30, and is true again as of 2026-10-05 (D103). The stretch
+in between is worth recording rather than tidying away.
 
-The access points brown out on the bench's USB supply — 28 per AP in 18 seconds, every one of them
-after `heap_init`, before Wi-Fi is even initialised — so they are moving to battery power, which takes
-their serial cable away. Two things followed:
+The access points browned out on the bench's USB supply, and the plan was to move them to battery, which
+takes their serial cable away. So, with the owner's decision each time and a register of what had been
+conceded ([docs/TEMPORARY.md](TEMPORARY.md)), four things were built: an AP build that broke itself on a
+schedule, arming it from the admin page over Wi-Fi, arming it over BLE, and finally an opcode that made
+any AP perform one fault on request over BLE. Each lowered the bar from "a hand on a cable" to "the admin
+password", and the last was in every image. `tools/check_release.py` refused a release while any of it
+was in the tree, and the owner's rule was that the prototype would not be left with the backdoors it
+opened to test its own resilience.
 
-- **An AP can be reflashed over Wi-Fi** through the admin page (D81), because a board on battery
-  otherwise has frozen firmware until it is physically carried back.
-- **A chaos run can be armed over Wi-Fi** (D83), because the framework's faults all came from the PC
-  side of a serial port that no longer exists.
+Then the power supplies were changed, the brownouts stopped, and the access points stayed on the bench.
+On 2026-10-05 three chaos runs, eleven hours in all, were driven entirely over USB and used none of it.
+That was the condition every one of the four had named for its own removal, so all four were removed -
+deleted, not put behind a build option, because code that is switched off still ships.
 
-So the boundary is now **the admin password, not the cable**. It is worth being precise about what
-that did and did not change: an attacker with that password could already replace the entire firmware
-the moment D81 landed, and a firmware can do anything chaos can. The chaos endpoints therefore grant
-no new *capability* — they lower the *effort* from "build and upload an image" to "click a button",
-which matters for accidental misuse rather than for attackers.
+**What is left, and why it is not a backdoor:**
 
-**What still holds the line:**
-
-- **Chaos is not in an ordinary build at all.** `CONFIG_LG_NODE_CHAOS` is off by default, and a
-  production AP contains no chaos code to reach — verified by the absence of its strings in the image,
-  not merely by a runtime flag.
-- **Two secrets, not one.** Being on the AP's network needs the grid's WPA2 passphrase; logging in
-  needs the admin password, behind a salted PBKDF2 hash with login lockout.
-- **The armed window closes by itself.** A run continues only while something keeps renewing it, so
-  losing contact *ends* a run instead of sustaining it — the inverse of a watchdog, and the protection
-  that matters most for a battery-powered AP with no cable.
-- **The fault budget is bounded and counted in flash**, so it cannot be raised over the network, and a
-  restart — which is one of the faults — cannot reset it.
+- Every fault the framework injects is typed at a serial console or made on a reset line. Nothing over
+  Wi-Fi or BLE can take a radio or an access point out.
+- The BLE admin link is read-only again, but for asking an AP to serve its admin page for a few minutes
+  (D91); the page still needs the grid's Wi-Fi passphrase to reach and the admin password to use.
+- An access point replaces its firmware only with an update signed by the release key it was given
+  (D97), so the admin password alone no longer amounts to "run anything".
 - A device that **cannot prove its identity refuses every command** except "who are you" (D75).
 
-**And it is temporary, with a blocker rather than a promise.** Every concession above is in
-[docs/TEMPORARY.md](TEMPORARY.md) with what must become true before it comes out, and
-`tools/check_release.py` fails on a release tag while any of it is still in the tree. The owner's rule:
-we do not leave the prototype phase with the backdoors we opened to test resiliency. The condition for
-removing most of it is simply a bench that can hold ten devices on USB without collapsing.
+**What that costs:** an access point with no cable cannot be chaos-tested. A soak on battery with
+faults needs cables run to the access points, or the removed code brought back from history.
 
-What is *not* removed but hardened is the firmware upload: OTA is worth keeping, and the gap is that
-an AP will accept any image. The fix is signed images, which the release blocker also demands.
 - The radio-off commands **restore themselves on a timer**, so a crashed test harness cannot leave
   the network degraded. The handheld's Wi-Fi switch has both forms, deliberately told apart: `wifi
   off <seconds>` is the self-restoring one, capped at an hour and forgotten across a restart, while
@@ -151,8 +141,7 @@ an AP will accept any image. The fix is signed images, which the release blocker
   field, and a chaos run must never use it.
 
 The cable, **where there still is one**, gives one more thing: control of each board's reset line.
-The handhelds stay on USB (owner, 2026-09-30) so this still applies to them; the access points do not,
-and a self-chaos build restarts itself instead (D82), which is the same fault by a different means. A brief pulse is a crash and
+Every board on the bench is on USB, so this applies to all of them. A brief pulse is a crash and
 instant restart. Holding it down means the device is simply gone for as long as it is held. One
 honest caveat: holding reset is not identical to a true power cut, because the chip's always-on
 memory survives it — which is precisely why the full-blackout scenario below matters.
