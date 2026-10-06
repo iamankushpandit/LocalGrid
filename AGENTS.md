@@ -24,7 +24,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui` (drawn with `lg_draw`), meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
 | `tests/target` | On-board test app with a simulated three-node grid. |
-| `tools/` | Secrets generator, multi-port serial capture, build and flash, and `grid_watch.py`, the laptop dashboard that reads the grid over BLE (`docs/grid-watch.md`). |
+| `tools/` | Secrets generator, multi-port serial capture, build and flash, `grid_watch.py`, the laptop dashboard that reads the grid over BLE (`docs/grid-watch.md`), and `test_admin_page.py`, which drives the AP's admin page in a headless browser against a stand-in AP. |
 | `site/`, `tools/gen_site.py` | Project site template and generator; every fact comes from the tree (`docs/OPEN_SOURCE.md`). |
 | `.github/` | CI (`verify` is the required check), Pages, issue and pull request templates. |
 
@@ -64,6 +64,6 @@ A change is done when:
 
 1. Every affected firmware project and `tests/target` build with zero warnings under ESP-IDF v6.1 defaults.
 2. `tests/target` prints `LG_TESTS_RESULT: PASS` on a bench board after any `lg_core` or `lg_crypto` change.
-3. Radio or firmware behavior changes are verified on the boards with captured serial output.
+3. Radio or firmware behavior changes are verified on the boards with captured serial output. A change to the admin page (`firmware/node/main/web/admin.html`) or to what `/api/*` answers passes `python tools/test_admin_page.py`, extended to cover the change.
 4. `CHANGELOG.md` has an entry, and `docs/DECISIONS.md` is updated if a decision changed.
 5. Milestones also get a report in `docs/milestones/` with build commands, expected serial output, a test procedure, and known limitations.

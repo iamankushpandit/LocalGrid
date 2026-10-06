@@ -416,6 +416,20 @@ lora_txq_slot_t *lora_txq_reserve(lora_txq_t *q, uint16_t dest, bool alert, uint
     return lora_txq_reserve_ranked(q, dest, alert ? LORA_RANK_ALERT : LORA_RANK_ROUTINE, id, cap, due_ms);
 }
 
+bool lora_txq_would_take(const lora_txq_t *q, uint8_t rank, size_t cap)
+{
+    if (q == NULL || cap == 0 || cap > LORA_PAYLOAD_MAX) {
+        return false;
+    }
+    for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {   /* the same two questions reserve asks, in its order */
+        const lora_txq_slot_t *c = &q->slots[i];
+        if (c->cap >= cap && (!c->in_use || (!c->alert && !c->sending && c->rank <= rank))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t rank, uint8_t id, size_t cap,
                                          uint32_t due_ms)
 {

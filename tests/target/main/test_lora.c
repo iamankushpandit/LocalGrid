@@ -500,6 +500,25 @@ static void test_queue(void)
     CHECK(lora_txq_commit(&q, s, 64));
     s = lora_txq_peek(&q, 0);
     CHECK(s != NULL && s->alert && s->data[0] == 8);   /* and still goes first */
+    /*
+     * Asking first (D102): the answer is the one reserve would give, and asking changes nothing. This is
+     * what lets a heartbeat wait half a second for room instead of being refused for a minute.
+     */
+    CHECK(!lora_txq_would_take(&q, LORA_RANK_ROUTINE, 64));   /* three messages and an alert: no place for routine */
+    CHECK(lora_txq_would_take(&q, LORA_RANK_MESSAGE, 64));    /* a message would take the oldest message's */
+    CHECK(lora_txq_would_take(&q, LORA_RANK_ALERT, 64));
+    CHECK(!lora_txq_would_take(&q, LORA_RANK_ALERT, LORA_SMALL_MAX + 1u));   /* nothing here is that big */
+    CHECK(!lora_txq_would_take(&q, LORA_RANK_ROUTINE, 0));
+    CHECK_EQ(q.dropped, 5);   /* as it was after the alert took a message's place: asking counted nothing */
+    CHECK_EQ(q.depth, 4);
+    for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
+        if (q.slots[i].in_use && !q.slots[i].alert) {
+            lora_txq_release(&q, &q.slots[i]);   /* one message sent: a place comes up */
+            break;
+        }
+    }
+    CHECK(lora_txq_would_take(&q, LORA_RANK_ROUTINE, 64));
+    CHECK(lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 9, 64, 0) != NULL);
     /* The old call keeps its meaning: an alert, or routine. */
     txq_setup(&q, false);
     s = lora_txq_reserve(&q, 2, true, 1, 64, 0);

@@ -143,6 +143,7 @@ static struct {
     bool     relaying;   /* a frame that arrived over LoRa is being handled right now ... */
     uint16_t relay_src;  /* ... from this AP */
     uint32_t relays_spared;   /* floods not repeated over LoRa because their sender reaches everyone here */
+    uint32_t hb_waited;       /* times a heartbeat found the queue full of messages and came back later */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -1158,12 +1159,29 @@ static void heartbeat(uint32_t now)
     if ((int32_t)(now - L.next_hb_ms) < 0) {
         return;
     }
-    L.next_hb_ms = now + LORA_HEARTBEAT_MS;
     static uint8_t frame[LG_FRAME_MAX];   /* core task only */
     size_t len = lgbb_build_hello(frame, sizeof(frame));
     if (len == 0) {
+        L.next_hb_ms = now + LORA_HEARTBEAT_MS;
         return;
     }
+    /*
+     * A heartbeat is routine traffic, and since D102 a queue full of people's messages refuses routine
+     * traffic. Refused, this used to wait a whole minute for its next turn: an AP carrying a busy
+     * LoRa-only handheld missed three in a row and both its neighbours called the link dead while it
+     * was working hardest (Fuji, 2026-10-05, for the three minutes it carried Channi). It asks first
+     * now, and with no room comes back in half a second: the queue sends something every second or
+     * two, so a place comes up, and the heartbeat is in it before the next message arrives.
+     */
+    lock();
+    bool room = lora_txq_would_take(&L.txq, LORA_RANK_ROUTINE, len + LGBB_OUTER_LEN + LG_AEAD_TAG_LEN);
+    unlock();
+    if (!room) {
+        L.next_hb_ms = now + LORA_HEARTBEAT_RETRY_MS;
+        L.hb_waited++;
+        return;
+    }
+    L.next_hb_ms = now + LORA_HEARTBEAT_MS;
     if (L.broadcast_ok) {
         (void)queue_sealed(LORA_ADDR_BROADCAST, false, frame, len);
         return;
@@ -1314,6 +1332,7 @@ void lora_print(void)
            t.queue_dropped, t.retries, t.airtime_ms, t.restarts);
     printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
     printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
+    printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
     printf("  one full part is about %" PRIu32 " ms on the air; it can take a %u-byte payload%s;"
            " live voice never comes this way\n", lora_airtime_ms(LORA_PART_B64_MAX),
            (unsigned)lora_txq_capacity(&L.txq),

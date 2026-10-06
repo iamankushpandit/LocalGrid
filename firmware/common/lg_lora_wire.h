@@ -346,6 +346,14 @@ lora_txq_slot_t *lora_txq_reserve(lora_txq_t *q, uint16_t dest, bool alert, uint
 lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t rank, uint8_t id, size_t cap,
                                          uint32_t due_ms);
 
+/*
+ * Whether lora_txq_reserve_ranked would find a place for such a payload now, changing nothing and
+ * counting nothing. For a sender that would rather wait a moment than be refused: the heartbeat, which
+ * is routine traffic and so is refused by a queue full of messages, and which must not then stay silent
+ * for a whole minute while its neighbours conclude the link is dead.
+ */
+bool lora_txq_would_take(const lora_txq_t *q, uint8_t rank, size_t cap);
+
 /* Makes a reserved slot ready to transmit. False (and the slot is freed) if len does not fit. */
 bool lora_txq_commit(lora_txq_t *q, lora_txq_slot_t *slot, size_t len);
 

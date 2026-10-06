@@ -448,6 +448,7 @@
   const TABS = ["overview", "map", "network", "handhelds", "settings"];
   let wanted = new Set(["loading"]);
   let hasPins = false;   /* renderLocation: the map has something to show */
+  let hasLora = true;    /* renderLora: the AP said something about its second radio */
   let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
 
   function applyTabs() {
@@ -458,6 +459,7 @@
       const t = sec.dataset.tab;
       let on = t ? dash && t === tab : wanted.has(sec.id);
       if (sec.id === "location-card") on = on && hasPins;
+      else if (sec.id === "lora-card") on = on && hasLora && wanted.has(sec.id);
       else if (sec.id === "map-empty") on = on && !hasPins;
       else if (t) on = on && wanted.has(sec.id);
       sec.hidden = !on;
@@ -469,7 +471,10 @@
     tab = name;
     applyTabs();
     try {
-      if (location.hash.slice(1) !== name) history.replaceState(null, "", "#" + name);   /* reloads land here */
+      /* window.history, by name: this script has a function of its own called history (the AP's
+         history, further down), and the bare word found that instead - so the tab was never saved,
+         silently, and every reload landed on Overview. Found by tools/test_admin_page.py. */
+      if (location.hash.slice(1) !== name) window.history.replaceState(null, "", "#" + name);   /* reloads land here */
     } catch (e) { /* some pages (a saved copy) have no address to keep it in; the tab still opens */ }
     if (name === "map") { mapKey = ""; refresh(); }   /* a hidden map had no size to draw at */
   }
@@ -1001,8 +1006,11 @@
   // The second backbone (D71). The AP sends facts; the wording is here.
   function renderLora(s) {
     const L = s.lora;
-    if (!L) { $("lora-card").hidden = true; return; }
-    $("lora-card").hidden = false;
+    /* Whether there is a card at all is decided here; whether it is on screen is the tabs' business.
+       This used to set the card's `hidden` itself, on every refresh, which put the LoRa card on
+       whichever tab was open five seconds after it was opened. */
+    if (hasLora !== !!L) { hasLora = !!L; applyTabs(); }
+    if (!L) return;
     const peers = L.peers || [];
     let state;
     if (!L.fitted) {

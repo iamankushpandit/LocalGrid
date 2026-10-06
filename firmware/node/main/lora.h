@@ -92,6 +92,7 @@ typedef struct {
  * than anyone would notice, and halves what the radio says when nobody needs it.
  */
 #define LORA_HEARTBEAT_MS     60000u
+#define LORA_HEARTBEAT_RETRY_MS 500u   /* a heartbeat the queue has no room for is tried again this soon (D102) */
 #define LORA_HB_STAGGER_MS    3000u    /* times the AP index, so three APs never speak together */
 #define LORA_LINK_TIMEOUT_MS  190000u  /* three missed heartbeats and a little: the link is down */
 #define LORA_PROBE_MS         60000u   /* how often an AP with no module looks for one again */
