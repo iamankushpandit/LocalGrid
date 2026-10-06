@@ -14,6 +14,7 @@
 #include "lg_crypto.h"
 #include "lg_dedup.h"
 #include "lg_envelope.h"
+#include "lg_lora_wire.h"
 
 static const char *TAG = "BB";
 
@@ -48,8 +49,9 @@ static const char *TAG = "BB";
  * the slots took.
  */
 #define BB_TX_QUEUE          16u
-#define BB_TX_RING           ((BB_TX_QUEUE - 1u) * (8u + BB_FRAME_MAX))
-#define BB_TX_HDR            8u      /* per frame in the ring: the 6-byte MAC and a 16-bit length */
+#define BB_TX_HDR            9u      /* per frame in the ring: the 6-byte MAC, a 16-bit length, and flags */
+#define BB_TX_RING           ((BB_TX_QUEUE - 1u) * (BB_TX_HDR + BB_FRAME_MAX))
+#define BB_TXF_FALLBACK      0x01u   /* D105: if ESP-NOW cannot deliver this one, LoRa is asked to */
 #define BB_TX_DEADMAN_MS     1000u
 /*
  * The receive queue is bytes too, for the same reason as the transmit ring above. It was twelve slots
@@ -143,6 +145,8 @@ static struct {
     bool              off;            /* chaos hook: pretend ESP-NOW is not there */
     uint32_t          off_until_ms;
     uint32_t          tx_frames, tx_fail, tx_dropped, tx_nomem;
+    uint32_t          tx_fellback;      /* D105: messages handed to LoRa because ESP-NOW could not deliver them */
+    lgbb_fallback_cb_t fallback;
     uint32_t          rx_frames, rx_auth_fail, rx_replay, rx_queue_full;
 } s;
 
@@ -264,9 +268,51 @@ static void ring_peek(size_t offset, uint8_t *dst, size_t n)
     memcpy(dst + first, s.tx_ring, n - first);
 }
 
+/* D105: hand a sealed frame ESP-NOW could not deliver to the other backbone. */
+static void fall_back(const uint8_t *mac, const uint8_t *sealed, size_t len)
+{
+    if (s.fallback == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < LG_MAX_NODES; i++) {
+        const lgbb_link_t *l = &s.links[i];
+        if (l->in_use && memcmp(l->mac, mac, 6) == 0) {
+            s.tx_fellback++;
+            s.fallback(l->node, sealed, len);
+            return;
+        }
+    }
+}
+
+/*
+ * D105: whether LoRa should be asked to carry this frame if ESP-NOW turns out not to. A message, the
+ * word that it arrived (what D104 acknowledges), going to one AP - and only while that AP's link looks
+ * healthy, because then LoRa was not offered the frame (D74) and a failure here would be its only
+ * chance. An alert already goes both ways, and a frame for a link that has gone quiet already went to
+ * LoRa.
+ */
+static uint8_t fallback_flag(const uint8_t *mac, const uint8_t *inner, size_t len)
+{
+    if (s.fallback == NULL || memcmp(mac, BROADCAST_MAC, 6) == 0 || !lora_frame_wants_ack(inner, len) ||
+        lora_is_alert_frame(inner, len)) {
+        return 0;
+    }
+    for (size_t i = 0; i < LG_MAX_NODES; i++) {
+        const lgbb_link_t *l = &s.links[i];
+        if (l->in_use && memcmp(l->mac, mac, 6) == 0) {
+            return lgbb_link_acked(l->node, (uint32_t)esp_log_timestamp()) ? BB_TXF_FALLBACK : 0u;
+        }
+    }
+    return 0;
+}
+
 static void enqueue_sealed(const uint8_t *mac, const uint8_t *inner, size_t len)
 {
-    if (len == 0 || len > LG_FRAME_MAX || s.off) {
+    if (len == 0 || len > LG_FRAME_MAX) {
+        return;
+    }
+    uint8_t flags = fallback_flag(mac, inner, len);
+    if (s.off && flags == 0u) {
         return;
     }
     lgbb_tx_t *t = &s.tx_cur;
@@ -275,8 +321,20 @@ static void enqueue_sealed(const uint8_t *mac, const uint8_t *inner, size_t len)
         ESP_LOGE(TAG, "seal failed");
         return;
     }
+    if (s.off) {
+        /*
+         * ESP-NOW is switched off under this AP (the chaos hook). A radio that cannot send says so at
+         * once, and that is what this stands for: the message goes to LoRa now, not in the six seconds
+         * it takes to notice that no HELLO is arriving.
+         */
+        fall_back(mac, t->data, (size_t)n);
+        return;
+    }
     if (s.tx_used + BB_TX_HDR + (size_t)n > BB_TX_RING) {
         s.tx_dropped++;
+        if (flags != 0u) {
+            fall_back(mac, t->data, (size_t)n);
+        }
         return;
     }
     memcpy(t->mac, mac, 6);
@@ -285,6 +343,7 @@ static void enqueue_sealed(const uint8_t *mac, const uint8_t *inner, size_t len)
     memcpy(hdr, mac, 6);
     hdr[6] = (uint8_t)(t->len & 0xFFu);
     hdr[7] = (uint8_t)(t->len >> 8);
+    hdr[8] = flags;
     ring_put(hdr, BB_TX_HDR);
     ring_put(t->data, t->len);
     s.tx_count++;
@@ -299,6 +358,48 @@ static void enqueue_sealed(const uint8_t *mac, const uint8_t *inner, size_t len)
 }
 
 static void note_ack(const uint8_t *mac, uint32_t now);
+
+/*
+ * Reads the frame at the head of the ring into s.tx_cur. False, with the ring emptied, if what is
+ * there cannot be a frame.
+ */
+static bool head_read(uint8_t *flags)
+{
+    lgbb_tx_t *t = &s.tx_cur;
+    uint8_t hdr[BB_TX_HDR];
+    ring_peek(0, hdr, BB_TX_HDR);
+    memcpy(t->mac, hdr, 6);
+    t->len = (uint16_t)(hdr[6] | ((uint16_t)hdr[7] << 8));
+    *flags = hdr[8];
+    if (t->len == 0 || t->len > sizeof(t->data) || BB_TX_HDR + (size_t)t->len > s.tx_used) {
+        ESP_LOGE(TAG, "[BB] Transmit queue out of step; emptied");   /* cannot happen; never send garbage */
+        s.tx_head = s.tx_used = s.tx_count = 0;
+        return false;
+    }
+    ring_peek(BB_TX_HDR, t->data, t->len);
+    return true;
+}
+
+/*
+ * Takes the frame at the head of the ring out of it: it was delivered, or it was not and never will
+ * be. Not delivered, a message is handed to LoRa (D105) - which is why a frame stays at the head of
+ * the ring while it is on the air instead of leaving when it is handed to the radio: its bytes are
+ * still here to give to the other backbone, and that costs no second buffer.
+ */
+static void head_done(bool delivered)
+{
+    uint8_t flags = 0;
+    if (s.tx_count == 0 || !head_read(&flags)) {
+        return;
+    }
+    lgbb_tx_t *t = &s.tx_cur;
+    s.tx_head = (s.tx_head + BB_TX_HDR + t->len) % BB_TX_RING;
+    s.tx_used -= BB_TX_HDR + t->len;
+    s.tx_count--;
+    if (!delivered && (flags & BB_TXF_FALLBACK) != 0u) {
+        fall_back(t->mac, t->data, t->len);
+    }
+}
 
 static void service_tx(uint32_t now)
 {
@@ -317,10 +418,12 @@ static void service_tx(uint32_t now)
             } else if (memcmp(s.in_flight_mac, BROADCAST_MAC, 6) != 0) {
                 note_ack(s.in_flight_mac, now);
             }
+            head_done(s.tx_ok);
         } else if (now - s.in_flight_ms > BB_TX_DEADMAN_MS) {
             ESP_LOGW(TAG, "send callback missing for %u ms; releasing", (unsigned)BB_TX_DEADMAN_MS);
             s.in_flight = false;
             s.tx_fail++;
+            head_done(false);
         } else {
             return;
         }
@@ -329,33 +432,25 @@ static void service_tx(uint32_t now)
         return;
     }
     lgbb_tx_t *t = &s.tx_cur;
-    uint8_t hdr[BB_TX_HDR];
-    ring_peek(0, hdr, BB_TX_HDR);
-    memcpy(t->mac, hdr, 6);
-    t->len = (uint16_t)(hdr[6] | ((uint16_t)hdr[7] << 8));
-    if (t->len == 0 || t->len > sizeof(t->data) || BB_TX_HDR + (size_t)t->len > s.tx_used) {
-        ESP_LOGE(TAG, "[BB] Transmit queue out of step; emptied");   /* cannot happen; never send garbage */
-        s.tx_head = s.tx_used = s.tx_count = 0;
+    uint8_t flags = 0;
+    if (!head_read(&flags)) {
         return;
     }
-    ring_peek(BB_TX_HDR, t->data, t->len);
     s.tx_done = false;
     esp_err_t err = esp_now_send(t->mac, t->data, t->len);
     if (err == ESP_ERR_ESPNOW_NO_MEM) {
         s.tx_nomem++;          /* back-pressure: keep the frame and retry on the next poll */
         return;
     }
-    s.tx_head = (s.tx_head + BB_TX_HDR + t->len) % BB_TX_RING;
-    s.tx_used -= BB_TX_HDR + t->len;
-    s.tx_count--;
     if (err == ESP_OK) {
-        memcpy(s.in_flight_mac, t->mac, 6);
+        memcpy(s.in_flight_mac, t->mac, 6);   /* it stays at the head of the ring until the radio answers */
         s.in_flight = true;
         s.in_flight_ms = now;
         s.tx_frames++;
     } else {
         s.tx_fail++;
         ESP_LOGW(TAG, "esp_now_send: %s", esp_err_to_name(err));
+        head_done(false);
     }
 }
 
@@ -446,6 +541,11 @@ bool lgbb_link_acked(uint16_t node, uint32_t now_ms)
 void lgbb_set_extra_peers(lgbb_extra_peers_cb_t cb)
 {
     s.extra_peers = cb;
+}
+
+void lgbb_set_fallback(lgbb_fallback_cb_t cb)
+{
+    s.fallback = cb;
 }
 
 uint8_t lgbb_link_count(void)
@@ -880,6 +980,7 @@ void lgbb_print(void)
     }
     printf("  gap = HELLO more than %u ms after the previous; probe = unicast keepalive; save = link kept by ACKs\n",
            (unsigned)BB_GAP_MS);
+    printf("  messages handed to LoRa because ESP-NOW could not deliver them: %" PRIu32 "\n", s.tx_fellback);
     printf("  tx %" PRIu32 " tx_fail %" PRIu32 " dropped %" PRIu32 " nomem %" PRIu32
            " | rx %" PRIu32 " auth_fail %" PRIu32 " replay %" PRIu32 " rx_queue_full %" PRIu32 " | queued %u\n",
            s.tx_frames, s.tx_fail, s.tx_dropped, s.tx_nomem,

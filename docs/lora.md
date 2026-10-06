@@ -249,6 +249,16 @@ alone is unchanged: the handheld already retries, and the delivery report is end
 `lora` on an access point's console says how many frames every access point acknowledged, how many
 went out again, and how many were given up.
 
+## Taking over a message ESP-NOW could not deliver (D105)
+
+LoRa stays quiet while ESP-NOW is carrying traffic to an access point (D74), and an access point
+needs six seconds without a HELLO to decide it is not. A message sent in those six seconds used to
+go to ESP-NOW alone and nowhere. Now, when a send fails - the radio reports no acknowledgement, the
+queue is full, or ESP-NOW is off - a text or a delivery report is handed here as the bytes ESP-NOW
+had sealed for that access point, which is the format this backbone carries anyway, and goes out
+acknowledged and repeated (D104). If the ESP-NOW copy did arrive and only its acknowledgement was
+lost, the receiver has seen that sequence number: it answers and handles nothing twice.
+
 ## What the watcher and the admin page show
 
 The AP's status gains the LoRa link: fitted or not, the last RSSI and SNR, frames sent and

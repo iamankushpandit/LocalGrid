@@ -5,6 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A message ESP-NOW could not deliver goes to LoRa at once (D105)
+
+- A text or a delivery report whose send to another access point fails is handed to the LoRa backbone
+  straight away, as the same sealed bytes, instead of being lost during the six seconds it takes to
+  decide the link is dead. It is acknowledged and repeated there like any message (D104).
+- A frame stays at the head of the ESP-NOW send queue until the radio answers for it.
+- `nodes` and `lora` on the console count the frames handed over.
+- Bench: backbone off on all three access points, a group message one second later, all five other
+  handhelds received it.
+
 ### Messages between access points over LoRa are acknowledged and sent again (D104)
 
 - A text, a delivery report or an alert that crosses between access points over LoRa is answered by

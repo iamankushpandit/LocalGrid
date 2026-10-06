@@ -153,6 +153,7 @@ static struct {
     uint16_t relay_src;  /* ... from this AP */
     uint32_t relays_spared;   /* floods not repeated over LoRa because their sender reaches everyone here */
     uint32_t hb_waited;       /* times a heartbeat found the queue full of messages and came back later */
+    uint32_t took_over;       /* messages ESP-NOW could not deliver, put on the air here instead (D105) */
     uint32_t acks_out;        /* acknowledgements sent (D104) */
     uint32_t acks_in;         /* acknowledgements that answered a frame waiting here */
     uint32_t acks_late;       /* acknowledgements for a frame no longer waiting: answered twice, or given up */
@@ -807,6 +808,35 @@ static void queue_ack(uint16_t src, uint32_t seq)
     }
 }
 
+/*
+ * D105: ESP-NOW could not hand this message to AP `node`, and until now that was the end of it for the
+ * six seconds it takes to notice a dead link. It is sealed for that AP already, in the very format this
+ * backbone carries, so the same bytes go out here - and are acknowledged and repeated like any message
+ * (D104). If the ESP-NOW copy did arrive after all and only its radio acknowledgement was lost, the
+ * receiver sees a sequence number it has had, answers, and handles nothing twice.
+ */
+static void take_over(uint16_t node, const uint8_t *sealed, size_t len)
+{
+    if (!L.started || !L.fitted || L.off || sealed == NULL || node >= LG_MAX_NODES || !L.peers[node].up ||
+        len <= LGBB_OUTER_LEN + LG_AEAD_TAG_LEN) {
+        return;
+    }
+    lock();
+    lora_txq_slot_t *slot = lora_txq_reserve_ranked(&L.txq, (uint16_t)LORA_ADDR_AP(node), LORA_RANK_MESSAGE,
+                                                    L.msg_id, len, app_now_ms() + rand_ms(BACKOFF_MAX_MS));
+    bool ok = slot != NULL;
+    if (ok) {
+        memcpy(slot->data, sealed, len);
+        ok = lora_txq_commit(&L.txq, slot, len);
+    }
+    if (ok) {
+        L.msg_id++;
+        L.took_over++;
+        lora_txq_want_ack(slot, lg_rd32(sealed + 8), (uint16_t)(1u << node));
+    }
+    unlock();
+}
+
 bool lora_is_peer(uint16_t node)
 {
     return node < LG_MAX_NODES && L.peers[node].up && !L.off;
@@ -1434,6 +1464,7 @@ void lora_print(void)
     printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
     printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
     printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
+    printf("  messages taken over from ESP-NOW when it could not deliver them: %" PRIu32 "\n", L.took_over);
     printf("  messages the queue had no room for (the rest of its drops were routine): %" PRIu32 "\n",
            L.txq.dropped_messages);
     printf("  acknowledged by every AP they were for: %" PRIu32 " | sent again: %" PRIu32 " | given up: %" PRIu32
@@ -1567,5 +1598,6 @@ esp_err_t lora_start(uint16_t ap_index, const uint8_t discriminator[4], lgbb_fra
     }
     L.started = true;
     lgbb_set_extra_peers(extra_peers);
+    lgbb_set_fallback(take_over);
     return ESP_OK;
 }

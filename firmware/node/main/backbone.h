@@ -36,6 +36,15 @@ typedef uint8_t (*lgbb_clients_cb_t)(void);
 typedef size_t  (*lgbb_extra_peers_cb_t)(uint16_t *nodes, uint32_t *boots, size_t max);
 void lgbb_set_extra_peers(lgbb_extra_peers_cb_t cb);
 
+/*
+ * D105: where a message goes when ESP-NOW could not hand it to `node`. The frame is already sealed
+ * for that AP, exactly as it would have gone over ESP-NOW, so the other backbone can carry the same
+ * bytes. Called on the core task. Only for frames that want an acknowledgement over LoRa (D104) and
+ * that LoRa was not already carrying.
+ */
+typedef void (*lgbb_fallback_cb_t)(uint16_t node, const uint8_t *sealed, size_t len);
+void lgbb_set_fallback(lgbb_fallback_cb_t cb);
+
 esp_err_t lgbb_init(uint16_t self, uint32_t boot, const uint8_t key[32],
                   lgbb_frame_cb_t on_frame, lgbb_link_cb_t on_link, lgbb_clients_cb_t clients);
 

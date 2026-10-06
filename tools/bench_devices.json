@@ -155,7 +155,7 @@
     },
     {
       "name": "e28",
-      "port": "COM48",
+      "port": "COM52",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
@@ -177,7 +177,7 @@
     },
     {
       "name": "e40",
-      "port": "COM50",
+      "port": "COM53",
       "role": "H",
       "board": "E40",
       "firmware": "handheld",
@@ -201,7 +201,7 @@
     },
     {
       "name": "e28b",
-      "port": "COM49",
+      "port": "COM54",
       "role": "H",
       "board": "E28",
       "firmware": "handheld",
