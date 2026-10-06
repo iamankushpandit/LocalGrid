@@ -225,6 +225,30 @@ unacknowledged and LoRa starts carrying for it.
 **A unicast is only sent to an AP LoRa has actually heard.** Transmitting at an AP whose heartbeat
 has never arrived would be seconds of airtime spent on nothing.
 
+## Acknowledged, and sent again (D104)
+
+Until 2026-10-06 a frame between access points went on the air once. Three radios share the channel
+and the module cannot listen before it transmits, so some frames collide and are gone; with the Wi-Fi
+backbone off, two 90 minute runs lost four and five messages between registered handhelds, and none of
+them to a full queue.
+
+What a person wrote, the word that it arrived, and an alert are now answered:
+
+| Step | What happens |
+|---|---|
+| The frame arrives | The receiving access point queues an acknowledgement: `L`, `A` and the frame's outer sequence number, six bytes, sealed with the backbone key like any frame. |
+| Whose turn | A frame may have gone to every access point at once. Each answers in a turn of its own, 500 ms apart, counted from the sender's index, so two answers do not collide. |
+| The sender listens | For as long as the last turn takes, it transmits nothing but alerts and answers it owes: the module cannot hear while it transmits. |
+| No answer | The frame goes out again from its first part, addressed to the one access point still to answer when there is only one. Three times on the air in all, then it is given up and counted. |
+| It arrives twice | The same sealed frame a second time means the answer was lost, not the frame: it is answered again and not handled again. |
+
+Voice is not acknowledged, because a second copy is too late to be heard, and routine traffic is not,
+because it is repeated within a minute anyway. The hop between an access point and a handheld on LoRa
+alone is unchanged: the handheld already retries, and the delivery report is end to end.
+
+`lora` on an access point's console says how many frames every access point acknowledged, how many
+went out again, and how many were given up.
+
 ## What the watcher and the admin page show
 
 The AP's status gains the LoRa link: fitted or not, the last RSSI and SNR, frames sent and

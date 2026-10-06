@@ -282,6 +282,27 @@ bool lora_is_alert_frame(const uint8_t *frame, size_t len);
 #define LORA_RANK_ALERT   2u
 uint8_t lora_frame_rank(const uint8_t *frame, size_t len);
 
+/*
+ * Whether the AP that receives this frame over LoRa says so, and the AP that sent it sends it again
+ * until it does (D104): what a person wrote, the word that it arrived, and an alert. Not voice, which
+ * is late by the time a second copy could go, and not routine traffic, which is repeated anyway. Both
+ * ends ask this of the same frame, so they never disagree about whether an answer is owed.
+ */
+bool lora_frame_wants_ack(const uint8_t *frame, size_t len);
+
+/*
+ * The acknowledgement (D104): six bytes sealed with the backbone key like any frame between APs, so it
+ * is authenticated and cannot be replayed, and far too short to be mistaken for an envelope. It names
+ * the outer sequence number of the sealed frame it answers; who sent it is in its own outer header.
+ */
+#define LORA_ACK_LEN   6u
+#define LORA_ACK_TAG0  0x4Cu   /* 'L' */
+#define LORA_ACK_TAG1  0x41u   /* 'A' */
+size_t lora_ack_build(uint32_t seq, uint8_t *out, size_t cap);
+bool   lora_ack_parse(const uint8_t *in, size_t len, uint32_t *seq);
+
+#define LORA_TX_TRIES  3u      /* times a frame that wants an acknowledgement goes on the air before it is given up */
+
 /* ---- the bounded send queue ---- */
 
 #define LORA_TXQ_SLOTS  5u
@@ -304,6 +325,11 @@ typedef struct {
     uint8_t  of;
     uint32_t order;        /* arrival order, so a queue stays first in first out */
     uint32_t due_ms;       /* not before this: the random backoff and the longer retry wait */
+    bool     waiting;      /* all of it has been on the air and an acknowledgement is awaited (D104) */
+    bool     is_ack;       /* it is an acknowledgement: sent even while this AP is listening for its own */
+    uint8_t  tries;        /* times all of it has been on the air */
+    uint16_t await;        /* bit n set: AP n has not acknowledged it yet. 0: none is wanted */
+    uint32_t seq;          /* the sealed frame's outer sequence number, which an acknowledgement names */
     uint8_t *data;
     size_t   cap;
 } lora_txq_slot_t;
@@ -313,6 +339,9 @@ typedef struct {
     uint32_t        next_order;
     uint32_t        dropped;    /* payloads the queue could not hold, never an alert already in it */
     uint32_t        dropped_messages;   /* how many of those were a person's message or above, not routine */
+    uint32_t        acked;      /* frames every awaited AP acknowledged (D104) */
+    uint32_t        resent;     /* times a frame went out again for want of an acknowledgement */
+    uint32_t        unacked;    /* frames given up: sent LORA_TX_TRIES times, or pushed out while waiting */
     uint16_t        depth;
     uint16_t        high;       /* high-water mark of depth */
 } lora_txq_t;
@@ -373,6 +402,35 @@ bool lora_txq_push(lora_txq_t *q, uint16_t dest, bool alert, uint8_t id, const u
  * stays in the queue, holding its progress, until lora_txq_release frees it.
  */
 lora_txq_slot_t *lora_txq_peek(lora_txq_t *q, uint32_t now_ms);
+
+/*
+ * The same while this AP is listening for an acknowledgement (`listening`): only an alert or an
+ * acknowledgement it owes somebody else is returned. The module cannot hear while it transmits, so
+ * sending the next message at once would talk over the very answer being waited for.
+ *
+ * Either call also deals with frames whose wait has run out: one that has not been on the air
+ * LORA_TX_TRIES times becomes due again from its first part - addressed to the one AP still to answer
+ * when there is only one, so the others' radios discard it unread - and one that has is given up.
+ */
+lora_txq_slot_t *lora_txq_peek_for(lora_txq_t *q, uint32_t now_ms, bool listening);
+
+/*
+ * Says that a committed slot wants an acknowledgement from each AP whose bit is set in `await`, and
+ * what sequence number those acknowledgements will name.
+ */
+void lora_txq_want_ack(lora_txq_slot_t *slot, uint32_t seq, uint16_t await);
+
+/*
+ * The last part of `slot` has gone out. A frame nobody is to acknowledge is finished and its slot is
+ * freed; one that is awaited stays, not transmitted again before `resend_ms`. Returns whether it stays.
+ */
+bool lora_txq_sent(lora_txq_t *q, lora_txq_slot_t *slot, uint32_t resend_ms);
+
+/* AP `from` acknowledged the frame sealed as `seq`. True if a frame here was waiting for exactly that. */
+bool lora_txq_acked(lora_txq_t *q, uint32_t seq, uint8_t from);
+
+/* Whether any frame is waiting for an acknowledgement now. */
+bool lora_txq_awaiting(const lora_txq_t *q);
 
 /* Whether an alert is queued and due. The sender checks this between parts, so an alert waits at
  * most one part rather than a whole long transfer (docs/lora.md). */

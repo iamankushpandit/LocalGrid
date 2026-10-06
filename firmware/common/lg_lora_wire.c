@@ -357,6 +357,38 @@ uint8_t lora_frame_rank(const uint8_t *frame, size_t len)
                                                                                   : LORA_RANK_ROUTINE;
 }
 
+bool lora_frame_wants_ack(const uint8_t *frame, size_t len)
+{
+    lg_env_t e;
+    if (frame == NULL || lg_env_decode(frame, len, &e) != LG_OK || e.type == LG_T_VOICE) {
+        return false;
+    }
+    return e.type == LG_T_TEXT || e.type == LG_T_MSG_ACK || lora_is_alert_frame(frame, len);
+}
+
+size_t lora_ack_build(uint32_t seq, uint8_t *out, size_t cap)
+{
+    if (out == NULL || cap < LORA_ACK_LEN) {
+        return 0;
+    }
+    out[0] = LORA_ACK_TAG0;
+    out[1] = LORA_ACK_TAG1;
+    out[2] = (uint8_t)seq;
+    out[3] = (uint8_t)(seq >> 8);
+    out[4] = (uint8_t)(seq >> 16);
+    out[5] = (uint8_t)(seq >> 24);
+    return LORA_ACK_LEN;
+}
+
+bool lora_ack_parse(const uint8_t *in, size_t len, uint32_t *seq)
+{
+    if (in == NULL || seq == NULL || len != LORA_ACK_LEN || in[0] != LORA_ACK_TAG0 || in[1] != LORA_ACK_TAG1) {
+        return false;
+    }
+    *seq = (uint32_t)in[2] | ((uint32_t)in[3] << 8) | ((uint32_t)in[4] << 16) | ((uint32_t)in[5] << 24);
+    return true;
+}
+
 /* ---- the bounded send queue ---- */
 
 void lora_txq_init(lora_txq_t *q)
@@ -453,8 +485,22 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
          */
         for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
             lora_txq_slot_t *c = &q->slots[i];
-            if (c->in_use && !c->alert && !c->sending && c->cap >= cap && c->rank <= rank &&
-                (slot == NULL || c->rank < slot->rank || (c->rank == slot->rank && c->order < slot->order))) {
+            if (!c->in_use || c->alert || c->sending || c->cap < cap || c->rank > rank) {
+                continue;
+            }
+            /* Of equal rank, one that has been on the air and is only waiting to hear so (D104) goes
+             * before one that has never been sent at all; then the oldest. */
+            bool better;
+            if (slot == NULL || c->rank < slot->rank) {
+                better = true;
+            } else if (c->rank > slot->rank) {
+                better = false;
+            } else if (c->waiting != slot->waiting) {
+                better = c->waiting;
+            } else {
+                better = c->order < slot->order;
+            }
+            if (better) {
                 slot = c;
             }
         }
@@ -466,7 +512,9 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
             return NULL;
         }
         q->dropped++;
-        if (slot->rank >= LORA_RANK_MESSAGE) {
+        if (slot->waiting) {
+            q->unacked++;            /* it was sent; whether it arrived will not now be known */
+        } else if (slot->rank >= LORA_RANK_MESSAGE) {
             q->dropped_messages++;   /* routine traffic giving way is the rule working; this is a loss */
         }
     }
@@ -481,8 +529,69 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
     slot->part = 0;
     slot->order = q->next_order++;
     slot->due_ms = due_ms;
+    slot->waiting = false;
+    slot->is_ack = false;
+    slot->tries = 0;
+    slot->await = 0;
+    slot->seq = 0;
     txq_recount(q);
     return slot;
+}
+
+void lora_txq_want_ack(lora_txq_slot_t *slot, uint32_t seq, uint16_t await)
+{
+    if (slot != NULL && slot->in_use) {
+        slot->seq = seq;
+        slot->await = await;
+    }
+}
+
+bool lora_txq_sent(lora_txq_t *q, lora_txq_slot_t *slot, uint32_t resend_ms)
+{
+    if (slot == NULL || !slot->in_use) {
+        return false;
+    }
+    slot->tries++;
+    if (slot->await == 0u) {
+        lora_txq_release(q, slot);   /* nobody is to answer, or everybody did while it was going out */
+        return false;
+    }
+    slot->sending = false;
+    slot->waiting = true;
+    slot->due_ms = resend_ms;
+    return true;
+}
+
+bool lora_txq_acked(lora_txq_t *q, uint32_t seq, uint8_t from)
+{
+    if (from >= 16u) {
+        return false;
+    }
+    for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
+        lora_txq_slot_t *c = &q->slots[i];
+        if (!c->in_use || c->seq != seq || (c->await & (1u << from)) == 0u) {
+            continue;
+        }
+        c->await = (uint16_t)(c->await & ~(1u << from));
+        if (c->await == 0u) {
+            q->acked++;
+            if (c->waiting) {
+                lora_txq_release(q, c);
+            }   /* otherwise a second copy is on the air this moment; lora_txq_sent frees it */
+        }
+        return true;
+    }
+    return false;
+}
+
+bool lora_txq_awaiting(const lora_txq_t *q)
+{
+    for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
+        if (q->slots[i].in_use && q->slots[i].waiting) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool lora_txq_commit(lora_txq_t *q, lora_txq_slot_t *slot, size_t len)
@@ -516,11 +625,37 @@ bool lora_txq_push(lora_txq_t *q, uint16_t dest, bool alert, uint8_t id, const u
 
 lora_txq_slot_t *lora_txq_peek(lora_txq_t *q, uint32_t now_ms)
 {
+    return lora_txq_peek_for(q, now_ms, false);
+}
+
+lora_txq_slot_t *lora_txq_peek_for(lora_txq_t *q, uint32_t now_ms, bool listening)
+{
     lora_txq_slot_t *best = NULL;
     lora_txq_slot_t *sending = NULL;
     for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
         lora_txq_slot_t *c = &q->slots[i];
         if (!c->in_use || c->of == 0u || (int32_t)(now_ms - c->due_ms) < 0) {
+            continue;
+        }
+        if (c->waiting) {
+            /* No answer in time (D104): once more from the first part, or enough. */
+            if (c->tries >= LORA_TX_TRIES) {
+                q->unacked++;
+                lora_txq_release(q, c);
+                continue;
+            }
+            c->waiting = false;
+            c->part = 0;
+            q->resent++;
+            if ((c->await & (uint16_t)(c->await - 1u)) == 0u) {   /* one AP left to answer: only it need listen */
+                for (uint16_t n = 0; n < 16u; n++) {
+                    if (c->await == (uint16_t)(1u << n)) {
+                        c->dest = LG_LORA_ADDR_AP(n);
+                    }
+                }
+            }
+        }
+        if (listening && !c->alert && !c->is_ack) {
             continue;
         }
         if (c->sending) {
@@ -530,6 +665,8 @@ lora_txq_slot_t *lora_txq_peek(lora_txq_t *q, uint32_t now_ms)
             best = c;
         } else if (c->alert != best->alert) {
             best = c->alert ? c : best;
+        } else if (c->is_ack != best->is_ack) {
+            best = c->is_ack ? c : best;   /* an answer somebody is waiting for, before the next message (D104) */
         } else if (c->order < best->order) {
             best = c;
         }
@@ -560,6 +697,8 @@ void lora_txq_release(lora_txq_t *q, lora_txq_slot_t *slot)
     if (slot != NULL) {
         slot->in_use = false;
         slot->sending = false;
+        slot->waiting = false;
+        slot->await = 0;
         txq_recount(q);
     }
 }

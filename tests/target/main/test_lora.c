@@ -671,6 +671,153 @@ static void test_airtime(void)
     CHECK(48u * full < LORA_ASM_MAX_MS);
 }
 
+/*
+ * D104: a message between APs is acknowledged, and sent again until it is.
+ *
+ * Until this a frame went on the air once. With the Wi-Fi backbone off, a 90 minute run on 2026-10-06
+ * lost five messages between registered handhelds, none of them to a full queue: they were transmitted
+ * and never arrived, on a channel three radios share without listening first.
+ */
+static void test_ack(void)
+{
+    static lora_txq_t q;
+    lora_txq_slot_t *s;
+    uint8_t ack[LORA_ACK_LEN];
+    uint32_t seq = 0;
+
+    /* The acknowledgement itself: six bytes, and nothing else is one. */
+    CHECK_EQ(lora_ack_build(0x01020304u, ack, sizeof(ack)), LORA_ACK_LEN);
+    CHECK(lora_ack_parse(ack, sizeof(ack), &seq) && seq == 0x01020304u);
+    CHECK(!lora_ack_parse(ack, sizeof(ack) - 1u, &seq));
+    ack[0] ^= 1u;
+    CHECK(!lora_ack_parse(ack, sizeof(ack), &seq));
+    CHECK_EQ(lora_ack_build(1, ack, sizeof(ack) - 1u), 0);
+
+    /* What is acknowledged: what a person wrote, the word that it arrived, an alert. Not the rest. */
+    static uint8_t f[LG_FRAME_MAX];
+    size_t n = make_frame(LG_T_TEXT, LG_SCOPE_DIRECT, 0, f, sizeof(f), 40);
+    CHECK(lora_frame_wants_ack(f, n));
+    n = make_frame(LG_T_MSG_ACK, LG_SCOPE_DIRECT, 0, f, sizeof(f), 13);
+    CHECK(lora_frame_wants_ack(f, n));
+    n = make_frame(LG_T_TEXT, LG_SCOPE_BROADCAST, LG_FLAG_URGENT, f, sizeof(f), 20);
+    CHECK(lora_frame_wants_ack(f, n));
+    n = make_frame(LG_T_PRESENCE_UPDATE, LG_SCOPE_SYSTEM, 0, f, sizeof(f), 8);
+    CHECK(!lora_frame_wants_ack(f, n));
+    n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, LG_FLAG_COMPACT, f, sizeof(f), 30);
+    CHECK(!lora_frame_wants_ack(f, n));
+    CHECK(!lora_ack_parse(f, n, &seq));          /* an envelope is never read as an acknowledgement */
+    lora_ack_build(7, ack, sizeof(ack));
+    CHECK(!lora_frame_wants_ack(ack, sizeof(ack)));   /* and an acknowledgement is never acknowledged */
+
+    /* A frame nobody is to answer is finished when its last part has gone, as it always was. */
+    txq_setup(&q, false);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 1, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    CHECK(!lora_txq_sent(&q, s, 1000));
+    CHECK_EQ(q.depth, 0);
+    CHECK(!lora_txq_awaiting(&q));
+
+    /* One that is awaited stays, is not transmitted again while it waits, and goes when the answer comes. */
+    s = lora_txq_reserve_ranked(&q, LG_LORA_ADDR_AP(1), LORA_RANK_MESSAGE, 2, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    lora_txq_want_ack(s, 500, 1u << 1);
+    CHECK(lora_txq_peek(&q, 0) == s);
+    CHECK(lora_txq_sent(&q, s, 1000));
+    CHECK(lora_txq_awaiting(&q));
+    CHECK(lora_txq_peek(&q, 999) == NULL);
+    CHECK(!lora_txq_acked(&q, 501, 1));            /* another frame's number */
+    CHECK(!lora_txq_acked(&q, 500, 2));            /* an AP it was not for */
+    CHECK(lora_txq_awaiting(&q));
+    CHECK(lora_txq_acked(&q, 500, 1));
+    CHECK(!lora_txq_awaiting(&q));
+    CHECK_EQ(q.depth, 0);
+    CHECK_EQ(q.acked, 1);
+    CHECK(!lora_txq_acked(&q, 500, 1));            /* the same answer twice changes nothing */
+    CHECK_EQ(q.acked, 1);
+
+    /*
+     * No answer: it goes out again from its first part, LORA_TX_TRIES times in all, and is then given
+     * up and counted. Sent to every AP, it is addressed the second time to the one that has not answered.
+     */
+    txq_setup(&q, false);
+    s = lora_txq_reserve_ranked(&q, LG_LORA_ADDR_BROADCAST, LORA_RANK_MESSAGE, 3, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    lora_txq_want_ack(s, 600, (1u << 1) | (1u << 2));
+    s->part = s->of;
+    CHECK(lora_txq_sent(&q, s, 1000));
+    CHECK(lora_txq_acked(&q, 600, 2));             /* one of the two answers */
+    CHECK(lora_txq_awaiting(&q));
+    CHECK_EQ(q.acked, 0);
+    CHECK(lora_txq_peek(&q, 1000) == s);           /* the wait is over: due again */
+    CHECK_EQ(s->part, 0);
+    CHECK_EQ(s->dest, LG_LORA_ADDR_AP(1));
+    CHECK(!s->waiting);
+    CHECK_EQ(q.resent, 1);
+    CHECK(lora_txq_sent(&q, s, 2000));
+    CHECK(lora_txq_peek(&q, 2000) == s);
+    CHECK_EQ(q.resent, 2);
+    CHECK(lora_txq_sent(&q, s, 3000));             /* the third time */
+    CHECK(lora_txq_peek(&q, 3000) == NULL);        /* and no fourth */
+    CHECK_EQ(q.unacked, 1);
+    CHECK_EQ(q.depth, 0);
+
+    /* An answer that arrives while the second copy is going out frees it when that copy is done. */
+    txq_setup(&q, false);
+    s = lora_txq_reserve_ranked(&q, LG_LORA_ADDR_AP(1), LORA_RANK_MESSAGE, 4, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    lora_txq_want_ack(s, 700, 1u << 1);
+    CHECK(lora_txq_sent(&q, s, 1000));
+    CHECK(lora_txq_peek(&q, 1000) == s);
+    s->sending = true;
+    CHECK(lora_txq_acked(&q, 700, 1));
+    CHECK_EQ(q.depth, 1);                          /* not pulled from under the transmitter */
+    CHECK(!lora_txq_sent(&q, s, 2000));
+    CHECK_EQ(q.depth, 0);
+    CHECK_EQ(q.acked, 1);
+    CHECK_EQ(q.unacked, 0);
+
+    /*
+     * While this AP listens for an answer it transmits nothing that could talk over it: only an alert,
+     * and an answer it owes somebody else. And an answer goes before a message that has waited longer.
+     */
+    txq_setup(&q, false);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 5, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    lora_txq_slot_t *msg = s;
+    CHECK(lora_txq_peek_for(&q, 0, true) == NULL);
+    CHECK(lora_txq_peek_for(&q, 0, false) == msg);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 6, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    s->is_ack = true;
+    CHECK(lora_txq_peek_for(&q, 0, true) == s);
+    CHECK(lora_txq_peek_for(&q, 0, false) == s);
+    lora_txq_release(&q, s);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_ALERT, 7, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    CHECK(lora_txq_peek_for(&q, 0, true) == s);
+
+    /*
+     * A full queue: a message that has been on the air and is only waiting to hear so gives way before
+     * one that has never been sent, and is counted as not known to have arrived rather than as dropped
+     * unsent.
+     */
+    txq_setup(&q, false);
+    lora_txq_slot_t *four[4];
+    for (uint8_t i = 0; i < 4; i++) {
+        four[i] = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, i, 64, 0);
+        CHECK(four[i] != NULL && lora_txq_commit(&q, four[i], 64));
+        four[i]->data[0] = i;
+    }
+    lora_txq_want_ack(four[2], 800, 1u << 1);      /* the third was sent and waits; the first is the oldest */
+    CHECK(lora_txq_sent(&q, four[2], 5000));
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 9, 64, 0);
+    CHECK(s == four[2]);
+    CHECK(!s->waiting && s->await == 0u && s->tries == 0u);   /* the slot starts clean for its new frame */
+    CHECK_EQ(q.unacked, 1);
+    CHECK_EQ(q.dropped_messages, 0);
+    CHECK(lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 10, 64, 0) == NULL);   /* routine still never does */
+}
+
 void test_lora(void)
 {
     test_base64();
@@ -678,6 +825,7 @@ void test_lora(void)
     test_reassembly();
     test_policy();
     test_queue();
+    test_ack();
     test_at_parser();
     test_round_trip();
     test_airtime();

@@ -44,6 +44,15 @@ static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set t
 #define RX_RING           2u
 #define WEDGE_FAILS       5u        /* consecutive failed parts before the module is reset */
 #define WEDGE_BACKOFF_MS  2000u
+/*
+ * D104. Every AP that owes an acknowledgement sends it in a turn of its own, counted from the sender's
+ * index, because the frame may have gone to all of them at once and two answers at the same moment are
+ * two answers lost. A turn is the acknowledgement's time on the air and the module's own delay.
+ */
+#define ACK_TURN_MS       500u
+#define ACK_JITTER_MS     80u
+#define ACK_MARGIN_MS     400u      /* on top of the last turn, before the sender stops listening */
+#define ACK_RESEND_SPAN_MS 600u     /* and a random wait more before it sends again */
 #define WEDGE_BACKOFF_MAX 60000u
 #define IDLE_WAIT_MS      50u       /* how long the task listens for a line when it has work to do */
 #define QUIET_WAIT_MS     1000u     /* ... and with no module: purely passive, and costs nothing */
@@ -144,6 +153,10 @@ static struct {
     uint16_t relay_src;  /* ... from this AP */
     uint32_t relays_spared;   /* floods not repeated over LoRa because their sender reaches everyone here */
     uint32_t hb_waited;       /* times a heartbeat found the queue full of messages and came back later */
+    uint32_t acks_out;        /* acknowledgements sent (D104) */
+    uint32_t acks_in;         /* acknowledgements that answered a frame waiting here */
+    uint32_t acks_late;       /* acknowledgements for a frame no longer waiting: answered twice, or given up */
+    uint32_t listen_until_ms; /* only alerts and acknowledgements are transmitted before this */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -511,7 +524,9 @@ static bool transmit_a_part(unsigned *fails)
     size_t   len, part, of;
 
     lock();
-    lora_txq_slot_t *slot = lora_txq_peek(&L.txq, app_now_ms());
+    uint32_t now = app_now_ms();
+    bool listening = (int32_t)(now - L.listen_until_ms) < 0 && lora_txq_awaiting(&L.txq);
+    lora_txq_slot_t *slot = lora_txq_peek_for(&L.txq, now, listening);
     if (slot == NULL) {
         unlock();
         return false;
@@ -550,7 +565,22 @@ static bool transmit_a_part(unsigned *fails)
     *fails = 0;
     slot->part++;
     if (slot->part >= slot->of) {
-        lora_txq_release(&L.txq, slot);
+        /*
+         * All of it is out. If APs are to acknowledge it (D104), work out when the last of them will
+         * have had its turn, listen until then, and send again a random moment after if any has not.
+         */
+        uint32_t turns = 0;
+        for (uint16_t n = 0; n < LG_MAX_NODES; n++) {
+            if ((slot->await & (1u << n)) != 0u) {
+                uint32_t turn = (uint32_t)((n + LG_MAX_NODES - L.index) % LG_MAX_NODES);   /* 1 .. LG_MAX_NODES-1 */
+                turns = turn > turns ? turn : turns;
+            }
+        }
+        uint32_t done = app_now_ms();
+        uint32_t listen = turns * ACK_TURN_MS + ACK_MARGIN_MS;
+        if (lora_txq_sent(&L.txq, slot, done + listen + rand_ms(ACK_RESEND_SPAN_MS))) {
+            L.listen_until_ms = done + listen;
+        }
         L.frames_out++;
     }
     unlock();
@@ -713,13 +743,20 @@ static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, siz
     return ok;
 }
 
-static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t len)
+/*
+ * `await` is the APs that are to acknowledge it, one bit each, and is ignored for a frame that wants no
+ * acknowledgement (D104). `ack_after_ms` is not zero for a frame that is itself an acknowledgement:
+ * how long to wait for this AP's turn before sending it.
+ */
+static bool queue_sealed_for(uint16_t dest, bool alert, const uint8_t *frame, size_t len, uint16_t await,
+                             uint32_t ack_after_ms)
 {
     size_t need = len + LGBB_OUTER_LEN + LG_AEAD_TAG_LEN;
-    uint8_t rank = alert ? LORA_RANK_ALERT : lora_frame_rank(frame, len);   /* D102 */
+    bool is_ack = ack_after_ms != 0u;
+    uint8_t rank = alert ? LORA_RANK_ALERT : is_ack ? LORA_RANK_MESSAGE : lora_frame_rank(frame, len);   /* D102 */
     lock();
     lora_txq_slot_t *slot = lora_txq_reserve_ranked(&L.txq, dest, rank, L.msg_id, need,
-                                                    app_now_ms() + rand_ms(BACKOFF_MAX_MS));
+                                                    app_now_ms() + (is_ack ? ack_after_ms : rand_ms(BACKOFF_MAX_MS)));
     int n = slot != NULL ? lgbb_seal(slot->data, slot->cap, frame, len) : -1;
     bool ok = n > 0 && lora_txq_commit(&L.txq, slot, (size_t)n);
     if (slot != NULL && !ok) {
@@ -727,6 +764,10 @@ static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t
     }
     if (ok) {
         L.msg_id++;
+        slot->is_ack = is_ack;
+        if (!is_ack && await != 0u && lora_frame_wants_ack(frame, len)) {
+            lora_txq_want_ack(slot, lg_rd32(slot->data + 8), await);   /* the outer header's sequence number */
+        }
     }
     unlock();
     if (slot == NULL) {
@@ -745,6 +786,25 @@ static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t
         L.seal_fail++;
     }
     return ok;
+}
+
+static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t len)
+{
+    return queue_sealed_for(dest, alert, frame, len, 0, 0);
+}
+
+/* D104: tell AP `src` that its frame sealed as `seq` arrived here, when this AP's turn comes. */
+static void queue_ack(uint16_t src, uint32_t seq)
+{
+    uint8_t body[LORA_ACK_LEN];
+    if (src >= LG_MAX_NODES || src == L.index || lora_ack_build(seq, body, sizeof(body)) == 0u) {
+        return;
+    }
+    uint32_t turn = (uint32_t)((L.index + LG_MAX_NODES - src) % LG_MAX_NODES);   /* 1 .. LG_MAX_NODES-1 */
+    uint32_t wait = (turn - 1u) * ACK_TURN_MS + 1u + rand_ms(ACK_JITTER_MS);
+    if (queue_sealed_for((uint16_t)LORA_ADDR_AP(src), false, body, sizeof(body), 0, wait)) {
+        L.acks_out++;
+    }
 }
 
 bool lora_is_peer(uint16_t node)
@@ -852,7 +912,8 @@ void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)
         return;   /* no LoRa link to that AP: transmitting at it would be wasted airtime */
     }
     L.force_once = false;
-    (void)queue_sealed((uint16_t)LORA_ADDR_AP(node), policy == LORA_SEND_ALWAYS, frame, len);
+    (void)queue_sealed_for((uint16_t)LORA_ADDR_AP(node), policy == LORA_SEND_ALWAYS, frame, len,
+                           (uint16_t)(1u << node), 0);
     if (lora_frame_is_compact_voice(frame, len)) {
         (void)queue_sealed((uint16_t)LORA_ADDR_AP(node), false, frame, len);   /* D95: said twice */
     }
@@ -937,12 +998,18 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
     L.force_once = false;
     bool alert = policy == LORA_SEND_ALWAYS;
     if (L.broadcast_ok && reachable > 1u) {
-        (void)queue_sealed(LORA_ADDR_BROADCAST, alert, frame, len);
+        uint16_t all = 0;   /* one transmission, and every AP it is for answers in its own turn (D104) */
+        for (uint16_t i = 0; i < LG_MAX_NODES; i++) {
+            if (L.peers[i].up && i != except_node) {
+                all = (uint16_t)(all | (1u << i));
+            }
+        }
+        (void)queue_sealed_for(LORA_ADDR_BROADCAST, alert, frame, len, all, 0);
         return;
     }
     for (uint16_t i = 0; i < LG_MAX_NODES; i++) {
         if (L.peers[i].up && i != except_node) {
-            (void)queue_sealed((uint16_t)LORA_ADDR_AP(i), alert, frame, len);
+            (void)queue_sealed_for((uint16_t)LORA_ADDR_AP(i), alert, frame, len, (uint16_t)(1u << i), 0);
         }
     }
 }
@@ -1099,15 +1166,46 @@ static void deliver(const lora_rx_t *r, uint32_t now)
     uint32_t boot = 0;
     size_t n = 0;
     lgbb_open_t rc = lgbb_open(r->slot->data, r->slot->total, &src, &boot, inner, sizeof(inner), &n);
-    if (rc != LGBB_OPEN_OK) {
-        if (rc != LGBB_OPEN_REPLAY) {
-            L.seal_fail++;   /* a replay is the two backbones agreeing, not a fault */
+    if (rc == LGBB_OPEN_REPLAY) {
+        /*
+         * The same sealed frame a second time. Over LoRa that is its sender sending it again because it
+         * never heard this AP's acknowledgement (D104) - the frame arrived, the answer did not - so the
+         * answer is given again and the frame is not handled twice. lgbb_open authenticated it and
+         * opened it into `inner` before it found the sequence number already used, which is why the
+         * header and the plaintext can be read here.
+         */
+        uint16_t again = lg_rd16(r->slot->data + 2);
+        size_t plain = r->slot->total - LGBB_OUTER_LEN - LG_AEAD_TAG_LEN;
+        if (again < LG_MAX_NODES && L.peers[again].up && lora_frame_wants_ack(inner, plain)) {
+            L.peers[again].last_ms = now;
+            queue_ack(again, lg_rd32(r->slot->data + 8));
         }
+        return;   /* a replay is not a fault */
+    }
+    if (rc != LGBB_OPEN_OK) {
+        L.seal_fail++;
         return;
     }
     L.frames_in++;
     L.heard_ms = now;
     L.heard_any = true;
+
+    uint32_t acked_seq = 0;
+    if (lora_ack_parse(inner, n, &acked_seq)) {
+        /* D104: that AP has a frame of ours. Authenticated like any frame, and word from that AP. */
+        if (L.peers[src].up) {
+            L.peers[src].last_ms = now;
+        }
+        lock();
+        bool waited = lora_txq_acked(&L.txq, acked_seq, (uint8_t)src);
+        unlock();
+        if (waited) {
+            L.acks_in++;
+        } else {
+            L.acks_late++;
+        }
+        return;
+    }
 
     lg_env_t e;
     if (lg_env_decode(inner, n, &e) != LG_OK) {
@@ -1137,6 +1235,9 @@ static void deliver(const lora_rx_t *r, uint32_t now)
      * pair running the link-up catch-up and leaving the peer unusable for the frames behind it.
      */
     L.peers[src].last_ms = now;
+    if (lora_frame_wants_ack(inner, n)) {
+        queue_ack(src, lg_rd32(r->slot->data + 8));   /* D104: before it is handled, so the answer is first in line */
+    }
     if (L.on_frame != NULL) {
         /*
          * The number that says whether the radio is earning its keep: a frame the core had not
@@ -1335,6 +1436,9 @@ void lora_print(void)
     printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
     printf("  messages the queue had no room for (the rest of its drops were routine): %" PRIu32 "\n",
            L.txq.dropped_messages);
+    printf("  acknowledged by every AP they were for: %" PRIu32 " | sent again: %" PRIu32 " | given up: %" PRIu32
+           " | acknowledgements sent %" PRIu32 ", received %" PRIu32 " (%" PRIu32 " more for nothing waiting)\n",
+           L.txq.acked, L.txq.resent, L.txq.unacked, L.acks_out, L.acks_in, L.acks_late);
     printf("  one full part is about %" PRIu32 " ms on the air; it can take a %u-byte payload%s;"
            " live voice never comes this way\n", lora_airtime_ms(LORA_PART_B64_MAX),
            (unsigned)lora_txq_capacity(&L.txq),

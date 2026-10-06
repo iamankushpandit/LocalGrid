@@ -5,6 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Messages between access points over LoRa are acknowledged and sent again (D104)
+
+- A text, a delivery report or an alert that crosses between access points over LoRa is answered by
+  the access point that receives it, and repeated by the sender until it is: three times on the air
+  at most, then given up and counted.
+- The answer is six bytes sealed with the backbone key, naming the sealed frame's sequence number.
+- Sent to every access point at once, a frame is answered by each in its own half-second turn, and
+  a repeat is addressed to the one that has not answered.
+- While an access point listens for an answer it transmits only alerts and answers of its own.
+- A message that has been sent and is only waiting to hear so gives way, in a full queue, before one
+  that has never been sent.
+- `lora` on the console: acknowledged, sent again, given up, acknowledgements sent and received.
+- Not acknowledged: voice, routine traffic, and the hop between an access point and a handheld.
+
 ### Screen saver: a battery icon and an envelope
 
 - The battery figure has a battery beside it, drawn as full as the battery is (five steps).
