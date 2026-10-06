@@ -85,6 +85,14 @@ int  lg_fwu_held_read(size_t offset, uint8_t *out, size_t len);
  * this access point's own firmware is still on trial, because the spare slot is then its way back.
  */
 bool lg_fwu_finished_carried(void);
+/*
+ * Stops carrying the handheld update held here, and remembers its serial so the same one, or an older
+ * one, is not taken again from a neighbour that still offers it. Each access point is told for itself.
+ * Returns the serial dropped, 0 if nothing was carried. lg_fwu_carry_floor is that remembered serial:
+ * a handheld update must be newer than it to be carried here.
+ */
+uint32_t lg_fwu_carried_drop(void);
+uint32_t lg_fwu_carry_floor(void);
 bool lg_fwu_carried(lg_fwu_info_t *out, size_t *file_len);
 int  lg_fwu_carried_read(size_t offset, uint8_t *out, size_t len);
 

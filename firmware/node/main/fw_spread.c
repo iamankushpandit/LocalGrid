@@ -140,6 +140,9 @@ static void on_offer(uint16_t from, const uint8_t *b, size_t len)
     uint32_t file_len = lg_rd32(b + 8);
     lg_fwu_info_t c;
     uint32_t have = kind == 'N' ? lg_fwu_running_serial() : lg_fwu_carried(&c, NULL) ? c.serial : 0u;
+    if (kind == 'H' && lg_fwu_carry_floor() > have) {
+        have = lg_fwu_carry_floor();   /* one withdrawn here is not fetched again */
+    }
     if (s.fetching || s.restart_at_ms != 0 || s.now_ms < SETTLE_MS || serial <= have ||
         file_len <= LG_FWU_PREFIX_LEN || lg_fwu_progress(NULL, NULL)) {
         return;   /* busy, too young, already as new, or an upload is in hand by another road */
@@ -375,6 +378,8 @@ void fw_spread_print(void)
     if (lg_fwu_carried(&c, &c_len)) {
         printf("Handheld update carried: %s, serial %" PRIu32 ", chip %u, %u bytes; handed whole to %" PRIu32
                " handheld(s) since this AP started\n", c.version, c.serial, c.chip, (unsigned)c_len, s.handhelds_served);
+    } else if (lg_fwu_carry_floor() != 0) {
+        printf("Handheld update carried: none (serial %" PRIu32 " and older were withdrawn here)\n", lg_fwu_carry_floor());
     } else {
         printf("Handheld update carried: none\n");
     }

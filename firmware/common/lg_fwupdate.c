@@ -274,6 +274,37 @@ bool lg_fwu_finished_carried(void)
     return u.carried_done;
 }
 
+uint32_t lg_fwu_carry_floor(void)
+{
+    nvs_handle_t h;
+    uint32_t floor = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_u32(h, "c_floor", &floor);
+        nvs_close(h);
+    }
+    return floor;
+}
+
+uint32_t lg_fwu_carried_drop(void)
+{
+    lg_fwu_info_t have;
+    if (!lg_fwu_carried(&have, NULL)) {
+        return 0;
+    }
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        if (have.serial > lg_fwu_carry_floor()) {
+            (void)nvs_set_u32(h, "c_floor", have.serial);
+        }
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+    carried_forget();
+    ESP_LOGW(TAG, "[GRID] Handheld update serial %u is no longer carried here, and will not be taken again",
+             (unsigned)have.serial);
+    return have.serial;
+}
+
 static esp_err_t refuse(esp_err_t err, const char *why)
 {
     u.reason = why;
@@ -330,6 +361,9 @@ static esp_err_t carry_begin(void)
     lg_fwu_info_t have;
     if (lg_fwu_carried(&have, NULL) && u.info.serial <= have.serial) {
         return refuse(ESP_ERR_INVALID_VERSION, "it is not newer than the handheld update this access point already carries");
+    }
+    if (u.info.serial <= lg_fwu_carry_floor()) {
+        return refuse(ESP_ERR_INVALID_VERSION, "that handheld update, or a newer one, was withdrawn on this access point");
     }
     u.target = esp_ota_get_next_update_partition(NULL);
     if (u.target == NULL) {

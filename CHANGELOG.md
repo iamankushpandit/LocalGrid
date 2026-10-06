@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   urgent message, not below 30 % battery. One handheld per access point at a time.
 - Status shows an `Update` row while one is arriving. `spread` on an AP says what it carries.
 - One handheld image at a time, for one chip; an access point's own update displaces it.
+- `spread drop` on an AP's console stops it carrying the handheld update and keeps it from taking
+  the same one again from a neighbour. Each AP is told for itself.
 
 ### A trail survives every device being switched off (D106)
 
