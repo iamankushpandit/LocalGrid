@@ -845,7 +845,11 @@ static void saver_label_tick(void)
     int8_t batt = hh_service_battery_percent();
     if (batt >= 0) {   /* no sense pin on this board: nothing to say (D62) */
         size_t at = strlen(clock);
-        snprintf(clock + at, sizeof(clock) - at, "   %d%%", (int)batt);
+        /* A battery drawn as full as it is, then the figure (owner, 2026-10-06). */
+        const char *icon = batt >= 88 ? LG_SYMBOL_BATTERY_FULL : batt >= 63 ? LG_SYMBOL_BATTERY_3
+                         : batt >= 38 ? LG_SYMBOL_BATTERY_2 : batt >= 13 ? LG_SYMBOL_BATTERY_1
+                         : LG_SYMBOL_BATTERY_EMPTY;
+        snprintf(clock + at, sizeof(clock) - at, "   %s %d%%", icon, (int)batt);
     }
     char facts[sizeof(s.facts)];
     char msgs[20];
@@ -853,8 +857,8 @@ static void saver_label_tick(void)
     if (unread == 0) {
         msgs[0] = '\0';   /* nothing new is nothing to say (owner, 2026-10-05) */
     } else {
-        snprintf(msgs, sizeof(msgs), "%" PRIu32 " new %s", unread > 999u ? 999u : unread,
-                 unread == 1 ? "message" : "messages");
+        /* An envelope and how many, not a sentence (owner, 2026-10-06). */
+        snprintf(msgs, sizeof(msgs), LG_SYMBOL_ENVELOPE " %" PRIu32, unread > 999u ? 999u : unread);
     }
     snprintf(facts, sizeof(facts), "%s", msgs);
     if (strcmp(who, s.who) != 0 || strcmp(ap, s.ap) != 0 || !s.label_on) {
@@ -1208,4 +1212,8 @@ void ui_overlay_log(uint32_t now_ms, uint32_t last_touch_ms)
              (int)s.cover, s.banner, now_ms - last_touch_ms,
              woke_ms != 0 ? now_ms - woke_ms : 0u, lg_bsp_setting_get_bool("saver", true) ? "on" : "off",
              ui_notify_unread_total());
+    if (s.cover == OV_SAVER) {   /* what the label says, with its width against the screen's: icons are 3 bytes each */
+        ESP_LOGI(TAG, "[UI] Saver label: [%s] [%s] [%s], widest %d of %u px", s.line0, s.clock, s.facts,
+                 (int)lg_draw_text_width(&lg_font_montserrat_16, NULL, s.clock), (unsigned)s.w);
+    }
 }

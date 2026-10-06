@@ -5,6 +5,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Screen saver: a battery icon and an envelope
+
+- The battery figure has a battery beside it, drawn as full as the battery is (five steps).
+- New messages are an envelope and the count, not "61 new messages". Nothing is shown when there are none.
+
 ### An AP no longer takes a handheld that has a session elsewhere (D80)
 
 - **Found by a chaos run, with no fault active:** a direct message between two registered handhelds was

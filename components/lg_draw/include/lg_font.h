@@ -59,6 +59,11 @@ extern const lg_font_t lg_font_montserrat_28;
 
 /* Font Awesome icons carried in the Montserrat fonts, as UTF-8 (the code points LVGL used). */
 #define LG_SYMBOL_BACKSPACE "\xEF\x95\x9A"
+#define LG_SYMBOL_BATTERY_FULL  "\xEF\x89\x80"
+#define LG_SYMBOL_BATTERY_3     "\xEF\x89\x81"
+#define LG_SYMBOL_BATTERY_2     "\xEF\x89\x82"
+#define LG_SYMBOL_BATTERY_1     "\xEF\x89\x83"
+#define LG_SYMBOL_BATTERY_EMPTY "\xEF\x89\x84"
 #define LG_SYMBOL_CLOSE     "\xEF\x80\x8D"
 #define LG_SYMBOL_DOWN      "\xEF\x81\xB8"
 #define LG_SYMBOL_DOWNLOAD  "\xEF\x80\x99"
