@@ -917,7 +917,7 @@ static bool emit_status(const web_sink_t *sink)
     const lora_traffic_t *lr = &s->lora;
     char lv[2 * sizeof(s->lora_version) + 8];
     json_escape(s->lora_version, lv, sizeof(lv));
-    jout(o, "],\"lora\":{\"fitted\":%s,\"configured\":%s,\"off\":%s,\"broadcast\":%s,\"big\":%s,"
+    jout(o, "],\"lora\":{\"fitted\":%s,\"configured\":%s,\"off\":%s,\"broadcast\":%s,\"big\":%s,\"power\":%d,"
             "\"version\":\"%s\",\"address\":%u,\"network\":%u,\"rssi\":%d,\"snr\":%d,"
             "\"frames_out\":%" PRIu32 ",\"frames_in\":%" PRIu32 ",\"frames_first\":%" PRIu32
             ",\"parts_out\":%" PRIu32 ",\"parts_in\":%" PRIu32 ",\"parts_dropped\":%" PRIu32
@@ -926,7 +926,8 @@ static bool emit_status(const web_sink_t *sink)
             ",\"airtime_ms\":%" PRIu32 ",\"restarts\":%u,\"heard_age_ms\":%" PRIu32 ",\"peers\":[",
          (lr->flags & LORA_TF_FITTED) ? "true" : "false", (lr->flags & LORA_TF_CONFIGURED) ? "true" : "false",
          (lr->flags & LORA_TF_OFF) ? "true" : "false", (lr->flags & LORA_TF_BROADCAST) ? "true" : "false",
-         (lr->flags & LORA_TF_BIG) ? "true" : "false", lv, lr->address, lr->networkid, lr->rssi, lr->snr,
+         (lr->flags & LORA_TF_BIG) ? "true" : "false", lora_power(), lv, lr->address, lr->networkid, lr->rssi,
+         lr->snr,
          lr->frames_out, lr->frames_in, lr->frames_first, lr->parts_out, lr->parts_in, lr->parts_dropped,
          lr->reasm_timeouts, lr->seal_fail, lr->refused_big, lr->queue_depth, lr->queue_high,
          lr->queue_dropped, lr->retries, lr->airtime_ms, lr->restarts, lr->heard_age_ms);
@@ -1397,6 +1398,38 @@ static esp_err_t h_chaos(httpd_req_t *req)
 }
 
 /*
+ * D98: this AP's LoRa transmit power, from the admin page. {"power":"full"|"medium"|"low"}. It is this
+ * AP's own setting - how close it sits to its neighbours is a fact about this AP - so it is kept here
+ * and not copied to the others with the grid's settings.
+ */
+static esp_err_t h_lora(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to change the LoRa power.");
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    char body[ADMIN_BODY_MAX];
+    char want[12] = "";
+    if (!read_body(req, body, sizeof(body)) || !json_string(body, "power", want, sizeof(want))) {
+        return send_error(req, "400 Bad Request", "Which power is wanted is required.");
+    }
+    int dbm = strcmp(want, "full") == 0 ? LG_LORA_POWER_FULL : strcmp(want, "medium") == 0 ? LG_LORA_POWER_MEDIUM
+            : strcmp(want, "low") == 0 ? LG_LORA_POWER_LOW : -1;
+    if (dbm < 0) {
+        return send_error(req, "400 Bad Request", "The power is full, medium or low.");
+    }
+    lora_set_power(dbm);
+    ESP_LOGI(TAG, "[WEB] Admin set this AP's LoRa transmit power to %s", want);
+    char json[48];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"power\":%d}", lora_power());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+/*
  * The journal, packed binary, from record ?from=N. Available in every build, because a run ends by
  * putting an ordinary image back over the air and that is exactly when it is read (D83).
  */
@@ -1467,6 +1500,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/status",   .method = HTTP_GET,  .handler = h_status },
         { .uri = "/api/history",  .method = HTTP_GET,  .handler = h_history },
         { .uri = "/api/trails",   .method = HTTP_GET,  .handler = h_trails },
+        { .uri = "/api/lora",     .method = HTTP_POST, .handler = h_lora },
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
         { .uri = "/api/update",   .method = HTTP_POST, .handler = h_update },

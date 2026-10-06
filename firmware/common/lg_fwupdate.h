@@ -62,6 +62,16 @@ bool lg_fwu_info(lg_fwu_info_t *out);
 uint32_t lg_fwu_running_serial(void);
 void lg_fwu_running_version(char out[LG_FWU_VERSION_MAX + 1u]);
 
+/*
+ * Passing an update on (D101). A device that is running firmware it took as a signed update kept that
+ * update's first 192 bytes, and the image is the one in its running slot, so it can produce the file
+ * again byte for byte. lg_fwu_held says whether it can and what the file is; lg_fwu_held_read copies
+ * up to len bytes of the file from offset and returns how many (0 at or past the end, -1 on a read
+ * error). A device whose firmware came by cable holds nothing: it has no signature to hand over.
+ */
+bool lg_fwu_held(lg_fwu_info_t *out, size_t *file_len);
+int  lg_fwu_held_read(size_t offset, uint8_t *out, size_t len);
+
 /* This chip's code in an update header. */
 uint8_t lg_fwu_this_chip(void);
 

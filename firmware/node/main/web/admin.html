@@ -243,6 +243,19 @@
       <tbody id="lora-body"></tbody>
     </table></div>
     <p class="hint" id="lora-counts" style="margin:10px 0 0"></p>
+    <div id="lora-power" hidden>
+      <p class="hint" style="margin:14px 0 0"><strong>Transmit power.</strong> How strongly this AP's long-range radio
+        sends. Full reaches furthest and is right almost always. Turn it down only when APs sit close together, such as
+        on one table: at full power, radios that close drown each other out and messages go missing. It is this AP's
+        own setting, each AP has its own, and Wi-Fi is not affected.</p>
+      <div class="row">
+        <button class="ghost" data-power="full">Full</button>
+        <button class="ghost" data-power="medium">Medium</button>
+        <button class="ghost" data-power="low">Low</button>
+        <span class="hint" id="lora-power-now"></span>
+      </div>
+      <div class="msg" id="lora-power-msg"></div>
+    </div>
   </section>
 
   <section id="groups-card" data-tab="handhelds" hidden>
@@ -1018,6 +1031,11 @@
     $("lora-body").innerHTML = rows.join("");
     $("lora-table").hidden = rows.length === 0;
 
+    /* D98: the power this AP's module sends at, and the three it can be set to. */
+    $("lora-power").hidden = !L.fitted || L.power === undefined;
+    const level = L.power >= 20 ? "full" : L.power >= 10 ? "medium" : "low";
+    for (const b of document.querySelectorAll("#lora-power button")) b.className = b.dataset.power === level ? "" : "ghost";
+    $("lora-power-now").textContent = L.power === undefined ? "" : `In use on ${s.node_name}: ${level}, ${L.power} dBm.`;
     if (!L.fitted) { $("lora-counts").textContent = ""; return; }
     // The number that says whether the radio earns its keep: frames Wi-Fi had not already delivered.
     const worth = L.frames_first > 0
@@ -1030,6 +1048,21 @@
       `${worth} Frames out ${L.frames_out}, in ${L.frames_in}; parts out ${L.parts_out}, in ${L.parts_in}; ` +
       `retries ${L.retries}; queue ${L.queue} (highest ${L.queue_high}); ` +
       `on air ${(L.airtime_ms / 1000).toFixed(1)} s; module restarts ${L.restarts}. ${trouble}`;
+  }
+
+  for (const b of document.querySelectorAll("#lora-power button")) {
+    b.addEventListener("click", async () => {
+      const msg = $("lora-power-msg");
+      try {
+        await api("/api/lora", { power: b.dataset.power });
+        msg.className = "msg ok";
+        msg.textContent = `LoRa power on this AP is now ${b.dataset.power}. It is kept across restarts.`;
+        refresh();
+      } catch (e) {
+        msg.className = "msg err";
+        msg.textContent = e.message;
+      }
+    });
   }
 
   function renderClock() {

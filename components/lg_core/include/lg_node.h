@@ -48,6 +48,8 @@ typedef struct {
     /* Send a frame to every working neighbor except except_node (LG_NODE_NONE for all). */
     void     (*backbone_flood)(void *ctx, uint16_t except_node, const uint8_t *frame, size_t len);
     bool     (*is_neighbor)(void *ctx, uint16_t node);
+    /* D101: an FW_OFFER, FW_GET or FW_DATA from the neighbour from_node, body unread. May be NULL. */
+    void     (*on_fw)(void *ctx, uint16_t from_node, uint8_t type, const uint8_t *body, size_t len);
     uint32_t (*now_ms)(void *ctx);
     uint32_t (*grid_time)(void *ctx);  /* Unix seconds, 0 when grid time is unset */
     /* Optional. A diagnostic echo arrived; hops = backbone hops travelled. */
@@ -333,6 +335,14 @@ size_t lg_node_positions(const lg_node_t *n, lg_position_t *out, size_t max);
  * one held and pushed to the attached handhelds, which is how a handheld reaching the grid over LoRa
  * alone tells it where it is.
  */
+
+/*
+ * D101: sends an FW_OFFER, FW_GET or FW_DATA to one neighbour, or to every neighbour when node is
+ * LG_NODE_NONE. One hop: a node that receives one hands it to io.on_fw and never passes it on, and
+ * one that did not come straight from its author is dropped. Returns LG_OK, or LG_ERR_ARG (another
+ * type, no body, or more than LG_FW_BODY_MAX bytes).
+ */
+int lg_node_send_fw(lg_node_t *n, uint16_t node, uint8_t type, const uint8_t *body, size_t len);
 
 /* The trail held for a handheld, or NULL. */
 const lg_trail_t *lg_node_trail(const lg_node_t *n, uint32_t subject);

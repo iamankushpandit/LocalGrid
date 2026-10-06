@@ -61,6 +61,7 @@ typedef enum {
     NODE_CMD_GPS,             /* console: print the GPS state */
     NODE_CMD_LORA,            /* console: print the LoRa backbone (D71) */
     NODE_CMD_TRAILS,          /* console: print whose trails this AP holds (D99) */
+    NODE_CMD_SPREAD,          /* console: print the update this AP can pass on or is fetching (D101) */
     NODE_CMD_LORA_TEST,       /* console: send one echo over LoRa whatever the policy says */
 } node_cmd_type_t;
 

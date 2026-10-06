@@ -800,9 +800,11 @@ void hh_lora_offer(const uint8_t *frame, size_t len, bool wifi_ok)
     for (int copy = 0; copy < copies; copy++) {
         /* Sealed straight into its queue slot: nothing is ever staged in a second buffer. */
         uint8_t id = ++L.next_id;
-        lora_txq_slot_t *s = lora_txq_reserve(&L.txq, LG_LORA_ADDR_BROADCAST, alert, id,
-                                              LGLH_OUTER_LEN + len + LG_AEAD_TAG_LEN,
-                                              now_ms() + rand_ms(BACKOFF_MAX_MS));
+        /* D102: its own message waits behind nothing routine - an announcement or a position gives way. */
+        lora_txq_slot_t *s = lora_txq_reserve_ranked(&L.txq, LG_LORA_ADDR_BROADCAST,
+                                                     alert ? LORA_RANK_ALERT : lora_frame_rank(frame, len), id,
+                                                     LGLH_OUTER_LEN + len + LG_AEAD_TAG_LEN,
+                                                     now_ms() + rand_ms(BACKOFF_MAX_MS));
         if (s == NULL) {
             break;   /* lora_txq counts what it could not hold */
         }

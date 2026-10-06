@@ -301,6 +301,15 @@ static void test_policy(void)
     CHECK(!lora_is_alert_frame(frame, n));
     n = make_frame(LG_T_NAME, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 12);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
+    /* D101: firmware never goes by LoRa, urgent or not, and a handheld may not send it at all. */
+    n = make_frame(LG_T_FW_DATA, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 520);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_NEVER);
+    CHECK(!lglh_type_allowed(frame, n));
+    n = make_frame(LG_T_FW_OFFER, LG_SCOPE_SYSTEM, LG_FLAG_URGENT, frame, sizeof(frame), 12);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_NEVER);
+    n = make_frame(LG_T_FW_GET, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 14);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_NEVER);
+    CHECK(!lglh_type_allowed(frame, n));
     /* D99: a trail waits for room between APs, and a handheld may send one and ask for one. */
     n = make_frame(LG_T_TRAIL, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), LG_TRAIL_LEN_MAX);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
@@ -453,6 +462,63 @@ static void test_queue(void)
     CHECK(s != NULL);
     CHECK(!lora_txq_commit(&q, s, LORA_SMALL_MAX + 1u));
     CHECK_EQ(q.depth, 0);
+
+    /*
+     * D102: what gives way to what. A message in a full queue takes the place of routine traffic, the
+     * oldest of it first; routine traffic arriving at a queue full of messages is the one refused; and
+     * a message among messages still replaces the oldest, as before.
+     */
+    txq_setup(&q, false);
+    for (uint8_t i = 0; i < 4; i++) {   /* routine 0, message 1, routine 2, message 3 */
+        s = lora_txq_reserve_ranked(&q, 2, i % 2u ? LORA_RANK_MESSAGE : LORA_RANK_ROUTINE, i, 64, 0);
+        CHECK(s != NULL);
+        s->data[0] = i;
+        CHECK(lora_txq_commit(&q, s, 64));
+    }
+    CHECK_EQ(q.dropped, 0);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 4, 64, 0);   /* a message: routine 0 goes */
+    CHECK(s != NULL && s->data[0] == 0);
+    s->data[0] = 4;
+    CHECK(lora_txq_commit(&q, s, 64));
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 5, 64, 0);   /* another: routine 2 goes */
+    CHECK(s != NULL && s->data[0] == 2);
+    s->data[0] = 5;
+    CHECK(lora_txq_commit(&q, s, 64));
+    CHECK_EQ(q.dropped, 2);
+    CHECK(lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 6, 64, 0) == NULL);   /* all messages now: refused */
+    CHECK_EQ(q.dropped, 3);
+    for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
+        CHECK(!q.slots[i].in_use || q.slots[i].rank == LORA_RANK_MESSAGE);
+    }
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 7, 64, 0);   /* a message among messages: the oldest, 1 */
+    CHECK(s != NULL && s->data[0] == 1);
+    s->data[0] = 7;
+    CHECK(lora_txq_commit(&q, s, 64));
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_ALERT, 8, 64, 0);     /* an alert takes a message's place: 3 */
+    CHECK(s != NULL && s->data[0] == 3 && s->alert);
+    s->data[0] = 8;
+    CHECK(lora_txq_commit(&q, s, 64));
+    s = lora_txq_peek(&q, 0);
+    CHECK(s != NULL && s->alert && s->data[0] == 8);   /* and still goes first */
+    /* The old call keeps its meaning: an alert, or routine. */
+    txq_setup(&q, false);
+    s = lora_txq_reserve(&q, 2, true, 1, 64, 0);
+    CHECK(s != NULL && s->rank == LORA_RANK_ALERT && s->alert);
+    s = lora_txq_reserve(&q, 2, false, 2, 64, 0);
+    CHECK(s != NULL && s->rank == LORA_RANK_ROUTINE && !s->alert);
+    /* What a frame is worth is read off the frame. */
+    static uint8_t ranked[LG_FRAME_MAX];
+    size_t rn = make_frame(LG_T_TEXT, LG_SCOPE_DIRECT, 0, ranked, sizeof(ranked), 40);
+    CHECK_EQ(lora_frame_rank(ranked, rn), LORA_RANK_MESSAGE);
+    rn = make_frame(LG_T_MSG_ACK, LG_SCOPE_DIRECT, 0, ranked, sizeof(ranked), 13);
+    CHECK_EQ(lora_frame_rank(ranked, rn), LORA_RANK_MESSAGE);
+    rn = make_frame(LG_T_TEXT, LG_SCOPE_BROADCAST, LG_FLAG_URGENT, ranked, sizeof(ranked), 20);
+    CHECK_EQ(lora_frame_rank(ranked, rn), LORA_RANK_ALERT);
+    rn = make_frame(LG_T_PRESENCE_UPDATE, LG_SCOPE_SYSTEM, 0, ranked, sizeof(ranked), 8);
+    CHECK_EQ(lora_frame_rank(ranked, rn), LORA_RANK_ROUTINE);
+    rn = make_frame(LG_T_POSITION, LG_SCOPE_SYSTEM, 0, ranked, sizeof(ranked), 18);
+    CHECK_EQ(lora_frame_rank(ranked, rn), LORA_RANK_ROUTINE);
+    CHECK_EQ(lora_frame_rank(ranked, 3), LORA_RANK_ROUTINE);
 
     /* Bounds. */
     CHECK(!lora_txq_push(&q, 2, false, 0, body, 0, 0));

@@ -125,6 +125,16 @@ static void n_time_now(void *ctx, lg_time_sync_t *out)
     out->flags = sn->time_flags;
 }
 
+static void n_on_fw(void *ctx, uint16_t from_node, uint8_t type, const uint8_t *body, size_t len)
+{
+    sim_node_t *sn = ctx;
+    sn->fw_count++;
+    sn->fw_from = from_node;
+    sn->fw_type = type;
+    sn->fw_len = len;
+    sn->fw_first = body[0];
+}
+
 static void n_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
 {
     sim_node_t *sn = ctx;
@@ -300,6 +310,7 @@ sim_t *sim_create(void)
             .on_time = n_on_time,
             .time_now = n_time_now,
             .on_grid_state = n_on_grid_state,
+            .on_fw = n_on_fw,
             .on_groups_changed = n_on_groups_changed,
             .on_client_time = n_on_client_time,
             .on_name = n_on_name,

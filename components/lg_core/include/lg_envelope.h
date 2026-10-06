@@ -52,6 +52,14 @@ typedef enum {
     LG_T_GROUPS          = 0x52,   /* AP to AP and AP to handheld: the whole group table and its version (D52) */
     LG_T_GROUP_EDIT      = 0x53,   /* handheld to AP: make, change, or remove one group (D52) */
     LG_T_TIME_ZONE       = 0x54,   /* AP to handheld: the grid's time zone as a POSIX TZ string (D67) */
+    /*
+     * D101: a signed firmware update passed from one AP to the next. AP to its own neighbours only: one
+     * hop, never forwarded, never taken from a handheld, never on LoRa. The core carries the bodies and
+     * does not read them; what they mean, and whether an update is trusted, is the AP firmware's.
+     */
+    LG_T_FW_OFFER        = 0x60,   /* "I hold this update and can pass it on" */
+    LG_T_FW_GET          = 0x61,   /* "send me these bytes of it" */
+    LG_T_FW_DATA         = 0x62,   /* those bytes */
     LG_T_DIAG_ECHO       = 0x70,   /* node console test: flooded once, reported by every node */
     LG_T_ERROR           = 0x7F,
 } lg_msg_type_t;

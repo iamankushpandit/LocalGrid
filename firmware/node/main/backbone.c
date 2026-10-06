@@ -1,12 +1,14 @@
 #include "backbone.h"
 
 #include <inttypes.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/message_buffer.h"
 #include "freertos/queue.h"
 #include "lg_body.h"
 #include "lg_crypto.h"
@@ -49,7 +51,16 @@ static const char *TAG = "BB";
 #define BB_TX_RING           ((BB_TX_QUEUE - 1u) * (8u + BB_FRAME_MAX))
 #define BB_TX_HDR            8u      /* per frame in the ring: the 6-byte MAC and a 16-bit length */
 #define BB_TX_DEADMAN_MS     1000u
-#define BB_RX_QUEUE          12u
+/*
+ * The receive queue is bytes too, for the same reason as the transmit ring above. It was twelve slots
+ * of a whole frame each: 12.9 KB of heap on every AP, held from boot, to queue frames that are nearly
+ * all a tenth of that size - on the AP that had 7 KB to spare at its worst moment (Everest alone with
+ * six handhelds, 2026-10-05). As a message buffer of bytes it takes each frame at its own length: this
+ * much holds five of the largest frames there can be, about twenty text messages, or ninety HELLOs,
+ * where the slots held twelve of anything. One writer (the Wi-Fi task's callback) and one reader (the
+ * core task), which is what a message buffer is for. What does not fit is counted, as before.
+ */
+#define BB_RX_BYTES          6144u
 #define BB_RX_PER_POLL       8u
 
 typedef struct {
@@ -108,7 +119,7 @@ static struct {
     uint32_t          frame_seq;
     uint32_t          hello_seq;
     uint8_t           key[32];
-    QueueHandle_t     rxq;
+    MessageBufferHandle_t rxq;
     uint8_t           tx_ring[BB_TX_RING];
     size_t            tx_head;        /* offset of the oldest frame's header */
     size_t            tx_used;        /* bytes in the ring */
@@ -147,7 +158,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     item.rssi = info->rx_ctrl != NULL ? (int8_t)info->rx_ctrl->rssi : 0;
     item.len = (uint16_t)len;
     memcpy(item.data, data, (size_t)len);
-    if (xQueueSend(s.rxq, &item, 0) != pdTRUE) {
+    if (xMessageBufferSend(s.rxq, &item, offsetof(lgbb_rx_t, data) + (size_t)len, 0) == 0) {
         s.rx_queue_full++;
     }
 }
@@ -732,8 +743,14 @@ void lgbb_poll(uint32_t now)
         lgbb_enable();   /* restores itself, whatever happened to the tool that turned it off */
     }
     static lgbb_rx_t r;
-    for (unsigned i = 0; i < BB_RX_PER_POLL && xQueueReceive(s.rxq, &r, 0) == pdTRUE; i++) {
-        handle_rx(&r, now);
+    for (unsigned i = 0; i < BB_RX_PER_POLL; i++) {
+        size_t got = xMessageBufferReceive(s.rxq, &r, sizeof(r), 0);
+        if (got == 0) {
+            break;
+        }
+        if (got >= offsetof(lgbb_rx_t, data) && got == offsetof(lgbb_rx_t, data) + r.len) {
+            handle_rx(&r, now);
+        }
     }
     uint32_t interval = s.hellos_sent < BB_HELLO_FAST_COUNT ? BB_HELLO_FAST_MS : BB_HELLO_MS;
     if (now - s.last_hello_ms >= interval) {
@@ -756,7 +773,7 @@ esp_err_t lgbb_init(uint16_t self, uint32_t boot, const uint8_t key[32],
     s.clients = clients;
     lg_dedup_init(&s.replay, s.replay_slots, LG_MAX_NODES);
 
-    s.rxq = xQueueCreate(BB_RX_QUEUE, sizeof(lgbb_rx_t));
+    s.rxq = xMessageBufferCreate(BB_RX_BYTES);
     if (s.rxq == NULL) {
         return ESP_ERR_NO_MEM;
     }

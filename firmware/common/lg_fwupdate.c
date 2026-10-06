@@ -7,6 +7,7 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -86,6 +87,93 @@ void lg_fwu_running_version(char out[LG_FWU_VERSION_MAX + 1u])
     }
 }
 
+/* What a signed header says. Only to be believed once its signature has been checked. */
+static void parse_header(const uint8_t *h, lg_fwu_info_t *info)
+{
+    info->role = (char)h[5];
+    info->chip = h[6];
+    info->serial = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+    info->image_len = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+    memcpy(info->sha256, h + 16, 32);
+    memcpy(info->version, h + 56, LG_FWU_VERSION_MAX);
+    info->version[LG_FWU_VERSION_MAX] = '\0';
+}
+
+/* ---- passing it on (D101): the file this device is running, served again ---- */
+
+static struct {
+    bool          known;
+    bool          ok;
+    uint8_t       prefix[LG_FWU_PREFIX_LEN];
+    lg_fwu_info_t info;
+    const esp_partition_t *slot;
+} held;
+
+static void held_load(void)
+{
+    if (held.known) {
+        return;
+    }
+    held.known = true;
+    held.slot = esp_ota_get_running_partition();
+    nvs_handle_t h;
+    char key[16];
+    size_t len = sizeof(held.prefix);
+    slot_key(held.slot, 'p', key);
+    if (held.slot == NULL || nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    bool got = nvs_get_blob(h, key, held.prefix, &len) == ESP_OK && len == sizeof(held.prefix);
+    nvs_close(h);
+    if (!got || memcmp(held.prefix, "LGFW", 4) != 0 || held.prefix[4] != 1) {
+        return;
+    }
+    parse_header(held.prefix, &held.info);
+    /* The kept bytes must be this slot's: same serial as was recorded for it, and an image that fits. */
+    held.ok = held.info.serial != 0 && held.info.serial == lg_fwu_running_serial() && held.info.image_len != 0 &&
+              held.info.image_len <= held.slot->size && held.info.chip == lg_fwu_this_chip();
+}
+
+bool lg_fwu_held(lg_fwu_info_t *out, size_t *file_len)
+{
+    held_load();
+    if (!held.ok) {
+        return false;
+    }
+    if (out != NULL) {
+        *out = held.info;
+    }
+    if (file_len != NULL) {
+        *file_len = LG_FWU_PREFIX_LEN + held.info.image_len;
+    }
+    return true;
+}
+
+int lg_fwu_held_read(size_t offset, uint8_t *out, size_t len)
+{
+    held_load();
+    if (!held.ok || out == NULL) {
+        return -1;
+    }
+    size_t total = LG_FWU_PREFIX_LEN + held.info.image_len;
+    if (offset >= total) {
+        return 0;
+    }
+    if (len > total - offset) {
+        len = total - offset;
+    }
+    size_t done = 0;
+    if (offset < LG_FWU_PREFIX_LEN) {
+        done = LG_FWU_PREFIX_LEN - offset < len ? LG_FWU_PREFIX_LEN - offset : len;
+        memcpy(out, held.prefix + offset, done);
+    }
+    if (done < len &&
+        esp_partition_read(held.slot, offset + done - LG_FWU_PREFIX_LEN, out + done, len - done) != ESP_OK) {
+        return -1;
+    }
+    return (int)len;
+}
+
 static esp_err_t refuse(esp_err_t err, const char *why)
 {
     u.reason = why;
@@ -137,13 +225,7 @@ static esp_err_t check_prefix(void)
         return refuse(ESP_ERR_NOT_ALLOWED, "it is not signed by the release key this device trusts");
     }
     /* Signed, so the header can be believed. */
-    u.info.role = (char)h[5];
-    u.info.chip = h[6];
-    u.info.serial = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
-    u.info.image_len = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
-    memcpy(u.info.sha256, h + 16, 32);
-    memcpy(u.info.version, h + 56, LG_FWU_VERSION_MAX);
-    u.info.version[LG_FWU_VERSION_MAX] = '\0';
+    parse_header(h, &u.info);
     if (u.info.role != u.role) {
         return refuse(ESP_ERR_NOT_SUPPORTED, u.role == 'N' ? "it is firmware for a handheld, and this is an access point"
                                                            : "it is firmware for an access point, and this is a handheld");
@@ -161,7 +243,9 @@ static esp_err_t check_prefix(void)
     if (u.info.image_len == 0 || u.info.image_len > u.target->size) {
         return refuse(ESP_ERR_INVALID_SIZE, "the image does not fit the update slot");
     }
-    if (esp_ota_begin(u.target, u.info.image_len, &u.ota) != ESP_OK) {
+    /* Erased a sector at a time as the image arrives, not all at once here: erasing a megabyte up
+     * front holds the calling task for seconds, and since D101 that task can be an AP's core task. */
+    if (esp_ota_begin(u.target, OTA_WITH_SEQUENTIAL_WRITES, &u.ota) != ESP_OK) {
         return refuse(ESP_FAIL, "the update slot could not be opened");
     }
     if (lg_sha256_begin(&u.hash) != 0) {
@@ -234,6 +318,9 @@ esp_err_t lg_fwu_finish(void)
         (void)nvs_set_u32(h, key, u.info.serial);
         slot_key(u.target, 'v', key);
         (void)nvs_set_str(h, key, u.info.version);
+        /* D101: the signed 192 bytes, so this device can hand the same update to another. */
+        slot_key(u.target, 'p', key);
+        (void)nvs_set_blob(h, key, u.prefix, sizeof(u.prefix));
         (void)nvs_commit(h);
         nvs_close(h);
     }

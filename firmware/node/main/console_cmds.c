@@ -121,6 +121,13 @@ static int cmd_gps(int argc, char **argv)
     return post(NODE_CMD_GPS, 0, NULL);
 }
 
+static int cmd_spread(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return post(NODE_CMD_SPREAD, 0, NULL);
+}
+
 static int cmd_trails(int argc, char **argv)
 {
     (void)argc;
@@ -295,6 +302,7 @@ void console_start(void)
         { .command = "ping",    .help = "ping [text]: flood a diagnostic echo to every AP", .func = cmd_ping },
         { .command = "time",    .help = "time | time set <unix seconds>: show or set grid time", .func = cmd_time },
         { .command = "gps",     .help = "The GPS on MAIN: heard, fix, satellites (D63); gps raw dumps what arrives", .func = cmd_gps },
+        { .command = "spread",  .help = "The signed update this AP can pass to its neighbours, or is fetching from one (D101)", .func = cmd_spread },
         { .command = "trails",  .help = "Whose last steps this AP holds: how many points and how old, never where (D99)", .func = cmd_trails },
         { .command = "lora",    .help = "The LoRa backbone (D71): status; lora send, off/on, reset, power [full|medium|low], broadcast on|off, at <cmd>", .func = cmd_lora },
 { .command = "chaos",     .help = "chaos | stop | clear: this AP's self-chaos schedule (D82)", .func = cmd_chaos },

@@ -269,6 +269,19 @@ bool lora_frame_is_compact_voice(const uint8_t *frame, size_t len);
 /* Whether this frame is one of the alerts that must never wait behind anything. */
 bool lora_is_alert_frame(const uint8_t *frame, size_t len);
 
+/*
+ * What a frame is worth when the queue is full (D102). Three ranks:
+ *   LORA_RANK_ALERT    an urgent broadcast, an SOS, an all clear: never dropped to make room
+ *   LORA_RANK_MESSAGE  what a person said and the word that it arrived: text, its acknowledgement,
+ *                      and a compact voice packet
+ *   LORA_RANK_ROUTINE  everything the grid says to itself: presence, positions, trails, time, names,
+ *                      settings. All of it is sent again within a minute anyway.
+ */
+#define LORA_RANK_ROUTINE 0u
+#define LORA_RANK_MESSAGE 1u
+#define LORA_RANK_ALERT   2u
+uint8_t lora_frame_rank(const uint8_t *frame, size_t len);
+
 /* ---- the bounded send queue ---- */
 
 #define LORA_TXQ_SLOTS  5u
@@ -282,6 +295,7 @@ bool lora_is_alert_frame(const uint8_t *frame, size_t len);
 typedef struct {
     bool     in_use;
     bool     alert;        /* rule 1 traffic: never dropped to make room, never made to wait */
+    uint8_t  rank;         /* LORA_RANK_*: what gives way to what when the queue is full */
     bool     sending;      /* parts of it are already on the air: never evicted, resumed in place */
     uint16_t dest;         /* LoRa address (docs/lora.md's address plan) */
     uint16_t len;
@@ -321,6 +335,16 @@ size_t lora_txq_waiting(const lora_txq_t *q);
  */
 lora_txq_slot_t *lora_txq_reserve(lora_txq_t *q, uint16_t dest, bool alert, uint8_t id, size_t cap,
                                   uint32_t due_ms);
+
+/*
+ * The same, saying what the payload is worth (LORA_RANK_*). In a full queue the newcomer takes the
+ * place of the oldest entry of the lowest rank there is, provided that rank is no higher than its
+ * own: a message pushes out routine traffic before another message, and routine traffic never pushes
+ * out a message - it is the one refused. Nothing pushes out an alert or a transfer already on the
+ * air. lora_txq_reserve is this with LORA_RANK_ALERT or LORA_RANK_ROUTINE.
+ */
+lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t rank, uint8_t id, size_t cap,
+                                         uint32_t due_ms);
 
 /* Makes a reserved slot ready to transmit. False (and the slot is freed) if len does not fit. */
 bool lora_txq_commit(lora_txq_t *q, lora_txq_slot_t *slot, size_t len);

@@ -1419,6 +1419,19 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         forward(n, &e, body, from_node);
         break;
     }
+    case LG_T_FW_OFFER:
+    case LG_T_FW_GET:
+    case LG_T_FW_DATA:
+        /* D101. From the neighbour that wrote it and no further: a relayed one is not believed. */
+        if (e.scope != LG_SCOPE_SYSTEM || e.body_len == 0 || e.body_len > LG_FW_BODY_MAX ||
+            e.origin_node != from_node || e.origin_id != lg_node_origin_id(from_node)) {
+            n->stats.malformed++;
+            break;
+        }
+        if (n->io.on_fw != NULL) {
+            n->io.on_fw(n->io.ctx, from_node, e.type, body, e.body_len);
+        }
+        break;
     case LG_T_GRID_STATE:
         if (e.scope != LG_SCOPE_SYSTEM || e.body_len == 0 || e.body_len > LG_GRID_STATE_MAX) {
             n->stats.malformed++;
@@ -1627,6 +1640,30 @@ const lg_position_t *lg_node_position(const lg_node_t *n, uint32_t subject)
         return NULL;
     }
     return &n->positions[slot];
+}
+
+int lg_node_send_fw(lg_node_t *n, uint16_t node, uint8_t type, const uint8_t *body, size_t len)
+{
+    if (n == NULL || body == NULL || len == 0 || len > LG_FW_BODY_MAX ||
+        (type != LG_T_FW_OFFER && type != LG_T_FW_GET && type != LG_T_FW_DATA)) {
+        return LG_ERR_ARG;
+    }
+    lg_env_t e;
+    env_from_node(n, &e, type, LG_SCOPE_SYSTEM, 0);
+    e.ttl = 1;
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, len, buf, sizeof(buf));
+    if (flen < 0) {
+        return flen;
+    }
+    (void)lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq);
+    if (node == LG_NODE_NONE) {
+        flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+    } else if (n->io.backbone_unicast != NULL) {
+        n->io.backbone_unicast(n->io.ctx, node, buf, (size_t)flen);
+    }
+    note_out(n, e.type, e.scope, (size_t)flen);
+    return LG_OK;
 }
 
 const lg_trail_t *lg_node_trail(const lg_node_t *n, uint32_t subject)

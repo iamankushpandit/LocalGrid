@@ -5,6 +5,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A signed update passes from one access point to the next (D101)
+
+- **`firmware/node/main/fw_spread.c`**: an AP running a signed update offers it; an older neighbour
+  pulls it 512 bytes at a time through `lg_fwupdate`, restarts into it, and offers it on. One neighbour
+  at a time, so APs never restart together. `spread` on the console.
+- **`lg_core`**: `LG_T_FW_OFFER`, `LG_T_FW_GET`, `LG_T_FW_DATA` (0x60 to 0x62), carried one hop between
+  APs, never forwarded, refused from a handheld. Never on LoRa.
+- **`lg_fwupdate`** keeps the signed 192 bytes of the update a device is running (`lg_fwu_held`,
+  `lg_fwu_held_read`), and erases the update slot as the image arrives instead of all at once.
+- **On the bench:** an update given to Denali by cable reached Everest (1.18 MB in about two minutes) and,
+  once it had a release key, Fuji. Handhelds are not covered: they still update by cable.
+
+### In a full LoRa queue, messages outrank routine traffic (D102)
+
+- Found by a chaos run: with the Wi-Fi backbone off, full queues discarded the oldest entry whatever it
+  was, and two messages between registered handhelds were lost.
+- A newcomer now replaces the oldest entry of the lowest rank, and routine traffic never replaces a
+  message. One comparable round since: no message lost. Not yet enough rounds to call it settled.
+
+### An access point gets about 7 KB back (D93)
+
+- The backbone's receive queue was twelve slots of a whole frame, 12.9 KB of heap from boot. It is a
+  6 KB message buffer of bytes, as the transmit side already was.
+- At rest with two handhelds: Everest 30 to 35 KB free, Fuji 35 to 41, Denali 35 to 40. One AP alone
+  with all six handhelds, where it touched 7 KB before, has not been measured since.
+
+### LoRa power on the admin page (D98)
+
+- The Network tab shows the AP's LoRa transmit power with what it is for, and three buttons;
+  `POST /api/lora`. The setting was console-only on an AP.
+
+### The admin page is tested in a browser, against a stand-in access point
+
+- **`tools/test_admin_page.py`** serves `admin.html` as it is in the tree, answers `/api/*` with the same
+  JSON and bytes an AP sends, and drives the page in headless Edge or Chrome: wrong then right password,
+  the trail on the map and in its table with its map links, the no-Internet note, the LoRa power change
+  with its session and CSRF token. 28 checks. It was run with the page broken three ways and failed each
+  time. It replaces asking a person to look at the page on a phone; it does not prove a real AP serves it.
+
 ### OpenStreetMap was refusing the dashboard's map tiles
 
 - **Cause, measured:** the tool called itself "LocalGrid-grid-watch/1.0 (offline network monitor; one

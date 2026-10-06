@@ -33,6 +33,7 @@ extern "C" {
 #define LG_DIRECT_BODY_MAX      (LG_TEXT_MAX + LG_AEAD_TAG_LEN)
 #define LG_GRID_STATE_MAX       256u         /* bytes in one GRID_STATE body; its layout belongs to AP firmware */
 #define LG_NAME_MAX             24u          /* a handheld's chosen name: up to 23 UTF-8 bytes plus a NUL */
+#define LG_FW_BODY_MAX          600u         /* bytes in one FW_OFFER, FW_GET or FW_DATA body; layout belongs to AP firmware */
 #define LG_TRAIL_POINTS         16u          /* a trail: a person's newest point and the fifteen before it (D99) */
 #define LG_TRAIL_SLOTS          4u           /* trails an AP holds at once; the stalest gives way to a fresher one */
 #define LG_TZ_MAX               47u          /* bytes in a POSIX TZ string, "CST6CDT,M3.2.0,M11.1.0", no NUL */

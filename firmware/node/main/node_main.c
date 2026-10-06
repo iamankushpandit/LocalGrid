@@ -32,6 +32,7 @@
 #include "lg_crypto.h"
 #include "lg_proto_config.h"
 #include "lg_timekeep.h"
+#include "fw_spread.h"
 #include "gps.h"
 #include "lg_gridkeys.h"
 #include "lora.h"
@@ -234,6 +235,12 @@ static void io_on_diag(void *ctx, uint16_t origin_node, uint8_t hops, const uint
     ESP_LOGI("BB", "[BB] Echo from node %u after %u hop(s): %.*s", origin_node, hops, (int)len, (const char *)text);
 }
 
+static void io_on_fw(void *ctx, uint16_t from_node, uint8_t type, const uint8_t *body, size_t len)
+{
+    (void)ctx;
+    fw_spread_on_frame(from_node, type, body, len);   /* D101 */
+}
+
 static void io_on_grid_state(void *ctx, uint16_t origin_node, const uint8_t *body, size_t len)
 {
     (void)ctx;
@@ -378,6 +385,7 @@ static void on_link(uint16_t node, bool up)
     ptrace_event(up ? PTRACE_LINK_UP : PTRACE_LINK_DOWN);
     if (up) {
         lg_node_on_neighbor_up(&g_app.core, node);
+        fw_spread_on_neighbor_up(node);   /* D101: an update this AP holds is offered to the newcomer */
         /* A returning or new AP learns everything it missed: settings first, so a time
          * generation it has not seen demotes it before the time itself arrives (D45). */
         grid_state_announce();
@@ -960,6 +968,9 @@ static void handle_command(const node_cmd_t *cmd)
     case NODE_CMD_TRAILS:
         print_trails();
         break;
+    case NODE_CMD_SPREAD:
+        fw_spread_print();
+        break;
     case NODE_CMD_LORA_TEST: {
         if (!lora_fitted()) {
             printf("LoRa: no module on this AP\n");
@@ -1134,6 +1145,7 @@ static void core_task(void *arg)
         lgbb_poll(now);
         lora_poll(now);   /* D71: frames that crossed on the second backbone, and its heartbeat */
         gps_poll();       /* empty unless the polled-GPS experiment is built in */
+        fw_spread_tick(now);   /* D101: an update passing between APs, a piece a pass */
         chaos_self_poll(now);   /* D82: inert in an ordinary build */
 #if NODE_BLE_ADV_ENABLED
         ble_status_poll(now);   /* D68: the next sealed status frame, every 500 ms */
@@ -1239,6 +1251,7 @@ void app_main(void)
         .on_time = io_on_time,
         .time_now = io_time_now,
         .on_grid_state = io_on_grid_state,
+        .on_fw = io_on_fw,
         .on_groups_changed = io_on_groups_changed,
         .on_client_time = io_on_client_time,
         .on_name = io_on_name,

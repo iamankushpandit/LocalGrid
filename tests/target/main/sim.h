@@ -46,6 +46,11 @@ typedef struct {
     uint32_t  diag_count;    /* diagnostic echoes reported to this node */
     uint8_t   diag_hops;     /* hops of the last echo */
     uint32_t  grid_state_count;    /* grid state bodies reported to this node */
+    uint32_t  fw_count;            /* D101: FW frames handed to this node's firmware */
+    uint16_t  fw_from;
+    uint8_t   fw_type;
+    size_t    fw_len;
+    uint8_t   fw_first;            /* the last one's first body byte */
     uint16_t  grid_state_origin;   /* origin node of the last one */
     uint8_t   grid_state_last[LG_GRID_STATE_MAX];
     size_t    grid_state_len;

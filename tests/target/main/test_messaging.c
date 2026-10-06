@@ -1454,6 +1454,115 @@ static void test_trails(void)
     sim_destroy(s);
 }
 
+/* D101: update frames go one hop between APs, are never passed on, and never come from a handheld. */
+static void test_fw_frames(void)
+{
+    sim_t *s = make_chain();   /* A - B - C */
+    if (s == NULL) {
+        return;
+    }
+    static uint8_t body[LG_FW_BODY_MAX + 1u];
+    memset(body, 0x5A, sizeof(body));
+    lg_node_t *a = &s->nodes[0].node;
+    lg_node_t *b = &s->nodes[1].node;
+
+    CHECK_EQ(lg_node_send_fw(a, 1, LG_T_TEXT, body, 12), LG_ERR_ARG);
+    CHECK_EQ(lg_node_send_fw(a, 1, LG_T_FW_GET, body, 0), LG_ERR_ARG);
+    CHECK_EQ(lg_node_send_fw(a, 1, LG_T_FW_DATA, body, LG_FW_BODY_MAX + 1u), LG_ERR_ARG);
+    CHECK_EQ(lg_node_send_fw(a, 1, LG_T_FW_GET, NULL, 12), LG_ERR_ARG);
+
+    /* To one neighbour: it arrives there, whole, and goes no further. */
+    body[0] = 0x11;
+    CHECK_EQ(lg_node_send_fw(a, 1, LG_T_FW_GET, body, 14), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].fw_count, 1u);
+    CHECK_EQ(s->nodes[1].fw_from, 0);
+    CHECK_EQ(s->nodes[1].fw_type, LG_T_FW_GET);
+    CHECK_EQ(s->nodes[1].fw_len, 14u);
+    CHECK_EQ(s->nodes[1].fw_first, 0x11);
+    CHECK_EQ(s->nodes[2].fw_count, 0u);
+    CHECK_EQ(s->nodes[0].fw_count, 0u);
+
+    /* To every neighbour: B has two, and each hears it once; A, two hops from C, hears nothing of C's. */
+    body[0] = 0x22;
+    CHECK_EQ(lg_node_send_fw(b, LG_NODE_NONE, LG_T_FW_OFFER, body, 12), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].fw_count, 1u);
+    CHECK_EQ(s->nodes[2].fw_count, 1u);
+    CHECK_EQ(s->nodes[2].fw_from, 1);
+    body[0] = 0x33;
+    CHECK_EQ(lg_node_send_fw(&s->nodes[2].node, LG_NODE_NONE, LG_T_FW_OFFER, body, 12), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].fw_count, 2u);
+    CHECK_EQ(s->nodes[1].fw_first, 0x33);
+    CHECK_EQ(s->nodes[0].fw_count, 1u);   /* not passed on */
+
+    /* A duplicate on the air is taken once. */
+    s->duplicate_backbone = true;
+    body[0] = 0x44;
+    CHECK_EQ(lg_node_send_fw(a, 1, LG_T_FW_DATA, body, 200), LG_OK);
+    CHECK(sim_pump(s));
+    s->duplicate_backbone = false;
+    CHECK_EQ(s->nodes[1].fw_count, 3u);
+    CHECK_EQ(s->nodes[1].fw_len, 200u);
+
+    /* The largest body is taken (handed over directly: the simulated radio carries smaller frames),
+     * and one byte more is not a frame the core will build at all. */
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.major = LG_PROTO_MAJOR;
+    e.minor = LG_PROTO_MINOR;
+    e.type = LG_T_FW_DATA;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.ttl = 1;
+    e.origin_id = LG_NODE_ID_BASE | 0u;
+    e.origin_node = 0;
+    e.origin_boot = 1;
+    e.origin_seq = 9400;
+    static uint8_t big_frame[LG_FRAME_MAX];
+    int big_len = lg_frame_build(&e, body, LG_FW_BODY_MAX, big_frame, sizeof(big_frame));
+    CHECK(big_len > 0);
+    lg_node_on_backbone_frame(b, 0, big_frame, (size_t)big_len);
+    CHECK_EQ(s->nodes[1].fw_count, 4u);
+    CHECK_EQ(s->nodes[1].fw_len, (size_t)LG_FW_BODY_MAX);
+
+    /* One that claims another author than the neighbour it came from is not believed. */
+    memset(&e, 0, sizeof(e));
+    e.major = LG_PROTO_MAJOR;
+    e.minor = LG_PROTO_MINOR;
+    e.type = LG_T_FW_DATA;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.ttl = 1;
+    e.origin_id = LG_NODE_ID_BASE | 2u;
+    e.origin_node = 2;
+    e.origin_boot = 1;
+    e.origin_seq = 9401;
+    uint8_t frame[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, 20, frame, sizeof(frame));
+    CHECK(flen > 0);
+    uint32_t malformed = a->stats.malformed;
+    lg_node_on_backbone_frame(a, 1, frame, (size_t)flen);   /* C's frame, arriving from B */
+    CHECK_EQ(a->stats.malformed, malformed + 1u);
+    CHECK_EQ(s->nodes[0].fw_count, 1u);
+    e.origin_id = LG_NODE_ID_BASE | 1u;
+    e.origin_node = 1;
+    e.origin_seq = 9402;
+    e.scope = LG_SCOPE_BROADCAST;
+    flen = lg_frame_build(&e, body, 20, frame, sizeof(frame));
+    lg_node_on_backbone_frame(a, 1, frame, (size_t)flen);   /* the wrong scope */
+    CHECK_EQ(a->stats.malformed, malformed + 2u);
+    CHECK_EQ(s->nodes[0].fw_count, 1u);
+
+    /* A handheld cannot put one in: on a session these types mean nothing. */
+    uint32_t forwarded = a->stats.forwarded;
+    send_session_frame(s, DAD, LG_T_FW_DATA, body, 20, LG_SCOPE_SYSTEM, 0, 9403);
+    send_session_frame(s, DAD, LG_T_FW_OFFER, body, 12, LG_SCOPE_SYSTEM, 0, 9404);
+    CHECK_EQ(s->nodes[0].fw_count, 1u);
+    CHECK_EQ(s->nodes[1].fw_count, 4u);
+    CHECK_EQ(a->stats.forwarded, forwarded);
+    sim_destroy(s);
+}
+
 /* D65: a handheld reading GPS now gives time to an AP that has none, and never overrides one set. */
 static void test_position_time(void)
 {
@@ -3254,6 +3363,7 @@ void test_messaging(void)
     test_position_time();
     test_trail_body();
     test_trails();
+    test_fw_frames();
     test_voice_body();
     test_voice_compact();
     test_voice_group();

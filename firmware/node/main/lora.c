@@ -693,9 +693,10 @@ static void lora_task(void *arg)
 static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, size_t len)
 {
     size_t need = len + LGLH_OUTER_LEN + LG_AEAD_TAG_LEN;
+    uint8_t rank = alert ? LORA_RANK_ALERT : lora_frame_rank(frame, len);   /* D102 */
     lock();
-    lora_txq_slot_t *slot = lora_txq_reserve(&L.txq, dest, alert, L.msg_id, need,
-                                             app_now_ms() + rand_ms(BACKOFF_MAX_MS));
+    lora_txq_slot_t *slot = lora_txq_reserve_ranked(&L.txq, dest, rank, L.msg_id, need,
+                                                    app_now_ms() + rand_ms(BACKOFF_MAX_MS));
     int n = slot != NULL ? lglh_seal(&L.hh, slot->data, slot->cap, frame, len) : -1;
     bool ok = n > 0 && lora_txq_commit(&L.txq, slot, (size_t)n);
     if (slot != NULL && !ok) {
@@ -714,9 +715,10 @@ static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, siz
 static bool queue_sealed(uint16_t dest, bool alert, const uint8_t *frame, size_t len)
 {
     size_t need = len + LGBB_OUTER_LEN + LG_AEAD_TAG_LEN;
+    uint8_t rank = alert ? LORA_RANK_ALERT : lora_frame_rank(frame, len);   /* D102 */
     lock();
-    lora_txq_slot_t *slot = lora_txq_reserve(&L.txq, dest, alert, L.msg_id, need,
-                                             app_now_ms() + rand_ms(BACKOFF_MAX_MS));
+    lora_txq_slot_t *slot = lora_txq_reserve_ranked(&L.txq, dest, rank, L.msg_id, need,
+                                                    app_now_ms() + rand_ms(BACKOFF_MAX_MS));
     int n = slot != NULL ? lgbb_seal(slot->data, slot->cap, frame, len) : -1;
     bool ok = n > 0 && lora_txq_commit(&L.txq, slot, (size_t)n);
     if (slot != NULL && !ok) {

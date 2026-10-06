@@ -308,6 +308,9 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
     if (frame == NULL || len > LORA_PAYLOAD_MAX || lg_env_decode(frame, len, &e) != LG_OK) {
         return LORA_SEND_NEVER;
     }
+    if (e.type == LG_T_FW_OFFER || e.type == LG_T_FW_GET || e.type == LG_T_FW_DATA) {
+        return LORA_SEND_NEVER;   /* D101: a megabyte of firmware is hours of airtime, and belongs to Wi-Fi */
+    }
     if (e.type == LG_T_VOICE) {
         /*
          * Live talk never: one 100 ms frame would be seconds of airtime (D61, D71). The compact codec
@@ -339,6 +342,19 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
 bool lora_is_alert_frame(const uint8_t *frame, size_t len)
 {
     return lora_policy_for_frame(frame, len) == LORA_SEND_ALWAYS;
+}
+
+uint8_t lora_frame_rank(const uint8_t *frame, size_t len)
+{
+    if (lora_is_alert_frame(frame, len)) {
+        return LORA_RANK_ALERT;
+    }
+    lg_env_t e;
+    if (frame == NULL || lg_env_decode(frame, len, &e) != LG_OK) {
+        return LORA_RANK_ROUTINE;
+    }
+    return e.type == LG_T_TEXT || e.type == LG_T_MSG_ACK || e.type == LG_T_VOICE ? LORA_RANK_MESSAGE
+                                                                                  : LORA_RANK_ROUTINE;
 }
 
 /* ---- the bounded send queue ---- */
@@ -397,6 +413,12 @@ void lora_txq_release(lora_txq_t *q, lora_txq_slot_t *slot);
 lora_txq_slot_t *lora_txq_reserve(lora_txq_t *q, uint16_t dest, bool alert, uint8_t id, size_t cap,
                                   uint32_t due_ms)
 {
+    return lora_txq_reserve_ranked(q, dest, alert ? LORA_RANK_ALERT : LORA_RANK_ROUTINE, id, cap, due_ms);
+}
+
+lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t rank, uint8_t id, size_t cap,
+                                         uint32_t due_ms)
+{
     if (cap == 0 || cap > LORA_PAYLOAD_MAX) {
         return NULL;
     }
@@ -408,11 +430,17 @@ lora_txq_slot_t *lora_txq_reserve(lora_txq_t *q, uint16_t dest, bool alert, uint
         }
     }
     if (slot == NULL) {
-        /* Full: the oldest entry that is neither an alert nor already on the air makes room. */
+        /*
+         * Full. Something makes room if it is neither an alert nor already on the air, and is worth no
+         * more than the newcomer: the least valuable first, and the oldest of those. Until D102 it was
+         * simply the oldest, so a presence update arriving at a full queue threw out a person's message
+         * that had been waiting its turn - on 2026-10-05, with the Wi-Fi backbone off, three APs dropped
+         * 5, 12 and 8 frames this way and two messages between registered handhelds were lost.
+         */
         for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
             lora_txq_slot_t *c = &q->slots[i];
-            if (c->in_use && !c->alert && !c->sending && c->cap >= cap &&
-                (slot == NULL || c->order < slot->order)) {
+            if (c->in_use && !c->alert && !c->sending && c->cap >= cap && c->rank <= rank &&
+                (slot == NULL || c->rank < slot->rank || (c->rank == slot->rank && c->order < slot->order))) {
                 slot = c;
             }
         }
@@ -423,7 +451,8 @@ lora_txq_slot_t *lora_txq_reserve(lora_txq_t *q, uint16_t dest, bool alert, uint
         q->dropped++;
     }
     slot->in_use = true;
-    slot->alert = alert;
+    slot->alert = rank >= LORA_RANK_ALERT;
+    slot->rank = rank;
     slot->sending = false;
     slot->dest = dest;
     slot->len = 0;
