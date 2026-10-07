@@ -187,7 +187,12 @@ async function talk(port, reader, writer, command, marker, ms) {
   await writer.write(new TextEncoder().encode("\r\n" + command + "\r\n"));
   let text = "", end = Date.now() + ms;
   while (Date.now() < end) {
-    const got = await Promise.race([reader.read(), sleep(250).then(() => null)]);
+    // One read is kept waiting across passes and calls. Racing a fresh reader.read() against the timer
+    // on every pass abandoned the read the timer beat, and the bytes it later received were thrown away:
+    // the board's answer to `provision` was lost that way (tools/test_installer_page.py, 2026-10-06).
+    if (!reader.lgPending) reader.lgPending = reader.read();
+    const got = await Promise.race([reader.lgPending, sleep(250).then(() => null)]);
+    if (got) reader.lgPending = null;
     if (got && got.value) text += new TextDecoder().decode(got.value);
     const lines = text.split(/\r?\n/);
     const at = lines.findLastIndex(l => l.trim().startsWith(marker));
@@ -195,6 +200,20 @@ async function talk(port, reader, writer, command, marker, ms) {
   }
   const line = text.split(/\r?\n/).reverse().find(l => l.trim().startsWith(marker));
   return line ? line.trim() : null;
+}
+
+// Opening the port can pull the board's reset line on the way, so the board may be starting up just as
+// it is spoken to - and a command typed into a console that is not listening yet is simply lost. That
+// is how `provision` went unanswered from this page while the same line over a cable worked
+// (tools/test_installer_page.py, 2026-10-06). Wait until the board has been quiet for a moment.
+async function settle(reader, quietMs, maxMs) {
+  let last = Date.now(), end = Date.now() + maxMs, heard = "";
+  while (Date.now() < end && Date.now() - last < quietMs) {
+    if (!reader.lgPending) reader.lgPending = reader.read();
+    const got = await Promise.race([reader.lgPending, sleep(200).then(() => null)]);
+    if (got) { reader.lgPending = null; last = Date.now(); if (got.value) heard += new TextDecoder().decode(got.value); }
+  }
+  return heard;
 }
 
 $("setup").onclick = async () => {
@@ -210,7 +229,9 @@ $("setup").onclick = async () => {
     await port.open({baudRate: 115200});
     try { await port.setSignals({dataTerminalReady: false, requestToSend: false}); } catch (e) { /* not every bridge has them */ }
     reader = port.readable.getReader(); writer = port.writable.getWriter();
-    say("log", "", "Connected. Asking the board who it is...\n");
+    say("log", "", "Connected. Waiting for the board to be ready...\n");
+    await settle(reader, 1500, 12000);
+    more("log", "Asking the board who it is...\n");
     const id = await talk(port, reader, writer, "id", "LGID", 4000);
     more("log", (id || "The board did not answer. Is LocalGrid installed on it, and is anything else using the port?") + "\n");
     if (!id) throw new Error("no answer from the board");
@@ -224,7 +245,11 @@ $("setup").onclick = async () => {
     } else {
       more("log", "It already has an identity, which it keeps.\n");
     }
-    const done = await talk(port, reader, writer, "provision " + keys, "LGPROV:", 6000);
+    let done = await talk(port, reader, writer, "provision " + keys, "LGPROV:", 6000);
+    if (!done) {   /* once more, after letting it settle: a console busy starting up drops a line */
+      await settle(reader, 1500, 8000);
+      done = await talk(port, reader, writer, "provision " + keys, "LGPROV:", 8000);
+    }
     more("log", (done || "LGPROV: no answer") + "\n");
     if (!done || !done.includes("ok")) throw new Error("the board did not take the grid keys");
     const ok = document.createElement("span"); ok.className = "ok"; ok.textContent = "Done. The board is restarting into your grid."; $("log").appendChild(ok);

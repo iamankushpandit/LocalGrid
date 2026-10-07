@@ -240,7 +240,12 @@ esp_err_t lg_identity_mint(const char *role, const char *board, uint32_t created
     if (err != ESP_OK) {
         return err;
     }
+    uint32_t floor = 0;
+    (void)nvs_get_u32(h, "boot", &floor);   /* D108: a new identity must not take the counter backwards */
     (void)nvs_erase_all(h);
+    if (floor != 0) {
+        (void)nvs_set_u32(h, "boot", floor);
+    }
     err = nvs_set_str(h, "id", id_out);
     err = err == ESP_OK ? nvs_set_str(h, "role", role) : err;
     err = err == ESP_OK ? nvs_set_str(h, "board", board) : err;
@@ -253,6 +258,39 @@ esp_err_t lg_identity_mint(const char *role, const char *board, uint32_t created
         err = err == ESP_OK ? nvs_set_u32(h, "device_idx", index) : err;
     }
     err = err == ESP_OK ? nvs_commit(h) : err;
+    nvs_close(h);
+    return err;
+}
+
+uint32_t lg_identity_boot_floor(void)
+{
+    uint32_t floor = 0;
+    if (nvs_flash_init_partition(PARTITION) != ESP_OK) {
+        return 0;
+    }
+    nvs_handle_t h;
+    if (nvs_open_from_partition(PARTITION, NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        (void)nvs_get_u32(h, "boot", &floor);
+        nvs_close(h);
+    }
+    return floor;
+}
+
+esp_err_t lg_identity_set_boot_floor(uint32_t boot)
+{
+    esp_err_t err = nvs_flash_init_partition(PARTITION);
+    if (err != ESP_OK) {
+        return err;
+    }
+    nvs_handle_t h;
+    err = nvs_open_from_partition(PARTITION, NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u32(h, "boot", boot);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
     nvs_close(h);
     return err;
 }

@@ -643,10 +643,19 @@ static uint32_t next_boot_counter(void)
     uint32_t boot = 0;
     ESP_ERROR_CHECK(nvs_open("lg", NVS_READWRITE, &h));
     (void)nvs_get_u32(h, "boot", &boot);
+    uint32_t floor = lg_identity_boot_floor();   /* D108: settings wiped, identity kept: never go back */
+    if (floor > boot) {
+        ESP_LOGW(TAG, "[GRID] Boot counter %" PRIu32 " was behind the %" PRIu32 " kept with the identity; "
+                      "continuing from there", boot, floor);
+        boot = floor;
+    }
     boot++;
     ESP_ERROR_CHECK(nvs_set_u32(h, "boot", boot));
     ESP_ERROR_CHECK(nvs_commit(h));   /* committed before any radio transmit: nonce uniqueness */
     nvs_close(h);
+    if (lg_identity_set_boot_floor(boot) != ESP_OK) {
+        ESP_LOGW(TAG, "[GRID] Boot counter not kept with the identity; a settings wipe could take it back");
+    }
     return boot;
 }
 

@@ -5,6 +5,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The installer page is tested in a real browser, and found a flaw (D108)
+
+- **`tools/test_installer_page.py`** puts LocalGrid on a bench board through the installer page the
+  way a person would: a visible Chrome or Edge window, real mouse presses, the browser's own port
+  chooser driven through Windows UI Automation, ESP Web Tools flashing without an erase, then the
+  page's set-up step with this bench's grid keys, and the board checked over its cable afterwards -
+  including that its boot banner names the published build and that no other board was touched.
+- **Its first run flashed the wrong board.** UI Automation's "select" did not move the chooser's
+  selection, so Connect opened the first port in the list: Denali was given handheld firmware. The
+  test now presses Connect only when the board's own row, and no other, reads as selected, clicking
+  it with the mouse if need be, and cancels otherwise.
+- **That accident showed a real flaw, now fixed (D108):** wiping a board's settings reset its boot
+  counter to 1 while its identity and keys survived, so it reused message ids and nonces and its
+  neighbours rejected it as a replay. The counter's high-water mark is now kept with the identity.
+- **And two bugs in the installer page itself, both of which made its last step fail for real users:**
+  each pass of its serial reader abandoned the read a timer beat, so the board's answers could be
+  thrown away; and opening the port restarts many boards, so `provision` reached a console that was
+  not listening yet. The page now keeps one read waiting, waits for the board to go quiet after
+  connecting, and asks again once. Bench: 25 of 25 checks on Chase, its boot counter carrying on
+  from 195 to 219 through four installs that each wiped its settings.
+
 ### A handheld takes its update from its access point (D107)
 
 - An access point given a signed handheld update keeps it in its spare firmware slot, never runs it,

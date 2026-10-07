@@ -2684,6 +2684,12 @@ static esp_err_t commit_boot_counter(void)
     }
     uint32_t boot = 0;
     (void)nvs_get_u32(h, "boot", &boot);
+    uint32_t floor = lg_identity_boot_floor();   /* D108: settings wiped, identity kept: never go back */
+    if (floor > boot) {
+        ESP_LOGW(TAG, "[GRID] Boot counter %" PRIu32 " was behind the %" PRIu32 " kept with the identity; "
+                      "continuing from there", boot, floor);
+        boot = floor;
+    }
     boot++;
     err = nvs_set_u32(h, "boot", boot);
     if (err == ESP_OK) {
@@ -2692,6 +2698,9 @@ static esp_err_t commit_boot_counter(void)
     nvs_close(h);
     if (err == ESP_OK) {
         s.boot = boot;
+        if (lg_identity_set_boot_floor(boot) != ESP_OK) {
+            ESP_LOGW(TAG, "[GRID] Boot counter not kept with the identity; a settings wipe could take it back");
+        }
     }
     return err;
 }

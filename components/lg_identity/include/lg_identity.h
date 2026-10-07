@@ -23,6 +23,7 @@
  *   node_idx   u8      infrastructure boards only
  *   node_name  string  infrastructure boards only
  *   device_idx u32     handhelds only
+ *   boot       u32     the highest boot counter this board has used (written by the firmware, D108)
  *
  * The nonce is not a secret. It exists so that the ID cannot be guessed from a MAC alone, and it
  * is stored so that the board can recompute its own ID at boot:
@@ -103,6 +104,17 @@ void lg_identity_register_console(const char *role);
  * on LG_IDENTITY_UNCHECKED.
  */
 lg_identity_check_t lg_identity_verified(void);
+
+/*
+ * D108: the boot counter's floor, kept beside the identity. A board's boot counter lives in its main
+ * settings storage, which an installer flash or an erase of the settings clears while the identity and
+ * the grid keys survive: the counter then started again at 1, so the board reused (author, boot, seq)
+ * - message ids, and the nonces they make, under the same key - and every neighbour threw its frames
+ * away as replays. Firmware takes the larger of the two, adds one, and writes both before it transmits.
+ * Minting a new identity keeps the floor. 0 when none was ever written.
+ */
+uint32_t  lg_identity_boot_floor(void);
+esp_err_t lg_identity_set_boot_floor(uint32_t boot);
 
 /* "this board's own", "another board's", or "not checked" - for logs and screens. */
 const char *lg_identity_check_text(lg_identity_check_t check);
