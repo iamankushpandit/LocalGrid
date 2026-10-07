@@ -53,6 +53,7 @@ STORY = ROOT / "tools" / "demo_story.json"
 FLASHER = ROOT / "site" / "flash" / "index.html"
 WATCH_PORT = 8768        # tools/grid_watch.py's own default
 VOICES = ROOT / "build" / "voices"   # Piper voice models (.onnx with its .onnx.json); build/ is not in git
+NARRATOR = "en_US-amy-medium"         # the owner's choice of voice, 2026-10-07
 MEDIA = ROOT / "build" / "demo-media"  # the owner's photos for the chapters; not in git (they show the bench)
 MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
                ".mp4": "video/mp4", ".webm": "video/webm"}
@@ -1366,10 +1367,14 @@ class Narrator:
     def names(self):
         return list(self.paths)
 
+    @property
+    def default(self):
+        return NARRATOR if NARRATOR in self.paths else next(iter(self.paths), None)
+
     def wav(self, text, name=None):
         import wave
         from piper import PiperVoice
-        name = name if name in self.paths else next(iter(self.paths))
+        name = name if name in self.paths else self.default
         key = hashlib.sha256((name + "\0" + text).encode("utf-8")).hexdigest()
         with self.lock:
             if key in self.cache:
@@ -1437,7 +1442,8 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
             if path == "/api/scenarios":
                 return self.reply(200, {"scenarios": scenario_list(grid), "boards": grid is not None,
                                         "watch": watch_url,
-                                        "tts": narrator.names if narrator else []})
+                                        "tts": narrator.names if narrator else [],
+                                        "tts_default": narrator.default if narrator else None})
             if path == "/api/tts":
                 if not narrator or not narrator.paths:
                     return self.reply(404, {"error": "no local voice"})

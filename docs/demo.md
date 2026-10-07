@@ -46,7 +46,8 @@ Chosen at the top of the page, most natural first:
 - **Piper, on this laptop.** An open-source neural voice, made locally, the same in every recording,
   and offline like the product. Install it once with `pip install piper-tts` and put a voice model
   (an `.onnx` file and its `.onnx.json`, from the Piper voices collection) in `build/voices/`, or name
-  one with `--voice-model`. The page then offers it first.
+  one with `--voice-model`. The page then offers it first. The voice is Amy (`en_US-amy-medium`), the
+  owner's choice; the others downloaded with it stay in the list.
 - **A browser's natural voices.** Microsoft Edge offers "Natural" voices; they sound close to a person
   but are online, so the narration text goes to Microsoft.
 - **The voices installed in Windows** (David, Mark, Zira): offline, and robotic.

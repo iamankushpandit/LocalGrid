@@ -194,6 +194,7 @@ function narrating() { return (!!synth || localVoices.length > 0) && $("speak").
 function tellNarrate() { fetch("/api/narrate?on=" + (narrating() ? 1 : 0), { method: "POST" }).catch(() => {}); }
 pref("lg-demo-speak", $("speak"), on => { if (!on && synth) synth.cancel(); tellNarrate(); }, true);
 
+let localVoiceDefault = null;      // the voice the owner chose, tools/demo.py NARRATOR
 let localVoices = [];             // Piper voices tools/demo.py makes on this laptop, if it has any
 const PIPER = "piper:";
 function fillVoices() {
@@ -207,7 +208,7 @@ function fillVoices() {
   const options = localVoices.map(n => ({ value: PIPER + n, label: pretty(n) + " (natural, on this laptop)" }))
     .concat(voices.map(v => ({ value: v.name, label: v.name.replace(/^Microsoft /, "") + (v.localService ? "" : " (online)"),
                                natural: /natural|neural/i.test(v.name), local: v.localService, us: /en-US/i.test(v.lang) })));
-  const pick = options.find(o => o.value === saved) || options.find(o => o.value.startsWith(PIPER))
+  const pick = options.find(o => o.value === saved) || options.find(o => o.value === PIPER + localVoiceDefault) || options.find(o => o.value.startsWith(PIPER))
     || options.find(o => o.natural && o.us) || options.find(o => o.natural) || options.find(o => o.local && o.us) || options[0];
   $("voice").innerHTML = "";
   options.forEach(o => {
@@ -707,7 +708,7 @@ Promise.all([fetch("/api/scenarios").then(r => r.json()), fetch("/api/story").th
              fetch("/api/media").then(r => r.json()).catch(() => ({ files: [] }))]).then(([s, story, media]) => {
   mediaFiles = new Set(media.files);
   s.scenarios.forEach(x => scenarios[x.key] = x);
-  boards = s.boards; watchUrl = s.watch; localVoices = s.tts || []; fillVoices();
+  boards = s.boards; watchUrl = s.watch; localVoices = s.tts || []; localVoiceDefault = s.tts_default; fillVoices();
   chapters = story.chapters;
   show(0);
   connect();
