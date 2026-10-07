@@ -48,7 +48,7 @@
     },
     {
       "id": "how",
-      "part": "How it works",
+      "part": "Three radios",
       "title": "Three radios, each with a job",
       "view": "diagram",
       "media": [
@@ -84,10 +84,10 @@
     },
     {
       "id": "espnow",
-      "part": "How it works",
+      "part": "ESP-NOW",
       "title": "ESP-NOW: how the access points talk to each other",
       "view": "diagram",
-      "lead": "First, ESP-NOW, the way the access points talk to each other.",
+      "lead": "ESP-NOW is how the access points talk to each other.",
       "lead_focus": "aps",
       "points": [
         {
@@ -119,10 +119,10 @@
     },
     {
       "id": "join",
-      "part": "How it works",
+      "part": "Joining the network",
       "title": "How a handheld joins",
       "view": "diagram",
-      "lead": "And how a handheld joins.",
+      "lead": "Here is how a handheld joins the network.",
       "lead_focus": "handhelds",
       "points": [
         {
@@ -149,8 +149,8 @@
     },
     {
       "id": "setup",
-      "part": "What you will see",
-      "title": "The boards on this bench",
+      "part": "The demo's hardware",
+      "title": "The boards you will see in this demo",
       "view": "map",
       "lead": "Before the demo, the hardware on this bench. Their names are on the diagram.",
       "points": [
@@ -167,8 +167,8 @@
           "say": "Chase and Marshall are LCD wiki two point eight inch displays, and Big Pepa is the four inch one."
         },
         {
-          "text": "Channi and Jolly: Freenove FNK0104B, 2.8-inch, ESP32-S3, each with a microphone, a speaker, a LoRa module and a GT-U7 GPS: everything a handheld can carry.",
-          "say": "Channi and Jolly are Freenove F N K zero one zero four B boards: two point eight inches, with the faster E S P 32 S 3 chip. They are fitted with everything a handheld can carry: a microphone and a speaker for push to talk, their own LoRa module for when Wi-Fi does not reach, and a G T U 7 GPS, so they know where they are, put it in an S O S, and leave a trail."
+          "text": "Channi and Jolly: Freenove FNK0104B, 2.8-inch, ESP32-S3, each with a microphone, a speaker, a LoRa module and a GT-U7 GPS: everything a handheld can carry. Indoors, their GPS has no fix yet.",
+          "say": "Channi and Jolly are Freenove F N K zero one zero four B boards: two point eight inches, with the faster E S P 32 S 3 chip. They are fitted with everything a handheld can carry: a microphone and a speaker for push to talk, their own LoRa module for when Wi-Fi does not reach, and a G T U 7 GPS, so they know where they are, put it in an S O S, and leave a trail. They have not been taken outside yet, so indoors on this bench their GPS hears the satellites but has no fix."
         },
         {
           "text": "Nothing here is custom hardware: the modules are wired onto boards anyone can buy.",
@@ -202,7 +202,7 @@
           "caption": "Access points on their own power"
         }
       ],
-      "lead": "First, the product, the way people would use it.",
+      "lead": "The first half shows the product the way people would use it.",
       "points": [
         {
           "text": "No cable to any board: access points on batteries or chargers, handhelds on their own batteries.",
@@ -220,14 +220,14 @@
     },
     {
       "id": "d-hands-sos",
-      "part": "Live: an SOS, by hand",
+      "part": "Live: an SOS",
       "title": "An SOS from a handheld's own screen",
       "body": [
         "Raise an SOS on any handheld.",
         "Every other screen shows it; pressing Read tells the sender who has seen it (D58).",
         "The sender marks themselves safe, and it is stood down everywhere (D79)."
       ],
-      "say": "The reason it exists. Somebody needs help. They raise an S O S from their handheld's screen.",
+      "say": "This is the reason it exists. Somebody needs help, so they raise an S O S from their handheld's screen.",
       "demo": "hands_sos",
       "view": "map",
       "media": [
@@ -243,33 +243,33 @@
     },
     {
       "id": "d-hands-ap",
-      "part": "Live: pull a plug, by hand",
-      "title": "Pull the plug on an access point, by hand",
+      "part": "Live: pulling a plug",
+      "title": "Pull the plug on any access point",
       "body": [
         "Unplug any access point you like.",
         "The laptop sees it go quiet over Bluetooth, and sees its handhelds turn up on the others.",
         "Plug it back in, and it rejoins."
       ],
-      "say": "Now something goes wrong. An access point loses power. Pull the plug on any one of them.",
+      "say": "Now something goes wrong: an access point loses power. Pull the plug on any one of them.",
       "demo": "hands_ap",
       "view": "map"
     },
     {
       "id": "d-hands-blackout",
-      "part": "Live: all off, by hand",
-      "title": "Every access point off, then on, with no cables",
+      "part": "Live: everything off",
+      "title": "Every access point off, then back on",
       "body": [
         "Switch every access point off; the handhelds keep the time on their own batteries.",
         "Switch them back on: they find each other, and the handhelds give them the time back (D53).",
         "Then the handhelds spread themselves out evenly across the access points (D54)."
       ],
-      "say": "And the worst case. Every access point goes off at once.",
+      "say": "Now the worst case: every access point goes off at once.",
       "demo": "hands_blackout",
       "view": "map"
     },
     {
       "id": "watch",
-      "part": "Watching it",
+      "part": "Watching the grid",
       "title": "A laptop or a phone watches the grid without joining it",
       "body": [
         "Observability was designed in from the first week (D68): every access point broadcasts a small, sealed status over Bluetooth.",
@@ -288,7 +288,7 @@
     },
     {
       "id": "chaos",
-      "part": "How it was built",
+      "part": "Tested by breaking it",
       "title": "Tested by breaking it, for hours, unattended",
       "body": [
         "A framework kills access points and handhelds at random, cuts their power and switches their radios off, while the handhelds keep messaging each other.",
@@ -304,8 +304,8 @@
     },
     {
       "id": "bench",
-      "part": "Live: the bench",
-      "title": "Every board on a cable, so each claim can be broken on cue and measured",
+      "part": "Live: on the bench",
+      "title": "Every board on a cable, to break each claim on cue and measure it",
       "body": [
         "Each board is plugged into this laptop: to cut its power on cue, and to read what it says.",
         "Faults go through the cable and no other way; nothing in the firmware can break the grid on request (D103).",
@@ -318,15 +318,15 @@
     },
     {
       "id": "hardware",
-      "part": "Hardware",
-      "title": "The boards on this bench, as they describe themselves",
+      "part": "The boards report themselves",
+      "title": "The boards, as they report themselves",
       "body": [
         "Access points: plain ESP32 boards with a 4 MB flash, an optional LoRa module (Reyax RYLR998, SX1262) and an optional GPS (GT-U7).",
         "Handhelds: off-the-shelf ESP32 and ESP32-S3 display boards with touchscreens, some with a microphone, speaker or LoRa module.",
         "Every module is optional: with no GPS an admin sets the time, and with no LoRa the access points use Wi-Fi alone.",
         "Board facts live in data-only profiles; a new display board is often a profile and a touch check away."
       ],
-      "say": "The hardware is deliberately ordinary. The access points are plain E S P 32 development boards. Some carry a LoRa module, and one can carry a GPS for time and location. The handhelds are off-the-shelf touchscreen boards. Several models run it today, on three different chips. Every module is optional. This table is not typed in: each board reported it as it was plugged in.",
+      "say": "Plugged in, each board can now say what it is. This table is not typed in: it is what every board reported about itself as it was plugged in.",
       "view": "hardware",
       "media": [
         {
@@ -345,7 +345,7 @@
     },
     {
       "id": "concepts",
-      "part": "Concepts",
+      "part": "Core ideas",
       "title": "What makes it hold together",
       "body": [
         "Information is sticky: anything one device learns survives it restarting and is shared, newest version wins (D48).",
@@ -385,7 +385,7 @@
     },
     {
       "id": "d-tour",
-      "part": "Live: the handhelds",
+      "part": "Live: the handheld screens",
       "title": "One screen per person, no phone needed",
       "body": [
         "Each person has a handheld with its own name, chosen on the handheld (D50).",
@@ -412,7 +412,7 @@
     },
     {
       "id": "d-emergency",
-      "part": "Live: an emergency, measured",
+      "part": "Live: an SOS, timed",
       "title": "An SOS breaks through every screen",
       "body": [
         "Sent from the handheld's own screen; it takes over every other screen, even a locked one (D57).",
@@ -426,7 +426,7 @@
     },
     {
       "id": "d-voice",
-      "part": "Live: voice",
+      "part": "Live: push to talk",
       "title": "Push to talk, to one person, a group, or everyone",
       "body": [
         "Live, half duplex, in 100 ms frames sealed like text (D61).",
@@ -445,14 +445,14 @@
     },
     {
       "id": "d-ap-out",
-      "part": "Live: losing an access point",
-      "title": "Pull the plug on an access point",
+      "part": "Live: a power cut, timed",
+      "title": "A power cut, timed",
       "body": [
         "Its handhelds look for another access point and move by themselves (D54).",
         "Messages keep arriving while it is gone.",
         "When it comes back it rejoins with nothing set up again."
       ],
-      "say": "Now we start breaking things. We cut the power to the access point carrying the most handhelds.",
+      "say": "Now each claim, measured. We cut the power to the access point carrying the most handhelds, and time what follows.",
       "demo": "ap_out",
       "view": "map"
     },
@@ -470,20 +470,20 @@
     },
     {
       "id": "d-lora",
-      "part": "Live: the second radio",
+      "part": "Live: LoRa between access points",
       "title": "Cut the Wi-Fi between access points",
       "body": [
         "The access points switch to LoRa, the longer, slower path (D71).",
         "Each LoRa message is acknowledged and sent again until it is (D104).",
         "A message Wi-Fi could not deliver goes to LoRa at once (D105)."
       ],
-      "say": "Now we take away the Wi-Fi link between every pair of access points.",
+      "say": "Next, we take away the Wi-Fi link between every pair of access points.",
       "demo": "lora_bridge",
       "view": "map"
     },
     {
       "id": "d-hh-lora",
-      "part": "Live: out of range",
+      "part": "Live: a handheld on LoRa",
       "title": "A handheld walks out of Wi-Fi range",
       "body": [
         "A handheld with a LoRa module stays reachable when no access point's Wi-Fi reaches it (D77).",
@@ -508,14 +508,14 @@
     },
     {
       "id": "d-blackout",
-      "part": "Live: the worst case",
-      "title": "Every access point off at once",
+      "part": "Live: a blackout, timed",
+      "title": "Every access point off at once, timed",
       "body": [
         "The handhelds keep the grid's time and carry it back to the access points (D53).",
         "Trails of where people walked survive every device being off (D106).",
         "The grid re-forms by itself."
       ],
-      "say": "And the worst case. Every access point loses power at the same moment.",
+      "say": "The worst case again, this time measured: every access point loses power at the same moment.",
       "demo": "blackout",
       "view": "map"
     },
@@ -535,14 +535,14 @@
     },
     {
       "id": "d-install",
-      "part": "Live: getting started",
+      "part": "Live: installing from a web page",
       "title": "Install it from a web page",
       "body": [
         "Plug a board in, open the installer page, press Install and choose the port.",
         "Then give it your grid's file: the keys stay on the device, not in the firmware (D96).",
         "No tools to install."
       ],
-      "say": "And finally, how anyone gets started. A board is installed from a web page: press install, choose the port, and give it your grid's file. Nothing to install on the computer.",
+      "say": "Finally, how anyone gets started. A board is installed from a web page: press install, choose the port, and give it your grid's file. Nothing to install on the computer.",
       "demo": "install",
       "view": "flasher",
       "media": [
@@ -633,7 +633,7 @@
     },
     {
       "id": "limits",
-      "part": "Honestly",
+      "part": "What it is not, yet",
       "title": "What it is not, yet",
       "body": [
         "A prototype: every test so far ran on one workbench, every board in range and on a cable.",
@@ -641,7 +641,7 @@
         "No store and forward: a message to someone unreachable is refused and the sender is told (D13).",
         "The handhelds are development boards; purpose-built handhelds and enclosures are still to come."
       ],
-      "say": "And to be straight about it. This is a prototype. Every test so far ran on one bench, with every board in range. We have not measured range yet, so we do not claim any. A message to someone who cannot be reached is refused, and the sender is told, rather than held for later. And the handhelds are development boards for now.",
+      "say": "Now, what it is not, yet. This is a prototype. Every test so far ran on one bench, with every board in range. We have not measured range yet, so we do not claim any. A message to someone who cannot be reached is refused, and the sender is told, rather than held for later. And the handhelds are development boards for now.",
       "view": "diagram",
       "focuses": [
         "all"
@@ -649,7 +649,7 @@
     },
     {
       "id": "end",
-      "part": "LocalGrid",
+      "part": "Open source",
       "title": "Open source, and built in the open",
       "body": [
         "GPL-3.0-or-later: firmware, tools and every design document (D76).",
