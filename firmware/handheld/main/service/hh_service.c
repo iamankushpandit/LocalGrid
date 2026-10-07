@@ -86,9 +86,10 @@ static const char *TAG = "NET";
  * those a handheld joins the one with the fewest handhelds, signal breaking ties. While online it
  * moves to another good AP only when that AP has fewer handhelds than its own would have without
  * it, so a move always evens the load and two handhelds never swap back and forth. It waits until
- * it has been online BALANCE_MIN_ONLINE_MS plus BALANCE_STAGGER_MS per device number, rescans
- * first, and moves at most once per BALANCE_HOLDOFF_MS, so handhelds that all see the same crowded
- * AP leave it one at a time, each seeing the move of the one before.
+ * it has been online BALANCE_MIN_ONLINE_MS plus BALANCE_STAGGER_MS per device number, then waits
+ * BALANCE_STAGGER_MS per device number again from when it first sees the uneven load, rescans first,
+ * and moves at most once per BALANCE_HOLDOFF_MS, so handhelds that all see the same crowded AP leave
+ * it one at a time, each seeing the move of the one before.
  */
 #define BALANCE_RSSI_DBM      (-70)
 
@@ -270,6 +271,7 @@ static struct {
     uint32_t  no_time_since_ms;     /* 0, or when this AP was first seen without time while another had it */
     uint32_t  last_time_move_ms;
     uint32_t  last_balance_ms;      /* when this handheld last moved to even the load, 0 never */
+    uint32_t  uneven_since_ms;      /* when it first saw a less loaded AP since then, 0 not seen */
     int64_t   time_offset_s;
     bool      time_set;
     uint16_t  rx_fill;
@@ -1325,6 +1327,7 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         s.link = HH_LINK_ONLINE;
         s.joins++;
         s.online_since_ms = now_ms();
+        s.uneven_since_ms = 0;   /* a load seen from the last AP says nothing about this one */
         s.last_ping_ms = s.online_since_ms;
         s.last_node = (int)ev->value;
         s.backoff_ms = 0;
@@ -1760,8 +1763,7 @@ static bool balance_move_due(uint32_t now)
     if (s.preferred >= 0 || current < 0 || current >= HH_MAX_NODES || s.no_time_since_ms != 0) {
         return false;   /* a chosen AP stays chosen, and a move for grid time comes first */
     }
-    uint32_t wait = BALANCE_MIN_ONLINE_MS + BALANCE_STAGGER_MS * (s.device % 8u);
-    if (now - s.online_since_ms < wait ||
+    if (now - s.online_since_ms < BALANCE_MIN_ONLINE_MS + BALANCE_STAGGER_MS * (s.device % 8u) ||
         (s.last_balance_ms != 0 && now - s.last_balance_ms < BALANCE_HOLDOFF_MS)) {
         return false;
     }
@@ -1769,6 +1771,21 @@ static bool balance_move_due(uint32_t now)
     int best = pick_node(now);
     if (best < 0 || best == current || !here->valid || s.cand[best].rssi < BALANCE_RSSI_DBM ||
         others_on(best) >= others_on(current)) {
+        s.uneven_since_ms = 0;
+        return false;
+    }
+    /*
+     * The stagger counts from when this handheld first sees the uneven load, not only from when it came
+     * online. Counted from coming online alone, every handheld long online acted on the same scan:
+     * three left Denali for Everest in one second, and Everest went from one handheld to four
+     * (2026-10-07). Staggered from here, the first to move leaves gracefully, and the next one's fresh
+     * scan already counts it.
+     */
+    if (s.uneven_since_ms == 0) {
+        s.uneven_since_ms = now ? now : 1u;
+        return false;
+    }
+    if (now - s.uneven_since_ms < BALANCE_STAGGER_MS * (s.device % 8u)) {
         return false;
     }
     if (now - s.last_scan_ms >= BALANCE_SCAN_AGE_MS) {
@@ -1779,6 +1796,7 @@ static bool balance_move_due(uint32_t now)
         return false;
     }
     s.last_balance_ms = now;
+    s.uneven_since_ms = 0;
     ESP_LOGW(TAG, "[ROAM] Balancing: %s has %d other handheld(s), %s has %d; moving", here->ssid, others_on(current),
              s.cand[best].ssid, others_on(best));
     leave_gracefully();

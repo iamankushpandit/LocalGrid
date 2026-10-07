@@ -714,6 +714,7 @@ function el(tag, attrs, parent, text) {
   return e;
 }
 let pos = {};
+let loraVia = {};                   // a handheld on LoRa alone -> the access point and drawn link that reach it
 function drawMap() {
   const svg = diagramSvg;
   if (!svg || viewNow !== "map") return;
@@ -723,7 +724,7 @@ function drawMap() {
   live.innerHTML = "";
   let fx = svg.querySelector("#fx");
   if (fx) fx.remove();
-  pos = {};
+  pos = {}; loraVia = {};
   svg.querySelectorAll(".used").forEach(e => e.classList.remove("used"));
   if (!state.aps.length) {
     el("text", { x: 480, y: 330, "text-anchor": "middle", fill: "#9DB8A8", "font-size": 22, "paint-order": "stroke", stroke: "#02040A", "stroke-width": 6 }, live,
@@ -795,8 +796,12 @@ function drawMap() {
     const slot = loraSlots[k % Math.max(1, loraSlots.length)] || { x: 480, y: 520 };
     const ap = apSpot[h.last_node] || spots.slice(0, 3).reduce((b, c) => Math.hypot(c.x - slot.x, c.y - slot.y) < Math.hypot(b.x - slot.x, b.y - slot.y) ? c : b, spots[0]);
     pos["hh" + h.index] = slot;
-    if (ap) el("path", { d: `M${slot.x} ${slot.y} Q${(slot.x + ap.x) / 2} ${slot.y - 40} ${ap.x} ${ap.y}`, fill: "none", stroke: "#F0A064",
-                         "stroke-width": 2.5, "stroke-dasharray": "6 5", class: "lora-link" }, live);
+    if (ap) {
+      const link = el("path", { d: `M${slot.x} ${slot.y} Q${(slot.x + ap.x) / 2} ${slot.y - 40} ${ap.x} ${ap.y}`, fill: "none", stroke: "#F0A064",
+                                "stroke-width": 2.5, "stroke-dasharray": "6 5", class: "lora-link" }, live);
+      const apIndex = Object.keys(apSpot).find(i => apSpot[i] === ap);
+      if (apIndex !== undefined) loraVia["hh" + h.index] = { ap: "ap" + apIndex, path: link };
+    }
     el("rect", { x: slot.x - 6, y: slot.y - 9, width: 12, height: 18, rx: 2.5, fill: "#152A21", stroke: "#F0A064", "stroke-width": 1.6 }, live);
     label(slot.x, slot.y - 22, h.name, "#F0A064", 14);   // the diagram's own "LoRa only" is under it
   });
@@ -814,28 +819,62 @@ function nameToKey(name) {
   const h = state.handhelds.find(x => x.name === name); if (h) return "hh" + h.index;
   return null;
 }
-function route(from, to) {
+// The diagram's own dashed LoRa arc between two points, if it draws one: what LoRa traffic travels along,
+// so a dot on its way between access points rides the orange line instead of the green Wi-Fi one.
+function loraArc(p, q) {
+  if (!diagramSvg) return null;
+  const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) < 45;
+  for (const e of diagramSvg.querySelectorAll('[data-part="lora"] path, path[data-part="lora"]')) {
+    if (!e.getTotalLength) continue;
+    const len = e.getTotalLength(); if (len < 60) continue;   // the antenna marks, not links
+    const s = e.getPointAtLength(0), t = e.getPointAtLength(len);
+    if (near(s, p) && near(t, q)) return { path: e, len, rev: false };
+    if (near(s, q) && near(t, p)) return { path: e, len, rev: true };
+  }
+  return null;
+}
+// A route is segments: straight lines (Wi-Fi), or a stretch of a drawn path (LoRa).
+function route(from, to, path) {
   const k1 = nameToKey(from), k2 = nameToKey(to);
   if (!k1 || !k2 || !pos[k1] || !pos[k2]) return null;
-  const pts = [pos[k1]];
-  const hop = k => { const h = state.handhelds.find(x => "hh" + x.index === k);
-    return h && h.node !== null && h.node !== undefined ? pos["ap" + h.node] : null; };
-  const a1 = hop(k1), a2 = hop(k2);
-  if (a1) pts.push(a1);
-  if (a2 && a2 !== a1) pts.push(a2);
-  pts.push(pos[k2]);
-  return pts;
+  const segs = [];
+  let at = pos[k1];
+  const line = q => { if (q && q !== at) { segs.push({ a: at, b: q, len: Math.hypot(q.x - at.x, q.y - at.y) }); at = q; } };
+  const curve = (c, q) => { segs.push(c); at = q; };
+  const apOf = k => { const h = state.handhelds.find(x => "hh" + x.index === k);
+    return h && h.node !== null && h.node !== undefined ? "ap" + h.node : null; };
+  // Out: to the sender's own access point, by Wi-Fi, or along its LoRa link if it is on LoRa alone.
+  let ap1 = apOf(k1);
+  if (!ap1 && loraVia[k1]) {
+    const v = loraVia[k1]; ap1 = v.ap;
+    curve({ path: v.path, len: v.path.getTotalLength(), rev: false }, pos[ap1]);
+  } else if (ap1) line(pos[ap1]);
+  // The receiver's end: its access point, or the one that reaches it over LoRa.
+  const ap2 = apOf(k2) || (loraVia[k2] && loraVia[k2].ap);
+  if (ap1 && ap2 && ap1 !== ap2) {
+    const arc = path === "lora" && loraArc(pos[ap1], pos[ap2]);
+    if (arc) curve(arc, pos[ap2]); else line(pos[ap2]);
+  }
+  if (!apOf(k2) && loraVia[k2]) {
+    const v = loraVia[k2];
+    if (at !== pos[v.ap]) line(pos[v.ap]);
+    curve({ path: v.path, len: v.path.getTotalLength(), rev: true }, pos[k2]);
+  } else line(pos[k2]);
+  return segs;
 }
-function along(pts, f) {
-  const segs = []; let total = 0;
-  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y); segs.push(d); total += d; }
+function along(segs, f) {
+  const total = segs.reduce((n, s) => n + s.len, 0);
   let s = f * total;
   for (let i = 0; i < segs.length; i++) {
-    if (s <= segs[i] || i === segs.length - 1) { const t = segs[i] ? Math.min(1, s / segs[i]) : 1;
-      return { x: pts[i].x + (pts[i+1].x - pts[i].x) * t, y: pts[i].y + (pts[i+1].y - pts[i].y) * t }; }
-    s -= segs[i];
+    const g = segs[i];
+    if (s <= g.len || i === segs.length - 1) {
+      const t = g.len ? Math.min(1, s / g.len) : 1;
+      if (g.path) { const p = g.path.getPointAtLength((g.rev ? 1 - t : t) * g.len); return { x: p.x, y: p.y }; }
+      return { x: g.a.x + (g.b.x - g.a.x) * t, y: g.a.y + (g.b.y - g.a.y) * t };
+    }
+    s -= g.len;
   }
-  return pts[pts.length - 1];
+  return null;
 }
 function animate(now) {
   const fx = document.getElementById("fx");
@@ -844,8 +883,8 @@ function animate(now) {
     flows.forEach(f => {
       const period = f.path === "lora" ? 2600 : 1100;
       f.to.forEach(name => {
-        const pts = route(f.from, name); if (!pts) return;
-        const p = along(pts, ((now - f.born) % period) / period);
+        const segs = route(f.from, name, f.path); if (!segs || !segs.length) return;
+        const p = along(segs, ((now - f.born) % period) / period); if (!p) return;
         el("circle", { cx: p.x, cy: p.y, r: 8, fill: f.path === "lora" ? "var(--lora)" : "var(--wifi)" }, fx);
       });
     });

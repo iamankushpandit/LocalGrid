@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Handhelds balance one at a time again; the LoRa demos measured right
+
+- **Balancing (D54).** The stagger by device number counted only from when a handheld came online, so
+  handhelds that had been online a while all acted on the same scan. During the LoRa demo three left
+  Denali for Everest in one second, and Everest went from one handheld to four. Each handheld now also
+  waits its stagger from when it first sees the uneven load; the first to move leaves gracefully, and the
+  next one's fresh scan already counts it. On the bench, with Fuji carrying three, only Marshall moved,
+  and the load stayed 2, 2, 2.
+- **Demo.** The two LoRa demos pin their handhelds to their access points for the demo (`node <n>`, back
+  to `node auto` after, and at warm-up), so the message and the talk really cross LoRa. A talk over LoRa is
+  checked against the compact copy that crosses it (D95), by packets and checksum: Channi had played every
+  byte while the page said it had not. `chaos.py` reads the `Note sent` and `Heard note` lines.
+- **Demo page.** Traffic between access points over LoRa rides the diagram's dashed orange arcs, and
+  traffic to a handheld on LoRa alone rides its dashed link, instead of the straight Wi-Fi lines.
+
 ### A handheld talks real speech made on the laptop (D112)
 
 - The handheld console's `clip` command takes a few seconds of speech over the cable and talks it out

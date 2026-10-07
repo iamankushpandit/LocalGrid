@@ -566,6 +566,7 @@ class Grid(chaos.Chaos):
             # Every handheld audible: an overnight run once left five of six at volume off, and the
             # talk demonstrated that day was heard on almost nothing (2026-10-07).
             self.write(h, "volume high")
+            self.write(h, "node auto")   # a pin from a demo that never finished is kept on the handheld
         self.wait(5)
         if self.args.lora_check:
             self.lora_query(self.aps + self.hhs)
@@ -587,12 +588,25 @@ class Grid(chaos.Chaos):
             if self.present(h):
                 self.write(h, "ui clear")
 
+    def pin(self, *hs):
+        """Keep these handhelds on the access point each is on now, for one demo. Balancing (D54) once moved
+        a LoRa demo's receiver onto the sender's access point mid-demo, so nothing crossed LoRa
+        (2026-10-07). restore() hands the choice back to them."""
+        self.pinned = getattr(self, "pinned", [])
+        for h in hs:
+            if h is not None and h.registered_node is not None:
+                self.write(h, f"node {h.registered_node}")
+                self.pinned.append(h)
+
     def restore(self):
         """Every fault this demo can leave behind, undone. Each hook also restores itself on the board."""
         if getattr(self, "renamed", None):
             h, old = self.renamed
             self.write(h, f"name {old}")
             self.renamed = None
+        for h in getattr(self, "pinned", ()):
+            self.write(h, "node auto")
+        self.pinned = []
         for b in self.boards:
             if b.held:
                 self.release_hold(b)
@@ -706,6 +720,8 @@ class Grid(chaos.Chaos):
             return
         on = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
         pair = next(((s, r) for s in on for r in on if s.registered_node != r.registered_node), None)
+        if pair:
+            self.pin(*pair)   # on two access points until the end, so what crosses has to cross LoRa
         before = self.lora_query(live)
         if not any(s.get("fitted") for s in before.values()):
             self.caption("No access point has a LoRa module answering, so there is no second path to show.")
@@ -751,7 +767,10 @@ class Grid(chaos.Chaos):
                 self.fact(f"{self.label(b) if b else name} heard it {secs:.1f} s later, over LoRa")
             if not got:
                 self.fact("The test message did not cross", ok=False)
-        if pair:
+        if pair and pair[0].registered_node == pair[1].registered_node:
+            self.fact(f"{self.label(pair[1])} moved onto {self.label(pair[0])}'s access point, so a talk would "
+                      "not cross LoRa; it is left out", ok=False)
+        elif pair:
             s, r = pair
             self.caption(f"And voice: {self.label(s)} talks to {self.label(r)}. Live talk is too big for LoRa, so a "
                          "compact copy of the same words crosses it instead (D95).")
@@ -910,6 +929,7 @@ class Grid(chaos.Chaos):
             return
         self.caption(f"{self.label(v)} has a LoRa radio as well as Wi-Fi. We switch its Wi-Fi off, "
                      f"as if it had walked out of range of every access point.", hold=2)
+        self.pin(peer)    # the peer stays where it is, so the demo shows one handheld moving to LoRa, not two
         self.write(v, "wifi off 300")
         self.wait(12, until=lambda: v.wifi_off)
         self.caption(f"{self.label(v)} has no Wi-Fi now. An access point that hears it over LoRa takes it on, "
@@ -1112,7 +1132,15 @@ class Grid(chaos.Chaos):
             t_ = tid()
             got = h.voice_heard.get(t_) if t_ is not None else None
             return got if got and got[0] == sender.index else None
-        self.wait(secs + 20, until=lambda: tid() is not None and all(heard(h) for h in listeners))
+
+        def heard_note(h):
+            # D95: what crossed LoRa is the compact copy, a "note", not the live frames.
+            t_ = tid()
+            got = h.note_heard.get(t_) if t_ is not None else None
+            return got if got and got[0] == sender.index else None
+        # A note is made after the talk ends and crosses LoRa at about a second a packet.
+        self.wait(secs + (60 if path == "lora" else 20),
+                  until=lambda: tid() is not None and all(heard(h) or heard_note(h) for h in listeners))
         self.wait(2)
         t_ = tid()
         self.timer("Talking", "stop", round(secs, 1) if t_ is not None else None)
@@ -1120,14 +1148,24 @@ class Grid(chaos.Chaos):
             self.fact(f"{self.label(sender)} did not send the talk" + (f": {sender.voice_refused}" if sender.voice_refused else ""), ok=False)
             return
         frames = sender.voice_sent[t_][0]
+        sent_note = sender.note_sent.get(t_)
         for h in listeners:
-            if heard(h):
+            if heard(h) or heard_note(h):
                 self.publish("flow", phase="landed", token=token, to=self.label(h), path=path)
         for h in listeners:
-            got = heard(h)
-            self.fact(f"{self.label(h)} played {got[1]} of {frames} frames of it" if got
-                      else f"{self.label(h)} did not play it", ok=bool(got))
-        leaked = [h for h in silent if heard(h)]
+            got, note = heard(h), heard_note(h)
+            if got:
+                self.fact(f"{self.label(h)} played {got[1]} of {frames} frames of it")
+            elif note:
+                _, packets, missing, crc = note
+                whole = missing == 0 and sent_note is not None and sent_note[2] == crc
+                self.fact(f"{self.label(h)} played the compact copy that crossed LoRa: all {packets} packets, "
+                          "byte for byte what was sent" if whole else
+                          f"{self.label(h)} played the compact copy that crossed LoRa, but {missing} of "
+                          f"{packets + missing} packets were lost on the air", ok=whole)
+            else:
+                self.fact(f"{self.label(h)} did not play it", ok=False)
+        leaked = [h for h in silent if heard(h) or heard_note(h)]
         if silent and not leaked:
             self.fact("Nobody else played it: " + ", ".join(self.label(h) for h in silent))
         for h in leaked:

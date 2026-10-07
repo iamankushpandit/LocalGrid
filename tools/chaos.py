@@ -159,6 +159,10 @@ RX = {
                              r"the AP, (\d+) ms"),
     "voice_heard": re.compile(r"\[MSG\] Heard talk (\d+) from (\d+): (\d+) frame\(s\), (\d+) missing"),
     "voice_refused": re.compile(r"\[MSG\] Talk not sent: (.+)"),
+    # D95: the compact copy of a talk, the only voice that crosses LoRa. The same crc both ends is every byte.
+    "note_sent": re.compile(r"\[MSG\] Note sent: talk (\d+), (\d+) packet\(s\), (\d+) bytes, crc ([0-9a-f]{8})"),
+    "note_heard": re.compile(r"\[MSG\] Heard note (\d+) from (\d+): (\d+) packet\(s\), (\d+) missing, (\d+) bytes, "
+                             r"crc ([0-9a-f]{8})"),
 }
 
 # The `lora` status block, as the AP console prints it (firmware/node/main/lora.c, lora_print).
@@ -749,6 +753,8 @@ class Board:
         self.can_talk = None
         self.voice_sent = {}             # talk id -> (frames, dropped, ms), as the sender reported
         self.voice_heard = {}            # talk id -> (author, played, missing), as this one played it
+        self.note_sent = {}              # talk id -> (packets, bytes, crc): the compact copy (D95)
+        self.note_heard = {}             # talk id -> (author, packets, missing, crc), as this one played it
         self.voice_refused = None        # the last 'Talk not sent' reason; cleared when a round starts
         self.ser = None
         self.lost_since = None
@@ -1190,6 +1196,10 @@ class Chaos:
             b.voice_sent[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
         elif m := RX["voice_heard"].search(line):
             b.voice_heard[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        elif m := RX["note_sent"].search(line):
+            b.note_sent[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), m.group(4))
+        elif m := RX["note_heard"].search(line):
+            b.note_heard[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(6))
         elif m := RX["voice_refused"].search(line):
             b.voice_refused = m.group(1)
         elif RX["lora_gone"].search(line):
@@ -3053,6 +3063,10 @@ SAMPLES = [
     ("voice_heard", "I (9400) VOICE: [MSG] Heard talk 3 from 9: 48 frame(s), 2 missing", ("3", "9", "48", "2")),
     ("voice_heard", "I (9400) VOICE: [MSG] Heard talk 3 from 9: 11 frame(s), 0 missing, no last frame",
      ("3", "9", "11", "0")),
+    ("note_sent", "I (879799) VOICE: [MSG] Note sent: talk 3, 4 packet(s), 648 bytes, crc ccb459bd, slowest "
+     "encode 21 ms, stack left 5436", ("3", "4", "648", "ccb459bd")),
+    ("note_heard", "I (1055019) VOICE: [MSG] Heard note 1 from 2: 3 packet(s), 0 missing, 468 bytes, crc 1d12a921, "
+     "slowest decode 15 ms, stack left 6396", ("1", "2", "3", "0", "468", "1d12a921")),
     ("voice_refused", "W (5000) MSG: [MSG] Talk not sent: short", ("short",)),
     ("volume", "Volume: medium", ("medium",)),
     ("echo_sent", "Echo sent to 2 link(s): CX0130-00021", ("2", "CX0130-00021")),
