@@ -65,5 +65,15 @@ void hh_voice_ptt_stop(void);
  */
 esp_err_t hh_voice_demo_start(uint8_t scope, uint32_t target, uint8_t seconds);
 
+/*
+ * D112: a talk from a clip of speech given over the cable, as IMA ADPCM at 8 kHz (hh_adpcm.h, low
+ * nibble first, the coder starting from zero). begin sizes it (at most 64 KB, 16 s), add appends,
+ * talk speaks it through the ordinary push-to-talk path and stops at its end, free lets it go.
+ */
+esp_err_t hh_voice_clip_begin(size_t bytes);
+esp_err_t hh_voice_clip_add(const uint8_t *data, size_t n, size_t *at);
+esp_err_t hh_voice_clip_talk(uint8_t scope, uint32_t target);
+void      hh_voice_clip_free(void);
+
 /* Copies the current state; safe from any task. */
 void hh_voice_state(hh_voice_state_t *out);

@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A handheld talks real speech made on the laptop (D112)
+
+- The handheld console's `clip` command takes a few seconds of speech over the cable and talks it out
+  through push-to-talk; `tools/voiceclip.py` makes the speech with Piper. On the bench a 6.4 s clip
+  from Channi reached Bluey and Chase whole (65 frames, 0 missing).
+- Five of the six bench handhelds were found with their volume off, left by an overnight chaos run,
+  which is why talk was barely heard: all six set to high, and the demo now sets it when it starts.
+
 ### The site and docs say what is true today
 
 - Site (`site/index.template.html`): chaos testing found five bugs, as the README lists, not three;

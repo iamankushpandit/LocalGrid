@@ -23,6 +23,7 @@
 #include "hh_service.h"
 #include "hh_lora.h"
 #include "voice/hh_voice.h"
+#include "lg_lora_wire.h"
 #include "lg_bsp_audio.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -794,6 +795,48 @@ static int cmd_demo(int argc, char **argv)
     return talk_cmd(argc, argv, true);
 }
 
+/*
+ * D112: clip begin <bytes> | clip data <base64> | clip talk <device|group|all> | clip free.
+ * Replies start "CLIP:" so a tool can wait for each one, as `update` does with "LGFWU:".
+ */
+static int cmd_clip(int argc, char **argv)
+{
+    if (argc >= 3 && strcmp(argv[1], "begin") == 0) {
+        esp_err_t err = hh_voice_clip_begin((size_t)strtoul(argv[2], NULL, 10));
+        printf("CLIP: %s\n", err == ESP_OK ? "ready" : esp_err_to_name(err));
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "data") == 0) {
+        uint8_t buf[256];
+        size_t n = lora_b64_decode(argv[2], strlen(argv[2]), buf, sizeof(buf));
+        size_t at = 0;
+        esp_err_t err = n == 0u ? ESP_ERR_INVALID_ARG : hh_voice_clip_add(buf, n, &at);
+        if (err == ESP_OK) {
+            printf("CLIP: at %u\n", (unsigned)at);
+        } else {
+            printf("CLIP: refused, %s\n", esp_err_to_name(err));
+        }
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "talk") == 0) {
+        uint8_t scope = LG_SCOPE_DIRECT;
+        uint32_t target = 0;
+        if (!voice_target(argv[2], &scope, &target)) {
+            return 1;
+        }
+        esp_err_t err = hh_voice_clip_talk(scope, target);
+        printf("CLIP: %s\n", err == ESP_OK ? "talking" : esp_err_to_name(err));
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 2 && strcmp(argv[1], "free") == 0) {
+        hh_voice_clip_free();
+        printf("CLIP: freed\n");
+        return 0;
+    }
+    printf("usage: clip begin <bytes> | clip data <base64> | clip talk <device|group|all> | clip free\n");
+    return 1;
+}
+
 /* send <device index | group name | all | urgent> <text...> */
 static int cmd_send(int argc, char **argv)
 {
@@ -1422,6 +1465,7 @@ esp_err_t hh_console_start(const lg_identity_t *identity)
         { .command = "tones",     .help = "tones [<message|announce|sos> <name|index>]: which sound each cue makes", .func = cmd_tones },
         { .command = "talk",      .help = "talk <device|group|all> [seconds]: push to talk from the microphone", .func = cmd_talk },
         { .command = "demo",      .help = "demo <device|group|all> [seconds]: the same with a generated voice, any board", .func = cmd_demo },
+        { .command = "clip",      .help = "clip begin <bytes> | data <base64> | talk <device|group|all> | free: talk a clip of speech given over the cable (D112)", .func = cmd_clip },
         { .command = "mem",       .help = "Heap now: free, lowest, largest block",                   .func = cmd_mem },
         { .command = "name",      .help = "name [new name]: show or change this handheld's name",     .func = cmd_name },
         { .command = "reboot",    .help = "Restart this handheld",                                   .func = cmd_reboot },

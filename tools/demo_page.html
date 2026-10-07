@@ -33,11 +33,17 @@ header select { background: var(--panel); color: var(--text); border: 1px solid 
 .dots i.live { background: color-mix(in srgb, var(--live) 45%, var(--line)); }
 .dots i.on { background: var(--accent); transform: scale(1.3); }
 
-main { display: grid; grid-template-columns: 270px 1fr 330px; min-height: 0; }
+main { display: grid; grid-template-columns: 1fr 360px; min-height: 0; position: relative; }
 aside, .stage { min-height: 0; }
 aside { padding: 14px; overflow: auto; }
-aside.left { border-right: 1px solid var(--line); }
-aside.right { border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 12px; }
+aside.left { position: absolute; z-index: 5; left: 0; top: 0; bottom: 0; width: 280px; background: var(--bg);
+              border-right: 1px solid var(--line); box-shadow: 8px 0 24px rgba(0,0,0,.4); transform: translateX(-105%);
+              transition: transform .25s ease; }
+aside.left.open { transform: none; }
+aside.right { border-left: 1px solid var(--line); display: grid; gap: 8px; overflow: hidden;
+               grid-template-rows: auto auto minmax(0, 1.2fr) auto minmax(0, 1fr); }
+aside.right .win { min-height: 0; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+                   background: var(--panel); scroll-behavior: smooth; }
 h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin: 4px 0 6px; font-weight: 600; }
 
 ol.chapters { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -180,9 +186,9 @@ footer .caption { font-size: 24px; line-height: 1.3; min-height: 62px; display: 
   <aside class="right">
     <div class="timer" id="timer"><div class="label" id="tlabel">&nbsp;</div><div class="clock" id="tclock">0.0 s</div></div>
     <h2>What the boards reported</h2>
-    <ul class="facts" id="facts"></ul>
+    <ul class="facts win" id="facts"></ul>
     <h2>Grid events</h2>
-    <ul class="log" id="log"></ul>
+    <ul class="log win" id="log"></ul>
   </aside>
 </main>
 <footer>
@@ -193,6 +199,7 @@ footer .caption { font-size: 24px; line-height: 1.3; min-height: 62px; display: 
     <button class="btn" id="here" title="Enter">Present this chapter</button>
     <button class="btn" id="next" title="Right arrow">▶</button>
     <button class="btn" id="logsbtn" title="L">Logs</button>
+    <button class="btn" id="chapbtn" title="C">Chapters</button>
     <button class="btn stop" id="stop" title="Esc">Stop</button>
     <button class="btn" id="reset" title="R">Reset grid</button>
   </div>
@@ -350,7 +357,7 @@ function renderChapters() {
       (st.live ? (st.why ? `<span class="na">needs setup</span>` : `<span class="live">live</span>`) : "");
     b.querySelector(".t").textContent = shortPart(c);
     if (st.why) b.title = st.why;
-    b.onclick = () => { if (!playing) show(i); };
+    b.onclick = () => { if (!playing) { show(i); document.querySelector("aside.left").classList.remove("open"); $("chapbtn").classList.remove("on"); } };
     li.appendChild(b);
     ol.appendChild(li);
   });
@@ -471,6 +478,8 @@ function toggleLogs() {
   setView(logsOn ? "logs" : (chapters[at] || {}).view || "map");
 }
 $("logsbtn").onclick = toggleLogs;
+function toggleChapters() { $("chapbtn").classList.toggle("on", document.querySelector("aside.left").classList.toggle("open")); }
+$("chapbtn").onclick = toggleChapters;
 
 // ---- the site's diagram: explained, pointed at, and drawn live ----
 // Everything on the stage is assets/network-diagram.svg, the diagram in the README and on the site
@@ -600,6 +609,11 @@ function placePointer() {
   tag.style.top = (above ? Math.max(8, top - view.top - 14) : Math.min(view.height - 40, bottom - view.top + 14)) + "px";
 }
 
+let watchLogin = false;
+function setWatchTab(name) {
+  const f = $("view").querySelector("iframe");
+  if (f && watchUrl) f.src = watchUrl + "#" + name;
+}
 let viewNow = null;
 function setView(kind) {
   const v = $("view");
@@ -814,8 +828,18 @@ function animate(now) {
 requestAnimationFrame(animate);
 
 // ---- playing ----
+// Between chapters the list slides out for a moment, showing where the demo is going, then stows away.
+let drawerTimer = null;
+function peekChapters() {
+  const d = document.querySelector("aside.left");
+  d.classList.add("open");
+  const on = d.querySelector("li.on"); if (on) on.scrollIntoView({ block: "center" });
+  clearTimeout(drawerTimer);
+  drawerTimer = setTimeout(() => { if (!$("chapbtn").classList.contains("on")) d.classList.remove("open"); }, 2600);
+}
 async function present(i) {
   show(i);
+  peekChapters();
   const c = chapters[i];
   const st = chapterState(c);
   hideBullets();
@@ -825,6 +849,13 @@ async function present(i) {
     if (c.lead) { if (c.lead_focus) focusOn(c.lead_focus); await say(c.lead, 0, true); await sleep(PACE.afterLead); }
     for (let k = 0; k < c.points.length && playing; k++) {
       reveal(k);
+      const pt = c.points[k];
+      if (pt.needs_login && !watchLogin) {
+        // The watcher's admin tabs need the admin password, typed by the presenter on the watcher itself.
+        await waitForPresenter({ prompt: "Log in on the watcher, top right, with the grid's admin password. Press Continue when its other tabs fill in." });
+        if (!playing) break;
+      }
+      if (pt.watch_tab) setWatchTab(pt.watch_tab);
       if (c.points[k].focus && viewNow === "diagram") focusOn(c.points[k].focus);
       await say(c.points[k].say, 0, true);
       await sleep(PACE.afterPoint);
@@ -907,6 +938,7 @@ function addLog(text) {
   const li = document.createElement("li");
   li.textContent = new Date().toLocaleTimeString() + "  " + text;
   $("log").prepend(li);
+  $("log").scrollTop = 0;   // newest at the top, in view
   while ($("log").children.length > 40) $("log").lastChild.remove();
 }
 const LOG_TEXT = {
@@ -952,7 +984,7 @@ function onMessage(m) {
     if (m.ok === false) li.className = "bad";
     li.textContent = m.text;
     $("facts").appendChild(li);
-    li.scrollIntoView({ block: "nearest" });
+    $("facts").scrollTop = $("facts").scrollHeight;   // newest at the bottom, in view
     if (m.n && performance.now() - openedAt > 400) say(m.text, m.n);
     return;
   }
@@ -1013,6 +1045,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Enter" && !$("here").disabled) playOne();
   else if (e.key === "Escape") stopAll();
   else if (e.key === "l" || e.key === "L") toggleLogs();
+  else if (e.key === "c" || e.key === "C") toggleChapters();
   else if ((e.key === "r" || e.key === "R") && !$("reset").disabled) post("/api/reset");
 });
 
@@ -1023,7 +1056,7 @@ Promise.all([fetch("/api/scenarios").then(r => r.json()), fetch("/api/story").th
     Object.entries(j.logs || {}).forEach(([key, b]) => addLogLines(b.lines.map(([lv, tx]) => [key, b.role, lv, tx, b.name])));
   }).catch(() => {});
   s.scenarios.forEach(x => scenarios[x.key] = x);
-  boards = s.boards; watchUrl = s.watch; localVoices = s.tts || []; localVoiceDefault = s.tts_default; fillVoices();
+  boards = s.boards; watchUrl = s.watch; watchLogin = !!s.watch_login; localVoices = s.tts || []; localVoiceDefault = s.tts_default; fillVoices();
   chapters = story.chapters;
   show(0);
   connect();

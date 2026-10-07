@@ -30,6 +30,7 @@ Output (gitignored): chaos-runs/demo/<start time>/ with the raw log and events.j
 """
 import argparse
 import hashlib
+import os
 import http.server
 import io
 import json
@@ -1614,6 +1615,7 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
             if path == "/api/scenarios":
                 return self.reply(200, {"scenarios": scenario_list(grid), "boards": grid is not None,
                                         "watch": watch_url,
+                                        "watch_login": bool(watch_url and os.environ.get("LG_ADMIN_PASSWORD")),
                                         "tts": narrator.names if narrator else [],
                                         "tts_default": narrator.default if narrator else None})
             if path == "/api/tts":
@@ -1716,6 +1718,19 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
     return Handler
 
 
+def watch_login():
+    import urllib.request
+    for _ in range(60):
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{WATCH_PORT}/login", method="POST",
+                                         data=json.dumps({"password": os.environ["LG_ADMIN_PASSWORD"]}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=3).read()
+            return
+        except OSError:
+            time.sleep(1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8770, help="the page's port on 127.0.0.1")
@@ -1772,6 +1787,12 @@ def main():
                                   "--no-map-tiles", "--port", str(WATCH_PORT)], cwd=str(ROOT),
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         watch_url = f"http://127.0.0.1:{WATCH_PORT}/"
+        # The watcher's admin tabs need the grid's admin password. Taken from LG_ADMIN_PASSWORD if the
+        # presenter set it, handed to the watcher over 127.0.0.1 and never written anywhere (the watcher
+        # sends the access point a proof of it, never the password, docs/grid-watch.md). Without it the
+        # "Watching the grid" chapter asks the presenter to log in on the watcher's own page.
+        if os.environ.get("LG_ADMIN_PASSWORD"):
+            threading.Thread(target=watch_login, daemon=True).start()
     narrator = Narrator(args.voice_model)
     print(f"Narrator: Piper on this laptop, voices {', '.join(narrator.names)}" if narrator.paths else
           f"Narrator: the browser's voices ({narrator.error})", flush=True)

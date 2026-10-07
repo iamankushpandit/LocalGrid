@@ -363,18 +363,55 @@
       "id": "watch",
       "part": "Watching the grid",
       "title": "A laptop or a phone watches the grid without joining it",
-      "body": [
-        "Observability was designed in from the first week (D68): every access point broadcasts a small, sealed status over Bluetooth.",
-        "Only devices holding this grid's key can read it, and nobody can forge it; positions are never in it.",
-        "After a login, the same tabs the admin page shows: network, handhelds, traffic (D70).",
-        "Read-only by construction: a watcher can never send, change or take part (D69, D70)."
-      ],
-      "say": "You do not have to join the network to see how it is doing. Being able to watch it was designed in during the project's first week, not added later: a network that claims to heal itself has to let you see it happen. Every access point broadcasts a small, sealed status over Bluetooth, and only a device with this grid's key can read it. This laptop is listening to it right now, without being part of the grid. There is an Android app that does the same, and both are read only by construction: a watcher can never send a message or change anything.",
       "view": "watch",
       "media": [
         {
           "file": "android-watch.png",
           "caption": "The Android app"
+        }
+      ],
+      "lead": "You do not have to join the network to see how it is doing. Being able to watch it was designed in during the project's first week: a network that claims to heal itself has to let you see it happen.",
+      "points": [
+        {
+          "text": "Overview, over Bluetooth from every access point: who is on which access point, batteries, links, the newest alert. No password (D68).",
+          "say": "Every access point broadcasts a small, sealed status over Bluetooth, and this laptop is listening to it right now. The overview needs no password: each access point, its links and its time, every handheld with the access point it is on and its battery, and the newest alert.",
+          "watch_tab": "overview"
+        },
+        {
+          "text": "Only a device holding this grid's key can read the beacon, and nobody can forge it; positions are never in it.",
+          "say": "Only a device holding this grid's key can read that beacon, and nobody can forge it. Where people are is never in it.",
+          "watch_tab": "overview"
+        },
+        {
+          "text": "After a login, the watcher asks one access point over Bluetooth for what the admin page shows; only a proof of the password crosses the air (D70).",
+          "say": "After a login with the admin password, the watcher connects to one access point over Bluetooth, and asks for what the admin page shows. The password itself never crosses the air, only a proof of it.",
+          "watch_tab": "overview",
+          "needs_login": true
+        },
+        {
+          "text": "Network: the access points, their links, availability over the last two hours, and what happened to each.",
+          "say": "The Network tab: the access points and their links, how available each one was over the last two hours, and what happened to them, like the restarts you saw.",
+          "watch_tab": "network"
+        },
+        {
+          "text": "Handhelds: the groups, who may make announcements, and every handheld the grid has seen.",
+          "say": "The Handhelds tab: the groups, who may make announcements, and every handheld the grid has seen.",
+          "watch_tab": "handhelds"
+        },
+        {
+          "text": "Traffic: message rates and totals, drops, the backbone and LoRa links, handheld sessions, each access point's performance.",
+          "say": "The Traffic tab: message rates and totals, anything dropped, the backbone and LoRa links, the handheld sessions, and how each access point is performing.",
+          "watch_tab": "traffic"
+        },
+        {
+          "text": "A Map tab shows everyone's position after the login; it stays closed on camera, because it shows where this bench is.",
+          "say": "There is a Map tab as well, with everyone's position, behind the same login. We keep it closed on camera, because it would show where this bench is.",
+          "watch_tab": "traffic"
+        },
+        {
+          "text": "Read-only by construction, on a laptop or the Android app: a watcher can never send, change or take part (D69, D70).",
+          "say": "The same view is an Android app. Both are read only by construction: a watcher can never send a message, change a setting, or take part in the grid.",
+          "watch_tab": "overview"
         }
       ]
     },

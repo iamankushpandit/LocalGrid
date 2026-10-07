@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "codec2.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
@@ -82,6 +83,7 @@ static struct {
     uint16_t         talk_id;
     uint32_t         rx_dropped;
     volatile bool    talk_synth;    /* the frames come from synth() rather than the microphone */
+    volatile bool    talk_clip;     /* the frames come from a clip given over the cable (D112) */
     volatile uint32_t talk_limit_ms;/* the talk stops itself after this long; 0 = until released */
 } v = { .mux = portMUX_INITIALIZER_UNLOCKED };
 
@@ -649,6 +651,80 @@ static size_t pack(const hh_adpcm_state_t *from, uint16_t talk, uint16_t frame, 
     return lg_voice_hdr_enc(&h, out);
 }
 
+/*
+ * D112: a talk from a clip given over the cable. The demo (tools/demo.py) makes a few seconds of speech
+ * on its laptop, sends it as IMA ADPCM at 8 kHz, the codec talk already uses, and this handheld talks it
+ * out through the ordinary push-to-talk path: paced like a microphone, gained like one, and heard by
+ * every listener as speech. It exists so a talk can be demonstrated and tested with real words and
+ * nobody's voice. The clip lives in PSRAM where there is some, and is freed with `clip free`.
+ */
+#define CLIP_MAX_BYTES  (64u * 1024u)    /* 16 s of speech: longer than any demonstration needs */
+
+static uint8_t          *s_clip;
+static size_t            s_clip_cap, s_clip_len, s_clip_pos;
+static hh_adpcm_state_t  s_clip_dec;
+
+esp_err_t hh_voice_clip_begin(size_t bytes)
+{
+    if (v.st.talking || v.talk_req) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (bytes == 0u || bytes > CLIP_MAX_BYTES) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    hh_voice_clip_free();
+    s_clip = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_clip == NULL) {
+        s_clip = malloc(bytes);
+    }
+    if (s_clip == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_clip_cap = bytes;
+    s_clip_len = 0;
+    return ESP_OK;
+}
+
+esp_err_t hh_voice_clip_add(const uint8_t *data, size_t n, size_t *at)
+{
+    if (s_clip == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_clip_len + n > s_clip_cap) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(s_clip + s_clip_len, data, n);
+    s_clip_len += n;
+    if (at != NULL) {
+        *at = s_clip_len;
+    }
+    return ESP_OK;
+}
+
+void hh_voice_clip_free(void)
+{
+    if (v.talk_clip) {
+        return;   /* the talk reading it frees nothing under it; `clip free` after it ends */
+    }
+    free(s_clip);
+    s_clip = NULL;
+    s_clip_cap = s_clip_len = s_clip_pos = 0;
+}
+
+/* The next frame of the clip, decoded; false once the clip has run out (the rest of the frame is silence). */
+static bool clip_frame(int16_t *pcm)
+{
+    size_t want = FRAME_SAMPLES / 2u;
+    size_t have = s_clip_len > s_clip_pos ? s_clip_len - s_clip_pos : 0u;
+    size_t take = have < want ? have : want;
+    memset(pcm, 0, FRAME_SAMPLES * sizeof(int16_t));
+    if (take > 0u) {
+        hh_adpcm_decode(&s_clip_dec, s_clip + s_clip_pos, take * 2u, pcm);
+        s_clip_pos += take;
+    }
+    return take == want && s_clip_pos < s_clip_len;
+}
+
 static void capture_task(void *arg)
 {
     capture_buf_t *buf = arg;
@@ -664,8 +740,13 @@ static void capture_task(void *arg)
         hh_voice_state(&st);
         uint8_t scope = st.talk_scope;
         uint32_t target = st.talk_target;
-        bool synthetic = v.talk_synth;
+        bool clip = v.talk_clip;
+        bool synthetic = v.talk_synth || clip;   /* neither needs the microphone */
         uint32_t limit_ms = v.talk_limit_ms;
+        if (clip) {
+            s_clip_pos = 0;
+            s_clip_dec = (hh_adpcm_state_t){ 0 };
+        }
         if (!synthetic && lg_bsp_audio_mic_start() != ESP_OK) {
             v.talk_req = false;
             set_talking(false, 0, 0);
@@ -683,7 +764,7 @@ static void capture_task(void *arg)
         c2_talk_begin(talk, scope, target);   /* the compact copy, for whoever only LoRa reaches (D95) */
         ESP_LOGI(TAG, "[MSG] Talking to %s %" PRIu32 "%s",
                  scope == LG_SCOPE_BROADCAST ? "everyone" : scope == LG_SCOPE_GROUP ? "group" : "device",
-                 target, synthetic ? " (generated voice)" : "");
+                 target, clip ? " (a clip given over the cable)" : synthetic ? " (generated voice)" : "");
         while (v.talk_req) {
             if (synthetic) {
                 /*
@@ -697,7 +778,14 @@ static void capture_task(void *arg)
                 if (due > now) {
                     vTaskDelay(pdMS_TO_TICKS(due - now));
                 }
-                synth(pcm, FRAME_SAMPLES);
+                if (clip) {
+                    if (!clip_frame(pcm)) {
+                        v.talk_req = false;   /* the clip is spoken: this frame is its last */
+                    }
+                    agc(pcm, FRAME_SAMPLES);   /* the same loudness a microphone talk gets */
+                } else {
+                    synth(pcm, FRAME_SAMPLES);
+                }
             } else {
                 size_t got = 0;
                 while (got < FRAME_SAMPLES && v.talk_req) {
@@ -744,6 +832,7 @@ static void capture_task(void *arg)
             lg_bsp_audio_mic_stop();
         }
         v.talk_synth = false;
+        v.talk_clip = false;
         v.talk_limit_ms = 0;
         set_talking(false, 0, 0);
         /*
@@ -990,6 +1079,28 @@ esp_err_t hh_voice_demo_start(uint8_t scope, uint32_t target, uint8_t seconds)
     if (err != ESP_OK) {
         v.talk_synth = false;
         v.talk_limit_ms = 0;
+    }
+    return err;
+}
+
+esp_err_t hh_voice_clip_talk(uint8_t scope, uint32_t target)
+{
+    if (s_clip == NULL || s_clip_len < FRAME_SAMPLES / 2u) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (v.capture == NULL) {
+        capture_buf_t *buf = calloc(1, sizeof(*buf));
+        if (buf == NULL ||
+            xTaskCreate(capture_task, "hh_talk", TASK_STACK, buf, TASK_PRIORITY, &v.capture) != pdPASS) {
+            free(buf);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    v.talk_clip = true;
+    v.talk_limit_ms = 0;   /* it stops when the clip does */
+    esp_err_t err = hh_voice_ptt_start(scope, target);
+    if (err != ESP_OK) {
+        v.talk_clip = false;
     }
     return err;
 }

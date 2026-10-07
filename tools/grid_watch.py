@@ -1620,6 +1620,14 @@ function applyTabs(loggedIn) {
   $("login").hidden = loggedIn;
   $("logout").hidden = !loggedIn;
 }
+/* A page that embeds this one (tools/demo.py) opens a tab by changing the address's #tab. */
+window.addEventListener("hashchange", () => {
+  const h = location.hash.slice(1);
+  if (!TABS.includes(h) || h === tab) return;
+  tab = h;
+  applyTabs(lastLoggedIn);
+  if (tab === "traffic") ask(true);
+});
 $("tabs").addEventListener("click", ev => {
   const b = ev.target.closest("button[data-tab]");
   if (!b) return;
