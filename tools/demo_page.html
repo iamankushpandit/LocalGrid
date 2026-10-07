@@ -1017,6 +1017,18 @@ function onMessage(m) {
     return;
   }
   if (m.type === "logs") { addLogLines(m.lines); return; }
+  if (m.type === "frame") {
+    // A page the demo puts on the stage for a while, such as an access point's own admin page.
+    if (m.url) { const v = $("view"); viewNow = "frame"; v.innerHTML = ""; const f = document.createElement("iframe");
+                 f.src = m.url; f.title = "An access point's admin page"; v.appendChild(f); }
+    else if (viewNow === "frame") setView((chapters[at] || {}).view || "map");
+    return;
+  }
+  if (m.type === "await") {
+    waitForPresenter({ prompt: m.prompt, wait_s: 900 }).then(() => fetch("/api/continue", { method: "POST" }).catch(() => {}));
+    return;
+  }
+  if (m.type === "await_done") { if (presenterGo) presenterGo(); return; }
   if (m.type === "log" && LOG_TEXT[m.event]) addLog(LOG_TEXT[m.event](m));
 }
 function connect() {

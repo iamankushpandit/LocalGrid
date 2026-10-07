@@ -82,6 +82,11 @@ IDF_LINE = re.compile(r"^([IWED]) \((\d+)\) [^:]+: (.*)$")   # "I (1234) TAG: te
 LOG_KEEP = 200            # lines kept per board, for a page opened mid-session
 LOG_BATCH_S = 0.3         # lines go to the page in batches, not one message each
 
+CLIP_REPLY = re.compile(r"CLIP: (.*)$")
+GRID_SSID = "LocalGrid Access Point"     # every access point's network (D46, lg_proto_config.h)
+ADMIN_URL = "http://192.168.4.1/"
+NAME_LINE = re.compile(r"Name: (.+)$")
+
 DEMO_GROUPS = ("Trail-Crew", "Ridge-Crew")   # the split demo renames one into the other
 
 DELIVERY_S = 30          # a message over Wi-Fi that has not landed by then has not landed
@@ -170,6 +175,7 @@ class Grid(chaos.Chaos):
         self.log_sent_at = 0.0
         self.ble_events_seen = 0.0    # the newest Bluetooth event already shown
         self.kept = {}                # port -> held open, lines released, while the cables are not in use
+        self.go = threading.Event()   # the presenter pressed Continue on a step only they can do
         self.kept_at = 0.0
 
     # ---- what the page sees ----
@@ -326,6 +332,8 @@ class Grid(chaos.Chaos):
         if not b.is_ap and (m := GROUP_LINE.search(line)):
             members = ",".join(m.group(4).split())
             self.gtab.setdefault(b.name, {})[int(m.group(1))] = (m.group(2), members)
+        if not b.is_ap and (m := CLIP_REPLY.search(line)):
+            b.clip_reply = m.group(1).strip()
         if b.is_ap and (m := AP_GROUPS.search(line)):
             b.groups_version = int(m.group(1))
         for rx, what in ((AP_CARRYING, "carrying"), (AP_HANDING, "handing"), (HH_OFFERED, "offered"),
@@ -531,6 +539,9 @@ class Grid(chaos.Chaos):
         self.wait(STEADY_S, until=lambda: not self.unsteady())
         for h in self.hhs:
             self.write(h, "people")
+            # Every handheld audible: an overnight run once left five of six at volume off, and the
+            # talk demonstrated that day was heard on almost nothing (2026-10-07).
+            self.write(h, "volume high")
         self.wait(5)
         if self.args.lora_check:
             self.lora_query(self.aps + self.hhs)
@@ -879,6 +890,9 @@ class Grid(chaos.Chaos):
         self.fact(f"Its answer reached {self.label(peer)} in {secs:.1f} s" if secs is not None
                   else "Its answer did not arrive" + (f" ({p['refused']})" if p["refused"] else ""),
                   ok=secs is not None)
+        self.caption(f"{self.label(peer)} talks to {self.label(v)} as well. Live talk needs Wi-Fi, so a compact copy "
+                     "of the same words, a fraction of the size, crosses LoRa instead (D95).")
+        self.talk_clip(peer, str(v.index), f"{self.label(v)}, can you hear me over LoRa?", [v])
         self.caption(f"Wi-Fi comes back on {self.label(v)}.")
         t = time.monotonic()
         self.write(v, "wifi on")
@@ -886,44 +900,260 @@ class Grid(chaos.Chaos):
         if back:
             self.fact(f"{self.label(v)} was back on Wi-Fi with an access point {time.monotonic() - t:.0f} s later")
 
-    def sc_voice(self):
-        """Push to talk: a voice from one handheld out of every other one's speaker (D61, D88)."""
+
+    # ---- the everyday things, driven through the cables and measured ----
+
+    def two_on_grid(self, prefer_apart=True):
+        on = self.on_grid()
+        if len(on) < 2:
+            return None, None
+        if prefer_apart:
+            for s in on:
+                for r in on:
+                    if s is not r and s.registered_node != r.registered_node:
+                        return s, r
+        return on[0], on[1]
+
+    def open_screens(self, pairs, settle=2.5):
+        for b, what in pairs:
+            self.write(b, f"chat {what}")
+        self.wait(settle)
+
+    def sc_direct(self):
+        """A message to one person, sealed end to end, timed to the other screen (D5, D42)."""
+        if not self.precheck():
+            return
+        s, r = self.two_on_grid()
+        sa, ra = self.ap_at(s.registered_node), self.ap_at(r.registered_node)
+        self.caption(f"{self.label(s)}, on {self.label(sa)}, writes to {self.label(r)}, on {self.label(ra)}. "
+                     "Both conversations are open, so you can watch them.")
+        self.open_screens([(s, str(r.index)), (r, str(s.index))])
+        self.timer(f"To {self.label(r)}", "start")
+        p = self.send(s, r, f"Hi {self.label(r)}, it is {self.label(s)}. Dinner at seven?", [r])
+        got = self.settle_message(p, DELIVERY_S)
+        secs = got.get(r.name)
+        self.timer(f"To {self.label(r)}", "stop", secs)
+        if secs is not None:
+            self.fact(f"{self.label(r)} had it in {secs:.1f} s, across two access points" if sa is not ra
+                      else f"{self.label(r)} had it in {secs:.1f} s")
+            self.fact("Sealed end to end: the access points carried it without being able to read it")
+        else:
+            self.fact("It did not arrive" + (f" ({p['refused']})" if p["refused"] else ""), ok=False)
+        self.caption(f"{self.label(r)} answers.")
+        p = self.send(r, s, "Seven works. See you there.", [s])
+        got = self.settle_message(p, DELIVERY_S)
+        if got.get(s.name) is not None:
+            self.fact(f"The answer was back with {self.label(s)} in {got[s.name]:.1f} s; with the conversation open, "
+                      "both now show the other's message as read")
+        self.wait(4)
+
+    def ensure_group(self, makers):
+        """The demo's group, with every handheld on the grid in it. Returns (id, name)."""
+        tables = self.read_groups(makers[:1])
+        for i, (name, mem) in tables[makers[0].name].items():
+            if name in DEMO_GROUPS:
+                want = ",".join(str(h.index) for h in self.on_grid())
+                if set(mem.split(",")) != set(want.split(",")):
+                    self.write(makers[0], f"group set {i} {name} {want}")
+                    self.wait(6)
+                return i, name
+        members = ",".join(str(h.index) for h in self.on_grid())
+        self.write(makers[0], f"group new {DEMO_GROUPS[0]} {members}")
+        self.wait(20, until=lambda: any(n == DEMO_GROUPS[0] for n, _ in self.read_groups(makers[:1], 3)[makers[0].name].values()))
+        for i, (name, _) in self.read_groups(makers[:1])[makers[0].name].items():
+            if name == DEMO_GROUPS[0]:
+                return i, name
+        return None, None
+
+    def sc_group(self):
+        """A message to a group reaches every member, wherever they are (D52)."""
         if not self.precheck():
             return
         on = self.on_grid()
-        sender = next((h for h in on if h.can_talk), on[0])
-        listeners = [h for h in self.hhs if self.present(h) and h is not sender and h.can_hear is not False]
-        if not listeners:
-            self.caption("No other handheld can play sound.")
+        s = on[0]
+        gid, gname = self.ensure_group([s])
+        if gid is None:
+            self.fact("The group could not be made", ok=False)
             return
-        sent_before = set(sender.voice_sent)
-        heard_before = {h.name: set(h.voice_heard) for h in listeners}
-        self.caption(f"Push to talk. {self.label(sender)} talks to everyone. A generated voice stands in for "
-                     "a person, so it says the same thing every time.", hold=1)
+        others = [h for h in on if h is not s]
+        self.caption(f"The group {gname} was made on a handheld, and everybody here is in it. "
+                     f"{self.label(s)} writes to the group.")
+        self.open_screens([(h, gname) for h in on])
+        self.timer(f"To {gname}", "start")
+        p = self.send(s, gname, "Group: we meet at the north gate at seven.", others)
+        got = self.settle_message(p, DELIVERY_S)
+        reached = {n: x for n, x in got.items() if x is not None}
+        self.timer(f"To {gname}", "stop", max(reached.values()) if reached else None)
+        aps = {h.registered_node for h in on}
+        if len(reached) == len(others):
+            self.fact(f"Every member had it within {max(reached.values()):.1f} s, on {len(aps)} access points")
+        for n, x in got.items():
+            if x is None:
+                self.fact(f"{self.label(self.by_name[n])} did not show it", ok=False)
+        self.wait(3)
+
+    def sc_announce(self):
+        """A message to everyone is an announcement: it flashes on every screen with a chime (D41, D56)."""
+        if not self.precheck():
+            return
+        on = self.on_grid()
+        s = on[-1]
+        others = [h for h in self.hhs if self.present(h) and h is not s]
+        self.caption(f"{self.label(s)} makes an announcement to everyone. Watch every screen flash, and listen for the chime.")
+        for h in self.hhs:
+            self.write(h, "screen home")
+        self.wait(2)
+        self.timer("Announcement on every screen", "start")
+        p = self.send(s, "all", "Announcement: the food is ready.", others)
+        got = self.settle_message(p, DELIVERY_S)
+        reached = {n: x for n, x in got.items() if x is not None}
+        self.timer("Announcement on every screen", "stop", max(reached.values()) if reached else None)
+        if len(reached) == len(others):
+            self.fact(f"It flashed on all {len(others)} other handhelds within {max(reached.values()):.1f} s")
+        else:
+            self.fact("Not every handheld showed it: " + ", ".join(
+                self.label(self.by_name[n]) for n, x in got.items() if x is None), ok=False)
+        self.fact("The admin decides who may announce; an SOS is never limited (D56)")
+        self.wait(4)
+
+    def give_clip(self, b, text):
+        """Speech made here with Piper, given to a handheld over its cable (D112). True once it holds it."""
+        import voiceclip
+        data, pcm = voiceclip.clip_bytes(text)
+        for cmd in voiceclip.lines(data):
+            b.clip_reply = None
+            self.write(b, cmd)
+            if not self.wait(6, until=lambda: b.clip_reply is not None) or "refused" in b.clip_reply \
+                    or b.clip_reply.startswith("ESP_"):
+                self.fact(f"{self.label(b)} would not take the clip: {b.clip_reply}", ok=False)
+                return None
+        return len(pcm) / voiceclip.RATE
+
+    def talk_clip(self, sender, target, text, listeners, silent=()):
+        """One talk of real speech; facts for who played it, and for who rightly did not."""
+        secs = self.give_clip(sender, text)
+        if secs is None:
+            return
+        before = set(sender.voice_sent)
+        sender.clip_reply = None
         self.timer("Talking", "start")
-        self.write(sender, "demo all 6")
+        self.write(sender, f"clip talk {target}")
+        self.wait(6, until=lambda: sender.clip_reply is not None)
 
-        def new_talk():
-            ids = set(sender.voice_sent) - sent_before
-            return next(iter(ids), None)
+        def tid():
+            return next(iter(set(sender.voice_sent) - before), None)
 
-        self.wait(30, until=lambda: new_talk() is not None and all(
-            new_talk() in h.voice_heard for h in listeners))
-        tid = new_talk()
-        self.timer("Talking", "stop", (sender.voice_sent[tid][2] / 1000) if tid in sender.voice_sent else None)
-        if tid is None:
-            why = sender.voice_refused
-            self.fact(f"{self.label(sender)} did not send the talk" + (f": {why}" if why else ""), ok=False)
+        def heard(h):
+            t_ = tid()
+            got = h.voice_heard.get(t_) if t_ is not None else None
+            return got if got and got[0] == sender.index else None
+        self.wait(secs + 20, until=lambda: tid() is not None and all(heard(h) for h in listeners))
+        self.wait(2)
+        t_ = tid()
+        self.timer("Talking", "stop", round(secs, 1) if t_ is not None else None)
+        if t_ is None:
+            self.fact(f"{self.label(sender)} did not send the talk" + (f": {sender.voice_refused}" if sender.voice_refused else ""), ok=False)
             return
-        frames = sender.voice_sent[tid][0]
+        frames = sender.voice_sent[t_][0]
         for h in listeners:
-            got = h.voice_heard.get(tid) if tid not in heard_before[h.name] else None
-            if got:
-                played = got[1]
-                self.fact(f"{self.label(h)} played {played} of {frames} voice frames "
-                          f"({100 * played // max(frames, 1)} %)")
-            else:
-                self.fact(f"{self.label(h)} did not play it", ok=False)
+            got = heard(h)
+            self.fact(f"{self.label(h)} played {got[1]} of {frames} frames of it" if got
+                      else f"{self.label(h)} did not play it", ok=bool(got))
+        leaked = [h for h in silent if heard(h)]
+        if silent and not leaked:
+            self.fact("Nobody else played it: " + ", ".join(self.label(h) for h in silent))
+        for h in leaked:
+            self.fact(f"{self.label(h)} played a talk that was not for it", ok=False)
+        self.write(sender, "clip free")
+
+    def sc_voice(self):
+        """Push to talk, to everyone, a group and one person, with real speech made on this laptop (D61, D88, D112)."""
+        if not self.precheck():
+            return
+        on = self.on_grid()
+        talkers = [h for h in on if h.can_talk] or on
+        a = talkers[0]
+        b = talkers[1] if len(talkers) > 1 else next((h for h in on if h is not a), None)
+        hear = [h for h in self.hhs if self.present(h) and h.can_hear is not False]
+        self.caption("Push to talk. Nobody here is speaking: this laptop makes the words, and gives them to a "
+                     "handheld over its cable, as if someone were talking into its microphone. Everything after "
+                     "that is the grid.")
+        self.caption(f"First, {self.label(a)} talks to everyone.")
+        self.open_screens([(h, "all") for h in on])
+        self.talk_clip(a, "all", f"Hello everyone, this is {self.label(a)}. The trail is clear, and we are heading back.",
+                       [h for h in hear if h is not a])
+        gid, gname = self.ensure_group([a])
+        if gid is not None and b is not None:
+            self.caption(f"Next, {self.label(b)} talks to the group {gname}.")
+            self.open_screens([(h, gname) for h in on])
+            self.talk_clip(b, gname, f"{self.label(b)} to the group. Meet at the north gate in ten minutes.",
+                           [h for h in hear if h is not b])
+        if b is not None:
+            self.caption(f"And {self.label(a)} talks to {self.label(b)} alone. Only {self.label(b)} should hear it.")
+            self.open_screens([(a, str(b.index)), (b, str(a.index))])
+            self.talk_clip(a, str(b.index), f"Just for you, {self.label(b)}. Can you bring the spare battery?",
+                           [b], silent=[h for h in hear if h not in (a, b)])
+            self.fact("One-to-one talk is sealed end to end, like text (D61)")
+
+    def sc_name(self):
+        """A handheld chooses its own name, and the whole grid knows it by the new one (D50)."""
+        if not self.precheck():
+            return
+        on = self.on_grid()
+        h = on[0]
+        other = next((x for x in on if x is not h), None)
+        old = self.label(h)
+        new = "Trail Boss" if old != "Trail Boss" else "Scout"
+        self.caption(f"A handheld chooses its own name. {old} becomes {new}.")
+        t0 = time.monotonic()
+        self.write(h, f"name {new}")
+
+        def seen():
+            self.people.pop(h.index, None)
+            self.write(other, "people")
+            self.wait(2.5)
+            return self.people.get(h.index) == new
+        self.timer("New name across the grid", "start")
+        ok = self.wait(45, until=seen)
+        secs = round(time.monotonic() - t0, 1)
+        self.timer("New name across the grid", "stop", secs if ok else None)
+        self.fact(f"{self.label(other)} knows it as {new} {secs:.0f} s later; so does the map" if ok
+                  else f"{self.label(other)} did not show the new name", ok=ok)
+        self.wait(3)
+        self.caption(f"And back to {old}.")
+        self.write(h, f"name {old}")
+        self.wait(30, until=lambda: (self.write(other, "people"), self.wait(2.5), self.people.get(h.index) == old)[-1])
+
+    def sc_hh_restart(self):
+        """A handheld restarts and is back on the grid with its name, groups and messages (D48, D53)."""
+        if not self.precheck():
+            return
+        on = self.on_grid()
+        h = on[-1]
+        groups_before = {n for n, _ in self.read_groups([h])[h.name].values()}
+        self.caption(f"{self.label(h)} restarts, the way a flat battery and a recharge would. Watch what it still knows.")
+        t0 = time.monotonic()
+        self.write(h, "reboot")
+        self.wait(15, until=lambda: h.boot_at > t0)
+        self.timer(f"{self.label(h)} back", "start")
+        back = self.wait(90, until=lambda: h.registered_node is not None and h.boot_at > t0)
+        secs = round(time.monotonic() - t0, 1)
+        self.timer(f"{self.label(h)} back", "stop", secs if back else None)
+        if not back:
+            self.fact(f"{self.label(h)} was not back on an access point within 90 s", ok=False)
+            return
+        ap = self.ap_at(h.registered_node)
+        self.fact(f"Back on {self.label(ap) if ap else 'an access point'} {secs:.0f} s after restarting")
+        self.wait(4)
+        groups_after = {n for n, _ in self.read_groups([h])[h.name].values()}
+        if groups_before and groups_before <= groups_after:
+            self.fact(f"Its groups came back: {', '.join(sorted(groups_after))}")
+        self.write(h, "people")
+        self.wait(3)
+        self.fact(f"It is still {self.label(h)}: the name is its own, kept on the handheld (D50)")
+        self.write(h, "screen messages")
+        self.caption("Its conversations are on its screen, as they were.")
+        self.wait(4)
 
     def sc_ap_restart(self):
         """An access point crashes and restarts; what it knew comes back by itself (D48, D53, D60)."""
@@ -1085,6 +1315,8 @@ class Grid(chaos.Chaos):
             self.set_time()
         if "handhelds" in marks:
             self.fact(f"Every handheld was back on an access point {marks['handhelds']:.0f} s after power returned")
+        if "linked" in marks:
+            self.watch_balance(cabled=True)
 
     def sc_tour(self):
         """The handhelds' own screens, opened from their consoles, for the camera."""
@@ -1107,10 +1339,26 @@ class Grid(chaos.Chaos):
                 self.write(h, f"screen {screen}")
             self.caption(words, hold=4)
 
+    def fresh_update(self, given, chip="esp32", tag="cable"):
+        """The update file to give: a fresh one, signed now from the current build, when a signing key was
+        given (each device takes only an update newer than the last it saw, so a file signed once works
+        for one run); else the file named on the command line."""
+        if not self.args.sign_key:
+            return pathlib.Path(given) if given else None
+        image = ROOT / "firmware" / "handheld" / f"build-{chip}" / "lg_handheld.bin"
+        out = self.out / f"handheld-{chip}-{tag}.lgfw"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lgfw.py"), "sign", "--key", self.args.sign_key,
+                            "--role", "H", "--chip", chip, "--version", f"demo-{time.strftime('%H%M%S')}",
+                            str(image), "-o", str(out)], capture_output=True, text=True, cwd=str(ROOT))
+        return out if r.returncode == 0 and out.exists() else None
+
     def sc_update(self):
         """A signed update given to one access point reaches the others and the handhelds by itself
         (D97, D101, D107, D111)."""
-        path = pathlib.Path(self.args.update)
+        path = self.fresh_update(self.args.update, tag="cable")
+        if path is None:
+            self.caption("No update file to give: start the demo with --sign-key or --update.")
+            return
         blob = path.read_bytes()
         if blob[:4] != b"LGFW" or blob[5:6] != b"H":
             self.caption("The update file given to this demo is not a handheld update.")
@@ -1171,6 +1419,148 @@ class Grid(chaos.Chaos):
         self.write(v, "spread drop")
         self.wait(10)
         self.fact("Withdrawn: no access point offers it any more")
+
+
+    # ---- the presenter's hands, and this laptop's Wi-Fi ----
+
+    def await_presenter(self, prompt, limit_s=600):
+        """A step only the presenter can do (a file chooser, a password): say it, wait for Continue."""
+        self.go.clear()
+        self.publish("await", prompt=prompt)
+        self.caption(prompt)
+        self.wait(limit_s, until=self.go.is_set)
+        self.publish("await_done")
+        return self.go.is_set()
+
+    @staticmethod
+    def wifi_now():
+        out = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True).stdout
+        state = re.search(r"^\s*State\s*:\s*(.+)$", out, re.M)
+        prof = re.search(r"^\s*Profile\s*:\s*(.+)$", out, re.M)
+        ssid = re.search(r"^\s*SSID\s*:\s*(.+)$", out, re.M)
+        return ((state.group(1).strip() if state else ""), (prof.group(1).strip() if prof else None),
+                (ssid.group(1).strip() if ssid else None))
+
+    def wifi_join_grid(self):
+        """Joins this laptop to the grid's Wi-Fi. The passphrase comes from the grid's secrets file into a
+        profile given straight to Windows; it is never printed, and the profile is deleted on the way back."""
+        import tempfile
+        from xml.sax.saxutils import escape
+        text = pathlib.Path(self.args.secrets).read_text(encoding="utf-8")
+        m = re.search(r'#define\s+LG_SECRET_WIFI_PASSPHRASE\s+"([^"]+)"', text)
+        if not m:
+            return False
+        xml = ('<?xml version="1.0"?><WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">'
+               f'<name>{escape(GRID_SSID)}</name><SSIDConfig><SSID><name>{escape(GRID_SSID)}</name></SSID></SSIDConfig>'
+               '<connectionType>ESS</connectionType><connectionMode>manual</connectionMode><MSM><security>'
+               '<authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption>'
+               '<useOneX>false</useOneX></authEncryption><sharedKey><keyType>passPhrase</keyType>'
+               f'<protected>false</protected><keyMaterial>{escape(m.group(1))}</keyMaterial></sharedKey>'
+               '</security></MSM></WLANProfile>')
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(xml)
+            subprocess.run(["netsh", "wlan", "add", "profile", f"filename={path}", "user=current"],
+                           capture_output=True, text=True)
+        finally:
+            os.unlink(path)
+        subprocess.run(["netsh", "wlan", "connect", f"name={GRID_SSID}", f"ssid={GRID_SSID}"],
+                       capture_output=True, text=True)
+        last = {"t": 0.0}
+
+        def joined():   # netsh is slow: asked twice a second, not on every pass of the wait loop
+            if time.monotonic() - last["t"] < 0.5:
+                return False
+            last["t"] = time.monotonic()
+            return self.wifi_now()[2] == GRID_SSID and self.admin_answers()
+        return self.wait(40, until=joined)
+
+    @staticmethod
+    def admin_answers():
+        import urllib.request
+        try:
+            urllib.request.urlopen(ADMIN_URL, timeout=2).read(64)
+            return True
+        except OSError:
+            return False
+
+    def wifi_back(self, profile):
+        """Back to the network this laptop was on, and the grid's profile deleted."""
+        if profile:
+            subprocess.run(["netsh", "wlan", "connect", f"name={profile}"], capture_output=True, text=True)
+        subprocess.run(["netsh", "wlan", "delete", "profile", f"name={GRID_SSID}"], capture_output=True, text=True)
+        if profile:
+            end = time.monotonic() + 40
+            while time.monotonic() < end and self.wifi_now()[1] != profile:
+                time.sleep(1)
+        self.publish("log", event="wifi", board=f"this laptop back on {profile or 'no network'}")
+
+    def sc_web_update(self):
+        """An update given through an access point's own admin page, in a browser (D110, D111)."""
+        path = self.fresh_update(self.args.web_update, tag="web")
+        if path is None:
+            self.caption("No update file to give: start the demo with --sign-key or --web-update.")
+            return
+        live = [a for a in self.aps if self.present(a)]
+        if not live:
+            self.caption("No access point on a cable to turn its admin page on.")
+            return
+        v = live[0]
+        state, profile, ssid = self.wifi_now()
+        self.caption(f"This time the update goes in through a browser. {self.label(v)} turns its admin page on, "
+                     "which it runs only when asked (D91).")
+        self.write(v, "web on 15")
+        self.wait(3)
+        self.caption("This laptop joins the grid's own Wi-Fi network, as a phone would.")
+        self.timer("Joining the grid's Wi-Fi", "start")
+        t0 = time.monotonic()
+        try:
+            joined = self.wifi_join_grid()
+            self.timer("Joining the grid's Wi-Fi", "stop", round(time.monotonic() - t0, 1) if joined else None)
+            if not joined:
+                self.fact("This laptop could not join the grid's Wi-Fi", ok=False)
+                return
+            self.fact(f"This laptop is on {GRID_SSID}, at the address every access point answers on (D46)")
+            self.publish("frame", url=ADMIN_URL)
+            self.updates = []
+            ok = self.await_presenter(
+                f"In the admin page: log in, open Settings, and under Firmware choose the update file "
+                f"({path.name}, in {path.parent}). Press Upload, then Continue here.")
+            self.publish("frame", url=None)
+            if not ok:
+                self.caption("No upload this time.")
+                return
+            self.caption("From here the grid does the rest, as with the cable: the access points pass it on, "
+                         "and the handhelds take it when they are idle.")
+            t = time.monotonic()
+            seen = set()
+
+            def progress():
+                for at, board, what, detail in self.updates:
+                    if (board, what) in seen:
+                        continue
+                    seen.add((board, what))
+                    b = self.by_name.get(board)
+                    who = self.label(b) if b else board
+                    words = {"carrying": "took it from another access point and carries it",
+                             "taken": "downloaded it over Wi-Fi and checked it",
+                             "restarting": "restarted into it"}.get(what)
+                    if words:
+                        self.fact(f"{who} {words} ({at - t:.0f} s)")
+                    elif what == "refused":
+                        self.fact(f"{who} refused it: {detail[0]}", ok=False)
+                return any(w == "carrying" for _, _, w, _ in self.updates)
+            self.timer("Reaching the other access points", "start")
+            got = self.wait(300, until=progress)
+            self.timer("Reaching the other access points", "stop", round(time.monotonic() - t, 1) if got else None)
+            self.wait(10, until=progress)
+        finally:
+            self.publish("frame", url=None)
+            self.caption("This laptop goes back to its own network.")
+            self.wifi_back(profile)
+            self.write(v, "web off")
+            self.write(v, "spread drop")
 
     def sc_install(self):
         """A board gets LocalGrid from the installer web page and joins the grid (the web flasher)."""
@@ -1367,10 +1757,18 @@ class Grid(chaos.Chaos):
         if "all" in marks:
             self.watch_balance()
 
-    def watch_balance(self):
+    def watch_balance(self, cabled=False):
         """After a restart the handhelds bunch on whichever access point came up first; then they spread
-        themselves out (D54). Waits for the counts to be even and says how it happened."""
+        themselves out (D54). Waits for the counts to be even and says how it happened. With the cables in
+        the counts come from the handhelds' own registrations; without, from the access points' beacons."""
         def counts():
+            if cabled:
+                live = {a.index: a for a in self.aps if self.present(a)}
+                per = {i: 0 for i in live}
+                mine = [h for h in self.hhs if self.present(h) and h.registered_node in live]
+                for h in mine:
+                    per[h.registered_node] += 1
+                return per, {i: self.label(a) for i, a in live.items()}, len(mine)
             snap, live, where = self.where_now()
             names = {a["index"]: a["name"] for a in snap["aps"]}
             mine = [d for d in where if d in self.seen_online]
@@ -1399,7 +1797,8 @@ class Grid(chaos.Chaos):
             if now != last["text"]:
                 last["text"] = now
                 self.publish("log", event="balance", board=now)
-            return len(per) > 1 and n >= max(1, len(self.seen_online) - 1) and max(per.values()) - min(per.values()) <= 1
+            everyone = len([h for h in self.hhs if self.present(h)]) if cabled else len(self.seen_online)
+            return len(per) > 1 and n >= max(1, everyone - 1) and max(per.values()) - min(per.values()) <= 1
         done = self.wait(BALANCE_S, until=even)
         secs = round(time.monotonic() - t, 1)
         self.timer("Handhelds spreading out", "stop", secs if done else None)
@@ -1413,7 +1812,12 @@ class Grid(chaos.Chaos):
         "tour": ("The handheld screens", "Status, messages, groups and settings on every handheld.", "sc_tour"),
         "emergency": ("SOS on every screen", "Over Wi-Fi and LoRa at once; one message stands it down.",
                       "sc_emergency"),
-        "voice": ("Push to talk", "A voice from one handheld out of every other speaker.", "sc_voice"),
+        "voice": ("Push to talk", "Real speech, to everyone, a group and one person.", "sc_voice"),
+        "direct": ("A message to one person", "Sealed end to end, timed to the other screen.", "sc_direct"),
+        "group": ("A message to a group", "Every member, on every access point.", "sc_group"),
+        "announce": ("An announcement", "Flashes on every screen, with a chime.", "sc_announce"),
+        "name": ("A new name", "Chosen on the handheld, known across the grid.", "sc_name"),
+        "hh_restart": ("A handheld restarts", "Back with its name, groups and messages.", "sc_hh_restart"),
         "ap_out": ("Unplug an access point", "Its handhelds move by themselves; messages keep arriving.",
                    "sc_ap_out"),
         "ap_restart": ("Crash an access point", "It comes back with everything it knew.", "sc_ap_restart"),
@@ -1427,6 +1831,7 @@ class Grid(chaos.Chaos):
                      "sc_blackout"),
         "update": ("An update that spreads itself", "Give it to one access point; the grid does the rest.",
                    "sc_update"),
+        "web_update": ("An update from the admin page", "Through a browser, on the grid's own Wi-Fi.", "sc_web_update"),
         "install": ("Install from the browser", "A board gets LocalGrid from a web page and joins.", "sc_install"),
         "hands_ap": ("Pull a plug, no cables", "You unplug an access point; the grid recovers on its own.",
                      "sc_hands_ap"),
@@ -1442,8 +1847,10 @@ class Grid(chaos.Chaos):
             return "runs with the cables unplugged"
         if key not in self.HANDS_ON and self.untethered:
             return "runs once the boards are plugged in"
-        if key == "update" and not self.args.update:
-            return "start the demo with --update <a signed handheld .lgfw file>"
+        if key == "update" and not (self.args.update or self.args.sign_key):
+            return "start the demo with --sign-key <release key> (or --update <a signed .lgfw>)"
+        if key == "web_update" and not (self.args.web_update or self.args.sign_key):
+            return "start the demo with --sign-key <release key> (or --web-update <a signed .lgfw>)"
         if key == "install" and not self.args.install_board:
             return "start the demo with --install-board <a bench handheld>"
         return None
@@ -1710,6 +2117,9 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
                 except ValueError:
                     return self.reply(400, {"error": "n"})
                 return self.reply(200, {"ok": True})
+            if path == "/api/continue":
+                grid.go.set()
+                return self.reply(200, {"ok": True})
             if path == "/api/stop":
                 grid.cancel.set()
                 return self.reply(202, {"ok": True})
@@ -1744,6 +2154,11 @@ def main():
                     help="skip reading which boards have a LoRa module at the start")
     ap.add_argument("--update", metavar="FILE",
                     help="a signed handheld update (.lgfw) for the 'update that spreads itself' demo")
+    ap.add_argument("--sign-key", metavar="PEM",
+                    help="a release private key the bench's devices trust: each update demo signs a fresh update "
+                         "from the current build with it (keep it off the devices and out of git)")
+    ap.add_argument("--web-update", metavar="FILE",
+                    help="a second signed handheld update, newer than --update, given through the admin page")
     ap.add_argument("--install-board", metavar="NAME",
                     help="a bench handheld the 'install from the browser' demo may reinstall (its settings are "
                          "cleared, its identity kept; it then runs the published image, not the bench build)")
@@ -1774,7 +2189,8 @@ def main():
                                    until_aps_die=False, ap_dead_after=10.0, audible_hours="0-23",
                                    allow_firmware_mismatch=args.allow_firmware_mismatch, scenario="mixed",
                                    blackout=False, max_aps_down=2, min_gap=3, max_gap=15, aps=3, handhelds=2,
-                                   lora_check=args.lora_check, update=args.update,
+                                   lora_check=args.lora_check, update=args.update, web_update=args.web_update,
+                                   sign_key=args.sign_key,
                                    install_board=args.install_board, release=args.release,
                                    bench=args.bench, secrets=str(ROOT / "firmware" / "common" / "lg_secrets.h"))
         grid = Grid(hargs, names, bus)
