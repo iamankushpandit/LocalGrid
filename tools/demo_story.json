@@ -14,16 +14,6 @@
           "focus": "all"
         },
         {
-          "text": "Access points on this bench: Elegoo ESP32 development boards, no screen, each with a Reyax RYLR998 LoRa module; one also has a GT-U7 GPS.",
-          "say": "On this bench, the access points are Elegoo E S P 32 development boards, with no screen. Each one has a Reyax R Y L R 998 LoRa module wired on, and one of them also has a G T U 7 GPS, for the time and its location.",
-          "focus": "aps"
-        },
-        {
-          "text": "Handhelds on this bench: CYD-style touchscreen boards (2.8, 3.2 and 4-inch) and the Freenove FNK0104B (2.8-inch, ESP32-S3).",
-          "say": "The handhelds are off-the-shelf touchscreen boards: C Y D style displays, at two point eight, three point two, and four inches, and the Freenove F N K zero one zero four B, a two point eight inch board with an E S P 32 S 3 chip, a microphone and a speaker.",
-          "focus": "handhelds"
-        },
-        {
           "text": "After a one-time setup, access points find each other and form the network on their own.",
           "say": "A few access points find each other, and form the network on their own. The only setup is once, when each board is installed: it is given the grid's keys.",
           "focus": "aps"
@@ -154,6 +144,49 @@
           "text": "It keeps one connection open to that access point; if that one goes, it finds another by itself (D12, D54).",
           "say": "It keeps one connection open to that access point. If that access point goes away, it finds another one by itself, as you will see in a moment.",
           "focus": "handhelds"
+        }
+      ]
+    },
+    {
+      "id": "setup",
+      "part": "What you will see",
+      "title": "The boards on this bench",
+      "view": "map",
+      "lead": "Before the demo, the hardware on this bench. Their names are on the diagram.",
+      "points": [
+        {
+          "text": "Three access points, Everest, Fuji and Denali: Elegoo ESP32 development boards with no screen, each with a Reyax RYLR998 LoRa module. Everest also has a GT-U7 GPS.",
+          "say": "Three access points: Everest, Fuji, and Denali. Each is an Elegoo E S P 32 development board, with no screen, and a Reyax R Y L R 998 LoRa module wired on. Everest also has a G T U 7 GPS, for the time and its location."
+        },
+        {
+          "text": "Bluey: a Hosyond 3.2-inch ESP32 display, with a speaker and no microphone.",
+          "say": "Six handhelds, all off-the-shelf touchscreen boards of the kind called C Y D. Bluey is a Hosyond three point two inch display, with a speaker, and no microphone."
+        },
+        {
+          "text": "Chase and Marshall: LCDWIKI 2.8-inch ESP32 displays. Big Pepa: an LCDWIKI 4-inch.",
+          "say": "Chase and Marshall are LCD wiki two point eight inch displays, and Big Pepa is the four inch one."
+        },
+        {
+          "text": "Channi and Jolly: Freenove FNK0104B, 2.8-inch, ESP32-S3, with a microphone, a speaker, and a LoRa module.",
+          "say": "Channi and Jolly are Freenove F N K zero one zero four B boards: two point eight inches, with the faster E S P 32 S 3 chip, a microphone, a speaker, and their own LoRa module."
+        },
+        {
+          "text": "Nothing here is custom hardware: the modules are wired onto boards anyone can buy.",
+          "say": "Nothing here is custom hardware. The modules are wired onto boards anyone can buy."
+        }
+      ],
+      "media": [
+        {
+          "file": "bench-wide.jpg",
+          "caption": "The whole bench"
+        },
+        {
+          "file": "handhelds-row.jpg",
+          "caption": "The six handhelds"
+        },
+        {
+          "file": "ap-lora.jpg",
+          "caption": "An access point with its LoRa module"
         }
       ]
     },
