@@ -75,6 +75,7 @@ ol.chapters .na { margin-left: auto; font-size: 10px; color: var(--muted); }
 .legend { position: absolute; inset: auto auto 10px 14px; width: auto; height: auto; display: flex; gap: 14px; color: var(--muted); font-size: 13px; }
 .legend span::before { content: ""; display: inline-block; width: 18px; height: 0; margin-right: 6px; vertical-align: middle; border-top: 3px solid var(--wifi); }
 .legend span.l::before { border-top: 3px dashed var(--lora); }
+.legend em { font-style: normal; }
 table.hw { position: static; width: 100%; height: auto; border-collapse: collapse; font-size: 16px; }
 .hwwrap { overflow: auto; padding: 14px 18px; }
 table.hw th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
@@ -368,6 +369,7 @@ function show(i) {
   bulletsOf(c).forEach(t => { const li = document.createElement("li"); li.textContent = t; $("body").appendChild(li); });
   $("slide").className = "slide" + (c.view === "map" || !c.view ? "" : " compact");
   setView(logsOn ? "logs" : (c.view || "map"));
+  if ((c.view || "map") === "diagram") focusOn(c.focus || (c.points && c.points[0] && c.points[0].focus) || "all");
   showMedia(c);
   $("caption").textContent = st.live && st.why ? "This live demo needs setup: " + st.why + "." : "";
   renderChapters(); renderControls();
@@ -451,6 +453,45 @@ function toggleLogs() {
 }
 $("logsbtn").onclick = toggleLogs;
 
+// ---- the site's diagram, zoomed to what is being said ----
+// Regions of assets/network-diagram.svg (viewBox 0 0 960 680), named for what they show. If the diagram
+// is redrawn, these are the numbers to move.
+const FOCUS = {
+  all:       [0, 0, 960, 680],
+  aps:       [100, 175, 760, 538],     // the ring of access points and the hops between them
+  main:      [320, 130, 330, 234],     // MAIN, with its GPS and LoRa
+  handhelds: [630, 270, 330, 234],     // one access point and the handhelds on it
+  lora:      [60, 200, 840, 470],      // the three LoRa access points and the arcs between them
+  gps:       [60, 0, 840, 300],        // the satellites: time and location, optional
+  watch:     [0, 120, 360, 255],       // the laptop watching over Bluetooth
+  offline:   [250, 0, 360, 255],       // "no Internet"
+};
+let diagramSvg = null, vbNow = FOCUS.all.slice(), vbTween = null;
+async function loadDiagram() {
+  if (diagramSvg) return diagramSvg;
+  const text = await fetch("/assets/network-diagram.svg").then(r => r.text());
+  const holder = document.createElement("div");
+  holder.innerHTML = text;
+  diagramSvg = holder.querySelector("svg");
+  diagramSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+  diagramSvg.style.background = "#02040A";
+  return diagramSvg;
+}
+function focusOn(name) {
+  const to = FOCUS[name] || FOCUS.all;
+  const from = vbNow.slice(), t0 = performance.now(), dur = 1400;
+  const ease = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+  if (vbTween) clearInterval(vbTween);
+  // A timer rather than animation frames: a tab that is not in front gets no frames, and the zoom must
+  // still land where the narration is.
+  vbTween = setInterval(() => {
+    const k = Math.min(1, (performance.now() - t0) / dur), e = ease(k);
+    vbNow = from.map((v, i) => v + (to[i] - v) * e);
+    if (diagramSvg) diagramSvg.setAttribute("viewBox", vbNow.join(" "));
+    if (k >= 1) { clearInterval(vbTween); vbTween = null; }
+  }, 16);
+}
+
 let viewNow = null;
 function setView(kind) {
   const v = $("view");
@@ -463,7 +504,8 @@ function setView(kind) {
     svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "The grid: access points, their links, and the handhelds on each");
     v.appendChild(svg);
     const lg = document.createElement("div"); lg.className = "legend";
-    lg.innerHTML = "<span>Wi-Fi link</span><span class='l'>LoRa link</span>";
+    lg.innerHTML = state.untethered ? "<span>Wi-Fi link</span><em>LoRa links show once the boards are on their cables; the Bluetooth beacon does not carry them</em>"
+                                    : "<span>Wi-Fi link</span><span class='l'>LoRa link</span>";
     v.appendChild(lg);
     drawMap();
   } else if (kind === "hardware") {
@@ -489,6 +531,12 @@ function setView(kind) {
   } else if (kind === "watch") {
     if (watchUrl) { const f = document.createElement("iframe"); f.src = watchUrl; f.title = "Grid watch"; v.appendChild(f); }
     else v.innerHTML = "<div class='empty'>The Bluetooth view (tools/grid_watch.py) starts with the boards.</div>";
+  } else if (kind === "diagram") {
+    loadDiagram().then(svg => {
+      if (viewNow !== "diagram") return;
+      v.innerHTML = ""; v.appendChild(svg);
+      svg.setAttribute("viewBox", vbNow.join(" "));
+    });
   } else if (kind === "logs") {
     const box = document.createElement("div"); box.className = "logs"; v.appendChild(box);
     drawLogsNow();
@@ -645,9 +693,10 @@ async function present(i) {
   await sleep(PACE.title);
   if (!playing) { revealAll(); return; }
   if (c.points) {
-    if (c.lead) { await say(c.lead, 0, true); await sleep(PACE.afterLead); }
+    if (c.lead) { if (c.lead_focus) focusOn(c.lead_focus); await say(c.lead, 0, true); await sleep(PACE.afterLead); }
     for (let k = 0; k < c.points.length && playing; k++) {
       reveal(k);
+      if (c.points[k].focus && viewNow === "diagram") focusOn(c.points[k].focus);
       await say(c.points[k].say, 0, true);
       await sleep(PACE.afterPoint);
     }
@@ -655,8 +704,11 @@ async function present(i) {
     // One narration for the whole chapter: its points appear in step with its sentences.
     const parts = sentences(c.say || "").map(s => s.trim()).filter(Boolean);
     const n = $("body").children.length;
+    const focuses = c.focuses || [];
     for (let k = 0; k < parts.length && playing; k++) {
       for (let j = 0; j < Math.ceil((k + 1) * n / parts.length); j++) reveal(j);
+      const f = focuses[Math.floor(k * focuses.length / parts.length)];
+      if (f && viewNow === "diagram") focusOn(f);
       await say(parts[k], 0, true);
       await sleep(PACE.sentence);
     }

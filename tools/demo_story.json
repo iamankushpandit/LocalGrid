@@ -1,28 +1,32 @@
 {
-  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown. A chapter may give 'lead' and 'points' instead of 'say' and 'body': the title shows alone while the lead is said, then each point appears as its own line is said.",
+  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown. A chapter may give 'lead' and 'points' instead of 'say' and 'body': the title shows alone while the lead is said, then each point appears as its own line is said. 'view': 'diagram' shows the site's own assets/network-diagram.svg; 'focus' on a point, 'lead_focus', or a chapter's 'focuses' (spread over its sentences) zoom it to a named region (FOCUS in the page).",
   "chapters": [
     {
       "id": "intro",
       "part": "LocalGrid",
       "title": "A messaging network you build yourself",
-      "view": "map",
+      "view": "diagram",
       "lead": "This is LocalGrid.",
       "points": [
         {
           "text": "Made from small, inexpensive ESP32 boards.",
-          "say": "It is a messaging network you build yourself, from small, inexpensive boards."
+          "say": "It is a messaging network you build yourself, from small, inexpensive boards.",
+          "focus": "all"
         },
         {
           "text": "Access points find each other and form the network on their own.",
-          "say": "A few access points find each other, and form the network on their own. Nobody configures them."
+          "say": "A few access points find each other, and form the network on their own. Nobody configures them.",
+          "focus": "aps"
         },
         {
           "text": "Touchscreen handhelds send text, alerts and voice across it.",
-          "say": "People carry touchscreen handhelds, and send text, alerts and voice to each other across it."
+          "say": "People carry touchscreen handhelds, and send text, alerts and voice to each other across it.",
+          "focus": "handhelds"
         },
         {
           "text": "No Internet, no phones, no accounts.",
-          "say": "It needs no Internet, no phone, and no account. Everything stays on the network itself."
+          "say": "It needs no Internet, no phone, and no account. Everything stays on the network itself.",
+          "focus": "offline"
         }
       ],
       "media": [
@@ -34,13 +38,14 @@
           "file": "handhelds-row.jpg",
           "caption": "Every handheld model, side by side"
         }
-      ]
+      ],
+      "lead_focus": "all"
     },
     {
       "id": "how",
       "part": "How it works",
       "title": "Three radios, each with a job",
-      "view": "map",
+      "view": "diagram",
       "media": [
         {
           "file": "bench-wide.jpg",
@@ -51,25 +56,31 @@
       "points": [
         {
           "text": "Wi-Fi (ESP-NOW) between access points, and each handheld's link to its access point (D2).",
-          "say": "Wi-Fi carries the everyday traffic: between access points, and from each handheld to its access point."
+          "say": "Wi-Fi carries the everyday traffic: between access points, and from each handheld to its access point.",
+          "focus": "aps"
         },
         {
           "text": "LoRa: a second, much longer path between access points, and to handhelds that have a module (D71, D77).",
-          "say": "LoRa is a second, longer path, between access points, and to handhelds that have a module."
+          "say": "LoRa is a second, longer path, between access points, and to handhelds that have a module.",
+          "focus": "lora"
         },
         {
           "text": "Bluetooth: a laptop or phone watches the grid's health without joining it (D68).",
-          "say": "Bluetooth lets a laptop or a phone watch the network, without ever joining it."
+          "say": "Bluetooth lets a laptop or a phone watch the network, without ever joining it.",
+          "focus": "watch"
         },
         {
           "text": "No master: every access point holds the whole grid's settings, groups and time (D45, D46).",
-          "say": "There is no master. Every access point holds a full copy of the settings, the groups and the time."
+          "say": "There is no master. Every access point holds a full copy of the settings, the groups and the time.",
+          "focus": "main"
         },
         {
           "text": "Handhelds spread themselves across access points, and move when one disappears (D54).",
-          "say": "And the handhelds spread themselves across the access points. The map is live: these boards, right now."
+          "say": "And the handhelds spread themselves across the access points.",
+          "focus": "handhelds"
         }
-      ]
+      ],
+      "lead_focus": "all"
     },
     {
       "id": "untether",
@@ -177,7 +188,10 @@
         "This demo uses the same engine, with a script instead of a random schedule."
       ],
       "say": "So that is the product. Now, how we know it holds up. The central claim is that it heals itself, so it was tested by attacking it. A framework kills access points and handhelds at random, cuts their power and turns their radios off, for hours, while the handhelds keep messaging each other. In one ten hour run, fifty five faults were injected and all fifty five recovered without a human. It also found five real bugs that code review never could.",
-      "view": "map"
+      "view": "diagram",
+      "focuses": [
+        "aps"
+      ]
     },
     {
       "id": "bench",
@@ -232,7 +246,15 @@
         "Bounded by design: fixed-size tables, no memory taken per message, and a logged result when anything fills up."
       ],
       "say": "A few ideas hold it together. Information is sticky: anything one device learns survives that device restarting, and is shared with its neighbours, with the newest version winning. A device that restarts gets its state back from the ones that stayed up. One-to-one messages are encrypted end to end, so the access points carry them without being able to read them. Emergencies go out over Wi-Fi and LoRa at the same time. And everything is bounded: fixed tables, no memory taken per message, and a defined result when something fills up.",
-      "view": "map"
+      "view": "diagram",
+      "focuses": [
+        "aps",
+        "aps",
+        "aps",
+        "handhelds",
+        "lora",
+        "all"
+      ]
     },
     {
       "id": "decisions",
@@ -247,7 +269,10 @@
         "D103: faults are injected through a cable and no other way; nothing in the firmware can break the grid on request."
       ],
       "say": "Every decision was made in writing first, and there are more than a hundred of them. A few that shaped it. Pure E S P I D F, for full control of the radios. Testing happens on the real boards, never on a laptop pretending to be one. No master access point. The handheld screens are drawn by our own small renderer, to leave memory for the radios. Each device holds its own grid's keys, and only installs updates signed by the release key it was given. And the fault injection you are about to see goes through a cable: there is nothing in the firmware that can break the grid on request.",
-      "view": "map"
+      "view": "diagram",
+      "focuses": [
+        "all"
+      ]
     },
     {
       "id": "d-tour",
@@ -430,13 +455,20 @@
         "A self test at every handheld start (D24); the firmware every device runs shown on every screen (D110)."
       ],
       "say": "There is more than we have time to break today. Groups made on the handhelds, while the grid runs. A GPS that gives the grid its time and location, and handhelds that share where they are and leave a trail. Voice notes that cross LoRa. A small alert unit that does nothing but show alerts and raise an S O S. And a self test every time a handheld starts.",
-      "view": "map"
+      "view": "diagram",
+      "focuses": [
+        "handhelds",
+        "gps",
+        "lora",
+        "handhelds",
+        "all"
+      ]
     },
     {
       "id": "uses",
       "part": "Where it fits",
       "title": "Some places it could be used",
-      "view": "map",
+      "view": "diagram",
       "lead": "A few places it could be used.",
       "points": [
         {
@@ -455,6 +487,9 @@
           "text": "Anywhere people spread out and want a network of their own.",
           "say": "Anywhere people spread out, and want a network of their own."
         }
+      ],
+      "focuses": [
+        "all"
       ]
     },
     {
@@ -468,7 +503,10 @@
         "The handhelds are development boards; purpose-built handhelds and enclosures are still to come."
       ],
       "say": "And to be straight about it. This is a prototype. Every test so far ran on one bench, with every board in range. We have not measured range yet, so we do not claim any. A message to someone who cannot be reached is refused, and the sender is told, rather than held for later. And the handhelds are development boards for now.",
-      "view": "map"
+      "view": "diagram",
+      "focuses": [
+        "all"
+      ]
     },
     {
       "id": "end",
@@ -480,7 +518,10 @@
         "Board ports, testing on your own radios, and the admin page are the best places to start."
       ],
       "say": "LocalGrid is open source, under the G P L, including every design document and decision. It is on GitHub, at i am ankush pandit, slash LocalGrid. If you build one, we would love to hear how far it reaches. Thank you for watching.",
-      "view": "map"
+      "view": "diagram",
+      "focuses": [
+        "all"
+      ]
     }
   ]
 }

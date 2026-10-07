@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The site answers common questions (FAQ)
+
+- A Questions section on the project site (`site/index.template.html`), linked from the top bar:
+  what LocalGrid is and who it is for, how it differs from LoRa meshes, walkie-talkies and phone
+  apps, hardware, capacity, range (not measured, and it says so), batteries, LoRa radio rules,
+  encryption, who sees positions, failures and power loss, no store-and-forward, testing, install,
+  signed updates, licence and contributing. Every answer cites the decision or document behind it.
+- Native `<details>` blocks, so the section needs no script.
+- The LoRa section no longer says LoRa is being built: access points use it with acknowledgement
+  and fallback (D104, D105), and handhelds with a module use it too (D77, D80, D109).
+
 ### A demo that runs itself (`tools/demo.py`, `docs/demo.md`)
 
 - A narrated presentation on a local web page that explains the project (what it is, why, how it
