@@ -268,6 +268,24 @@ FIRST_RUN = """<script>
     out.fw.msg = txt("fw-msg");
     step("the card then says what this AP carries", await until(() => /hh-test/.test(txt("fw-carried"))) && txt("fw-carried"));
     out.fw.carried_after = txt("fw-carried");
+    out.fw.others = txt("fw-others");
+    out.fw.withdraw_shown = shown($("fw-withdraw"));
+    /* D111: another chip's file, while this AP holds the only copy of the first: the AP refuses, in its words */
+    await pick(lgfw(true, "H", 3, 7100, "hh-c6", 2048));
+    $("fw-form").requestSubmit();
+    await until(() => /only one carrying/.test(txt("fw-msg")));
+    out.fw.only_copy = txt("fw-msg");
+    /* withdrawing: asked first, then gone here */
+    window.__confirm.answer = false; window.__confirm.asked = [];
+    $("fw-withdraw").click(); await pause(300);
+    out.fw.withdraw_declined_kept = /hh-test/.test(txt("fw-carried"));
+    window.__confirm.answer = true;
+    $("fw-withdraw").click();
+    step("withdrawing it is asked first, then done", await until(() => txt("fw-carried") === "none") && txt("fw-msg"));
+    out.fw.withdraw_msg = txt("fw-msg");
+    out.fw.withdraw_asked = window.__confirm.asked;
+    out.fw.withdraw_hidden_after = !shown($("fw-withdraw"));
+    window.__confirm.answer = false;
 
     /* ---- Settings: the admin password ---- */
     step("the Settings tab has the password form", await until(() => shown($("password-form"))));
@@ -318,6 +336,12 @@ RETURNING = """<script>
     out.overview_hidden = !shown($("time-card")) && !shown($("grid-card"));
     out.zone_hint_default = (tab("overview"), await until(() => shown($("time-card"))), txt("zone-hint"));
     out.password_field = $("login-password").value;
+    await fetch("/test-control", { method: "POST", body: JSON.stringify({ derive: true }) });
+    await until(() => /worked out/.test(txt("zone-hint")), 15000);
+    out.zone_hint_derived = txt("zone-hint");
+    await fetch("/test-control", { method: "POST", body: JSON.stringify({ no_rule: true }) });
+    await until(() => /does not know/.test(txt("zone-hint")), 15000);
+    out.zone_hint_no_rule = txt("zone-hint");
   } catch (e) {
     out.driver_error = String(e && e.stack || e);
   }
@@ -358,6 +382,7 @@ class StandInAP:
         self.gps_fix = True
         self.power = 22
         self.carried = None      # D110: the handheld update this stand-in was given, as the status says it
+        self.derived = False     # the zone rule is one the AP worked out from the zone's name (D100)
         self.uploads = []        # (bytes, X-CSRF header, had the session cookie)
         self.token = self.csrf = None
         self.posts = []          # (path, body, X-CSRF header, had the session cookie, when)
@@ -376,6 +401,7 @@ class StandInAP:
         s["gps"]["fix"] = self.gps_fix
         s["lora"]["power"] = self.power
         s["firmware"]["carried"] = self.carried
+        s["posix_tz_derived"] = self.derived
         for d in s["devices"]:
             d["name"] = next((u["name"] for u in self.users if u["device"] == d["device"]), d["name"])
         return json.dumps(s).encode("utf-8")
@@ -481,8 +507,13 @@ def make_handler(ap, page_bytes):
                 ap.done.set()
                 return self._send(b"{}")
             if path == "/test-control":
-                if json.loads(raw.decode("utf-8")).get("expire"):
+                control = json.loads(raw.decode("utf-8"))
+                if control.get("expire"):
                     ap.token = ap.csrf = None     # as an AP that restarted, or an admin who changed the password
+                if control.get("derive"):
+                    ap.derived = True             # the rule was worked out from the zone's name, not saved
+                if control.get("no_rule"):
+                    ap.derived, ap.posix_tz = False, ""   # a zone this AP has no rule for
                 return self._send(b"{}")
             if path == "/api/update":
                 # D110: the body is the update file's bytes. The real AP checks the signature; this one
@@ -494,6 +525,11 @@ def make_handler(ap, page_bytes):
                     return self._error(403, "Request blocked. Reload the page and try again.")
                 if len(raw) <= 192 or raw[:4] != b"LGFW":
                     return self._error(400, "That is not a LocalGrid update file.")
+                if raw[5:6] == b"H" and ap.carried and ap.carried["chip"] != raw[6] and \
+                        not any(x["chip"] == ap.carried["chip"] for x in ap.sample["firmware"]["neighbours"]):
+                    return self._error(409, "This access point is the only one carrying the handheld update for chip "
+                                       f"{ap.carried['chip']} ({ap.carried['version']}). Give this file to another access "
+                                       "point, or withdraw that one first.")
                 if raw[5:6] == b"H":
                     version = raw[56:88].split(b"\0")[0].decode("ascii", "replace")
                     ap.carried = {"serial": int.from_bytes(raw[8:12], "little"), "version": version, "chip": raw[6]}
@@ -532,6 +568,11 @@ def make_handler(ap, page_bytes):
             if path == "/api/logout":
                 ap.token = ap.csrf = None
                 return self._ok()
+            if path == "/api/withdraw":
+                if not ap.carried:
+                    return self._error(409, "This access point carries no handheld update.")
+                ap.carried = None
+                return self._ok(note="Withdrawn here, and every access point has been told to stop offering it.")
             if path == "/api/lora":
                 level = {"full": 22, "medium": 14, "low": 5}.get(body.get("power"))
                 if level is None:
@@ -636,7 +677,8 @@ def judge_first_run(ap, started):
     last = trail[-1] if trail else {"cells": [], "links": []}
     aps = n.get("aps") or [[], [], []]
     hostile_stripped = HOSTILE.replace("<", "").replace("&", "")
-    after_login = [x for x in ap.refused if x[1] not in ("/api/login", "/api/setup", "/api/time", "/api/password")]
+    after_login = [x for x in ap.refused if x[1] not in ("/api/login", "/api/setup", "/api/time", "/api/password")
+                   and x != ("POST", "/api/update", 409)]   # the only-copy refusal is asked for on purpose (D111)
     checks = common(ap) + [
         # setup
         ("setup shows the zone and a running clock taken from this device", bool(r.get("setup_zone_shown")) and r.get("setup_clock_running"),
@@ -733,8 +775,11 @@ def judge_first_run(ap, started):
          and power.get("marked_after") == ["low"] and ap.power == 5 and "kept across restarts" in (power.get("msg") or ""),
          (power.get("after"), power.get("marked_after"), power.get("msg"))),
         # handhelds
+        ("each handheld's firmware is shown as it reported it, or that it has not",
+         [r[3] if len(r) > 3 else None for r in h.get("devices") or []] == ["2026.10.6 (serial 6000)", "installed by cable", "not reported"],
+         h.get("devices")),
         ("the handhelds are listed with whether each is connected and to which AP",
-         h.get("devices") == [["Ana", "ONLINE", "MAIN"], ["Priya", "ONLINE", "SOUTH"], [hostile_stripped, "OFFLINE", "--"]], h.get("devices")),
+         [r[:3] for r in h.get("devices") or []] == [["Ana", "ONLINE", "MAIN"], ["Priya", "ONLINE", "SOUTH"], [hostile_stripped, "OFFLINE", "--"]], h.get("devices")),
         ("the groups are listed with their members by name", h.get("groups") == [["Cooks", "Ana, Priya"], ["Lake walk", f"Priya, {HOSTILE}"]],
          h.get("groups")),
         ("a name that is markup is shown as the text it is, in every list", h.get("markup_in_tables") == 0
@@ -779,8 +824,19 @@ def judge_first_run(ap, started):
         ("the page reads the update's own header and says what it is",
          fw.get("what") == "A handheld update for ESP32: hh-test, serial 7000, 4 KB." and fw.get("send_enabled") is True, fw.get("what")),
         ("the file went to the AP whole, with the session and its CSRF token",
-         len(good_uploads) == 1 and len(good_uploads[0][0]) == 192 + 4096 and good_uploads[0][2]
+         len(good_uploads) == 2 and len(good_uploads[0][0]) == 192 + 4096 and good_uploads[0][2]
          and good_uploads[0][0][192:200] == bytes(range(192, 200)), [(len(u[0]), bool(u[1]), u[2]) for u in ap.uploads]),
+        ("what the other access points carry is listed, with which AP",
+         fw.get("others") == "ESP32-S3 serial 6100 (SOUTH)", fw.get("others")),
+        ("a file that would push out the grid's only copy of another chip's update is refused, in the AP's words",
+         (fw.get("only_copy") or "").startswith("This access point is the only one carrying the handheld update for chip 1"),
+         fw.get("only_copy")),
+        ("Withdraw is offered while something is carried, asks first, and saying no keeps it",
+         fw.get("withdraw_shown") is True and fw.get("withdraw_declined_kept") is True and len(fw.get("withdraw_asked") or []) == 2,
+         (fw.get("withdraw_shown"), fw.get("withdraw_declined_kept"), fw.get("withdraw_asked"))),
+        ("withdrawn, the card says nothing is carried, the button goes, and the AP's answer is shown",
+         (fw.get("withdraw_msg") or "").startswith("Withdrawn here") and fw.get("withdraw_hidden_after") is True,
+         (fw.get("withdraw_msg"), fw.get("withdraw_hidden_after"))),
         ("the AP's answer is shown, and the card then says what it carries",
          "carrying it" in (fw.get("msg") or "") and fw.get("carried_after") == "carrying hh-test (serial 7000) for ESP32 handhelds",
          (fw.get("msg"), fw.get("carried_after"))),
@@ -816,6 +872,12 @@ def judge_returning(ap):
         ("the zone handhelds use is the one the AP holds", r.get("zone_hint_default") == "Handhelds show local time for Europe/Berlin (CET-1CEST,M3.5.0,M10.5.0/3).",
          r.get("zone_hint_default")),
         ("the password is not left in its field", r.get("password_field") == "", r.get("password_field")),
+        ("a rule the AP worked out from the zone's name is shown as that, not as UTC",
+         r.get("zone_hint_derived") == "Handhelds show local time for Europe/Berlin (CET-1CEST,M3.5.0,M10.5.0/3, "
+                                       "worked out by this AP from the zone's name).", r.get("zone_hint_derived")),
+        ("a zone the AP has no rule for says so, and what to press",
+         r.get("zone_hint_no_rule") == "Handhelds show UTC: this AP does not know the rule for Europe/Berlin. "
+                                       "Press \"Use this device's time\" once to send it.", r.get("zone_hint_no_rule")),
         ("the password went to the AP once", [p[1] for p in ap.posts if p[0] == "/api/login"] == [{"password": PASSWORD}], len(ap.posts)),
         ("nothing was changed on the AP", [p[0] for p in ap.posts] == ["/api/login"], [p[0] for p in ap.posts]),
     ]

@@ -1328,6 +1328,89 @@ static void test_trails_from_flash(void)
     sim_destroy(s);
 }
 
+/*
+ * D110: a handheld tells its AP which firmware it runs, and every AP comes to know it, so the admin page
+ * and the dashboard can list every handheld's version. Only the handheld itself may say so.
+ */
+static void test_device_fw(void)
+{
+    /* The body: exact length, a handheld, a known chip, printable text padded with zeros. */
+    lg_devfw_t v = { .device = 7, .serial = 6000, .chip = 1, .version = "2026.10.6" };
+    uint8_t body[LG_DEVFW_LEN + 1];
+    CHECK_EQ(lg_devfw_enc(&v, body), LG_DEVFW_LEN);
+    lg_devfw_t back;
+    CHECK(lg_devfw_dec(body, LG_DEVFW_LEN, &back));
+    CHECK(back.device == 7 && back.serial == 6000 && back.chip == 1 && strcmp(back.version, "2026.10.6") == 0);
+    CHECK(!lg_devfw_dec(body, LG_DEVFW_LEN - 1u, &back));
+    CHECK(!lg_devfw_dec(body, LG_DEVFW_LEN + 1u, &back));
+    body[8] = 4;
+    CHECK(!lg_devfw_dec(body, LG_DEVFW_LEN, &back));            /* no such chip */
+    body[8] = 1;
+    body[9 + 12] = 'x';                                          /* text after the padding */
+    CHECK(!lg_devfw_dec(body, LG_DEVFW_LEN, &back));
+    body[9 + 12] = 0;
+    body[9] = 0x07;                                              /* not printable */
+    CHECK(!lg_devfw_dec(body, LG_DEVFW_LEN, &back));
+    v.device = LG_NODE_ID_BASE | 1u;                             /* an AP is not a handheld */
+    lg_devfw_enc(&v, body);
+    CHECK(!lg_devfw_dec(body, LG_DEVFW_LEN, &back));
+
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    CHECK_EQ(lg_client_send_devfw(cl(s, DAD), 6000, 9, "x"), LG_ERR_ARG);
+    CHECK_EQ(lg_client_send_devfw(cl(s, DAD), 6000, 1, NULL), LG_ERR_ARG);
+    /* Dad on A says what he runs: every AP holds it, under his number whatever the body tried. */
+    CHECK_EQ(lg_client_send_devfw(cl(s, DAD), 6000, 1, "2026.10.6"), LG_OK);
+    CHECK(sim_pump(s));
+    for (int i = 0; i < SIM_NODES; i++) {
+        const lg_devfw_t *held = lg_node_devfw(&s->nodes[i].node, LG_PROTO_DAD);
+        CHECK(held != NULL && held->serial == 6000 && held->chip == 1 && strcmp(held->version, "2026.10.6") == 0);
+    }
+    CHECK(lg_node_devfw(&s->nodes[0].node, LG_PROTO_EMMA) == NULL);   /* nobody has said for Emma */
+
+    /* The same again changes nothing and goes nowhere. */
+    uint32_t fwd = s->nodes[1].node.stats.forwarded;
+    CHECK_EQ(lg_client_send_devfw(cl(s, DAD), 6000, 1, "2026.10.6"), LG_OK);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[1].node.stats.forwarded, fwd);
+
+    /* Flashed by cable: serial 0, no version. A change, so it is taken everywhere. */
+    CHECK_EQ(lg_client_send_devfw(cl(s, DAD), 0, 1, ""), LG_OK);
+    CHECK(sim_pump(s));
+    const lg_devfw_t *c = lg_node_devfw(&s->nodes[2].node, LG_PROTO_DAD);
+    CHECK(c != NULL && c->serial == 0 && c->version[0] == '\0');
+
+    /* A handheld cannot speak for another: a body naming Emma, sent on Dad's session, is refused. */
+    lg_devfw_t forged = { .device = LG_PROTO_EMMA, .serial = 1, .chip = 1, .version = "fake" };
+    uint8_t fb[LG_DEVFW_LEN];
+    lg_devfw_enc(&forged, fb);
+    lg_env_t e;
+    memset(&e, 0, sizeof(e));
+    e.type = LG_T_DEVICE_FW;
+    e.scope = LG_SCOPE_SYSTEM;
+    e.origin_id = LG_PROTO_DAD;
+    e.origin_boot = 99;
+    e.origin_seq = 1;
+    e.ttl = LG_TTL_DEFAULT;
+    uint8_t frame[LG_FRAME_MAX];
+    int fl = lg_frame_build(&e, fb, sizeof(fb), frame, sizeof(frame));
+    CHECK(fl > 0);
+    uint32_t rejected = s->nodes[0].node.stats.rejected;
+    uint32_t session = LG_PROTO_DAD;
+    lg_node_on_session_frame(&s->nodes[0].node, &session, frame, (size_t)fl);
+    CHECK_EQ(s->nodes[0].node.stats.rejected, rejected + 1u);
+    CHECK(lg_node_devfw(&s->nodes[0].node, LG_PROTO_EMMA) == NULL);
+
+    /* An AP that missed it learns it when a link comes up (D48). */
+    memset(&s->nodes[2].node.devfw, 0, sizeof(s->nodes[2].node.devfw));
+    lg_node_on_neighbor_up(&s->nodes[1].node, 2);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_devfw(&s->nodes[2].node, LG_PROTO_DAD) != NULL);
+    sim_destroy(s);
+}
+
 static void test_trails(void)
 {
     sim_t *s = make_chain();
@@ -3566,6 +3649,7 @@ void test_messaging(void)
     test_trail_body();
     test_trails();
     test_trails_from_flash();
+    test_device_fw();
     test_fw_frames();
     test_fw_to_a_handheld();
     test_voice_body();

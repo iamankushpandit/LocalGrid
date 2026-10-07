@@ -163,6 +163,7 @@ typedef struct {
     lg_position_t       positions[LG_POS_SLOTS];            /* by lg_position_slot; fix_time 0 = none; RAM only (D65) */
     lg_trail_t          trails[LG_TRAIL_SLOTS];             /* fix_time 0 = empty; the glue keeps a copy in flash (D106) */
     uint32_t            trail_changes;                      /* counts every trail taken, so the glue knows to save */
+    lg_devfw_t          devfw[LG_MAX_DEVICES];              /* D110: each handheld's firmware, by roster place; RAM only */
     uint32_t            trail_evictions;                    /* a full table gave its stalest trail to a fresher one */
     uint32_t            last_broadcast_ms[LG_MAX_DEVICES];  /* indexed by roster user index */
     bool                has_broadcast[LG_MAX_DEVICES];
@@ -363,6 +364,8 @@ int lg_node_send_fw_client(lg_node_t *n, uint32_t device, uint8_t type, const ui
 bool lg_node_restore_trail(lg_node_t *n, const lg_trail_t *t);
 /* The trail in slot `i` of the table, or NULL if that slot is empty. For saving them all. */
 const lg_trail_t *lg_node_trail_at(const lg_node_t *n, size_t i);
+/* D110: the firmware a handheld last said it runs, or NULL if this AP has not been told. */
+const lg_devfw_t *lg_node_devfw(const lg_node_t *n, uint32_t device);
 /* The trail held for a handheld, or NULL. */
 const lg_trail_t *lg_node_trail(const lg_node_t *n, uint32_t subject);
 /* How many trails are held. */

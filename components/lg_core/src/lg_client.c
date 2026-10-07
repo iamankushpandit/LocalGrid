@@ -289,6 +289,29 @@ int lg_client_send_fw_get(lg_client_t *c, const uint8_t *body, size_t len)
     return send_frame(c, &e, body, len) ? LG_OK : LG_ERR_SHORT;
 }
 
+int lg_client_send_devfw(lg_client_t *c, uint32_t serial, uint8_t chip, const char *version)
+{
+    if (c == NULL || chip == 0 || chip > 3u || version == NULL) {
+        return LG_ERR_ARG;
+    }
+    lg_devfw_t v;
+    memset(&v, 0, sizeof(v));
+    v.device = c->device;
+    v.serial = serial;
+    v.chip = chip;
+    for (size_t i = 0; i < LG_DEVFW_VERSION_MAX && version[i] != '\0'; i++) {
+        v.version[i] = version[i] >= 0x20 && version[i] <= 0x7E ? version[i] : '?';
+    }
+    uint8_t body[LG_DEVFW_LEN];
+    size_t blen = lg_devfw_enc(&v, body);
+    if (!c->connected || !c->registered) {
+        return LG_ERR_SHORT;   /* a session's fact: not put on LoRa */
+    }
+    lg_env_t e;
+    base_env(c, &e, LG_T_DEVICE_FW, LG_SCOPE_SYSTEM, c->device);
+    return send_frame(c, &e, body, blen) ? LG_OK : LG_ERR_SHORT;
+}
+
 const lg_trail_t *lg_client_trail(const lg_client_t *c, uint32_t subject)
 {
     return c != NULL && subject != 0 && c->trail.fix_time != 0 && c->trail.subject == subject ? &c->trail : NULL;

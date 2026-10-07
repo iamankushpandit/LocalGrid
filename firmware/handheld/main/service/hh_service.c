@@ -1338,6 +1338,11 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         tr.due = true;       /* D99: and where we have been */
         if (tr.n < LG_TRAIL_POINTS) {
             (void)lg_client_request_trail(&s.client, s.client.device);   /* ... as far as the grid remembers (D53) */
+            {
+                char ver[LG_FWU_VERSION_MAX + 1u];
+                lg_fwu_running_version(ver);
+                (void)lg_client_send_devfw(&s.client, lg_fwu_running_serial(), lg_fwu_this_chip(), ver);   /* D110 */
+            }
         }
         s_on_ap_since_ms = now_ms() | 1u;   /* never 0, which means "not on one" */
         set_problem("");

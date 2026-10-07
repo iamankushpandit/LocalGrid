@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Handheld updates for every chip, shared across the access points (D111)
+
+- Each access point carries one handheld image and the grid shares them out by chip; a handheld is
+  offered the newest update for its chip within reach, and its access point fetches the pieces from
+  the neighbour that carries it.
+- An upload that would push out the grid's only copy of another chip's update is refused, and says so.
+- Withdrawing (`spread drop`, or Withdraw on the admin page) reaches every access point.
+
+### Handhelds report their firmware, and the time-zone hint is right (D110)
+
+- A handheld tells the grid which firmware it runs at every registration; the admin page's and the
+  dashboard's handheld tables show it.
+- The admin page's hint says the zone rule handhelds actually get, including one the access point
+  worked out from the zone's name, and says plainly when it has none.
+- `tools/test_admin_page.py`: 126 checks. On-board tests: 4690 checks, 0 failures.
+
 ### The admin page gives an update, and every screen says what firmware runs (D110)
 
 - **Settings > Firmware** on the admin page: what this access point runs (or "installed by cable"),

@@ -596,6 +596,62 @@ static void handle_client_trail(lg_node_t *n, uint32_t session_device, const lg_
     }
 }
 
+/* ---- firmware each handheld runs (D110) ----------------------------------- */
+
+/* Takes a report that differs from what is held; true if it changed anything (and so goes further). */
+static bool devfw_take(lg_node_t *n, const lg_devfw_t *v)
+{
+    int ui = lg_roster_user_index(n->roster, v->device);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
+        return false;
+    }
+    lg_devfw_t *slot = &n->devfw[ui];
+    if (slot->device == v->device && slot->serial == v->serial && slot->chip == v->chip &&
+        strcmp(slot->version, v->version) == 0) {
+        return false;
+    }
+    *slot = *v;
+    return true;
+}
+
+static void flood_devfw(lg_node_t *n, const lg_devfw_t *v)
+{
+    uint8_t body[LG_DEVFW_LEN];
+    size_t blen = lg_devfw_enc(v, body);
+    lg_env_t e;
+    env_from_node(n, &e, LG_T_DEVICE_FW, LG_SCOPE_SYSTEM, v->device);
+    e.ttl = LG_TTL_DEFAULT;
+    uint8_t buf[LG_FRAME_MAX];
+    int flen = lg_frame_build(&e, body, blen, buf, sizeof(buf));
+    if (flen < 0) {
+        return;
+    }
+    (void)lg_dedup_mark(&n->dedup, e.origin_id, e.origin_boot, e.origin_seq);
+    flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+}
+
+static void handle_client_devfw(lg_node_t *n, uint32_t session_device, const lg_env_t *e, const uint8_t *body)
+{
+    lg_devfw_t v;
+    if (e->scope != LG_SCOPE_SYSTEM || !lg_devfw_dec(body, e->body_len, &v)) {
+        n->stats.malformed++;
+        return;
+    }
+    if (v.device != session_device) {
+        n->stats.rejected++;   /* a handheld speaks for its own firmware only */
+        return;
+    }
+    if (devfw_take(n, &v)) {
+        flood_devfw(n, &v);
+    }
+}
+
+const lg_devfw_t *lg_node_devfw(const lg_node_t *n, uint32_t device)
+{
+    int ui = n != NULL ? lg_roster_user_index(n->roster, device) : -1;
+    return ui >= 0 && ui < (int)LG_MAX_DEVICES && n->devfw[ui].device == device ? &n->devfw[ui] : NULL;
+}
+
 static void handle_client_trail_req(lg_node_t *n, uint32_t session_device, const lg_env_t *e, const uint8_t *body)
 {
     if (e->scope != LG_SCOPE_SYSTEM || e->body_len != LG_TRAIL_REQ_LEN) {
@@ -1218,6 +1274,9 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
     case LG_T_TRAIL_REQ:
         handle_client_trail_req(n, *session_device, &e, body);
         break;
+    case LG_T_DEVICE_FW:
+        handle_client_devfw(n, *session_device, &e, body);
+        break;
     case LG_T_FW_GET:
         /* D107: a handheld asking for bytes of the update this AP carries for it. Its own, by its own
          * session, and never passed on; what the bytes are worth is the release key's to say. */
@@ -1447,6 +1506,17 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
         }
         break;
     }
+    case LG_T_DEVICE_FW: {
+        lg_devfw_t v;
+        if (e.scope != LG_SCOPE_SYSTEM || !lg_devfw_dec(body, e.body_len, &v)) {
+            n->stats.malformed++;
+            break;
+        }
+        if (devfw_take(n, &v)) {   /* only a change goes further */
+            forward(n, &e, body, from_node);
+        }
+        break;
+    }
     case LG_T_TRAIL: {
         lg_trail_t trail;
         if (e.scope != LG_SCOPE_SYSTEM || !lg_trail_dec(body, e.body_len, &trail)) {
@@ -1546,6 +1616,11 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor)
     for (size_t i = 0; i < LG_TRAIL_SLOTS; i++) {
         if (n->trails[i].fix_time != 0) {
             flood_trail(n, &n->trails[i]);
+        }
+    }
+    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {   /* D110 */
+        if (n->devfw[i].device != 0) {
+            flood_devfw(n, &n->devfw[i]);
         }
     }
 }

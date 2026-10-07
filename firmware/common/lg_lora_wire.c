@@ -331,7 +331,7 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
      * what someone said, who is present, where they are and what the time is go first, and the
      * shared state catches up when Wi-Fi returns or the air is quiet.
      */
-    if (e.type == LG_T_GRID_STATE || e.type == LG_T_NAME || e.type == LG_T_TRAIL) {
+    if (e.type == LG_T_GRID_STATE || e.type == LG_T_NAME || e.type == LG_T_TRAIL || e.type == LG_T_DEVICE_FW) {
         /* A trail (D99) is two parts every few seconds while someone walks, and its newest point has
          * usually gone ahead of it as a position: between APs it waits for room like the rest. */
         return LORA_SEND_SPARE_ROOM;

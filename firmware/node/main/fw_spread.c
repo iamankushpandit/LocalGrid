@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "backbone.h"   /* the update frames go one ESP-NOW hop and never by LoRa */
 #include "esp_log.h"
 #include "esp_system.h"
 #include "lg_envelope.h"
@@ -26,6 +27,8 @@ static const char *TAG = "GRID";
 #define REFUSED_WAIT_MS   600000u   /* an update lg_fwupdate refused is not asked for again for this long */
 #define FAILED_WAIT_MS    120000u   /* one that stopped arriving is tried again after this */
 #define RESTART_AFTER_MS  3000u     /* between "it is in the slot" and the restart, so the log line gets out */
+#define NEIGHBOUR_FRESH_MS 180000u  /* D111: what a neighbour carries is believed this long after it last said so */
+#define WITHDRAW_LEN      8u        /* D111: {LAYOUT, 'W', chip, 0, serial u32}: withdrawn up to this serial */
 
 _Static_assert(DATA_HEADER + FW_SPREAD_CHUNK <= LG_FW_BODY_MAX, "a chunk fits the frame the core carries");
 
@@ -60,7 +63,53 @@ static struct {
     uint32_t      wait_until_ms;
     uint32_t      restart_at_ms;     /* nonzero: the update is in its slot, restart then */
     uint32_t      now_ms;
+
+    /*
+     * D111: what each neighbour carries for handhelds, from its offers. One AP holds one handheld image,
+     * and there are three handheld chips, so the grid shares them out: a handheld whose chip another AP
+     * carries is served through its own AP, which asks that neighbour for each piece.
+     */
+    struct {
+        uint8_t  chip;               /* 0: nothing heard */
+        uint32_t serial;
+        uint32_t file_len;
+        uint32_t heard_ms;
+    } nb[LG_MAX_NODES];
+    /* a handheld's piece being fetched from a neighbour on its behalf */
+    uint32_t      proxy_dev;         /* 0 when none */
+    uint16_t      proxy_node;
+    uint32_t      proxy_serial;
+    uint32_t      proxy_offset;
+    uint32_t      proxy_ms;
+    uint32_t      proxied_pieces;
 } s = { .serve_node = LG_NODE_NONE };
+
+static bool nb_fresh(uint16_t n)
+{
+    return n < LG_MAX_NODES && s.nb[n].chip != 0 && s.now_ms - s.nb[n].heard_ms < NEIGHBOUR_FRESH_MS &&
+           lgbb_is_neighbor(n);
+}
+
+bool fw_spread_carried_elsewhere(uint8_t chip)
+{
+    for (uint16_t n = 0; n < LG_MAX_NODES; n++) {
+        if (nb_fresh(n) && s.nb[n].chip == chip) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t fw_spread_neighbours(fw_spread_nb_t *out, size_t max)
+{
+    size_t k = 0;
+    for (uint16_t n = 0; n < LG_MAX_NODES && k < max; n++) {
+        if (nb_fresh(n)) {
+            out[k++] = (fw_spread_nb_t){ .node = n, .chip = s.nb[n].chip, .serial = s.nb[n].serial };
+        }
+    }
+    return k;
+}
 
 static void held_load(void)
 {
@@ -90,17 +139,69 @@ static void offer(void)
      */
     lg_fwu_info_t c;
     size_t c_len = 0;
-    if (lg_fwu_carried(&c, &c_len)) {
+    bool mine = lg_fwu_carried(&c, &c_len);
+    if (mine) {
         uint8_t body[OFFER_LEN] = { LAYOUT, 'H', c.chip, 0 };
         lg_wr32(body + 4, c.serial);
         lg_wr32(body + 8, (uint32_t)c_len);
         (void)lg_node_send_fw(&g_app.core, LG_NODE_NONE, LG_T_FW_OFFER, body, sizeof(body));
+    }
+    /*
+     * D111: to this AP's handhelds, the newest update for each chip within reach - its own, and what its
+     * neighbours carry, which it fetches piece by piece on a handheld's behalf.
+     */
+    for (uint8_t chip = 1; chip <= 3u; chip++) {
+        uint32_t serial = mine && c.chip == chip ? c.serial : 0u;
+        uint32_t flen = mine && c.chip == chip ? (uint32_t)c_len : 0u;
+        for (uint16_t n = 0; n < LG_MAX_NODES; n++) {
+            if (nb_fresh(n) && s.nb[n].chip == chip && s.nb[n].serial > serial) {
+                serial = s.nb[n].serial;
+                flen = s.nb[n].file_len;
+            }
+        }
+        if (serial == 0 || serial <= lg_fwu_carry_floor(chip)) {
+            continue;
+        }
+        uint8_t body[OFFER_LEN] = { LAYOUT, 'H', chip, 0 };
+        lg_wr32(body + 4, serial);
+        lg_wr32(body + 8, flen);
         for (uint32_t device = 1; device <= LG_MAX_DEVICES; device++) {
             (void)lg_node_send_fw_client(&g_app.core, device, LG_T_FW_OFFER, body, sizeof(body));
         }
     }
     s.offered_ms = s.now_ms;
     s.offer_due = false;
+}
+
+/*
+ * D111: a withdrawal, passed to every neighbour. Each AP passes one on only when it changed something
+ * there, so it crosses the grid once and stops.
+ */
+static void send_withdraw(uint8_t chip, uint32_t serial, uint16_t except)
+{
+    uint8_t body[WITHDRAW_LEN] = { LAYOUT, 'W', chip, 0 };
+    lg_wr32(body + 4, serial);
+    for (uint16_t n = 0; n < LG_MAX_NODES; n++) {
+        if (n != except && lgbb_is_neighbor(n)) {
+            (void)lg_node_send_fw(&g_app.core, n, LG_T_FW_OFFER, body, sizeof(body));
+        }
+    }
+}
+
+uint32_t fw_spread_withdraw(void)
+{
+    lg_fwu_info_t c;
+    if (!lg_fwu_carried(&c, NULL)) {
+        return 0;
+    }
+    uint32_t dropped = lg_fwu_carried_drop();
+    send_withdraw(c.chip, c.serial, LG_NODE_NONE);
+    for (uint16_t n = 0; n < LG_MAX_NODES; n++) {   /* and stop offering what the neighbours had of it */
+        if (s.nb[n].chip == c.chip && s.nb[n].serial <= c.serial) {
+            s.nb[n].chip = 0;
+        }
+    }
+    return dropped;
 }
 
 static void request(void)
@@ -131,6 +232,18 @@ static void give_up(const char *why, uint32_t wait_ms)
 
 static void on_offer(uint16_t from, const uint8_t *b, size_t len)
 {
+    if (len == WITHDRAW_LEN && b[0] == LAYOUT && b[1] == 'W' && b[2] >= 1u && b[2] <= 3u) {
+        uint32_t upto = lg_rd32(b + 4);
+        if (lg_fwu_carry_withdraw(b[2], upto)) {
+            send_withdraw(b[2], upto, from);   /* changed something here: pass it on */
+        }
+        for (uint16_t n = 0; n < LG_MAX_NODES; n++) {
+            if (s.nb[n].chip == b[2] && s.nb[n].serial <= upto) {
+                s.nb[n].chip = 0;
+            }
+        }
+        return;
+    }
     if (len != OFFER_LEN || b[0] != LAYOUT || (b[1] != 'N' && b[1] != 'H') ||
         (b[1] == 'N' && b[2] != lg_fwu_this_chip())) {
         return;   /* an AP's firmware for another chip: not ours to take */
@@ -138,10 +251,27 @@ static void on_offer(uint16_t from, const uint8_t *b, size_t len)
     char kind = (char)b[1];
     uint32_t serial = lg_rd32(b + 4);
     uint32_t file_len = lg_rd32(b + 8);
+    if (kind == 'H' && from < LG_MAX_NODES && b[2] >= 1u && b[2] <= 3u) {
+        s.nb[from].chip = b[2];          /* D111: what that neighbour carries */
+        s.nb[from].serial = serial;
+        s.nb[from].file_len = file_len;
+        s.nb[from].heard_ms = s.now_ms;
+    }
     lg_fwu_info_t c;
-    uint32_t have = kind == 'N' ? lg_fwu_running_serial() : lg_fwu_carried(&c, NULL) ? c.serial : 0u;
-    if (kind == 'H' && lg_fwu_carry_floor() > have) {
-        have = lg_fwu_carry_floor();   /* one withdrawn here is not fetched again */
+    bool carrying = kind == 'H' && lg_fwu_carried(&c, NULL);
+    uint32_t have = kind == 'N' ? lg_fwu_running_serial() : carrying ? c.serial : 0u;
+    if (kind == 'H') {
+        /*
+         * D111: one image per AP. Take a newer one for the chip already carried here; take any if nothing
+         * is carried here; never let one chip push out another - that is how a chip would vanish from the
+         * grid. An admin who wants this AP to carry another chip gives it the file.
+         */
+        if (carrying && c.chip != b[2]) {
+            return;
+        }
+        if (lg_fwu_carry_floor(b[2]) > have) {
+            have = lg_fwu_carry_floor(b[2]);   /* one withdrawn here is not fetched again */
+        }
     }
     if (s.fetching || s.restart_at_ms != 0 || s.now_ms < SETTLE_MS || serial <= have ||
         file_len <= LG_FWU_PREFIX_LEN || lg_fwu_progress(NULL, NULL)) {
@@ -230,6 +360,14 @@ static void on_get(uint16_t from, const uint8_t *b, size_t len)
 
 static void on_data(uint16_t from, const uint8_t *b, size_t len)
 {
+    if (s.proxy_dev != 0 && from == s.proxy_node && len > DATA_HEADER && b[0] == LAYOUT &&
+        lg_rd32(b + 4) == s.proxy_serial && lg_rd32(b + 8) == s.proxy_offset) {
+        /* D111: the piece asked for on a handheld's behalf: the same bytes go on to it. */
+        (void)lg_node_send_fw_client(&g_app.core, s.proxy_dev, LG_T_FW_DATA, b, len);
+        s.proxied_pieces++;
+        s.proxy_dev = 0;
+        return;
+    }
     if (!s.fetching || from != s.from || len <= DATA_HEADER || b[0] != LAYOUT || lg_rd32(b + 4) != s.serial ||
         lg_rd32(b + 8) != s.have) {
         return;   /* not the piece asked for: a late answer to a request already repeated */
@@ -310,6 +448,30 @@ void fw_spread_on_client_get(uint32_t device, const uint8_t *b, size_t len)
     uint32_t offset = 0;
     int n = piece(b, len, body + DATA_HEADER, &serial, &offset);
     if (n <= 0) {
+        /*
+         * D111: not carried here. If a neighbour carries this chip at this serial, ask it for the very
+         * piece; its answer comes to on_data and is passed straight on. The handheld repeats a request
+         * that goes unanswered, so one lost on either hop costs a second and a half, not the update.
+         */
+        uint32_t want_serial = lg_rd32(b + 4);
+        for (uint16_t nb = 0; nb < LG_MAX_NODES; nb++) {
+            if (nb_fresh(nb) && s.nb[nb].chip == b[2] && s.nb[nb].serial == want_serial &&
+                want_serial > lg_fwu_carry_floor(b[2])) {
+                s.proxy_dev = device;
+                s.proxy_node = nb;
+                s.proxy_serial = want_serial;
+                s.proxy_offset = lg_rd32(b + 8);
+                s.proxy_ms = s.now_ms;
+                if (s.serve_dev != device) {
+                    ESP_LOGI(TAG, "[GRID] Fetching the handheld update, serial %" PRIu32 ", from AP %u for device %" PRIu32,
+                             want_serial, nb, device);
+                }
+                s.serve_dev = device;
+                s.serve_dev_ms = s.now_ms;
+                (void)lg_node_send_fw(&g_app.core, nb, LG_T_FW_GET, b, len);
+                return;
+            }
+        }
         return;
     }
     memset(body, 0, DATA_HEADER);
@@ -378,10 +540,21 @@ void fw_spread_print(void)
     if (lg_fwu_carried(&c, &c_len)) {
         printf("Handheld update carried: %s, serial %" PRIu32 ", chip %u, %u bytes; handed whole to %" PRIu32
                " handheld(s) since this AP started\n", c.version, c.serial, c.chip, (unsigned)c_len, s.handhelds_served);
-    } else if (lg_fwu_carry_floor() != 0) {
-        printf("Handheld update carried: none (serial %" PRIu32 " and older were withdrawn here)\n", lg_fwu_carry_floor());
     } else {
         printf("Handheld update carried: none\n");
+    }
+    for (uint8_t chip = 1; chip <= 3u; chip++) {
+        if (lg_fwu_carry_floor(chip) != 0) {
+            printf("  withdrawn here for chip %u: serial %" PRIu32 " and older\n", chip, lg_fwu_carry_floor(chip));
+        }
+    }
+    for (uint16_t n = 0; n < LG_MAX_NODES; n++) {   /* D111 */
+        if (nb_fresh(n)) {
+            printf("  AP %u carries chip %u, serial %" PRIu32 "\n", n, s.nb[n].chip, s.nb[n].serial);
+        }
+    }
+    if (s.proxied_pieces != 0) {
+        printf("  pieces fetched from a neighbour for a handheld here: %" PRIu32 "\n", s.proxied_pieces);
     }
     if (s.fetching) {
         printf("Fetching %s serial %" PRIu32 " from AP %u: %u of %u bytes\n", s.kind == 'H' ? "handheld update" : "firmware",

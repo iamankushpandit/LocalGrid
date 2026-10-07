@@ -1054,10 +1054,10 @@ static void handle_command(const node_cmd_t *cmd)
         break;
     case NODE_CMD_SPREAD:
         if (cmd->value == 1u) {   /* `spread drop` (D107) */
-            uint32_t dropped = lg_fwu_carried_drop();
+            uint32_t dropped = fw_spread_withdraw();   /* D111: and every AP is told */
             if (dropped != 0) {
-                printf("Stopped carrying handheld update serial %" PRIu32 " on this AP. The other APs each keep "
-                       "theirs until told the same.\n", dropped);
+                printf("Withdrew handheld update serial %" PRIu32 " here and told the other APs to do the same.\n",
+                       dropped);
             }
         }
         fw_spread_print();

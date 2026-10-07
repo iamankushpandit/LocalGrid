@@ -92,7 +92,14 @@ bool lg_fwu_finished_carried(void);
  * a handheld update must be newer than it to be carried here.
  */
 uint32_t lg_fwu_carried_drop(void);
-uint32_t lg_fwu_carry_floor(void);
+/* D111: the floor is per chip, so withdrawing one chip's update never blocks another chip's. */
+uint32_t lg_fwu_carry_floor(uint8_t chip);
+/*
+ * D111: a withdrawal heard from another AP: the handheld update for `chip` up to `serial` is not to be
+ * carried. Drops this AP's copy if it is that chip and no newer, and raises the floor. True if anything
+ * changed here, which is when the withdrawal is passed on.
+ */
+bool lg_fwu_carry_withdraw(uint8_t chip, uint32_t serial);
 bool lg_fwu_carried(lg_fwu_info_t *out, size_t *file_len);
 int  lg_fwu_carried_read(size_t offset, uint8_t *out, size_t len);
 

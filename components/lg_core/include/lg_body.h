@@ -198,6 +198,26 @@ typedef struct {
     lg_trail_point_t older[LG_TRAIL_POINTS - 1u];
 } lg_trail_t;
 
+/*
+ * DEVICE_FW (0x27, D110): the firmware a handheld runs, sent by it at every registration and passed between
+ * APs, so the admin page and the dashboard can list every handheld's version and not only the APs'.
+ *     0  u32  device     the handheld it is about; only that handheld's own session may say so
+ *     4  u32  serial     the update serial it runs; 0 for a build put on by cable
+ *     8  u8   chip       1 ESP32, 2 ESP32-S3, 3 ESP32-C6
+ *     9  32   version    printable ASCII, zero padded; empty for a build put on by cable
+ */
+#define LG_DEVFW_VERSION_MAX 32u
+#define LG_DEVFW_LEN         (9u + LG_DEVFW_VERSION_MAX)
+typedef struct {
+    uint32_t device;    /* 0 in an empty slot */
+    uint32_t serial;
+    uint8_t  chip;
+    char     version[LG_DEVFW_VERSION_MAX + 1u];
+} lg_devfw_t;
+size_t lg_devfw_enc(const lg_devfw_t *v, uint8_t *out);   /* writes LG_DEVFW_LEN bytes */
+/* Exactly LG_DEVFW_LEN bytes, a handheld (not an AP) device, a known chip, a printable version padded with zeros. */
+bool   lg_devfw_dec(const uint8_t *body, size_t len, lg_devfw_t *out);
+
 /* Writes LG_TRAIL_HDR_LEN + 6 x count bytes (count clamped to what fits) and returns the length. */
 size_t lg_trail_enc(const lg_trail_t *t, uint8_t *out);
 /* Exact length for its count, a handheld subject, coordinates and fix time in range, ages in order. */

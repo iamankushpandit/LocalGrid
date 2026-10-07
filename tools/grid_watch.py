@@ -1583,7 +1583,7 @@ PAGE = r"""<!doctype html>
     <div class="src" id="devices-src"></div>
     <p class="hint" id="devices-empty">Log in to see every handheld the grid has seen, including the ones out of this laptop's range.</p>
     <div class="table" id="devices-table" hidden><table>
-      <thead><tr><th>Name</th><th>Status</th><th>Connected to</th><th>Battery</th></tr></thead>
+      <thead><tr><th>Name</th><th>Status</th><th>Connected to</th><th>Battery</th><th>Firmware</th></tr></thead>
       <tbody id="devices-body"></tbody>
     </table></div>
   </section>
@@ -2204,6 +2204,8 @@ function renderHandheldTab(status, sec, beaconById) {
     cell(tr, d.state === "ONLINE" && d.node >= 0 ? (apNameFromStatus(status, d.node)) : "--");
     const b = beaconById[d.device];
     tr.append(batteryCell(b ? b.battery : null));
+    /* D110: what it said it runs when it last registered (cell() sets text, so a version cannot be markup) */
+    cell(tr, !d.fw ? "not reported" : d.fw.serial ? d.fw.version + " (serial " + d.fw.serial + ")" : "installed by cable");
     db.append(tr);
   }
   $("devices-table").hidden = (status.devices || []).length === 0;
@@ -3017,9 +3019,10 @@ def sample_status_json():
                 "lat_u": 47623450, "lon_u": 13045670},
         "links": [{"node": 1, "up": True, "rssi": -62, "age_ms": 400},
                   {"node": 2, "up": False, "rssi": -91, "age_ms": 95000}],
-        "devices": [{"device": 1, "name": "Ana", "state": "ONLINE", "node": 0},
-                    {"device": 3, "name": "Priya", "state": "ONLINE", "node": 2},
-                    {"device": 4, "name": "Tom", "state": "OFFLINE", "node": -1}],
+        "devices": [{"device": 1, "name": "Ana", "state": "ONLINE", "node": 0,
+                     "fw": {"serial": 6000, "chip": 1, "version": "2026.10.6"}},
+                    {"device": 3, "name": "Priya", "state": "ONLINE", "node": 2, "fw": {"serial": 0, "chip": 2, "version": ""}},
+                    {"device": 4, "name": "Tom", "state": "OFFLINE", "node": -1, "fw": None}],
         "users": [{"device": 1, "name": "Ana"}, {"device": 3, "name": "Priya"},
                   {"device": 4, "name": "Tom"}],
         "announce_all": False, "announcers": [1], "groups_version": 7,
@@ -3033,7 +3036,7 @@ def sample_status_json():
         # D71: the same LoRa facts the admin page reads, with the per-peer signal the packed
         # traffic record has no room for.
         "firmware": {"serial": 0, "version": "", "slot": "ota_0", "chip": 1, "release_key": True, "carried": None,
-                     "carry_floor": 0},
+                     "withdrawn": [0, 0, 0], "neighbours": [{"node": 2, "chip": 2, "serial": 6100}]},
         "lora": {"fitted": True, "configured": True, "off": False, "broadcast": True, "big": False,
                  "version": "RYLR998_REYAX_V1.2.6", "address": 1, "network": 14,
                  "rssi": -14, "snr": 9, "frames_out": 412, "frames_in": 388, "frames_first": 19,

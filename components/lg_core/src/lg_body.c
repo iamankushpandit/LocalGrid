@@ -243,6 +243,45 @@ size_t lg_trail_enc(const lg_trail_t *t, uint8_t *out)
     return LG_TRAIL_HDR_LEN + (size_t)count * LG_TRAIL_POINT_LEN;
 }
 
+size_t lg_devfw_enc(const lg_devfw_t *v, uint8_t *out)
+{
+    memset(out, 0, LG_DEVFW_LEN);
+    lg_wr32(out, v->device);
+    lg_wr32(out + 4, v->serial);
+    out[8] = v->chip;
+    size_t n = strnlen(v->version, LG_DEVFW_VERSION_MAX);
+    memcpy(out + 9, v->version, n);
+    return LG_DEVFW_LEN;
+}
+
+bool lg_devfw_dec(const uint8_t *body, size_t len, lg_devfw_t *out)
+{
+    if (body == NULL || out == NULL || len != LG_DEVFW_LEN) {
+        return false;
+    }
+    lg_devfw_t v;
+    memset(&v, 0, sizeof(v));
+    v.device = lg_rd32(body);
+    v.serial = lg_rd32(body + 4);
+    v.chip = body[8];
+    if (v.device == 0 || (v.device & LG_NODE_ID_BASE) != 0 || v.chip == 0 || v.chip > 3u) {
+        return false;
+    }
+    bool ended = false;
+    for (size_t i = 0; i < LG_DEVFW_VERSION_MAX; i++) {
+        uint8_t ch = body[9 + i];
+        if (ch == 0) {
+            ended = true;
+        } else if (ended || ch < 0x20u || ch > 0x7Eu) {
+            return false;   /* text after the padding, or not printable: a version is shown on screens */
+        } else {
+            v.version[i] = (char)ch;
+        }
+    }
+    *out = v;
+    return true;
+}
+
 bool lg_trail_dec(const uint8_t *body, size_t len, lg_trail_t *out)
 {
     if (body == NULL || out == NULL || len < LG_TRAIL_HDR_LEN || body[16] > LG_TRAIL_POINTS - 1u ||

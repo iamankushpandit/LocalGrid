@@ -39,6 +39,18 @@ void fw_spread_on_neighbor_up(uint16_t node);
 /* D107: an FW_GET from a handheld with a session here, for the handheld update this AP carries. */
 void fw_spread_on_client_get(uint32_t device, const uint8_t *body, size_t len);
 
+/* D111: what a neighbour carries for handhelds, as its offers say. */
+typedef struct {
+    uint16_t node;
+    uint8_t  chip;
+    uint32_t serial;
+} fw_spread_nb_t;
+size_t fw_spread_neighbours(fw_spread_nb_t *out, size_t max);
+/* Whether a neighbour carries the handheld update for this chip: if none does, this AP's copy is the grid's only one. */
+bool fw_spread_carried_elsewhere(uint8_t chip);
+/* Stops carrying the handheld update here and tells every AP to do the same (D111). Returns its serial, 0 if none. */
+uint32_t fw_spread_withdraw(void);
+
 /* Every pass of the core loop: offers, the next request, retries, and the restart into a finished
  * update. Core task. */
 void fw_spread_tick(uint32_t now_ms);

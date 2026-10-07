@@ -221,7 +221,9 @@
     <h2>Firmware</h2>
     <p><span class="dim">This AP runs</span> <span id="fw-running">--</span></p>
     <p><span class="dim">Updates:</span> <span id="fw-key">--</span></p>
-    <p><span class="dim">For handhelds:</span> <span id="fw-carried">--</span></p>
+    <p><span class="dim">For handhelds:</span> <span id="fw-carried">--</span>
+      <button type="button" id="fw-withdraw" class="secondary" hidden>Withdraw it</button></p>
+    <p><span class="dim">Other access points carry:</span> <span id="fw-others">--</span></p>
     <form id="fw-form">
       <label for="fw-file">A signed update file (.lgfw), for an access point or for handhelds</label>
       <input id="fw-file" type="file" accept=".lgfw">
@@ -334,7 +336,7 @@
     <h2>Handhelds</h2>
     <p class="dim" id="devices-empty" hidden>No handhelds have connected yet.</p>
     <div class="table" id="devices-table"><table>
-      <thead><tr><th>Name</th><th>Status</th><th>Connected to</th></tr></thead>
+      <thead><tr><th>Name</th><th>Status</th><th>Connected to</th><th>Firmware</th></tr></thead>
       <tbody id="devices-body"></tbody>
     </table></div>
   </section>
@@ -1151,8 +1153,17 @@
     $("fw-key").className = f.release_key ? "" : "warn";
     $("fw-carried").textContent = f.carried
       ? `carrying ${f.carried.version} (serial ${f.carried.serial}) for ${CHIPS[f.carried.chip] || "chip " + f.carried.chip} handhelds`
-      : f.carry_floor ? `none (serial ${f.carry_floor} and older were withdrawn here)` : "none";
+      : "none";
+    $("fw-withdraw").hidden = !f.carried;
+    /* D111: one image per AP, shared out across the grid; a handheld is served whichever AP holds its chip's. */
+    const others = (f.neighbours || []).map((x) => `${CHIPS[x.chip] || "chip " + x.chip} serial ${x.serial} (${nodeName(x.node)})`);
+    $("fw-others").textContent = others.length ? others.join("; ") : "nothing that this AP has heard of";
   }
+  $("fw-withdraw").onclick = async () => {
+    if (!confirm("Stop offering this handheld update everywhere? Every access point drops it; handhelds that already took it keep it.")) return;
+    try { const r = await api("/api/withdraw", {}); say("fw-msg", r.note || "Withdrawn.", true); refresh(); }
+    catch (e) { say("fw-msg", e.message, false); }
+  };
   /* The signed header's layout: docs/firmware-updates.md and tools/lgfw.py. Read for show only; the AP checks it. */
   function readUpdateHeader(buf) {
     const b = new Uint8Array(buf);
@@ -1229,9 +1240,12 @@
     renderLocation(s);
     $("subtitle").textContent = `LocalGrid Access Point, served by AP ${s.node_name}` + (s.timezone ? `, time zone ${s.timezone}` : "");
     /* D67: handhelds show local time in the zone saved here, UTC until one is. */
+    /* The rule handhelds are given: saved here, worked out by the AP from the zone's name (D100), or none. */
     $("zone-hint").textContent = s.posix_tz
-      ? `Handhelds show local time${s.timezone ? ` for ${s.timezone}` : ""} (${s.posix_tz}).`
-      : "Handhelds show UTC until a time zone is saved: press \"Use this device's time\" once.";
+      ? `Handhelds show local time${s.timezone ? ` for ${s.timezone}` : ""} (${s.posix_tz}${s.posix_tz_derived ? ", worked out by this AP from the zone's name" : ""}).`
+      : s.timezone
+        ? `Handhelds show UTC: this AP does not know the rule for ${s.timezone}. Press "Use this device's time" once to send it.`
+        : "Handhelds show UTC until a time zone is saved: press \"Use this device's time\" once.";
     $("s-node").textContent = s.node_name;
     $("s-uptime").textContent = fmtDur(s.uptime_s);
     $("s-handhelds").textContent = s.handhelds;
@@ -1309,7 +1323,9 @@
     const rows = s.devices.map((d) => {
       const cls = d.state === "ONLINE" ? "good" : "dim";
       const where = d.state === "ONLINE" ? nodeName(d.node) : "--";
-      return `<tr><td>${d.name.replace(/[<&]/g, "")}</td><td><span class="pill ${cls}">${d.state}</span></td><td>${where}</td></tr>`;
+      /* D110: what it said it runs at its last registration; a version is the handheld's own text */
+      const fw = !d.fw ? "not reported" : d.fw.serial ? `${d.fw.version.replace(/[<&]/g, "")} (serial ${d.fw.serial})` : "installed by cable";
+      return `<tr><td>${d.name.replace(/[<&]/g, "")}</td><td><span class="pill ${cls}">${d.state}</span></td><td>${where}</td><td>${fw}</td></tr>`;
     });
     $("devices-body").innerHTML = rows.join("");
     renderGroups(s);

@@ -367,6 +367,8 @@ int lg_client_send_trail(lg_client_t *c, const lg_trail_t *trail);
  * Only with a registered session: LG_ERR_SHORT without one, and it is never offered to LoRa.
  */
 int lg_client_send_fw_get(lg_client_t *c, const uint8_t *body, size_t len);
+/* D110: tells this handheld's AP which firmware it runs, for the grid's lists. Sent at every registration. */
+int lg_client_send_devfw(lg_client_t *c, uint32_t serial, uint8_t chip, const char *version);
 int lg_client_request_trail(lg_client_t *c, uint32_t subject);
 /* The trail last received for subject, or NULL. */
 const lg_trail_t *lg_client_trail(const lg_client_t *c, uint32_t subject);

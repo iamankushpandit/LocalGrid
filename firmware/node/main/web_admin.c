@@ -18,6 +18,7 @@
 #include "esp_timer.h"
 #include "freertos/semphr.h"
 #include "gps.h"
+#include "fw_spread.h"
 #include "grid_state.h"
 #include "lora.h"
 #include "lg_body.h"
@@ -70,6 +71,7 @@ typedef struct {
         uint8_t  known;
         uint8_t  state;
         uint16_t node;
+        lg_devfw_t fw;                /* D110: device 0 when the grid has not been told */
     } devices[LG_MAX_DEVICES];
     lg_roster_t roster;   /* a copy: users point at const data, groups are values (D52) */
     /* Every AP this one knows about, with the facts each announced (D45), taken on the core
@@ -199,6 +201,12 @@ void web_admin_publish_snapshot(void)
         s->devices[k].known = 1;
         s->devices[k].state = p->state;
         s->devices[k].node = p->node;
+        const lg_devfw_t *fw = lg_node_devfw(&g_app.core, r->users[i].device);
+        if (fw != NULL) {
+            s->devices[k].fw = *fw;
+        } else {
+            memset(&s->devices[k].fw, 0, sizeof(s->devices[k].fw));
+        }
     }
     s->roster = *r;
     for (uint16_t ap = 0; ap < LG_MAX_NODES; ap++) {
@@ -843,11 +851,17 @@ static bool emit_status(const web_sink_t *sink)
 
     char name[2 * SETTINGS_GRID_NAME_MAX + 8];
     json_escape(cfg.grid_name, name, sizeof(name));
-    jout(o, "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"posix_tz\":\"%s\",\"node\":%u,\"node_name\":\"%s\",\"boot\":%" PRIu32
+    /* The rule handhelds are actually given: the one saved, or since D100 the one this AP works out from
+     * the zone's name. The page said "UTC until a zone is saved" while handhelds were already on the
+     * worked-out rule; posix_tz_derived says which of the two it is. */
+    char rule[SETTINGS_POSIX_TZ_MAX + 1];
+    bool saved_rule = grid_state_posix_tz(rule, sizeof(rule));
+    jout(o, "{\"grid_name\":\"%s\",\"timezone\":\"%s\",\"posix_tz\":\"%s\",\"posix_tz_derived\":%s,\"node\":%u,"
+             "\"node_name\":\"%s\",\"boot\":%" PRIu32
              ",\"uptime_s\":%" PRIu32 ",\"grid_time\":%" PRIu32 ",\"time_quality\":%u,\"heap_free\":%" PRIu32
              ",\"heap_min\":%" PRIu32 ",\"handhelds\":%u,",
-         name, cfg.timezone, cfg.posix_tz, s->node, s->node_name, s->boot, s->uptime_s, s->grid_time, s->time_quality,
-         s->heap_free, s->heap_min, s->handhelds);
+         name, cfg.timezone, rule, (!saved_rule && rule[0] != '\0') ? "true" : "false", s->node, s->node_name, s->boot,
+         s->uptime_s, s->grid_time, s->time_quality, s->heap_free, s->heap_min, s->handhelds);
     jout(o, "\"gps\":{\"started\":%s,\"heard\":%s,\"fix\":%s,\"sats\":%u,\"pos\":%s,\"lat_u\":%" PRId32
              ",\"lon_u\":%" PRId32 "},\"links\":[",
          gps.started ? "true" : "false", gps.heard ? "true" : "false", gps_has_fix() ? "true" : "false", gps.sats,
@@ -861,9 +875,17 @@ static bool emit_status(const web_sink_t *sink)
         const char *state = !s->devices[i].known ? "UNKNOWN" : s->devices[i].state ? "ONLINE" : "OFFLINE";
         char dn[2 * sizeof(s->devices[i].name) + 8];
         json_escape(s->devices[i].name, dn, sizeof(dn));   /* a chosen name is typed by a person */
-        jout(o, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\",\"state\":\"%s\",\"node\":%d}", i ? "," : "",
+        jout(o, "%s{\"device\":%" PRIu32 ",\"name\":\"%s\",\"state\":\"%s\",\"node\":%d,\"fw\":", i ? "," : "",
              s->devices[i].device, dn, state,
              s->devices[i].node == LG_NODE_NONE ? -1 : (int)s->devices[i].node);
+        if (s->devices[i].fw.device != 0) {   /* D110; the version is printable ASCII (lg_devfw_dec) */
+            char fv[2 * sizeof(s->devices[i].fw.version) + 8];
+            json_escape(s->devices[i].fw.version, fv, sizeof(fv));
+            jout(o, "{\"serial\":%" PRIu32 ",\"chip\":%u,\"version\":\"%s\"}}", s->devices[i].fw.serial,
+                 s->devices[i].fw.chip, fv);
+        } else {
+            jout(o, "null}");
+        }
     }
     /* Handhelds the grid has seen, the same list as the Handhelds card: roster places nobody has
      * taken are not offered as group members. Then the groups, members named by device (D52). */
@@ -935,7 +957,16 @@ static bool emit_status(const web_sink_t *sink)
         } else {
             jout(o, "null");
         }
-        jout(o, ",\"carry_floor\":%" PRIu32 "}", lg_fwu_carry_floor());
+        /* D111: what each neighbour carries, and what has been withdrawn on this AP, chip by chip. */
+        jout(o, ",\"withdrawn\":[%" PRIu32 ",%" PRIu32 ",%" PRIu32 "],\"neighbours\":[", lg_fwu_carry_floor(1),
+             lg_fwu_carry_floor(2), lg_fwu_carry_floor(3));
+        fw_spread_nb_t nb[LG_MAX_NODES];
+        size_t nn = fw_spread_neighbours(nb, LG_MAX_NODES);
+        for (size_t i = 0; i < nn; i++) {
+            jout(o, "%s{\"node\":%u,\"chip\":%u,\"serial\":%" PRIu32 "}", i ? "," : "", nb[i].node, nb[i].chip,
+                 nb[i].serial);
+        }
+        jout(o, "]}");
     }
     const lora_traffic_t *lr = &s->lora;
     char lv[2 * sizeof(s->lora_version) + 8];
@@ -1293,6 +1324,32 @@ static esp_err_t h_groups(httpd_req_t *req)
  */
 #define OTA_CHUNK 1024
 
+/*
+ * D111: stop carrying the handheld update held here, and tell every AP to do the same. Done on the core
+ * task, which owns the spreading; this only asks for it.
+ */
+static esp_err_t h_withdraw(httpd_req_t *req)
+{
+    admin_session_t *s = session_from_request(req);
+    if (s == NULL) {
+        return send_error(req, "401 Unauthorized", "Log in to withdraw an update.");
+    }
+    if (!csrf_ok(req, s)) {
+        return send_error(req, "403 Forbidden", "Request blocked. Reload the page and try again.");
+    }
+    lg_fwu_info_t have;
+    if (!lg_fwu_carried(&have, NULL)) {
+        return send_error(req, "409 Conflict", "This access point carries no handheld update.");
+    }
+    node_cmd_t cmd = { .type = NODE_CMD_SPREAD, .value = 1u };
+    if (xQueueSend(g_app.cmd_queue, &cmd, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return send_error(req, "503 Service Unavailable", "This access point is busy. Try again in a moment.");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"note\":\"Withdrawn here, and every access point has been told to "
+                                   "stop offering it.\"}");
+}
+
 static esp_err_t h_update(httpd_req_t *req)
 {
     admin_session_t *s = session_from_request(req);
@@ -1317,7 +1374,7 @@ static esp_err_t h_update(httpd_req_t *req)
         return send_error(req, "409 Conflict", "Another update is being taken. Try again in a moment.");
     }
     static char chunk[OTA_CHUNK];   /* one buffer, not one per request: this AP has no heap to spare */
-    static char why[160];
+    static char why[256];
     int received = 0;
     while (received < total) {
         int n = httpd_req_recv(req, chunk, (size_t)(total - received) < OTA_CHUNK
@@ -1329,6 +1386,21 @@ static esp_err_t h_update(httpd_req_t *req)
             lg_fwu_abort();
             ESP_LOGE(TAG, "[WEB] Update aborted: the upload stopped after %d of %d bytes", received, total);
             return send_error(req, "400 Bad Request", "The upload did not finish. Nothing was changed.");
+        }
+        if (received == 0 && n >= 7 && memcmp(chunk, "LGFW", 4) == 0 && chunk[5] == 'H') {
+            /*
+             * D111: one handheld image per AP. A file for another chip would push out the one carried
+             * here; refused if no neighbour carries that one too, or the grid would lose it. Read off
+             * the header before anything is written - the signature is checked after, by lg_fwupdate.
+             */
+            lg_fwu_info_t have;
+            if (lg_fwu_carried(&have, NULL) && have.chip != (uint8_t)chunk[6] && !fw_spread_carried_elsewhere(have.chip)) {
+                lg_fwu_abort();
+                snprintf(why, sizeof(why), "This access point is the only one carrying the handheld update for "
+                         "chip %u (%s). Give this file to another access point, or withdraw that one first.",
+                         have.chip, have.version);
+                return send_error(req, "409 Conflict", why);
+            }
         }
         if (lg_fwu_write((const uint8_t *)chunk, (size_t)n) != ESP_OK) {
             snprintf(why, sizeof(why), "Update refused: %s. This access point is still running the old firmware.",
@@ -1436,6 +1508,7 @@ esp_err_t web_admin_start(void)
         { .uri = "/api/time",     .method = HTTP_POST, .handler = h_time },
         { .uri = "/api/groups",   .method = HTTP_POST, .handler = h_groups },
         { .uri = "/api/update",   .method = HTTP_POST, .handler = h_update },
+        { .uri = "/api/withdraw", .method = HTTP_POST, .handler = h_withdraw },
     };
     const size_t n_routes = sizeof(routes) / sizeof(routes[0]);
 
