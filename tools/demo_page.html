@@ -493,7 +493,7 @@ const POINT = {
   aps:       { parts: ["aps", "hops"], label: "Access points: the circles. Green dashes: the Wi-Fi hops between them" },
   main:      { parts: ["main", "aps"], label: "The access point with a GPS: it gives the grid its time" },
   handhelds: { parts: ["handhelds", "hhsym", "hhlinks"], label: "Handhelds: each one linked to the access point it is on" },
-  lora:      { parts: ["lora", "antennas"], label: "LoRa: the orange arcs between the access points that have a module" },
+  lora:      { parts: ["lora", "antennas"], label: "LoRa: the orange dashes" },
   gps:       { parts: ["gps"], label: "GPS satellites: time and location, optional" },
   watch:     { parts: ["laptop"], label: "A laptop, watching over Bluetooth without joining" },
   offline:   { parts: ["nointernet"], label: "No Internet, anywhere" },
@@ -530,7 +530,8 @@ function tagDiagram(svg) {
   // and speaker symbols, and the green pins are the handhelds that have a GPS.
   tag(q('g[fill="#152A21"][stroke="#E4F2E9"]'), "handhelds");
   tag(q('g[transform*="scale(1.4)"]').concat(q('g[fill="#5FD38D"]')), "hhsym");
-  tag(q('g[stroke-dasharray="10 7"]').concat(texts(/^LoRa:/)), "lora");
+  // LoRa: the arcs between access points, the links to the handhelds that carry a module, and the caption.
+  tag(q('g[stroke-dasharray="10 7"], g[stroke="#F0A064"][stroke-dasharray="6 5"]').concat(texts(/^LoRa:/)), "lora");
   const antennas = q('g[stroke="#F0A064"]:not([stroke-dasharray])');
   tag([...new Set(antennas.map(g => g.parentNode))], "antennas");
   tag(q('g[transform^="translate(78 208)"], g[stroke-dasharray="2 6"]').concat(texts(/watching over BLE/)), "laptop");
