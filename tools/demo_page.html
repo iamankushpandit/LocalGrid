@@ -482,7 +482,7 @@ const FOCUS = {
   aps:       [100, 175, 760, 538],     // the ring of access points and the hops between them
   main:      [320, 130, 330, 234],     // the access point with a GPS and LoRa
   handhelds: [630, 270, 330, 234],     // one access point and the handhelds on it
-  lora:      [60, 200, 840, 470],      // the three LoRa access points and the arcs between them
+  lora:      [0, 190, 960, 430],       // the LoRa access points, the arcs between them, the LoRa-only handhelds
   gps:       [60, 0, 840, 300],        // the satellites: time and location, optional
   watch:     [0, 120, 360, 255],       // the laptop watching over Bluetooth
   offline:   [250, 0, 360, 255],       // "no Internet"
@@ -499,7 +499,8 @@ const POINT = {
   offline:   { parts: ["nointernet"], label: "No Internet, anywhere" },
 };
 let diagramSvg = null, vbNow = FOCUS.all.slice(), vbTween = null, pointing = null;
-let spots = [];                    // diagram access point circles, in the order bench access points take them
+let spots = [];
+let loraSlots = [];                // the diagram's handhelds out of Wi-Fi range, reached over LoRa only                    // diagram access point circles, in the order bench access points take them
 const iconsAt = new Map();         // spot -> the handheld icons drawn around it [{x, y, el}]
 
 async function loadDiagram() {
@@ -528,10 +529,13 @@ function tagDiagram(svg) {
   tag(texts(/^GPS \+ LoRa$/), "main");
   // The handhelds are the small rectangles in one group; the scaled groups beside them are their microphone
   // and speaker symbols, and the green pins are the handhelds that have a GPS.
-  tag(q('g[fill="#152A21"][stroke="#E4F2E9"]'), "handhelds");
+  tag(q('g[fill="#152A21"][stroke="#E4F2E9"]:not([stroke-dasharray])'), "handhelds");
   tag(q('g[transform*="scale(1.4)"]').concat(q('g[fill="#5FD38D"]')), "hhsym");
   // LoRa: the arcs between access points, the links to the handhelds that carry a module, and the caption.
-  tag(q('g[stroke-dasharray="10 7"], g[stroke="#F0A064"][stroke-dasharray="6 5"]').concat(texts(/^LoRa:/)), "lora");
+  // The handhelds out of every access point's Wi-Fi are LoRa's too: drawn apart, linked only over it.
+  tag(q('g[stroke-dasharray="10 7"], g[stroke="#F0A064"][stroke-dasharray="6 5"], g[fill="#152A21"][stroke-dasharray="none"]')
+        .concat(texts(/^LoRa:/), texts(/^LoRa only$/)), "lora");
+  loraSlots = q('g[fill="#152A21"][stroke-dasharray="none"] rect').map(r => ({ x: +r.getAttribute("x") + 6, y: +r.getAttribute("y") + 9 }));
   const antennas = q('g[stroke="#F0A064"]:not([stroke-dasharray])');
   tag([...new Set(antennas.map(g => g.parentNode))], "antennas");
   tag(q('g[transform^="translate(78 208)"], g[stroke-dasharray="2 6"]').concat(texts(/watching over BLE/)), "laptop");
@@ -543,7 +547,7 @@ function tagDiagram(svg) {
   const near = (x, y) => circles.reduce((b, c) => Math.hypot(c.x - x, c.y - y) < Math.hypot(b.x - x, b.y - y) ? c : b, circles[0]);
   const withLora = new Set(antennas.map(g => near(...tr(g))));
   spots = circles.slice().sort((a, b) => (withLora.has(b) - withLora.has(a)) || (a.y - b.y) || (a.x - b.x));
-  q('g[fill="#152A21"][stroke="#E4F2E9"] rect').forEach(r => {
+  q('g[fill="#152A21"][stroke="#E4F2E9"]:not([stroke-dasharray]) rect').forEach(r => {
     const x = +r.getAttribute("x") + 6, y = +r.getAttribute("y") + 9, c = near(x, y);
     if (!iconsAt.has(c)) iconsAt.set(c, []);
     iconsAt.get(c).push({ x, y, el: r });
@@ -736,8 +740,20 @@ function drawMap() {
       }
     });
   });
-  loose.forEach((h, k) => {
-    const x = 480 + (k - (loose.length - 1) / 2) * 110, y = 520;
+  // A handheld on LoRa alone goes where the diagram draws one: out of Wi-Fi range, with an orange link to
+  // the access point that hears it (the one it was last on, else the nearest LoRa access point).
+  const onLora = loose.filter(h => h.wifi_off), noLink = loose.filter(h => !h.wifi_off);
+  onLora.forEach((h, k) => {
+    const slot = loraSlots[k % Math.max(1, loraSlots.length)] || { x: 480, y: 520 };
+    const ap = apSpot[h.last_node] || spots.slice(0, 3).reduce((b, c) => Math.hypot(c.x - slot.x, c.y - slot.y) < Math.hypot(b.x - slot.x, b.y - slot.y) ? c : b, spots[0]);
+    pos["hh" + h.index] = slot;
+    if (ap) el("path", { d: `M${slot.x} ${slot.y} Q${(slot.x + ap.x) / 2} ${slot.y - 40} ${ap.x} ${ap.y}`, fill: "none", stroke: "#F0A064",
+                         "stroke-width": 2.5, "stroke-dasharray": "6 5" }, live);
+    el("rect", { x: slot.x - 6, y: slot.y - 9, width: 12, height: 18, rx: 2.5, fill: "#152A21", stroke: "#F0A064", "stroke-width": 1.6 }, live);
+    label(slot.x, slot.y - 22, h.name, "#F0A064", 14);   // the diagram's own "LoRa only" is under it
+  });
+  noLink.forEach((h, k) => {
+    const x = 480 + (k - (noLink.length - 1) / 2) * 110, y = 520;
     pos["hh" + h.index] = { x, y };
     el("rect", { x: x - 6, y: y - 9, width: 12, height: 18, rx: 2.5, fill: "#152A21", stroke: h.wifi_off ? "#F0A064" : "#9DB8A8", "stroke-width": 1.4 }, live);
     label(x, y + 26, h.name, h.wifi_off ? "#F0A064" : "#9DB8A8", 13);
