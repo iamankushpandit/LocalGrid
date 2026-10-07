@@ -71,7 +71,7 @@
         },
         {
           "text": "Bluetooth: a laptop or phone watches the grid's health without joining it (D68).",
-          "say": "Bluetooth lets a laptop or a phone watch the network, without ever joining it.",
+          "say": "Bluetooth lets a laptop or a phone watch the network, without ever joining it. That was built in during the project's first week, so that watching the network was part of it from the start.",
           "focus": "watch"
         },
         {
@@ -272,12 +272,12 @@
       "part": "Watching it",
       "title": "A laptop or a phone watches the grid without joining it",
       "body": [
-        "Every access point broadcasts a small sealed status over Bluetooth; anyone with the key can read it (D68).",
+        "Observability was designed in from the first week (D68): every access point broadcasts a small, sealed status over Bluetooth.",
+        "Only devices holding this grid's key can read it, and nobody can forge it; positions are never in it.",
         "After a login, the same tabs the admin page shows: network, handhelds, traffic (D70).",
-        "Read-only by construction: a watcher can never send, change or take part (D69, D70).",
-        "Every access point also serves the admin page itself, on request (D45, D91)."
+        "Read-only by construction: a watcher can never send, change or take part (D69, D70)."
       ],
-      "say": "You do not have to join the network to see how it is doing. What drew that map is the same view anyone can open: every access point broadcasts a small, sealed status over Bluetooth, and this laptop listens without being part of the grid. There is an Android app that does the same, and it is read only by construction: a watcher can never send a message or change anything.",
+      "say": "You do not have to join the network to see how it is doing. Being able to watch it was designed in during the project's first week, not added later: a network that claims to heal itself has to let you see it happen. Every access point broadcasts a small, sealed status over Bluetooth, and only a device with this grid's key can read it. This laptop is listening to it right now, without being part of the grid. There is an Android app that does the same, and both are read only by construction: a watcher can never send a message or change anything.",
       "view": "watch",
       "media": [
         {
