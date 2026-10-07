@@ -9,9 +9,14 @@
       "lead": "This is LocalGrid.",
       "points": [
         {
-          "text": "Made from small, inexpensive ESP32 boards.",
-          "say": "It is a messaging network you build yourself, from small, inexpensive boards.",
+          "text": "Made from ESP32 boards: small, low-cost chips from Espressif with Wi-Fi and Bluetooth built in.",
+          "say": "It is a messaging network you build yourself, from E S P 32 boards. An E S P 32 is a small, low-cost chip made by Espressif, with Wi-Fi and Bluetooth built in.",
           "focus": "all"
+        },
+        {
+          "text": "On this bench: plain ESP32 boards as access points; as handhelds, CYD-style touchscreen boards (2.8, 3.2 and 4-inch) and the Freenove FNK0104B (2.8-inch, ESP32-S3).",
+          "say": "On this bench, the access points are plain E S P 32 development boards. The handhelds are off-the-shelf touchscreen boards: C Y D style displays, at two point eight, three point two, and four inches, and the Freenove F N K zero one zero four B, a two point eight inch board with an E S P 32 S 3 chip, a microphone and a speaker.",
+          "focus": "handhelds"
         },
         {
           "text": "After a one-time setup, access points find each other and form the network on their own.",
