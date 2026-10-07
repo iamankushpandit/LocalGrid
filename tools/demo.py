@@ -1158,11 +1158,13 @@ class Grid(chaos.Chaos):
                 self.fact(f"{self.label(h)} played {got[1]} of {frames} frames of it")
             elif note:
                 _, packets, missing, crc = note
-                whole = missing == 0 and sent_note is not None and sent_note[2] == crc
+                # The sender's count: a listener counts only the gaps before the last packet it got.
+                total = sent_note[0] if sent_note else packets + missing
+                whole = sent_note is not None and sent_note[2] == crc
                 self.fact(f"{self.label(h)} played the compact copy that crossed LoRa: all {packets} packets, "
                           "byte for byte what was sent" if whole else
-                          f"{self.label(h)} played the compact copy that crossed LoRa, but {missing} of "
-                          f"{packets + missing} packets were lost on the air", ok=whole)
+                          f"{self.label(h)} played only {packets} of the {total} packets of the compact copy; "
+                          "the rest did not cross LoRa in time", ok=whole)
             else:
                 self.fact(f"{self.label(h)} did not play it", ok=False)
         leaked = [h for h in silent if heard(h) or heard_note(h)]
