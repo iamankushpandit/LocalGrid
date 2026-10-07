@@ -705,9 +705,17 @@ static void test_ack(void)
     CHECK(!lora_frame_wants_ack(f, n));
     n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, LG_FLAG_COMPACT, f, sizeof(f), 30);
     CHECK(!lora_frame_wants_ack(f, n));
+    CHECK(lora_frame_wants_ap_ack(f, n));        /* between two APs a compact voice packet is answered (D95) */
     CHECK(!lora_ack_parse(f, n, &seq));          /* an envelope is never read as an acknowledgement */
+    n = make_frame(LG_T_VOICE, LG_SCOPE_DIRECT, 0, f, sizeof(f), 30);
+    CHECK(!lora_frame_wants_ap_ack(f, n));       /* live voice is never on LoRa to be answered */
+    n = make_frame(LG_T_TEXT, LG_SCOPE_DIRECT, 0, f, sizeof(f), 40);
+    CHECK(lora_frame_wants_ap_ack(f, n));        /* and everything that wanted an answer still does */
+    n = make_frame(LG_T_PRESENCE_UPDATE, LG_SCOPE_SYSTEM, 0, f, sizeof(f), 8);
+    CHECK(!lora_frame_wants_ap_ack(f, n));
     lora_ack_build(7, ack, sizeof(ack));
     CHECK(!lora_frame_wants_ack(ack, sizeof(ack)));   /* and an acknowledgement is never acknowledged */
+    CHECK(!lora_frame_wants_ap_ack(ack, sizeof(ack)));
 
     /* A frame nobody is to answer is finished when its last part has gone, as it always was. */
     txq_setup(&q, false);

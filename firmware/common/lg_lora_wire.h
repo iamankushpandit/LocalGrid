@@ -258,11 +258,12 @@ typedef enum {
 lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len);
 
 /*
- * A frame of voice in the compact codec (D95). Every radio that puts one on the air sends it twice:
- * it is two parts, either of which can be lost, nothing acknowledges it and nothing sends it again,
- * and on the bench on 2026-10-04 two packets in five of a talk did not arrive when sent once. The
- * second copy is sealed afresh, so the link does not see a replay; the core's newest-only rule for
- * voice drops whichever copy comes second.
+ * A frame of voice in the compact codec (D95). A handheld or an AP sending one to a handheld sends it
+ * twice: it is two parts, either of which can be lost, nothing acknowledges it and nothing sends it
+ * again, and on the bench on 2026-10-04 two packets in five of a talk did not arrive when sent once.
+ * The second copy is sealed afresh, so the link does not see a replay; the core's newest-only rule for
+ * voice drops whichever copy comes second. Between two APs it goes once and is acknowledged instead
+ * (lora_frame_wants_ap_ack).
  */
 bool lora_frame_is_compact_voice(const uint8_t *frame, size_t len);
 
@@ -289,6 +290,15 @@ uint8_t lora_frame_rank(const uint8_t *frame, size_t len);
  * ends ask this of the same frame, so they never disagree about whether an answer is owed.
  */
 bool lora_frame_wants_ack(const uint8_t *frame, size_t len);
+
+/*
+ * The same question between two APs, where a compact voice packet is acknowledged too (D95, amended
+ * 2026-10-07). Sent twice, each packet took about 3.8 s of air against one every 2.8 s from the talker,
+ * the AP's four-slot queue overflowed, and a five-packet note arrived as one. Sent once and answered,
+ * it costs a second copy's airtime only when the first is lost. A handheld's LoRa link is unchanged: it
+ * still says a note twice and acknowledges none of it.
+ */
+bool lora_frame_wants_ap_ack(const uint8_t *frame, size_t len);
 
 /*
  * The acknowledgement (D104): six bytes sealed with the backbone key like any frame between APs, so it

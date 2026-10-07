@@ -366,6 +366,11 @@ bool lora_frame_wants_ack(const uint8_t *frame, size_t len)
     return e.type == LG_T_TEXT || e.type == LG_T_MSG_ACK || lora_is_alert_frame(frame, len);
 }
 
+bool lora_frame_wants_ap_ack(const uint8_t *frame, size_t len)
+{
+    return lora_frame_wants_ack(frame, len) || lora_frame_is_compact_voice(frame, len);
+}
+
 size_t lora_ack_build(uint32_t seq, uint8_t *out, size_t cap)
 {
     if (out == NULL || cap < LORA_ACK_LEN) {

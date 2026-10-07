@@ -774,7 +774,7 @@ static bool queue_sealed_for(uint16_t dest, bool alert, const uint8_t *frame, si
     if (ok) {
         L.msg_id++;
         slot->is_ack = is_ack;
-        if (!is_ack && await != 0u && lora_frame_wants_ack(frame, len)) {
+        if (!is_ack && await != 0u && lora_frame_wants_ap_ack(frame, len)) {
             lora_txq_want_ack(slot, lg_rd32(slot->data + 8), await);   /* the outer header's sequence number */
         }
     }
@@ -950,11 +950,9 @@ void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)
         return;   /* no LoRa link to that AP: transmitting at it would be wasted airtime */
     }
     L.force_once = false;
+    /* A compact voice packet goes once and is acknowledged, like text (D95 as amended, D104). */
     (void)queue_sealed_for((uint16_t)LORA_ADDR_AP(node), policy == LORA_SEND_ALWAYS, frame, len,
                            (uint16_t)(1u << node), 0);
-    if (lora_frame_is_compact_voice(frame, len)) {
-        (void)queue_sealed((uint16_t)LORA_ADDR_AP(node), false, frame, len);   /* D95: said twice */
-    }
 }
 
 /*
@@ -1228,7 +1226,7 @@ static void deliver(const lora_rx_t *r, uint32_t now)
          */
         uint16_t again = lg_rd16(r->slot->data + 2);
         size_t plain = r->slot->total - LGBB_OUTER_LEN - LG_AEAD_TAG_LEN;
-        if (again < LG_MAX_NODES && L.peers[again].up && lora_frame_wants_ack(inner, plain)) {
+        if (again < LG_MAX_NODES && L.peers[again].up && lora_frame_wants_ap_ack(inner, plain)) {
             L.peers[again].last_ms = now;
             queue_ack(again, lg_rd32(r->slot->data + 8));
         }
@@ -1287,7 +1285,7 @@ static void deliver(const lora_rx_t *r, uint32_t now)
      * pair running the link-up catch-up and leaving the peer unusable for the frames behind it.
      */
     L.peers[src].last_ms = now;
-    if (lora_frame_wants_ack(inner, n)) {
+    if (lora_frame_wants_ap_ack(inner, n)) {
         queue_ack(src, lg_rd32(r->slot->data + 8));   /* D104: before it is handled, so the answer is first in line */
     }
     if (L.on_frame != NULL) {

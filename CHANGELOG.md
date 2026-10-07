@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A voice packet between two APs goes once and is acknowledged (D95 amended)
+
+- Between two APs a compact voice packet is now sent once and acknowledged and sent again until it is
+  (D104), instead of twice and unanswered (`lora_frame_wants_ap_ack`). Sent twice, each packet took about
+  3.8 s of air against one every 2.8 s from the talker: Denali's four-slot queue dropped 12 frames and a
+  five-packet note reached Big Pepa as one. A handheld's own LoRa link is unchanged.
+- On the bench after the change, Big Pepa got 2 of 5 packets, but that run is not a fair measure:
+  Denali never heard Everest over LoRa after the restart, Everest still counted Denali as up 184 s after
+  last hearing it, and Everest's signal from Fuji was SNR 1 against 9 to 11 on every other pair. The
+  text message from Denali to Everest did not arrive for the same reason.
+- `tests/target`: 4695 checks, 0 failures on Fuji, with new checks for which frames an AP answers.
+- `tools/bench_devices.json`: Fuji is on COM16 and Denali on COM29 now.
+
 ### Handhelds balance one at a time again; the LoRa demos measured right
 
 - **Balancing (D54).** The stagger by device number counted only from when a handheld came online, so
