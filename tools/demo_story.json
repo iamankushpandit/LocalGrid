@@ -1,5 +1,5 @@
 {
-  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown. A chapter may give 'lead' and 'points' instead of 'say' and 'body': the title shows alone while the lead is said, then each point appears as its own line is said. 'view': 'diagram' shows the site's own assets/network-diagram.svg; 'focus' on a point, 'lead_focus', or a chapter's 'focuses' (spread over its sentences) zoom it to a named region (FOCUS in the page).",
+  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown. A chapter may give 'lead' and 'points' instead of 'say' and 'body': the title shows alone while the lead is said, then each point appears as its own line is said. 'view': 'diagram' shows the site's own assets/network-diagram.svg; 'focus' on a point, 'lead_focus', or a chapter's 'focuses' (spread over its sentences) zoom it to a named region (FOCUS in the page). A chapter with 'await': 'presenter' shows its 'prompt' after the narration and waits for the presenter's Continue: the laptop cannot see message contents, so these are not measured.",
   "chapters": [
     {
       "id": "intro",
@@ -219,6 +219,98 @@
       ]
     },
     {
+      "id": "h-direct",
+      "part": "Live: one to one",
+      "title": "A message to one person",
+      "view": "map",
+      "lead": "First, the everyday things. A message to one person.",
+      "points": [
+        {
+          "text": "Pick a person in Messages and write; it reaches their handheld wherever they are on the grid.",
+          "say": "On any handheld, pick a person in Messages, and write to them. It reaches their handheld, whichever access point either of you is on."
+        },
+        {
+          "text": "A mark beside it shows how far it got: held here, taken by an access point, delivered, read (D42).",
+          "say": "The mark beside your message shows how far it got: still on your handheld, taken by an access point, delivered, and then read."
+        },
+        {
+          "text": "One-to-one messages are sealed end to end: the access points carry them without being able to read them (D5).",
+          "say": "One-to-one messages are sealed end to end. The access points carry them, and cannot read them. Nor can this laptop, which is why it cannot show you this one: you will have to watch the screens."
+        }
+      ],
+      "await": "presenter",
+      "prompt": "Your turn: send a message from one handheld to another, and watch its mark change. Press Continue when it has been read."
+    },
+    {
+      "id": "h-group",
+      "part": "Live: a group",
+      "title": "A message to a group",
+      "view": "map",
+      "lead": "Next, a group.",
+      "points": [
+        {
+          "text": "Groups are made on the handhelds while the grid runs; up to eight (D52).",
+          "say": "Groups are made on the handhelds themselves, while the grid runs. Nothing is built in."
+        },
+        {
+          "text": "A message to a group reaches every member, and only the members.",
+          "say": "A message to a group reaches every member, on whichever access point they are, and nobody else."
+        },
+        {
+          "text": "The sender sees who has read it.",
+          "say": "And the sender can see who has read it."
+        }
+      ],
+      "await": "presenter",
+      "prompt": "Your turn: send a message to a group. Press Continue when the members have it."
+    },
+    {
+      "id": "h-everyone",
+      "part": "Live: an announcement",
+      "title": "An announcement to everyone",
+      "view": "map",
+      "lead": "Then, a message to everyone: an announcement.",
+      "points": [
+        {
+          "text": "A message to everyone flashes on every screen with a chime, then clears itself (D41).",
+          "say": "A message to everyone is an announcement. It flashes on every screen with a chime, so it is caught from across the room, and then clears itself."
+        },
+        {
+          "text": "The admin decides who may announce: everyone, or a chosen few (D56).",
+          "say": "The admin decides who may make announcements: everyone, or a chosen few."
+        },
+        {
+          "text": "Under it, the sender sees who has read it (D58).",
+          "say": "And under it, the sender sees who has read it."
+        }
+      ],
+      "await": "presenter",
+      "prompt": "Your turn: send a message to Everyone, and watch it flash on the other screens. Press Continue when you are ready."
+    },
+    {
+      "id": "h-voice",
+      "part": "Live: push to talk",
+      "title": "Push to talk",
+      "view": "map",
+      "lead": "Now voice.",
+      "points": [
+        {
+          "text": "Hold the talk bar and speak: like a walkie-talkie, to one person, a group, or everyone (D61, D88).",
+          "say": "Hold the talk bar and speak. It works like a walkie-talkie: to one person, to a group, or to everyone."
+        },
+        {
+          "text": "Your voice arrives about a third of a second later; one-to-one talk is sealed end to end like text.",
+          "say": "Your voice comes out of the other handhelds about a third of a second later. One-to-one talk is sealed end to end, just like text."
+        },
+        {
+          "text": "Channi and Jolly have microphones; every handheld with a speaker can listen.",
+          "say": "Channi and Jolly have microphones, so they can talk. Every handheld with a speaker can listen."
+        }
+      ],
+      "await": "presenter",
+      "prompt": "Your turn: on Channi or Jolly, open Everyone, hold the talk bar and speak. Press Continue when you are done."
+    },
+    {
       "id": "d-hands-sos",
       "part": "Live: an SOS",
       "title": "An SOS from a handheld's own screen",
@@ -227,7 +319,7 @@
         "Every other screen shows it; pressing Read tells the sender who has seen it (D58).",
         "The sender marks themselves safe, and it is stood down everywhere (D79)."
       ],
-      "say": "Somebody needs help, so they raise an S O S from their handheld's screen.",
+      "say": "Now the reason for the alerts. Somebody needs help, so they raise an S O S from their handheld's screen. Unlike an announcement, it takes over every screen, even a locked one, and it keeps sounding until somebody reads it.",
       "demo": "hands_sos",
       "view": "map",
       "media": [
