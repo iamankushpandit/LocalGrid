@@ -14,8 +14,13 @@
           "focus": "all"
         },
         {
-          "text": "On this bench: plain ESP32 boards as access points; as handhelds, CYD-style touchscreen boards (2.8, 3.2 and 4-inch) and the Freenove FNK0104B (2.8-inch, ESP32-S3).",
-          "say": "On this bench, the access points are plain E S P 32 development boards. The handhelds are off-the-shelf touchscreen boards: C Y D style displays, at two point eight, three point two, and four inches, and the Freenove F N K zero one zero four B, a two point eight inch board with an E S P 32 S 3 chip, a microphone and a speaker.",
+          "text": "Access points on this bench: Elegoo ESP32 development boards, no screen, each with a Reyax RYLR998 LoRa module; one also has a GT-U7 GPS.",
+          "say": "On this bench, the access points are Elegoo E S P 32 development boards, with no screen. Each one has a Reyax R Y L R 998 LoRa module wired on, and one of them also has a G T U 7 GPS, for the time and its location.",
+          "focus": "aps"
+        },
+        {
+          "text": "Handhelds on this bench: CYD-style touchscreen boards (2.8, 3.2 and 4-inch) and the Freenove FNK0104B (2.8-inch, ESP32-S3).",
+          "say": "The handhelds are off-the-shelf touchscreen boards: C Y D style displays, at two point eight, three point two, and four inches, and the Freenove F N K zero one zero four B, a two point eight inch board with an E S P 32 S 3 chip, a microphone and a speaker.",
           "focus": "handhelds"
         },
         {
