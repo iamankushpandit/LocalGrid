@@ -147,6 +147,21 @@
   ul.rw { padding-left: 0; list-style: none; margin: 0; display: grid; gap: 8px; }
   .rw-k { font: 600 12px var(--sans); color: var(--accent); text-transform: uppercase; letter-spacing: .04em; margin-right: 6px; }
 
+  .faq-group { margin-top: 28px; }
+  .faq-group:first-of-type { margin-top: 0; }
+  .faq-group h3 { font-size: 17px; margin: 0 0 12px; color: var(--muted); }
+  .faq { display: grid; gap: 10px; }
+  .faq details { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .faq summary { cursor: pointer; list-style: none; position: relative; padding: 14px 48px 14px 16px; font-weight: 600; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::after { content: "+"; position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
+    color: var(--accent); font: 600 22px/1 var(--sans); }
+  .faq details[open] summary::after { content: "\2212"; }
+  .faq summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+  .faq .a { padding: 0 16px 16px; color: var(--muted); font-size: 15px; }
+  .faq .a p { margin: 0 0 10px; }
+  .faq .a p:last-child { margin-bottom: 0; }
+
   .note { border-left: 3px solid var(--warn); background: var(--surface); padding: 14px 16px; border-radius: 0 10px 10px 0; color: var(--muted); }
   footer { border-top: 1px solid var(--line); padding: 32px 0 48px; color: var(--muted); font-size: 14px; }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; }
@@ -162,6 +177,7 @@
       <a href="#esp-now" class="opt">ESP-NOW</a>
       <a href="#features" class="opt">Features</a>
       <a href="#status" class="opt">Status</a>
+      <a href="#faq">FAQ</a>
       <a href="#contribute">Contribute</a>
       <a href="{{REPO}}">GitHub</a>
     </nav>
@@ -320,14 +336,14 @@
 
 <section id="lora">
   <div class="wrap">
-    <h2>Being built: LoRa</h2>
+    <h2>LoRa: the second path</h2>
     <p class="sub">LoRa is a low-power, long-range radio that works below the Wi-Fi band. It reaches kilometres
-      instead of a couple of hundred metres, but carries far less data. ESP32 chips have no LoRa radio, so it would mean
-      adding a small LoRa module to a board. The modules are now fitted to the access points and the firmware for them is
-      being written, so none of this runs yet.</p>
+      instead of a couple of hundred metres, but carries far less data. ESP32 chips have no LoRa radio, so it means
+      adding a small LoRa module to a board. The access points use it today: a message is acknowledged over LoRa and sent
+      again until it arrives (D104), and one that Wi-Fi could not deliver goes over LoRa at once (D105).</p>
     <div class="tablewrap">
       <table>
-        <thead><tr><th></th><th>Wi-Fi and ESP-NOW (today)</th><th>LoRa (being built)</th></tr></thead>
+        <thead><tr><th></th><th>Wi-Fi and ESP-NOW</th><th>LoRa</th></tr></thead>
         <tbody>
           <tr><td><strong>Range</strong></td><td>~100&#8211;200 m between access points, ~30&#8211;60 m to a handheld (estimates)</td><td>Kilometres with a clear line of sight; less through trees and hills</td></tr>
           <tr><td><strong>Speed</strong></td><td>1 Mbps between access points</td><td>Roughly 0.3 to 20 kbps, depending on settings; slower goes farther</td></tr>
@@ -339,14 +355,15 @@
     </div>
     <div class="grid" style="margin-top:20px">
       <div class="card"><h3>Access points first</h3>
-        <p>Access points too far apart for ESP-NOW will still reach each other, so two groups of access points, say at two
+        <p>Access points too far apart for ESP-NOW still reach each other, so two groups of access points, say at two
           sites a few kilometres apart, become one network. The LoRa link carries messages, alerts, who is around, positions
-          and the time, but never live talk. A module is optional: an access point without one behaves exactly as it does
-          today.</p></div>
-      <div class="card"><h3>Handhelds later</h3>
-        <p>A handheld with a module would not go silent when it walks out of Wi-Fi range: it could still send and receive
-          messages and emergencies from much farther away, with talk returning once it is back in range. This comes after
-          the access points, and stays optional, since each handheld needs the extra module.</p></div>
+          and the time, but never live talk. A module is optional: an access point without one simply uses Wi-Fi
+          alone.</p></div>
+      <div class="card"><h3>Handhelds too</h3>
+        <p>A handheld with a module does not go silent when it walks out of Wi-Fi range: it still sends and receives
+          messages and emergencies through an access point over LoRa, shown to others as reachable by LoRa, with live talk
+          returning once it is back in range (D77, D80, D109). It stays optional, since each handheld needs the extra
+          module.</p></div>
       <div class="card"><h3>What stays the same</h3>
         <p>Wi-Fi and ESP-NOW stay the main links, because they are fast enough for live talk. LoRa is the long-distance path
           for short, important messages. The aim is for encryption, groups, and emergencies to work the same way over
@@ -402,6 +419,190 @@
             field, on batteries and with no wires, is planned, and the ranges quoted above are estimates rather than
             measurements. If you have LoRa experience or boards, we would like to hear from you.</p>
         </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <h2>Questions people ask</h2>
+    <p class="sub">Straight answers, each backed by the project's own documents. A number such as D5 points to the
+      <a href="{{REPO}}/blob/main/docs/DECISIONS.md">decisions log</a>, where every choice is written down with its reasoning.</p>
+
+    <div class="faq-group">
+      <h3>The basics</h3>
+      <div class="faq">
+        <details><summary>What is LocalGrid, and who is it for?</summary><div class="a">
+          <p>An offline network you set up yourself. Small ESP32 access points, placed around an area and powered, find
+            each other and form a mesh on their own. People carry touchscreen handhelds and send private, group and
+            everyone messages, emergencies, and push-to-talk voice across it.</p>
+          <p>It is for groups that need to stay in touch where there is no signal: a group trip several families take
+            together, an event site, an exercise or a drill. Today it is a prototype, best suited to people who build and
+            test hardware.</p></div></details>
+        <details><summary>Does it need the Internet, a phone, or an account?</summary><div class="a">
+          <p>No. The network never uses the Internet, there is no server, and there is nothing to sign up to. A handheld is
+            a complete device on its own: one handheld is one person, with no logins (D7).</p>
+          <p>A phone or laptop is needed only to look after the network: join its Wi-Fi and open the admin page to name
+            the network, add people and groups, and set the time. After the first setup the page is opened on request,
+            so the access point's memory goes to handhelds the rest of the time (D91).</p></div></details>
+        <details><summary>Can it connect to the Internet, or to people's phones?</summary><div class="a">
+          <p>No, by design. There is no gateway to the Internet or to the phone network, and no app for sending messages
+            from a phone.</p>
+          <p>A laptop running the project's dashboard, or the Android watcher app, can sit beside the network and watch
+            it over Bluetooth without joining: alerts, which access points are up, who is online, and batteries (D68,
+            D69). With the admin password it also sees what the admin page shows, such as the map. It has no way to read a
+            message, hear a talk, or send anything (D70).</p></div></details>
+        <details><summary>How is it different from Meshtastic and other LoRa meshes?</summary><div class="a">
+          <p>LoRa meshes such as Meshtastic trade bandwidth for kilometres and usually pair each radio with a phone.
+            LocalGrid's main links are Wi-Fi: ESP-NOW between access points, and Wi-Fi from each handheld to its access
+            point. That covers a smaller area and needs powered access points; in return the handhelds stand alone with no
+            phone, carry live push-to-talk, and show who has read an emergency.</p>
+          <p>LoRa is LocalGrid's second path: between access points when Wi-Fi cannot reach (D74), and to handhelds that
+            carry a LoRa module (D77). Live voice never crosses LoRa; a compact copy of a talk can (D95).</p></div></details>
+        <details><summary>Why not walkie-talkies, or a phone mesh app?</summary><div class="a">
+          <p>Push-to-talk works like a walkie-talkie: hold a person, a group, or everyone, and talk (D61, D88). LocalGrid
+            adds written messages, one-to-one conversations that are end-to-end encrypted, groups, and emergencies that
+            take over every screen, even a locked one, and tell the sender who has read them (D57, D58).</p>
+          <p>It needs no phone at all. The handhelds are their own devices, and the network is carried by access points
+            you place, so it does not depend on anyone's phone being charged, nearby, or set up.</p></div></details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>Hardware, size, and range</h3>
+      <div class="faq">
+        <details><summary>What hardware does it run on, and how many boards do I need?</summary><div class="a">
+          <p>Common ESP32 boards. An access point is an ESP32 dev board (any 4 MB ESP32). Handhelds are ESP32 touchscreen
+            display boards, listed under <a href="#hardware">Hardware</a>, plus a small alert unit that shows alerts and
+            raises an SOS (D66). A GPS module and a LoRa module are optional.</p>
+          <p>One access point is enough to start: it serves handhelds on its own. More access points add coverage and room
+            for more people. The project is developed on a bench of three access points and six handhelds.</p></div></details>
+        <details><summary>How many handhelds can one network hold?</summary><div class="a">
+          <p>Up to 32 handhelds and 8 access points in one network, with up to 8 groups, and a message crosses at most 3
+            hops between access points. These limits are fixed in the code, so a full table gives a defined, logged result
+            instead of crashing.</p>
+          <p>Per access point, the firmware keeps 8 handheld sessions (D93), but memory decides how many it can really
+            serve. Measured alone, one access point served all six bench handhelds and still had memory free; the real
+            ceiling has not been measured yet (<a href="{{REPO}}/blob/main/docs/capacity-and-memory.md">capacity and
+            memory</a>). Handhelds spread themselves across the access points they can hear (D54).</p></div></details>
+        <details><summary>How far does it reach?</summary><div class="a">
+          <p>Not measured yet. Every test so far has run on one workbench with every board in radio range, so there is no
+            measured range to quote, for Wi-Fi or for LoRa. The distances in the table at the top of this page are
+            estimates for these boards, not measurements.</p>
+          <p>A field test will replace them. If you run one on your own boards, we would like the numbers.</p></div></details>
+        <details><summary>How long do the batteries last?</summary><div class="a">
+          <p>For handhelds, it has not been measured.</p>
+          <p>For access points, two overnight runs recorded how long each kept running on a 5000 mAh pack: between
+            9 h 19 min and 12 h 42 min, with the one carrying a GPS the shortest both times. The boards cannot report their
+            own charge, so these are floors read from when each went silent, not a battery-life rating
+            (<a href="{{REPO}}/blob/main/docs/chaos/2026-10-01-night-run.md">the run's report</a>).</p></div></details>
+        <details><summary>Is LoRa legal where I am?</summary><div class="a">
+          <p>Check your local radio rules before you transmit. The modules used are Reyax RYLR998 for the 868/915 MHz
+            bands (D71). The firmware sets 868.5 MHz, and one setting changes it for a 915 MHz region
+            (<a href="{{REPO}}/blob/main/docs/lora.md">LoRa notes</a>). Transmit power is 22 dBm by default and can be
+            turned down (D98).</p>
+          <p>The firmware counts airtime but does not yet enforce a region's duty-cycle limit, so staying within your
+            region's rules on frequency, power and airtime is up to you.</p></div></details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>Security and privacy</h3>
+      <div class="faq">
+        <details><summary>Is it encrypted?</summary><div class="a">
+          <p>Yes, by LocalGrid itself rather than by the radio. One-to-one messages and one-to-one talk are end-to-end
+            encrypted (X25519, HKDF-SHA256, ChaCha20-Poly1305): access points carry them and cannot read them (D5, D61).
+            Group and everyone messages are encrypted over the air, but an access point can read them (D5).</p>
+          <p>Everything between access points, over ESP-NOW or LoRa, is sealed with the network's own key, and the
+            encryption is checked against published RFC test vectors on the boards. Keys sit in each device's storage,
+            which is not encrypted, so someone who takes a device can read them (D96).</p></div></details>
+        <details><summary>Who can see where I am?</summary><div class="a">
+          <p>Only a handheld with a GPS shares a position; one without a GPS never appears. Positions are shared within
+            the network: other handhelds use them to show where an alert came from and how far away people are, and the
+            admin page and a watcher holding the admin password show them on a map (D65, D70). The Bluetooth status
+            beacon carries no positions (D68).</p>
+          <p>A single position is held in memory and forgotten on restart. The last sixteen steps of a walk, its trail,
+            are kept in flash on purpose, so a device found after its owner got lost still shows where they went (D99,
+            D106). A handheld can stop sharing its trail from its My trail page. Positions are not logged.</p></div></details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>When things go wrong</h3>
+      <div class="faq">
+        <details><summary>What happens when an access point fails?</summary><div class="a">
+          <p>Only the area it covered loses signal; the rest carries on. There is no master and no server: every access
+            point holds a full copy of the settings, groups, who is online, the time, and the health history, each record
+            versioned so the newest wins (D45, D48).</p>
+          <p>Handhelds in range of another access point move to it, messages route around the gap, and a message Wi-Fi
+            could not deliver between access points goes over LoRa at once (D105). When the access point comes back, it
+            recovers what it knew from the ones that stayed up.</p></div></details>
+        <details><summary>What if everything loses power at once?</summary><div class="a">
+          <p>Settings, groups, keys and trails are kept in each device's flash and come back on their own (D48, D96,
+            D106). The clock is the exception, because the boards have no clock battery.</p>
+          <p>The time survives any restart that keeps power (D60). A restarted access point takes it from another access
+            point or from a handheld that kept it (D53), and an access point with a GPS takes it from satellites (D63).
+            Only after every device has truly lost power, with no GPS, does the admin set the time again (D6).</p></div></details>
+        <details><summary>Will a message wait for someone who is offline?</summary><div class="a">
+          <p>No. There is no store-and-forward: a message to someone the network cannot reach is refused, and the sender
+            is told straight away, rather than being promised it will arrive later (D13).</p>
+          <p>A handheld out of Wi-Fi range but reachable over LoRa is shown as such and still gets messages, acknowledged
+            and sent again until they arrive (D80, D109).</p></div></details>
+        <details><summary>How was it tested?</summary><div class="a">
+          <p>Every test runs on real ESP32 boards, never a simulation on a PC (D25). The protocol core and the encryption
+            run their unit tests and RFC test vectors on a board.</p>
+          <p>The self-healing claim was tested by attacking it: a framework kills access points and handhelds, cuts their
+            power and switches their radios off at random for hours, while the handhelds keep messaging. In the 10-hour
+            run of 2026-09-18, 55 faults were injected and 55 recovered with nobody stepping in, and the backbone
+            re-formed in a median of 3.7 s. It also found bugs that code review and unit tests had missed
+            (<a href="{{REPO}}/blob/main/docs/chaos-engineering.md">how it was chaos tested</a>). It has not yet been tested
+            in the field: every run so far was on one workbench.</p></div></details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>Building and running it</h3>
+      <div class="faq">
+        <details><summary>Can I build one? How do I install it?</summary><div class="a">
+          <p>Yes. From source: install ESP-IDF v6.1 and follow the README's
+            <a href="{{REPO}}#build-it">Build it</a> steps.</p>
+          <p>From the browser: the <a href="flash/">installer page</a> flashes a board over its USB cable from Chrome or
+            Edge, then gives the board its place in your network. A network's keys are made once and handed to each device
+            at setup rather than built into the firmware, so one published image can serve every network (D96). Images are
+            not published on this site yet; until they are, build from source.</p></div></details>
+        <details><summary>How does it get updates?</summary><div class="a">
+          <p>Only signed ones. A device installs firmware only if it is signed with the release key it was given at setup,
+            and a device given no release key takes no update at all (D97). The <a href="sign/">signer page</a> makes a
+            release key and signs firmware in your browser.</p>
+          <p>Give a signed update to one access point and it spreads to the others by itself, one at a time (D101). Access
+            points also carry handheld updates and hand them to handhelds over Wi-Fi, sharing the images for different
+            chips between them (D107, D111). A device installs an update on its own, never during a talk or an alert and
+            never below 30 % battery, and new firmware runs on trial and is kept only if it starts.</p></div></details>
+      </div>
+    </div>
+
+    <div class="faq-group">
+      <h3>The project</h3>
+      <div class="faq">
+        <details><summary>Is it a product I can buy?</summary><div class="a">
+          <p>No. LocalGrid is an open-source prototype. It runs on development boards with modules wired on; purpose-built
+            handhelds are still being designed, and the access points have no cases yet.</p></div></details>
+        <details><summary>What does it not do yet?</summary><div class="a">
+          <p>Measured range and field testing; purpose-built handhelds and cases; handhelds relaying for each other, which is
+            planned (D47); holding messages for someone offline (D13); and LoRa directly between two handhelds, which goes
+            through an access point instead (D77). Read the
+            <a href="{{REPO}}/tree/main/docs/milestones">milestone reports</a> before relying on any part of it.</p></div></details>
+        <details><summary>What licence is it under?</summary><div class="a">
+          <p>GPL-3.0-or-later (D76). A company shipping devices with it must publish its changes and leave the boards
+            reflashable. Contributions are accepted under the same licence, with no contributor licence agreement.
+            Third-party material keeps its own licence (<a href="{{REPO}}/blob/main/THIRD_PARTY.md">THIRD_PARTY.md</a>).</p></div></details>
+        <details><summary>Can I contribute, or port my board?</summary><div class="a">
+          <p>Yes. Start with <a href="{{REPO}}/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>. Porting a display board
+            mostly means describing its pins, screen and touch controller in one profile file;
+            <a href="{{REPO}}/blob/main/docs/BOARDS.md">docs/BOARDS.md</a> lists the fields and the bring-up checklist.
+            Range tests on your own radios are just as welcome, and the <a href="admin/">admin page</a> can be worked on
+            with no hardware.</p></div></details>
       </div>
     </div>
   </div>
