@@ -167,8 +167,8 @@
           "say": "Chase and Marshall are LCD wiki two point eight inch displays, and Big Pepa is the four inch one."
         },
         {
-          "text": "Channi and Jolly: Freenove FNK0104B, 2.8-inch, ESP32-S3, each with a microphone, a speaker, a LoRa module and a GT-U7 GPS: everything a handheld can carry. Indoors, their GPS has no fix yet.",
-          "say": "Channi and Jolly are Freenove F N K zero one zero four B boards: two point eight inches, with the faster E S P 32 S 3 chip. They are fitted with everything a handheld can carry: a microphone and a speaker for push to talk, their own LoRa module for when Wi-Fi does not reach, and a G T U 7 GPS, so they know where they are, put it in an S O S, and leave a trail. They have not been taken outside yet, so indoors on this bench their GPS hears the satellites but has no fix."
+          "text": "Channi and Jolly: Freenove FNK0104B, 2.8-inch, ESP32-S3, each with a microphone, a speaker, a LoRa module and a GT-U7 GPS: everything a handheld can carry.",
+          "say": "Channi and Jolly are Freenove F N K zero one zero four B boards: two point eight inches, with the faster E S P 32 S 3 chip. They are fitted with everything a handheld can carry: a microphone and a speaker for push to talk, their own LoRa module for when Wi-Fi does not reach, and a G T U 7 GPS, so they know where they are, put it in an S O S, and leave a trail."
         },
         {
           "text": "Nothing here is custom hardware: the modules are wired onto boards anyone can buy.",
