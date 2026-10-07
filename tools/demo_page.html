@@ -478,7 +478,7 @@ $("logsbtn").onclick = toggleLogs;
 const FOCUS = {
   all:       [0, 0, 960, 680],
   aps:       [100, 175, 760, 538],     // the ring of access points and the hops between them
-  main:      [320, 130, 330, 234],     // MAIN, with its GPS and LoRa
+  main:      [320, 130, 330, 234],     // the access point with a GPS and LoRa
   handhelds: [630, 270, 330, 234],     // one access point and the handhelds on it
   lora:      [60, 200, 840, 470],      // the three LoRa access points and the arcs between them
   gps:       [60, 0, 840, 300],        // the satellites: time and location, optional
@@ -489,7 +489,7 @@ const FOCUS = {
 // What glows for each, and what the label says.
 const POINT = {
   aps:       { parts: ["aps", "hops"], label: "Access points: the circles. Green dashes: the Wi-Fi hops between them" },
-  main:      { parts: ["main", "aps"], label: "MAIN: the access point with a GPS" },
+  main:      { parts: ["main", "aps"], label: "The access point with a GPS: it gives the grid its time" },
   handhelds: { parts: ["handhelds", "hhsym", "hhlinks"], label: "Handhelds: each one linked to the access point it is on" },
   lora:      { parts: ["lora", "antennas"], label: "LoRa: the orange arcs between the access points that have a module" },
   gps:       { parts: ["gps"], label: "GPS satellites: time and location, optional" },
@@ -523,7 +523,7 @@ function tagDiagram(svg) {
   tag(q('g[stroke-width="1.3"]'), "hhlinks");
   const apg = svg.querySelector('g[fill="#0B1510"]');
   tag([apg], "aps");
-  tag(texts(/^(MAIN|GPS \+ LoRa)$/), "main");
+  tag(texts(/^GPS \+ LoRa$/), "main");
   // The handhelds are the small rectangles in one group; the scaled groups beside them are their microphone
   // and speaker symbols, and the green pins are the handhelds that have a GPS.
   tag(q('g[fill="#152A21"][stroke="#E4F2E9"]'), "handhelds");
@@ -532,13 +532,14 @@ function tagDiagram(svg) {
   const antennas = q('g[stroke="#F0A064"]:not([stroke-dasharray])');
   tag([...new Set(antennas.map(g => g.parentNode))], "antennas");
   tag(q('g[transform^="translate(78 208)"], g[stroke-dasharray="2 6"]').concat(texts(/watching over BLE/)), "laptop");
-  // Where bench access points go: MAIN first (Everest is MAIN, with the GPS), then the other access points
-  // that carry LoRa, then the rest of the ring.
+  // Where bench access points go: the access points that carry LoRa first, the top one (with the GPS, as
+  // Everest has) before the others, then the rest of the ring. Every access point is drawn the same: there
+  // is no master (D45).
   const tr = g => (g.getAttribute("transform").match(/translate\(([-\d.]+) ([-\d.]+)\)/) || []).slice(1).map(Number);
   const circles = apg ? [...apg.querySelectorAll("circle")].map(c => ({ x: +c.getAttribute("cx"), y: +c.getAttribute("cy"), r: +c.getAttribute("r"), el: c })) : [];
   const near = (x, y) => circles.reduce((b, c) => Math.hypot(c.x - x, c.y - y) < Math.hypot(b.x - x, b.y - y) ? c : b, circles[0]);
   const withLora = new Set(antennas.map(g => near(...tr(g))));
-  spots = circles.slice().sort((a, b) => (b.r - a.r) || (withLora.has(b) - withLora.has(a)) || (a.x - b.x));
+  spots = circles.slice().sort((a, b) => (withLora.has(b) - withLora.has(a)) || (a.y - b.y) || (a.x - b.x));
   q('g[fill="#152A21"][stroke="#E4F2E9"] rect').forEach(r => {
     const x = +r.getAttribute("x") + 6, y = +r.getAttribute("y") + 9, c = near(x, y);
     if (!iconsAt.has(c)) iconsAt.set(c, []);

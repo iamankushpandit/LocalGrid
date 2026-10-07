@@ -22,7 +22,7 @@ ever.
 
 </div>
 
-<img src="assets/network-diagram.svg" alt="Circles are access points and small rectangles are handhelds. Access points pass messages to each other in hops, with handhelds on each. Above, GPS satellites give the main access point its time and location, and some handhelds have their own GPS; both optional. A laptop beside the grid watches it over Bluetooth without joining. LoRa links the access points as a longer-range second path.">
+<img src="assets/network-diagram.svg" alt="Circles are access points and small rectangles are handhelds. Access points pass messages to each other in hops, with handhelds on each. Above, GPS satellites give one access point its time and location, and some handhelds have their own GPS; both optional. A laptop beside the grid watches it over Bluetooth without joining. LoRa links the access points as a longer-range second path.">
 
 ## What it is
 

@@ -161,7 +161,7 @@
       </div>
     </div>
     <div class="diagram-scroll"><div class="diagram">
-      <img src="assets/network-diagram.svg" alt="LocalGrid's network. Circles are access points and small rectangles are handhelds. Eight access points pass messages to each other in hops, every one within three hops of the rest, with three handhelds on each. Some handhelds do push-to-talk; the rest send text and listen. There is no Internet. Above, GPS satellites give the main access point its time and location, and some handhelds have their own GPS; both optional. A laptop beside the grid watches it over Bluetooth without joining. LoRa links the access points as a longer-range second path." width="960" height="680">
+      <img src="assets/network-diagram.svg" alt="LocalGrid's network. Circles are access points and small rectangles are handhelds. Eight access points pass messages to each other in hops, every one within three hops of the rest, with three handhelds on each. Some handhelds do push-to-talk; the rest send text and listen. There is no Internet. Above, GPS satellites give one access point its time and location, and some handhelds have their own GPS; both optional. A laptop beside the grid watches it over Bluetooth without joining. LoRa links the access points as a longer-range second path." width="960" height="680">
     </div></div>
     <div class="legend">
       <div>
@@ -285,7 +285,7 @@
           on its admin page. A handheld can carry its own GPS too, and then it backs up the time as well.</p></div>
       <div class="card"><h3>Everyone on a map</h3>
         <p>A handheld with a GPS shares its position with the network, so the admin page can show where people are and a
-          handheld can show how far it is from the main access point. A single position is held in memory only; the last
+          handheld can show how far it is from the access point with the GPS. A single position is held in memory only; the last
           steps of a walk, its trail, are kept in flash so they survive every device being off (D106). A handheld
           without a GPS simply does not appear.</p></div>
       <div class="card"><h3>Watch the network without joining it</h3>

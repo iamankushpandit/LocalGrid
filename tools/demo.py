@@ -165,6 +165,8 @@ class Grid(chaos.Chaos):
         self.log_out = []             # lines not yet sent to the page
         self.log_sent_at = 0.0
         self.ble_events_seen = 0.0    # the newest Bluetooth event already shown
+        self.kept = {}                # port -> held open, lines released, while the cables are not in use
+        self.kept_at = 0.0
 
     # ---- what the page sees ----
 
@@ -246,6 +248,8 @@ class Grid(chaos.Chaos):
     def background(self):
         super().background()
         self.flush_logs()
+        if self.untethered:
+            self.keep_ports()
         snap = self.snapshot()
         key = json.dumps(snap, sort_keys=True)
         if key != self.state_key:
@@ -406,6 +410,50 @@ class Grid(chaos.Chaos):
             return False
         return True
 
+    def keep_ports(self):
+        """Hold every bench bridge port open with both lines released, reading nothing.
+
+        Found in the demo of 2026-10-07: with the access points' USB cables still in this laptop for power,
+        unplugging one access point left the others on the same hub held in reset - Everest and Fuji both
+        reported 1 s of uptime the moment a port was opened, minutes after they had gone quiet, and every
+        handheld said "No LocalGrid AP in range". A CP210x or CH34x that the system has just set up holds
+        the board's enable line until a program opens it with the lines released. Holding the ports open
+        released keeps a re-plugged board running. Nothing is read or written: the laptop still only
+        listens over Bluetooth. Native USB boards (Espressif's own) have no reset line to hold and are left
+        alone."""
+        now = time.monotonic()
+        if now - self.kept_at < 2.0:
+            return
+        self.kept_at = now
+        from serial.tools import list_ports
+        present = {pt.device: pt.vid for pt in list_ports.comports() if pt.vid in chaos.SEPARATE_BRIDGES}
+        for port in list(self.kept):
+            if port not in present:
+                try:
+                    self.kept.pop(port).close()
+                except (self.serial.SerialException, OSError):
+                    pass
+        for port in present:
+            if port in self.kept:
+                continue
+            s = self.serial.Serial()
+            s.port, s.baudrate, s.timeout, s.dtr, s.rts = port, 115200, 0, False, False
+            try:
+                s.open()
+            except (self.serial.SerialException, OSError):
+                continue
+            self.kept[port] = s
+            self.publish("log", event="port_kept", board=port)
+
+    def let_go_of_ports(self):
+        for port, s in list(self.kept.items()):
+            try:
+                s.dtr = s.rts = False
+                s.close()
+            except (self.serial.SerialException, OSError):
+                pass
+        self.kept.clear()
+
     def untether(self):
         """Let go of every cable. The boards keep running; the laptop only listens from here on."""
         self.caption("This laptop lets go of every cable. From here on it only listens to the grid over "
@@ -464,6 +512,7 @@ class Grid(chaos.Chaos):
 
     def warm_up_tethered(self):
         self.caption("Finding the boards on this laptop's cables.")
+        self.let_go_of_ports()
         self.boards, self.aps, self.hhs, self.by_name = [], [], [], {}
         self.start_boards()
         self.untethered = False
@@ -1699,6 +1748,7 @@ def main():
             watch.terminate()
         if grid is not None:
             try:
+                grid.let_go_of_ports()
                 grid.restore()
             finally:
                 grid.close_all()

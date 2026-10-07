@@ -367,6 +367,25 @@ static void refresh(void)
             s.subline.fg = C_WARNING;
         } else {
             snprintf(text, sizeof(text), "%s", st->problem[0] ? st->problem : "Looking for an AP");
+            /* The clock shares this line, so a reason that does not fit is said shorter rather than cut
+             * off mid-word ("No LocalGrid AP in rang", owner, 2026-10-07): "LocalGrid " goes first, then
+             * whole words from the end. The whole reason stays on the Status screen. */
+            int16_t room = (int16_t)(s.subline.rect.w - 2 * s.subline.pad);
+            char *brand = strstr(text, "LocalGrid ");
+            if (brand != NULL && lg_draw_text_width(s.subline.font, s.subline.fallback, text) > room) {
+                memmove(brand, brand + 10, strlen(brand + 10) + 1);
+            }
+            while (lg_draw_text_width(s.subline.font, s.subline.fallback, text) > room) {
+                char *cut = strrchr(text, ' ');
+                if (cut == NULL || cut == text) {
+                    break;
+                }
+                strcpy(cut, "...");
+                if (lg_draw_text_width(s.subline.font, s.subline.fallback, text) <= room) {
+                    break;
+                }
+                *cut = '\0';
+            }
             s.subline.fg = st->problem[0] ? C_ERROR : C_WARNING;
         }
         lg_draw_set_text(&s.subline, text);
