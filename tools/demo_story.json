@@ -73,14 +73,74 @@
           "text": "No master: every access point holds the whole grid's settings, groups and time (D45, D46).",
           "say": "There is no master. Every access point holds a full copy of the settings, the groups and the time.",
           "focus": "main"
-        },
-        {
-          "text": "Handhelds spread themselves across access points, and move when one disappears (D54).",
-          "say": "And the handhelds spread themselves across the access points.",
-          "focus": "handhelds"
         }
       ],
       "lead_focus": "all"
+    },
+    {
+      "id": "espnow",
+      "part": "How it works",
+      "title": "ESP-NOW: how the access points talk to each other",
+      "view": "diagram",
+      "lead": "First, ESP-NOW, the way the access points talk to each other.",
+      "lead_focus": "aps",
+      "points": [
+        {
+          "text": "A radio protocol built into every ESP32: board to board, with no router and no joining (D2).",
+          "say": "ESP-NOW is a radio protocol built into every ESP32 by Espressif, the chip's maker. It sends short packets straight from one board's Wi-Fi radio to another's. There is no router, and nothing to join.",
+          "focus": "aps"
+        },
+        {
+          "text": "An access point says hello as it starts; every access point that hears it becomes a neighbour.",
+          "say": "When an access point starts, it broadcasts a hello. Every access point that hears it adds it as a neighbour. There is no pairing, and it does not matter which one is switched on first.",
+          "focus": "aps"
+        },
+        {
+          "text": "A message hops from neighbour to neighbour, at most 3 hops; copies already seen are ignored.",
+          "say": "A message goes to each neighbour, which passes it on to theirs. Copies already seen are ignored, and a message stops after three hops, so nothing goes round forever.",
+          "focus": "aps"
+        },
+        {
+          "text": "A neighbour that misses three hellos (6 s) is dropped, and messages flow around it.",
+          "say": "A neighbour that misses three hellos, which is six seconds, is dropped, and messages keep flowing through the access points that are left.",
+          "focus": "aps"
+        },
+        {
+          "text": "Same radio and channel as the handhelds' Wi-Fi; every message between access points is encrypted by LocalGrid.",
+          "say": "Each access point runs ESP-NOW and the Wi-Fi network the handhelds join at the same time, on one radio and one channel. And every message between access points is encrypted by LocalGrid itself, with a key only that network's devices hold.",
+          "focus": "aps"
+        }
+      ]
+    },
+    {
+      "id": "join",
+      "part": "How it works",
+      "title": "How a handheld joins",
+      "view": "diagram",
+      "lead": "And how a handheld joins.",
+      "lead_focus": "handhelds",
+      "points": [
+        {
+          "text": "Every access point broadcasts the same Wi-Fi network, like a home mesh router (D46).",
+          "say": "Every access point broadcasts the same Wi-Fi network, the way a home mesh router does.",
+          "focus": "aps"
+        },
+        {
+          "text": "A handheld that switches on listens for access points, over Wi-Fi and Bluetooth (D4).",
+          "say": "When a handheld is switched on, it listens for access points, over Wi-Fi and over Bluetooth.",
+          "focus": "handhelds"
+        },
+        {
+          "text": "Of the ones it hears well, it joins the one with the fewest handhelds (D54).",
+          "say": "Of the ones it hears well, it joins the one carrying the fewest handhelds. That is usually a nearby one, though not always the very nearest, because it spreads the load.",
+          "focus": "handhelds"
+        },
+        {
+          "text": "It keeps one connection open to that access point; if that one goes, it finds another by itself (D12, D54).",
+          "say": "It keeps one connection open to that access point. If that access point goes away, it finds another one by itself, as you will see in a moment.",
+          "focus": "handhelds"
+        }
+      ]
     },
     {
       "id": "untether",
