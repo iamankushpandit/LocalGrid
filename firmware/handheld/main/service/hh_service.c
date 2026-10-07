@@ -1336,13 +1336,15 @@ static void io_event(void *ctx, const lg_client_event_t *ev)
         }
         gp.pos_due = true;   /* D65: our position at registration, from the service loop */
         tr.due = true;       /* D99: and where we have been */
+        {
+            /* D110: which firmware this is, at every registration. Not inside the trail's condition below:
+             * there it went unsaid by a handheld whose trail was already full (Jolly, 2026-10-07). */
+            char ver[LG_FWU_VERSION_MAX + 1u];
+            lg_fwu_running_version(ver);
+            (void)lg_client_send_devfw(&s.client, lg_fwu_running_serial(), lg_fwu_this_chip(), ver);
+        }
         if (tr.n < LG_TRAIL_POINTS) {
             (void)lg_client_request_trail(&s.client, s.client.device);   /* ... as far as the grid remembers (D53) */
-            {
-                char ver[LG_FWU_VERSION_MAX + 1u];
-                lg_fwu_running_version(ver);
-                (void)lg_client_send_devfw(&s.client, lg_fwu_running_serial(), lg_fwu_this_chip(), ver);   /* D110 */
-            }
         }
         s_on_ap_since_ms = now_ms() | 1u;   /* never 0, which means "not on one" */
         set_problem("");
