@@ -24,7 +24,7 @@ User-facing text calls the product "an offline network", never a camp or campsit
 | `firmware/handheld` | Handheld firmware: network service in `main/service`, screens in `main/ui` (drawn with `lg_draw`), meeting only in `hh_service.h`. |
 | `firmware/common` | Prototype grid config shared by all firmware; secrets are generated here. |
 | `tests/target` | On-board test app with a simulated three-node grid. |
-| `tools/` | Secrets generator, multi-port serial capture, build and flash, `grid_watch.py`, the laptop dashboard that reads the grid over BLE (`docs/grid-watch.md`), `test_admin_page.py`, which drives the AP's admin page in a headless browser against a stand-in AP, `test_installer_page.py`, which installs a bench board through the installer page in a real browser, and `demo.py`, a local page with one button per fact about the grid that plays it on the bench boards, narrated, for filming. |
+| `tools/` | Secrets generator, multi-port serial capture, build and flash, `grid_watch.py`, the laptop dashboard that reads the grid over BLE (`docs/grid-watch.md`), `test_admin_page.py`, which drives the AP's admin page in a headless browser against a stand-in AP, `test_installer_page.py`, which installs a bench board through the installer page in a real browser, and `demo.py`, a narrated presentation that explains the project and proves each claim live on the bench boards, for filming (`docs/demo.md`). |
 | `site/`, `tools/gen_site.py` | Project site template and generator; every fact comes from the tree (`docs/OPEN_SOURCE.md`). |
 | `.github/` | CI (`verify` is the required check), Pages, issue and pull request templates. |
 

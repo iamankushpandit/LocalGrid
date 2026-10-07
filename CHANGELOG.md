@@ -5,13 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
-### A demo that runs itself (`tools/demo.py`)
+### A demo that runs itself (`tools/demo.py`, `docs/demo.md`)
 
-- A local web page with one button per fact about the grid, made to be filmed: unplug an access
-  point, cut the Wi-Fi between access points so a message crosses by LoRa, and an SOS on every
-  screen stood down by one all clear. Each button checks the grid is ready, says what is about to
-  happen, does it through the boards' cables, shows it on a live map of the grid with a stopwatch,
-  and ends with what the boards themselves reported. Then it puts the grid back.
+- A narrated presentation on a local web page that explains the project (what it is, why, how it
+  works, the bench's hardware as the boards report it, the concepts, key decisions, chaos testing)
+  and then proves each claim live, from one Play all button. Its words are in `tools/demo_story.json`.
+- Thirteen live demos: the handheld screens, an SOS and its all clear, push to talk, an access point
+  losing power, a crash, the Wi-Fi between access points cut so messages cross by LoRa, a handheld
+  out of Wi-Fi range on LoRa alone, a split grid that agrees again, every access point off at once,
+  an update that spreads itself, installing a board from the installer page, and, with every cable
+  unplugged, a plug pulled, an SOS and a blackout done by hand and watched over Bluetooth only.
+- Each checks the grid is ready, says what is about to happen, does it, shows it on a live map with
+  a stopwatch, and ends with what the boards themselves reported. Then it puts the grid back.
 - The page narrates every step with the browser's own voice, chosen on the page, and the demo waits
   for each line to be spoken before it acts, so a recording needs nobody speaking.
 - The engine is the chaos harness, scripted: the same fault injection and log parsing, and the same

@@ -1,0 +1,357 @@
+{
+  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. Every claim here is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py), flasher (site/flash), or none. A chapter with 'action': 'untether' lets go of every cable; the hands-on chapters after it are watched over Bluetooth only.",
+  "chapters": [
+    {
+      "id": "intro",
+      "part": "LocalGrid",
+      "title": "An offline network you can build from inexpensive boards",
+      "body": [
+        "Access points find each other and form a network by themselves.",
+        "Touchscreen handhelds send text, emergencies and push-to-talk voice across it.",
+        "No Internet, no phones, no cell service. Ever."
+      ],
+      "say": "This is LocalGrid. An offline messaging network built from inexpensive E S P 32 boards. A few access points find each other and form the network by themselves, and touchscreen handhelds send text, emergencies and voice across it. There is no Internet, no phone and no cell service involved, at any point.",
+      "view": "map"
+    },
+    {
+      "id": "why",
+      "part": "Why it exists",
+      "title": "For the moment the infrastructure everyone relies on is not there",
+      "body": [
+        "A group trip several families share, far from any signal.",
+        "A festival site, a disaster drill, a power cut that takes the towers with it.",
+        "Working looks like nothing happening, so today we break it on purpose and watch it recover."
+      ],
+      "say": "It is meant for the moment the infrastructure everyone relies on is not there. A group trip several families share, far from any signal. An event site. A storm that takes the towers down. The trouble with a network like this is that when it works, nothing seems to happen. So in this demo we break it on purpose, live, and let the boards report how it recovers.",
+      "view": "map"
+    },
+    {
+      "id": "how",
+      "part": "How it works",
+      "title": "Three radios, each with a job",
+      "body": [
+        "Wi-Fi (ESP-NOW) between access points, and each handheld's link to its access point (D2).",
+        "LoRa: a second, much longer path between access points, and to handhelds that have a module (D71, D77).",
+        "Bluetooth: a laptop or phone watches the grid's health without joining it (D68).",
+        "No master: every access point holds the whole grid's settings, groups and time (D45, D46).",
+        "Handhelds spread themselves across access points, and move when one disappears (D54)."
+      ],
+      "say": "Three radios, each with a job. Wi-Fi carries normal traffic: between access points over E S P now, and from each handheld to its access point. LoRa is a second, much longer path, between access points and to handhelds that carry a module. Bluetooth lets a laptop or a phone watch the grid without ever joining it. There is no master. Every access point holds a full copy of the settings, the groups and the time, and the handhelds spread themselves out across the access points. What you see here is live: these are the boards on this bench, and who is connected to whom right now.",
+      "view": "map"
+    },
+    {
+      "id": "hardware",
+      "part": "Hardware",
+      "title": "The boards on this bench, as they describe themselves",
+      "body": [
+        "Access points: plain ESP32 boards with a 4 MB flash, an optional LoRa module (Reyax RYLR998, SX1262) and an optional GPS (GT-U7).",
+        "Handhelds: off-the-shelf ESP32 and ESP32-S3 display boards with touchscreens, some with a microphone, speaker or LoRa module.",
+        "Every module is optional: with no GPS an admin sets the time, and with no LoRa the access points use Wi-Fi alone.",
+        "Board facts live in data-only profiles; a new display board is often a profile and a touch check away."
+      ],
+      "say": "The hardware is deliberately ordinary. The access points are plain E S P 32 development boards. Some carry a LoRa module, and one can carry a GPS for time and location. The handhelds are off-the-shelf touchscreen boards. Several models run it today, on three different chips. Every module is optional. This table is not typed in: each board on the bench reported it, a moment ago.",
+      "view": "hardware"
+    },
+    {
+      "id": "concepts",
+      "part": "Concepts",
+      "title": "What makes it hold together",
+      "body": [
+        "Information is sticky: anything one device learns survives it restarting and is shared, newest version wins (D48).",
+        "Self-healing: a device that restarts gets its state back from the ones that stayed up (D53).",
+        "One-to-one messages are end-to-end encrypted; access points carry them without being able to read them (D5).",
+        "Emergencies go out over Wi-Fi and LoRa at the same time, so an alert never depends on one radio (D74).",
+        "Bounded by design: fixed-size tables, no memory taken per message, and a logged result when anything fills up."
+      ],
+      "say": "A few ideas hold it together. Information is sticky: anything one device learns survives that device restarting, and is shared with its neighbours, with the newest version winning. A device that restarts gets its state back from the ones that stayed up. One-to-one messages are encrypted end to end, so the access points carry them without being able to read them. Emergencies go out over Wi-Fi and LoRa at the same time. And everything is bounded: fixed tables, no memory taken per message, and a defined result when something fills up.",
+      "view": "map"
+    },
+    {
+      "id": "decisions",
+      "part": "Key decisions",
+      "title": "Decided in writing, before the code",
+      "body": [
+        "D1: pure ESP-IDF, no Arduino, for full control of Wi-Fi, ESP-NOW and memory.",
+        "D25: everything is tested on the real boards; a laptop never stands in for a device.",
+        "D45: no master access point; any one of them can go and the rest carry on.",
+        "D55: the handheld screens are drawn by our own small renderer, not a UI library, to leave memory for the radios.",
+        "D96, D97: a device holds its grid's keys, and only installs an update signed by the release key it was given.",
+        "D103: faults are injected through a cable and no other way; nothing in the firmware can break the grid on request."
+      ],
+      "say": "Every decision was made in writing first, and there are more than a hundred of them. A few that shaped it. Pure E S P I D F, for full control of the radios. Testing happens on the real boards, never on a laptop pretending to be one. No master access point. The handheld screens are drawn by our own small renderer, to leave memory for the radios. Each device holds its own grid's keys, and only installs updates signed by the release key it was given. And the fault injection you are about to see goes through a cable: there is nothing in the firmware that can break the grid on request.",
+      "view": "map"
+    },
+    {
+      "id": "chaos",
+      "part": "Tested by breaking it",
+      "title": "Chaos testing, for hours, unattended",
+      "body": [
+        "A framework kills access points and handhelds at random, cuts their power and switches their radios off, while the handhelds keep messaging each other.",
+        "In a 10-hour run: 55 faults injected, 55 recovered, none needing a human. The backbone re-formed in a median of 3.7 s.",
+        "It found five bugs code review and unit tests never could, including one that made the self-healing promise untrue.",
+        "This demo uses the same engine, with a script instead of a random schedule."
+      ],
+      "say": "The central claim is that it heals itself, so it was tested by attacking it. A framework kills access points and handhelds at random, cuts their power and turns their radios off, for hours, while the handhelds keep messaging each other. In one ten hour run, fifty five faults were injected and all fifty five recovered without a human. It also found five real bugs that code review never could. This demo is that same engine, with a script instead of dice.",
+      "view": "map"
+    },
+    {
+      "id": "bench",
+      "part": "On the bench",
+      "title": "Everything is wired, for now, so it can be broken on cue",
+      "body": [
+        "Each board is on a USB cable to this laptop, for two reasons: to cut its power on cue, and to read what it says.",
+        "Faults go through the cable and no other way; nothing in the firmware can break the grid on request (D103).",
+        "Every message is sent and received by the handhelds themselves. The laptop never joins the grid (D25).",
+        "Later, the cables come out."
+      ],
+      "say": "For the first part, every board is on a cable to this laptop. Not because the grid needs it, but so the demo can cut a board's power on cue, and read what each one says about itself. The handhelds still send and receive every message themselves, and the laptop never joins the grid. Later on, the cables come out.",
+      "view": "map"
+    },
+    {
+      "id": "d-tour",
+      "part": "Live: the handhelds",
+      "title": "One screen per person, no phone needed",
+      "body": [
+        "Each person has a handheld with its own name, chosen on the handheld (D50).",
+        "Messages to everyone, to a group, or to one person; a mark shows sent, delivered and read (D42).",
+        "Battery, screen lock and a screen saver; the firmware it runs is on its status screen (D62, D110)."
+      ],
+      "say": "First, the handhelds themselves. Watch their screens.",
+      "demo": "tour",
+      "view": "map"
+    },
+    {
+      "id": "d-emergency",
+      "part": "Live: an emergency",
+      "title": "An SOS breaks through every screen",
+      "body": [
+        "Sent from the handheld's own screen; it takes over every other screen, even a locked one (D57).",
+        "It goes out over Wi-Fi and LoRa at the same time (D74).",
+        "Read is how an alert is dismissed, and the sender sees who has read it (D58).",
+        "The sender marks themselves safe, and one message stands it down everywhere (D79)."
+      ],
+      "say": "The reason this exists. One handheld raises an S O S.",
+      "demo": "emergency",
+      "view": "map"
+    },
+    {
+      "id": "d-voice",
+      "part": "Live: voice",
+      "title": "Push to talk, to one person, a group, or everyone",
+      "body": [
+        "Live, half duplex, in 100 ms frames sealed like text (D61).",
+        "A compact copy of each talk also crosses LoRa, for handhelds out of Wi-Fi range (D95).",
+        "Handhelds without a microphone still listen."
+      ],
+      "say": "Voice. Push to talk, to one person, a group, or everyone.",
+      "demo": "voice",
+      "view": "map"
+    },
+    {
+      "id": "d-ap-out",
+      "part": "Live: losing an access point",
+      "title": "Pull the plug on an access point",
+      "body": [
+        "Its handhelds look for another access point and move by themselves (D54).",
+        "Messages keep arriving while it is gone.",
+        "When it comes back it rejoins with nothing set up again."
+      ],
+      "say": "Now we start breaking things. We cut the power to the access point carrying the most handhelds.",
+      "demo": "ap_out",
+      "view": "map"
+    },
+    {
+      "id": "d-ap-restart",
+      "part": "Live: a crash",
+      "title": "An access point crashes and restarts",
+      "body": [
+        "Settings, groups and the grid's time come back from its own flash and from the others (D48, D53, D60).",
+        "Nothing is typed in again."
+      ],
+      "say": "A crash is different from a power cut: the access point comes straight back. Watch what it remembers.",
+      "demo": "ap_restart",
+      "view": "map"
+    },
+    {
+      "id": "d-lora",
+      "part": "Live: the second radio",
+      "title": "Cut the Wi-Fi between access points",
+      "body": [
+        "The access points switch to LoRa, the longer, slower path (D71).",
+        "Each LoRa message is acknowledged and sent again until it is (D104).",
+        "A message Wi-Fi could not deliver goes to LoRa at once (D105)."
+      ],
+      "say": "Now we take away the Wi-Fi link between every pair of access points.",
+      "demo": "lora_bridge",
+      "view": "map"
+    },
+    {
+      "id": "d-hh-lora",
+      "part": "Live: out of range",
+      "title": "A handheld walks out of Wi-Fi range",
+      "body": [
+        "A handheld with a LoRa module stays reachable when no access point's Wi-Fi reaches it (D77).",
+        "The grid knows it is on LoRa alone and never pretends it is on Wi-Fi (D80).",
+        "Messages to it are acknowledged and sent again until they arrive (D109)."
+      ],
+      "say": "LoRa is not only for access points. A handheld with a module can walk out of Wi-Fi range and stay on the grid.",
+      "demo": "hh_lora",
+      "view": "map"
+    },
+    {
+      "id": "d-split",
+      "part": "Live: a split grid",
+      "title": "Split the grid in two, then let it meet again",
+      "body": [
+        "Each half carries on by itself.",
+        "Changes made on either side carry a version; when the halves meet, the newest wins (D45, D48)."
+      ],
+      "say": "What if the grid splits in two, and someone changes something on one side?",
+      "demo": "split",
+      "view": "map"
+    },
+    {
+      "id": "d-blackout",
+      "part": "Live: the worst case",
+      "title": "Every access point off at once",
+      "body": [
+        "The handhelds keep the grid's time and carry it back to the access points (D53).",
+        "Trails of where people walked survive every device being off (D106).",
+        "The grid re-forms by itself."
+      ],
+      "say": "And the worst case. Every access point loses power at the same moment.",
+      "demo": "blackout",
+      "view": "map"
+    },
+    {
+      "id": "d-update",
+      "part": "Live: updates",
+      "title": "An update that spreads itself",
+      "body": [
+        "Give a signed update to one access point; it reaches the others by itself (D101).",
+        "Access points carry handheld updates and hand them to handhelds over the air (D107, D111).",
+        "A device installs only an update signed by the release key it was given (D97).",
+        "One command withdraws an update from the whole grid."
+      ],
+      "say": "Updating a network nobody can plug a cable into. A signed update is given to one access point, and the grid does the rest.",
+      "demo": "update",
+      "view": "map"
+    },
+    {
+      "id": "d-install",
+      "part": "Live: getting started",
+      "title": "Install it from a web page",
+      "body": [
+        "Plug a board in, open the installer page, press Install and choose the port.",
+        "Then give it your grid's file: the keys stay on the device, not in the firmware (D96).",
+        "No tools to install."
+      ],
+      "say": "And finally, how anyone gets started. A board is installed from a web page: press install, choose the port, and give it your grid's file. Nothing to install on the computer.",
+      "demo": "install",
+      "view": "flasher"
+    },
+    {
+      "id": "watch",
+      "part": "Watching it",
+      "title": "A laptop or a phone watches the grid without joining it",
+      "body": [
+        "Every access point broadcasts a small sealed status over Bluetooth; anyone with the key can read it (D68).",
+        "After a login, the same tabs the admin page shows: network, handhelds, traffic (D70).",
+        "Read-only by construction: a watcher can never send, change or take part (D69, D70).",
+        "Every access point also serves the admin page itself, on request (D45, D91)."
+      ],
+      "say": "You do not have to join the network to see how it is doing. Every access point broadcasts a small, sealed status over Bluetooth, and this laptop is listening to it right now, without being part of the grid. The same view exists as an Android app, and it is read only by construction: a watcher can never send a message or change anything.",
+      "view": "watch"
+    },
+    {
+      "id": "untether",
+      "part": "Live: no cables",
+      "title": "Now, every cable comes out",
+      "body": [
+        "The laptop lets go of every port; from here it only listens over Bluetooth.",
+        "Access points run from batteries or chargers, handhelds from their own batteries.",
+        "Nothing from here on can be faked by the laptop: it has no way in."
+      ],
+      "say": "Everything so far ran with cables, so we could break things on cue. A real deployment has none. So the laptop now lets go of every cable, and we unplug them. From here on, it can only listen.",
+      "action": "untether",
+      "view": "map"
+    },
+    {
+      "id": "d-hands-ap",
+      "part": "Live: pull a plug, by hand",
+      "title": "Pull the plug on an access point, by hand",
+      "body": [
+        "Unplug any access point you like.",
+        "The laptop sees it go quiet over Bluetooth, and sees its handhelds turn up on the others.",
+        "Plug it back in, and it rejoins."
+      ],
+      "say": "Now the faults are done by hand. Pull the power on any access point.",
+      "demo": "hands_ap",
+      "view": "map"
+    },
+    {
+      "id": "d-hands-sos",
+      "part": "Live: an SOS, by hand",
+      "title": "An SOS from a handheld's own screen",
+      "body": [
+        "Raise an SOS on any handheld.",
+        "Every other screen shows it; pressing Read tells the sender who has seen it (D58).",
+        "The sender marks themselves safe, and it is stood down everywhere (D79)."
+      ],
+      "say": "An S O S, raised the way a person would, from the screen.",
+      "demo": "hands_sos",
+      "view": "map"
+    },
+    {
+      "id": "d-hands-blackout",
+      "part": "Live: all off, by hand",
+      "title": "Every access point off, then on, with no cables",
+      "body": [
+        "Switch every access point off; the handhelds keep the time on their own batteries.",
+        "Switch them back on: they find each other, and the handhelds give them the time back (D53)."
+      ],
+      "say": "And the whole grid, off and on again, with no cable anywhere.",
+      "demo": "hands_blackout",
+      "view": "map"
+    },
+    {
+      "id": "more",
+      "part": "Also working today",
+      "title": "Everything else it does",
+      "body": [
+        "Groups made on the handhelds while the grid runs (D52); names chosen on the handheld (D50).",
+        "A GPS gives the grid its time and location; handhelds with one share position, distance and a trail (D63, D65, D99).",
+        "Voice notes that cross LoRa (D72, D95); LoRa power that can be turned down (D98).",
+        "A small alert and distress unit that shows alerts and raises an SOS (D66).",
+        "A self test at every handheld start (D24); the firmware every device runs shown on every screen (D110)."
+      ],
+      "say": "There is more than we have time to break today. Groups made on the handhelds, while the grid runs. A GPS that gives the grid its time and location, and handhelds that share where they are and leave a trail. Voice notes that cross LoRa. A small alert unit that does nothing but show alerts and raise an S O S. And a self test every time a handheld starts.",
+      "view": "map"
+    },
+    {
+      "id": "limits",
+      "part": "Honestly",
+      "title": "What it is not, yet",
+      "body": [
+        "A prototype: every test so far ran on one workbench, every board in range and on a cable.",
+        "Ranges are not measured yet; field tests come next.",
+        "No store and forward: a message to someone unreachable is refused and the sender is told (D13).",
+        "The handhelds are development boards; purpose-built handhelds and enclosures are still to come."
+      ],
+      "say": "And to be straight about it. This is a prototype. Every test so far ran on one bench, with every board in range. We have not measured range yet, so we do not claim any. A message to someone who cannot be reached is refused, and the sender is told, rather than held for later. And the handhelds are development boards for now.",
+      "view": "map"
+    },
+    {
+      "id": "end",
+      "part": "LocalGrid",
+      "title": "Open source, and built in the open",
+      "body": [
+        "GPL-3.0-or-later: firmware, tools and every design document (D76).",
+        "github.com/iamankushpandit/LocalGrid",
+        "Board ports, testing on your own radios, and the admin page are the best places to start."
+      ],
+      "say": "LocalGrid is open source, under the G P L, including every design document and decision. It is on GitHub, at i am ankush pandit, slash LocalGrid. If you build one, we would love to hear how far it reaches. Thank you for watching.",
+      "view": "map"
+    }
+  ]
+}
