@@ -15,6 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Denali never heard Everest over LoRa after the restart, Everest still counted Denali as up 184 s after
   last hearing it, and Everest's signal from Fuji was SNR 1 against 9 to 11 on every other pair. The
   text message from Denali to Everest did not arrive for the same reason.
+- A sender now listens 1.5 s past the last answering turn instead of 0.4 s (`ACK_MARGIN_MS`): an answer
+  that comes due while the answering AP has a part on the air waits for it. Eight messages Denali to
+  Everest, Wi-Fi backbone off: before, 7 of 8 arrived and Denali heard 5 of 11 answers; after, 8 of 8
+  and 7 of 8 answers.
 - `tests/target`: 4695 checks, 0 failures on Fuji, with new checks for which frames an AP answers.
 - `tools/bench_devices.json`: Fuji is on COM16 and Denali on COM29 now.
 
