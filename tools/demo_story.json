@@ -227,7 +227,7 @@
         "Every other screen shows it; pressing Read tells the sender who has seen it (D58).",
         "The sender marks themselves safe, and it is stood down everywhere (D79)."
       ],
-      "say": "This is the reason it exists. Somebody needs help, so they raise an S O S from their handheld's screen.",
+      "say": "Somebody needs help, so they raise an S O S from their handheld's screen.",
       "demo": "hands_sos",
       "view": "map",
       "media": [

@@ -570,6 +570,24 @@ static void draw_confirm(void)
     lg_draw_region(&s.confirm, paint_confirm, NULL);
 }
 
+/*
+ * The field and the keys beside it. D79: "I'm safe" is there exactly while this handheld's own SOS
+ * stands, so it is worked out again whenever the messages change (ui_chat_refresh), not only when the
+ * conversation opens: an SOS sent from this screen used to need leaving and coming back before it
+ * could be stood down (owner, 2026-10-07).
+ */
+static void place_keys(int16_t input_y)
+{
+    bool has_urgent = s.scope == LG_SCOPE_BROADCAST;
+    s.has_sos = has_urgent && sos_standing();   /* D79: only then is there anything to stand down */
+    int16_t keys_w = (int16_t)(has_urgent ? (s.has_sos ? 108 : 72) : 36);
+    s.field = (lg_rect_t){ PAD, input_y, (int16_t)(s.w - 2 * PAD - keys_w), INPUT_H };
+    s.send = (lg_rect_t){ (int16_t)(s.w - PAD - 32), input_y, 32, INPUT_H };
+    s.urgent_key = (lg_rect_t){ (int16_t)(s.w - PAD - 68), input_y, 32, INPUT_H };
+    s.safe_key = s.has_sos ? (lg_rect_t){ (int16_t)(s.w - PAD - 104), input_y, 32, INPUT_H }
+                           : (lg_rect_t){ 0, 0, 0, 0 };
+}
+
 static void place(bool keyboard)
 {
     s.keyboard = keyboard;
@@ -589,14 +607,7 @@ static void place(bool keyboard)
     s.list = (lg_rect_t){ 0, HEAD_H, (int16_t)s.w, (int16_t)(input_y - HEAD_H - GAP) };
     s.arrow = (lg_rect_t){ (int16_t)((s.w - ARROW_SIZE) / 2), (int16_t)(s.list.y + (s.list.h - ARROW_SIZE) / 2),
                            ARROW_SIZE, ARROW_SIZE };
-    bool has_urgent = s.scope == LG_SCOPE_BROADCAST;
-    s.has_sos = has_urgent && sos_standing();   /* D79: only then is there anything to stand down */
-    int16_t keys_w = (int16_t)(has_urgent ? (s.has_sos ? 108 : 72) : 36);
-    s.field = (lg_rect_t){ PAD, input_y, (int16_t)(s.w - 2 * PAD - keys_w), INPUT_H };
-    s.send = (lg_rect_t){ (int16_t)(s.w - PAD - 32), input_y, 32, INPUT_H };
-    s.urgent_key = (lg_rect_t){ (int16_t)(s.w - PAD - 68), input_y, 32, INPUT_H };
-    s.safe_key = s.has_sos ? (lg_rect_t){ (int16_t)(s.w - PAD - 104), input_y, 32, INPUT_H }
-                           : (lg_rect_t){ 0, 0, 0, 0 };
+    place_keys(input_y);
     place_confirm();
     if (keyboard) {
         ui_kb_open(s.w, s.h, s.input, sizeof(s.input));
@@ -748,6 +759,10 @@ void ui_chat_refresh(const hh_status_t *st)
     if (st->messages_version != s.shown_messages) {
         s.shown_messages = st->messages_version;
         ui_notify_mark_seen(s.scope, s.target);
+        if (s.scope == LG_SCOPE_BROADCAST && sos_standing() != s.has_sos) {
+            place_keys(s.field.y);   /* our SOS went out, or our all clear did: "I'm safe" follows it */
+            draw_field();
+        }
         bool was_at_bottom = at_bottom();
         layout();
         uint32_t newest = s.n_bubbles ? s.bubbles[s.n_bubbles - 1u].id : 0;
