@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalGrid Demo</title>
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+  --wifi: #58a6ff; --lora: #f0883e; --ok: #3fb950; --bad: #f85149; --ap: #d2a8ff; --hh: #e6edf3;
+  --off: #484f58; --accent: #58a6ff;
+}
+:root[data-theme="light"] {
+  --bg: #f6f8fa; --panel: #ffffff; --line: #d0d7de; --text: #1f2328; --muted: #57606a;
+  --wifi: #0969da; --lora: #bc4c00; --ok: #1a7f37; --bad: #cf222e; --ap: #8250df; --hh: #1f2328;
+  --off: #afb8c1; --accent: #0969da;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, "Segoe UI", sans-serif;
+       display: grid; grid-template-rows: auto 1fr auto; }
+header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+header h1 { font-size: 20px; margin: 0; letter-spacing: .3px; }
+header .status { color: var(--muted); }
+header .spacer { flex: 1; }
+header label { color: var(--muted); display: flex; gap: 6px; align-items: center; cursor: pointer; }
+header select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                padding: 4px 6px; font: inherit; max-width: 260px; }
+main { display: grid; grid-template-columns: 300px 1fr 340px; min-height: 0; }
+aside, section { padding: 16px; min-height: 0; overflow: auto; }
+aside.left { border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+aside.right { border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 14px; }
+.btn { display: block; width: 100%; text-align: left; background: var(--panel); color: var(--text);
+       border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; font: inherit; }
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn .t { font-weight: 600; font-size: 16px; }
+.btn .s { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.btn .k { float: right; color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+.btn.running { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+.row { display: flex; gap: 8px; }
+.row .btn { text-align: center; }
+.btn.stop { border-color: var(--bad); color: var(--bad); }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 6px 0 2px; }
+section.grid { display: flex; align-items: center; justify-content: center; }
+svg { width: 100%; height: 100%; max-height: 100%; }
+.timer { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.timer .label { color: var(--muted); font-size: 13px; min-height: 18px; }
+.timer .clock { font: 600 44px/1.1 ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.timer.done .clock { color: var(--ok); }
+.timer.fail .clock { color: var(--bad); }
+ul.facts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+ul.facts li { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok);
+              border-radius: 8px; padding: 8px 10px; }
+ul.facts li.bad { border-left-color: var(--bad); }
+ul.log { list-style: none; margin: 0; padding: 0; font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--muted); }
+footer { border-top: 1px solid var(--line); padding: 16px 24px; min-height: 92px; display: flex; align-items: center; }
+footer .caption { font-size: 26px; line-height: 1.3; }
+.legend { display: flex; gap: 14px; color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+.legend span::before { content: ""; display: inline-block; width: 18px; height: 0; margin-right: 6px; vertical-align: middle;
+                       border-top: 3px solid var(--wifi); }
+.legend span.l::before { border-top: 3px dashed var(--lora); }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+  aside.left, aside.right { border: 0; }
+  section.grid { height: 60vh; }
+  footer .caption { font-size: 20px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>LocalGrid</h1>
+  <span class="status" id="status">Connecting…</span>
+  <span class="spacer"></span>
+  <label><input type="checkbox" id="speak"> Narrate</label>
+  <select id="voice" title="Narrator voice"></select>
+  <label><input type="checkbox" id="light"> Light</label>
+</header>
+<main>
+  <aside class="left">
+    <h2>Show it</h2>
+    <div id="scenarios"></div>
+    <div class="row">
+      <button class="btn" id="reset" title="R">Reset grid</button>
+      <button class="btn stop" id="stop" title="Esc">Stop</button>
+    </div>
+    <h2>Key</h2>
+    <div class="legend"><span>Wi-Fi link</span><span class="l">LoRa link</span></div>
+  </aside>
+  <section class="grid"><svg id="map" viewBox="0 0 1000 700" role="img" aria-label="The grid: access points, their links, and the handhelds on each"></svg></section>
+  <aside class="right">
+    <div class="timer" id="timer"><div class="label" id="tlabel"></div><div class="clock" id="tclock">0.0 s</div></div>
+    <h2>What the boards reported</h2>
+    <ul class="facts" id="facts"></ul>
+    <h2>Grid events</h2>
+    <ul class="log" id="log"></ul>
+  </aside>
+</main>
+<footer><div class="caption" id="caption"></div></footer>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+let state = { aps: [], handhelds: [], busy: null, ready: false };
+let scenarios = [];
+let boards = true;
+const flows = new Map();          // token -> {from, to:Set, path, born}
+const bursts = [];                // {name, at}
+let timerStart = null;
+
+function pref(key, el, apply, dflt) {
+  let v = null;
+  try { v = localStorage.getItem(key); } catch (e) {}
+  el.checked = v === null ? dflt : v === "1";
+  apply(el.checked);
+  el.addEventListener("change", () => { try { localStorage.setItem(key, el.checked ? "1" : "0"); } catch (e) {} apply(el.checked); });
+}
+pref("lg-demo-light", $("light"), on => document.documentElement.dataset.theme = on ? "light" : "dark", false);
+
+// ---- narration: the browser's own voice, so a recording needs nobody speaking ----
+// Each line is spoken in turn, never cut off, and the demo is told when it ends: it waits for that
+// before it acts, so the words and what happens on the boards stay together.
+const synth = window.speechSynthesis || null;
+let openedAt = 0;
+function narrating() { return !!synth && $("speak").checked; }
+function tellNarrate() { fetch("/api/narrate?on=" + (narrating() ? 1 : 0), { method: "POST" }).catch(() => {}); }
+pref("lg-demo-speak", $("speak"), on => { if (!on && synth) synth.cancel(); tellNarrate(); }, true);
+
+function fillVoices() {
+  if (!synth) { $("voice").hidden = true; $("speak").disabled = true; return; }
+  const voices = synth.getVoices().filter(v => /^en/i.test(v.lang));
+  if (!voices.length) return;
+  let saved = null;
+  try { saved = localStorage.getItem("lg-demo-voice"); } catch (e) {}
+  // A voice installed on this laptop first: it works with no Internet, which is the product's point too.
+  const pick = voices.find(v => v.name === saved) || voices.find(v => v.localService && /natural/i.test(v.name))
+    || voices.find(v => v.localService && /en-US/i.test(v.lang)) || voices[0];
+  $("voice").innerHTML = "";
+  voices.forEach(v => {
+    const o = document.createElement("option");
+    o.value = v.name; o.textContent = v.name.replace(/^Microsoft /, "") + (v.localService ? "" : " (online)");
+    if (v === pick) o.selected = true;
+    $("voice").appendChild(o);
+  });
+}
+if (synth) { fillVoices(); synth.onvoiceschanged = fillVoices; }
+$("voice").addEventListener("change", () => { try { localStorage.setItem("lg-demo-voice", $("voice").value); } catch (e) {} });
+
+function spokenForm(text) {
+  return text.replace(/(\d) s\b/g, "$1 seconds").replace(/\bSOS\b/g, "S O S").replace(/\bAP\b/g, "access point");
+}
+function speak(text, n) {
+  const done = () => { if (n) fetch("/api/spoken?n=" + n, { method: "POST" }).catch(() => {}); };
+  // Lines replayed to a page opened mid-scenario are shown, not spoken again.
+  if (!narrating() || performance.now() - openedAt < 400) return;
+  const u = new SpeechSynthesisUtterance(spokenForm(text));
+  const v = synth.getVoices().find(x => x.name === $("voice").value);
+  if (v) u.voice = v;
+  u.rate = 1.0;
+  u.onend = done;
+  u.onerror = done;
+  synth.speak(u);
+}
+
+async function post(path) {
+  const r = await fetch(path, { method: "POST" });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); $("status").textContent = "Not now: " + (j.error || r.status); }
+}
+
+function renderButtons() {
+  const box = $("scenarios");
+  box.innerHTML = "";
+  scenarios.forEach((s, i) => {
+    const b = document.createElement("button");
+    b.className = "btn" + (state.busy === s.key ? " running" : "");
+    b.disabled = !boards || !state.ready || (state.busy && state.busy !== s.key);
+    b.innerHTML = `<span class="k">${i + 1}</span><div class="t"></div><div class="s"></div>`;
+    b.querySelector(".t").textContent = s.title;
+    b.querySelector(".s").textContent = s.subtitle;
+    b.onclick = () => post("/api/run?s=" + encodeURIComponent(s.key));
+    box.appendChild(b);
+  });
+  $("reset").disabled = !boards || !!state.busy;
+  $("stop").disabled = !boards || !state.busy;
+  $("status").textContent = !boards ? "Page only: no boards" : !state.ready ? "Warming up…" :
+    state.busy ? "Running" : `Ready: ${state.aps.length} access points, ${state.handhelds.length} handhelds`;
+}
+
+// ---- the map ----
+function layout() {
+  const pos = {};
+  const n = state.aps.length, cx = 500, cy = 340, R = n > 1 ? 190 : 0;
+  state.aps.forEach((a, i) => {
+    const ang = -Math.PI / 2 + i * 2 * Math.PI / Math.max(n, 1);
+    pos["ap" + a.index] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), ang };
+  });
+  const groups = {};
+  const loose = [];
+  state.handhelds.forEach(h => {
+    if (h.node !== null && h.node !== undefined && pos["ap" + h.node]) (groups[h.node] = groups[h.node] || []).push(h);
+    else loose.push(h);
+  });
+  Object.entries(groups).forEach(([node, hs]) => {
+    const ap = pos["ap" + node];
+    const out = n > 1 ? ap.ang : Math.PI / 2;
+    hs.forEach((h, j) => {
+      const a = out + (j - (hs.length - 1) / 2) * 0.95;
+      pos["hh" + h.index] = { x: ap.x + 125 * Math.cos(a), y: ap.y + 125 * Math.sin(a) };
+    });
+  });
+  loose.forEach((h, j) => { pos["hh" + h.index] = { x: 500 + (j - (loose.length - 1) / 2) * 130, y: 655 }; });
+  return pos;
+}
+
+function el(tag, attrs, parent, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text !== undefined) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+let pos = {};
+
+function drawMap() {
+  const svg = $("map");
+  svg.innerHTML = "";
+  pos = layout();
+  const links = el("g", {}, svg);
+  const aps = state.aps;
+  for (let i = 0; i < aps.length; i++) for (let j = i + 1; j < aps.length; j++) {
+    const a = aps[i], b = aps[j], p = pos["ap" + a.index], q = pos["ap" + b.index];
+    if (a.held || b.held || !a.present || !b.present) continue;   // a board with no power has no links
+    const wifi = !a.bb_off && !b.bb_off && (a.links.includes(b.index) || b.links.includes(a.index));
+    const lora = !a.lora_off && !b.lora_off && (a.lora_links.includes(b.index) || b.lora_links.includes(a.index));
+    const dx = q.x - p.x, dy = q.y - p.y, L = Math.hypot(dx, dy) || 1, ox = -dy / L * 9, oy = dx / L * 9;
+    if (wifi) el("line", { x1: p.x - ox, y1: p.y - oy, x2: q.x - ox, y2: q.y - oy, stroke: "var(--wifi)", "stroke-width": 4 }, links);
+    if (lora) el("line", { x1: p.x + ox, y1: p.y + oy, x2: q.x + ox, y2: q.y + oy, stroke: "var(--lora)", "stroke-width": 3, "stroke-dasharray": "10 7" }, links);
+  }
+  state.handhelds.forEach(h => {
+    const p = pos["hh" + h.index];
+    if (h.node !== null && h.node !== undefined && pos["ap" + h.node]) {
+      const q = pos["ap" + h.node];
+      el("line", { x1: p.x, y1: p.y, x2: q.x, y2: q.y, stroke: "var(--wifi)", "stroke-width": 2, opacity: .55 }, links);
+    }
+  });
+  if (state.handhelds.some(h => h.node === null || h.node === undefined))
+    el("text", { x: 500, y: 612, "text-anchor": "middle", fill: "var(--muted)", "font-size": 15 }, svg, "No Wi-Fi session");
+  aps.forEach(a => {
+    const p = pos["ap" + a.index];
+    const dead = a.held || !a.present;
+    const g = el("g", {}, svg);
+    el("circle", { cx: p.x, cy: p.y, r: 46, fill: "var(--panel)", stroke: dead ? "var(--off)" : "var(--ap)", "stroke-width": 4,
+                   "stroke-dasharray": dead ? "6 6" : "none" }, g);
+    el("text", { x: p.x, y: p.y + 2, "text-anchor": "middle", fill: dead ? "var(--off)" : "var(--text)", "font-size": 17, "font-weight": 600 }, g, a.name);
+    el("text", { x: p.x, y: p.y + 21, "text-anchor": "middle", fill: "var(--muted)", "font-size": 12 }, g,
+       a.held ? "power cut" : !a.present ? "no cable" : a.bb_off ? "Wi-Fi link off" : "access point");
+  });
+  state.handhelds.forEach(h => {
+    const p = pos["hh" + h.index];
+    const off = !h.present;
+    const g = el("g", {}, svg);
+    el("rect", { x: p.x - 52, y: p.y - 20, width: 104, height: 40, rx: 8, fill: "var(--panel)",
+                 stroke: off ? "var(--off)" : h.wifi_off ? "var(--lora)" : "var(--hh)", "stroke-width": 2 }, g);
+    el("text", { x: p.x, y: p.y + (h.wifi_off ? -1 : 5), "text-anchor": "middle", fill: off ? "var(--off)" : "var(--text)", "font-size": 15 }, g, h.name);
+    if (h.wifi_off) el("text", { x: p.x, y: p.y + 14, "text-anchor": "middle", fill: "var(--lora)", "font-size": 11 }, g, "LoRa only");
+  });
+  el("g", { id: "fx" }, svg);
+}
+
+function nameToKey(name) {
+  const a = state.aps.find(x => x.name === name); if (a) return "ap" + a.index;
+  const h = state.handhelds.find(x => x.name === name); if (h) return "hh" + h.index;
+  return null;
+}
+function route(from, to) {
+  const k1 = nameToKey(from), k2 = nameToKey(to);
+  if (!k1 || !k2 || !pos[k1] || !pos[k2]) return null;
+  const pts = [pos[k1]];
+  const hop = k => { const h = state.handhelds.find(x => "hh" + x.index === k);
+    return h && h.node !== null && h.node !== undefined ? pos["ap" + h.node] : null; };
+  const a1 = hop(k1), a2 = hop(k2);
+  if (a1) pts.push(a1);
+  if (a2 && a2 !== a1) pts.push(a2);
+  pts.push(pos[k2]);
+  return pts;
+}
+function along(pts, f) {
+  const segs = []; let total = 0;
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y); segs.push(d); total += d; }
+  let s = f * total;
+  for (let i = 0; i < segs.length; i++) {
+    if (s <= segs[i] || i === segs.length - 1) { const t = segs[i] ? Math.min(1, s / segs[i]) : 1;
+      return { x: pts[i].x + (pts[i+1].x - pts[i].x) * t, y: pts[i].y + (pts[i+1].y - pts[i].y) * t }; }
+    s -= segs[i];
+  }
+  return pts[pts.length - 1];
+}
+function animate(now) {
+  const fx = document.getElementById("fx");
+  if (fx) {
+    fx.innerHTML = "";
+    flows.forEach(f => {
+      const period = f.path === "lora" ? 2600 : 1100;
+      f.to.forEach(name => {
+        const pts = route(f.from, name); if (!pts) return;
+        const p = along(pts, ((now - f.born) % period) / period);
+        el("circle", { cx: p.x, cy: p.y, r: 8, fill: f.path === "lora" ? "var(--lora)" : "var(--wifi)" }, fx);
+      });
+    });
+    for (let i = bursts.length - 1; i >= 0; i--) {
+      const b = bursts[i], age = now - b.at, k = nameToKey(b.name);
+      if (age > 1200 || !k || !pos[k]) { if (age > 1200) bursts.splice(i, 1); continue; }
+      el("circle", { cx: pos[k].x, cy: pos[k].y, r: 30 + age / 15, fill: "none", stroke: "var(--ok)", "stroke-width": 4, opacity: 1 - age / 1200 }, fx);
+    }
+  }
+  if (timerStart !== null) $("tclock").textContent = ((now - timerStart) / 1000).toFixed(1) + " s";
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// ---- the stream ----
+function addLog(text) {
+  const li = document.createElement("li");
+  li.textContent = new Date().toLocaleTimeString() + "  " + text;
+  $("log").prepend(li);
+  while ($("log").children.length > 40) $("log").lastChild.remove();
+}
+const LOG_TEXT = {
+  registered: m => `${m.board} joined AP ${m.node}`,
+  handheld_down: m => `${m.board} lost its access point`,
+  link_up: m => `${m.board}: Wi-Fi link up to AP ${m.peer}`,
+  link_down: m => `${m.board}: Wi-Fi link down to AP ${m.peer}`,
+  lora_link_up: m => `${m.board}: LoRa link up to AP ${m.peer}`,
+  lora_link_down: m => `${m.board}: LoRa link down to AP ${m.peer}`,
+  boot: m => `${m.board} started (boot ${m.boot})`,
+  bb_off: m => `${m.board}: Wi-Fi link between APs off`,
+  bb_on: m => `${m.board}: Wi-Fi link between APs on`,
+  wifi_off: m => `${m.board}: Wi-Fi off`,
+  wifi_on: m => `${m.board}: Wi-Fi on`,
+  power_cut: m => `${m.board}: power cut`,
+  backbone_cut: m => `Wi-Fi between APs cut on ${m.board}`,
+  finding: m => `Finding: ${m.text}`,
+};
+
+function onMessage(m) {
+  if (m.type === "state") { state = m; drawMap(); renderButtons(); return; }
+  if (m.type === "caption") { $("caption").textContent = m.text; if (m.n) speak(m.text, m.n); return; }
+  if (m.type === "fact") {
+    const li = document.createElement("li");
+    if (m.ok === false) li.className = "bad";
+    li.textContent = m.text;
+    $("facts").appendChild(li);
+    if (m.n) speak(m.text, m.n);
+    return;
+  }
+  if (m.type === "timer") {
+    const t = $("timer");
+    $("tlabel").textContent = m.label;
+    if (m.state === "start") { t.className = "timer"; timerStart = performance.now(); }
+    else { timerStart = null; t.className = "timer " + (m.seconds === null || m.seconds === undefined ? "fail" : "done");
+           $("tclock").textContent = m.seconds === null || m.seconds === undefined ? "—" : m.seconds.toFixed(1) + " s"; }
+    return;
+  }
+  if (m.type === "flow") {
+    if (m.phase === "sent") flows.set(m.token, { from: m.sender, to: new Set(m.to), path: m.path, born: performance.now() });
+    else if (m.phase === "landed") {
+      bursts.push({ name: m.to, at: performance.now() });
+      const f = flows.get(m.token);
+      if (f) { f.to.delete(m.to); if (!f.to.size) flows.delete(m.token); }
+    }
+    return;
+  }
+  if (m.type === "scenario") {
+    if (m.phase === "start") { $("facts").innerHTML = ""; $("tlabel").textContent = ""; $("tclock").textContent = "0.0 s";
+                               $("timer").className = "timer"; flows.clear(); }
+    else { flows.clear(); timerStart = null; }
+    state.busy = m.phase === "start" ? m.key : null;
+    renderButtons();
+    return;
+  }
+  if (m.type === "log" && LOG_TEXT[m.event]) addLog(LOG_TEXT[m.event](m));
+}
+
+function connect() {
+  const es = new EventSource("/events");
+  es.onopen = () => { openedAt = performance.now(); tellNarrate(); };
+  es.onmessage = e => onMessage(JSON.parse(e.data));
+  es.onerror = () => { $("status").textContent = "Reconnecting…"; };
+}
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= scenarios.length && !state.busy) post("/api/run?s=" + scenarios[n - 1].key);
+  else if (e.key === "r" || e.key === "R") post("/api/reset");
+  else if (e.key === "Escape") post("/api/stop");
+});
+$("reset").onclick = () => post("/api/reset");
+$("stop").onclick = () => post("/api/stop");
+
+fetch("/api/scenarios").then(r => r.json()).then(j => { scenarios = j.scenarios; boards = j.boards; renderButtons(); drawMap(); connect(); });
+</script>
+</body>
+</html>
