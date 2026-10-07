@@ -914,7 +914,10 @@ async function present(i) {
     const want = c.action === "untether";
     if (!!state.untethered !== want && await post("/api/" + c.action)) {
       await sleep(1000);
-      while (playing && (state.busy || !!state.untethered !== want)) await sleep(500);
+      // Until the server is done, whether or not it switched: a failed switch (a board not plugged in)
+      // once left this waiting forever with every control but Pause greyed out.
+      while (playing && state.busy) await sleep(500);
+      if (!!state.untethered !== want) { playing = false; renderControls(); return; }
     }
     await refreshScenarios();
     if (playing) await sleep(2500);

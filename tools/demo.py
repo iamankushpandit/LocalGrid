@@ -515,17 +515,33 @@ class Grid(chaos.Chaos):
         """Every board plugged into this laptop: the bench, where each claim is broken on cue and measured."""
         self.caption("Every board is now plugged into this laptop. Each one is restarted, so each test "
                      "starts from a known point.")
-        try:
-            acquire_lock()    # the same lock as flash.py and chaos.py: one tool on the boards at a time
-        except SystemExit as e:
-            self.caption(f"The boards are in use by another tool. {e}")
-            return
+        if not getattr(self, "holds_lock", False):   # a second try reuses this demo's own lock
+            try:
+                acquire_lock()    # the same lock as flash.py and chaos.py: one tool on the boards at a time
+            except SystemExit as e:
+                self.caption(f"The boards are in use by another tool. {e}")
+                return
+            self.holds_lock = True
         self.ready = False
         try:
             self.warm_up_tethered()
         except SystemExit as e:   # no board answered, or one runs a build that is not the current one
+            # Back to listening over Bluetooth, the cables let go, so the chapter can simply be tried again.
+            found = {a.index for a in self.aps}
+            for b in self.boards:
+                self.release_port(b)
+            self.boards, self.aps, self.hhs, self.by_name = [], [], [], {}
+            self.untethered = True
+            self.args.bench = False
             self.ready = True
-            self.caption(f"Not ready: {str(e).strip()}")
+            try:
+                unplugged = [d.get("node_name") or d.get("name") for d in load_map().get("devices", [])
+                             if d.get("role") == "N" and isinstance(d.get("node_index"), int)
+                             and d["node_index"] not in found]
+            except (OSError, ValueError):
+                unplugged = []
+            self.caption("Not on a cable yet: " + ", ".join(unplugged) + ". Plug it in, then present this "
+                         "chapter again." if unplugged else f"Not ready: {str(e).strip()}")
 
     def warm_up_tethered(self):
         self.caption("Finding the boards on this laptop's cables.")
