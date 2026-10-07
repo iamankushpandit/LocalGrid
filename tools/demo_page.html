@@ -146,6 +146,16 @@ footer .caption { font-size: 24px; line-height: 1.3; min-height: 62px; display: 
 .btn:disabled { opacity: .4; cursor: default; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .btn.stop { color: var(--bad); border-color: var(--bad); }
+body.recording header .status, body.recording header label, body.recording header select,
+body.recording .controls { visibility: hidden; }
+body.recording header label:has(#rec) { visibility: visible; opacity: .25; }
+.card { position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        background: var(--bg); gap: 14px; animation: in .5s ease-out; }
+.card img { width: 72px; height: 72px; }
+.card .p { color: var(--accent); font-size: 22px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+.card .t { font-size: 46px; font-weight: 700; max-width: 80%; text-align: center; line-height: 1.15; }
+.stage .big { position: absolute; inset: 0; z-index: 3; background: #000; display: flex; align-items: center; justify-content: center; }
+.stage .big img, .stage .big video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .btn.go { background: var(--ok); border-color: var(--ok); animation: glow 1.1s ease-in-out infinite alternate; }
 
 @media (max-width: 1100px) {
@@ -172,6 +182,7 @@ footer .caption { font-size: 24px; line-height: 1.3; min-height: 62px; display: 
   <label><input type="checkbox" id="speak"> Narrate</label>
   <select id="voice" title="Narrator voice"></select>
   <label><input type="checkbox" id="light"> Light</label>
+  <label title="One chapter per video: a title card first, a held frame after, no controls on screen"><input type="checkbox" id="rec"> Recording</label>
 </header>
 <main>
   <aside class="left">
@@ -227,6 +238,7 @@ function pref(key, el, apply, dflt) {
   apply(el.checked);
   el.addEventListener("change", () => { try { localStorage.setItem(key, el.checked ? "1" : "0"); } catch (e) {} apply(el.checked); });
 }
+pref("lg-demo-rec", $("rec"), on => document.body.classList.toggle("recording", on), false);
 pref("lg-demo-light", $("light"), on => { document.documentElement.dataset.theme = on ? "light" : "dark"; setTimeout(drawMap, 0); }, false);
 
 // ---- narration: the browser's own voice, so a recording needs nobody speaking ----
@@ -404,6 +416,18 @@ function show(i) {
 // The owner's photos and clips for a chapter, from build/demo-media/. Only files that exist are shown,
 // so a chapter whose photo has not been taken yet simply has none.
 let mediaFiles = new Set();
+function showBig(file) {
+  const stage = document.querySelector(".stage"), old = stage.querySelector(".big");
+  if (old) old.remove();
+  if (!file || !mediaFiles.has(file)) return;
+  const d = document.createElement("div"); d.className = "big";
+  const isVideo = /\.(mp4|webm)$/i.test(file);
+  const m = document.createElement(isVideo ? "video" : "img");
+  m.src = "/media/" + encodeURIComponent(file);
+  if (isVideo) { m.autoplay = true; m.muted = false; m.playsInline = true; }
+  d.appendChild(m);
+  $("view").appendChild(d);
+}
 function showMedia(c) {
   const box = $("media");
   box.innerHTML = "";
@@ -856,6 +880,7 @@ async function present(i) {
         if (!playing) break;
       }
       if (pt.watch_tab) setWatchTab(pt.watch_tab);
+      showBig(pt.media);
       if (c.points[k].focus && viewNow === "diagram") focusOn(c.points[k].focus);
       await say(c.points[k].say, 0, true);
       await sleep(PACE.afterPoint);
@@ -919,9 +944,21 @@ async function playAll(from) {
   for (let i = from; i < chapters.length && playing; i++) await present(i);
   playing = false; renderControls();
 }
+// Recording: a title card, the chapter, then the last frame held, so each chapter is its own clean cut.
+function recording() { return $("rec").checked; }
+async function titleCard(c, ms) {
+  const d = document.createElement("div"); d.className = "card";
+  d.innerHTML = `<img src="/assets/brand/localgrid-icon.svg" alt=""><div class="p"></div><div class="t"></div>`;
+  d.querySelector(".p").textContent = shortPart(c); d.querySelector(".t").textContent = c.title;
+  document.body.appendChild(d);
+  await sleep(ms);
+  d.remove();
+}
 async function playOne() {
   playing = true; renderControls();
+  if (recording()) await titleCard(chapters[at], 3000);
   await present(at);
+  if (recording()) await sleep(3000);
   playing = false; renderControls();
 }
 function stopAll() {
@@ -1070,7 +1107,8 @@ Promise.all([fetch("/api/scenarios").then(r => r.json()), fetch("/api/story").th
   s.scenarios.forEach(x => scenarios[x.key] = x);
   boards = s.boards; watchUrl = s.watch; watchLogin = !!s.watch_login; localVoices = s.tts || []; localVoiceDefault = s.tts_default; fillVoices();
   chapters = story.chapters;
-  show(0);
+  const fromHash = chapters.findIndex(c => c.id === location.hash.slice(1));
+  show(fromHash >= 0 ? fromHash : 0);
   connect();
 });
 </script>
