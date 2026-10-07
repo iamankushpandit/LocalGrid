@@ -891,6 +891,7 @@ const LOG_TEXT = {
   split: m => `${m.board}: cut off from the others`,
   backbone_cut: m => `Wi-Fi between APs cut on ${m.board}`,
   mark: m => `${m.board}: after ${m.detail}`,
+  balance: m => `Handhelds per access point: ${m.board}`,
   tool: m => `${m.board}: ${m.detail}`,
   update_carrying: m => `${m.board}: carrying update ${m.detail.split(" ")[0]}`,
   update_handing: m => `${m.board}: handing the update to device ${m.detail.split(" ")[1]}`,

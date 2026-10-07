@@ -95,6 +95,9 @@ UPDATE_S = 1500          # a handheld update crossing the grid and being install
 # a busy moment read as "Denali went silent" with Denali running (2026-10-07). This much is an AP that is off.
 GONE_S = 15
 HANDS_S = 180            # how long a hands-on demo waits for the presenter to do something
+# Spreading out takes minutes by design (D54): a handheld waits 60 s plus 20 s per device number before it
+# may move, and moves at most once every 3 minutes. Device 9 may not move for 4 minutes after it joins.
+BALANCE_S = 600
 
 
 class Stopped(Exception):
@@ -1360,6 +1363,50 @@ class Grid(chaos.Chaos):
                       "carried back by the handhelds. Nobody typed it in")
         elif t is not None:
             self.fact("The grid did not get its time back by itself", ok=False)
+        if "all" in marks:
+            self.watch_balance()
+
+    def watch_balance(self):
+        """After a restart the handhelds bunch on whichever access point came up first; then they spread
+        themselves out (D54). Waits for the counts to be even and says how it happened."""
+        def counts():
+            snap, live, where = self.where_now()
+            names = {a["index"]: a["name"] for a in snap["aps"]}
+            mine = [d for d in where if d in self.seen_online]
+            per = {i: 0 for i in live}
+            for d in mine:
+                per[where[d]] += 1
+            return per, names, len(mine)
+
+        def text(per, names):
+            return ", ".join(f"{names.get(i, i)} {n}" for i, n in sorted(per.items()))
+
+        per, names, _ = counts()
+        self.caption("Now watch the handhelds. They came back on whichever access point they found first. "
+                     "From here they spread themselves out, with no one telling them to.")
+        self.fact(f"Handhelds on each access point now: {text(per, names)}")
+        self.caption("Each one joins the access point with the fewest handhelds. It waits a little, a different "
+                     "time for each handheld so they do not all move at once, and it moves only if that evens "
+                     "the load. So no handheld ever moves twice.")
+        self.timer("Handhelds spreading out", "start")
+        t = time.monotonic()
+        last = {"text": text(per, names)}
+
+        def even():
+            per, names, n = counts()
+            now = text(per, names)
+            if now != last["text"]:
+                last["text"] = now
+                self.publish("log", event="balance", board=now)
+            return len(per) > 1 and n >= max(1, len(self.seen_online) - 1) and max(per.values()) - min(per.values()) <= 1
+        done = self.wait(BALANCE_S, until=even)
+        secs = round(time.monotonic() - t, 1)
+        self.timer("Handhelds spreading out", "stop", secs if done else None)
+        per, names, _ = counts()
+        if done:
+            self.fact(f"Spread out by themselves in {secs:.0f} s: {text(per, names)}. The load is even")
+        else:
+            self.fact(f"Not yet even after {BALANCE_S // 60} minutes: {text(per, names)}", ok=False)
 
     SCENARIOS = {
         "tour": ("The handheld screens", "Status, messages, groups and settings on every handheld.", "sc_tour"),

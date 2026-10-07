@@ -152,7 +152,8 @@
       "title": "Every access point off, then on, with no cables",
       "body": [
         "Switch every access point off; the handhelds keep the time on their own batteries.",
-        "Switch them back on: they find each other, and the handhelds give them the time back (D53)."
+        "Switch them back on: they find each other, and the handhelds give them the time back (D53).",
+        "Then the handhelds spread themselves out evenly across the access points (D54)."
       ],
       "say": "And the worst case. Every access point goes off at once.",
       "demo": "hands_blackout",
