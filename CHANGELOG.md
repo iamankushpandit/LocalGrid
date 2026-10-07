@@ -5,6 +5,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The site and docs say what is true today
+
+- Site (`site/index.template.html`): chaos testing found five bugs, as the README lists, not three;
+  setting up says the admin page runs in setup mode or when an admin turns it on (`web on`, or the
+  Bluetooth admin link), not always at `http://192.168.4.1/` (D91); the map card says trails are
+  kept in flash and single positions stay in memory (D106); push-to-talk reaches everyone too (D88).
+- Site: no LoRa distance anywhere, since none has been measured. "Kilometres" is gone from the line
+  table and the LoRa comparison, and "two sites a few kilometres apart" from the access point card.
+- Site: the hardware table lists the Reyax RYLR998 LoRa module, and "Build it with us" links the
+  installer (`flash/`) and the update signer (`sign/`). The legend's CSS, pasted four times, is
+  there once.
+- `docs/chaos-engineering.md` opens with five bugs, matching its own sections and the README.
+- README and `docs/OPEN_SOURCE.md`: keys are no longer built in (D96); what still stops a download
+  is that no release workflow builds and publishes images, and the site offers none.
+- `docs/OPEN_SOURCE.md` positioning and `docs/ADS.md`: LoRa works as a second path between access
+  points and to a handheld with a module (D71, D74, D104, D105, D77, D80, D109). It is still not a
+  LoRa mesh of handhelds (D77, D47), and the no-range rule stays.
+- `docs/DECISIONS.md`: D99's row notes that D106 amended it (trails are kept in flash).
+
 ### The site answers common questions (FAQ)
 
 - A Questions section on the project site (`site/index.template.html`), linked from the top bar:

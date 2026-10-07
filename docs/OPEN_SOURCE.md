@@ -17,7 +17,7 @@ community files, and issue and pull request templates.
 | 1 | Which licence? (section 2) | **GPL-3.0-or-later** for code and docs, the same as Braino |
 | 2 | Make the repository public, and when? | After decisions 1 and 3 and the checklist in section 5 |
 | 3 | Is the name "LocalGrid" clear to use? (section 5) | Search trademark registers before any promotion |
-| 4 | Provision grid keys at runtime instead of compiling them in? (section 3) | Yes, before any binary is offered for download |
+| 4 | Provision grid keys at runtime instead of compiling them in? (section 3) | **Done** (D96, 2026-10-04) |
 | 5 | Accept code contributions before the licence exists? | No. Issues, bench reports, and discussion only |
 
 Record each answer in `docs/DECISIONS.md` as the next D-number.
@@ -77,27 +77,29 @@ changes come back.
 ## 3. Why there is no download yet
 
 Braino's site has a flash button, and its release workflow attaches binaries to every tag. LocalGrid
-cannot do either yet: **each grid's keys are compiled into the firmware** from
-`firmware/common/lg_secrets.h`. A published binary would give everyone who flashes it the same Wi-Fi
-passphrase and backbone key, so every "LocalGrid" built from it would be one grid that anyone can
-join and read group traffic on.
+used to be unable to do either because **each grid's keys were compiled into the firmware** from
+`firmware/common/lg_secrets.h`: a published binary would have given everyone who flashed it the same
+Wi-Fi passphrase and backbone key, so every "LocalGrid" built from it would have been one grid that
+anyone could join and read group traffic on.
 
-CI builds with throwaway keys generated on each run and never uploads the images.
+**Decision 4 is done (D96).** A device now holds its grid's keys in NVS, written once at setup by a
+setup bundle over the USB cable (`provision`, which the installer page and `tools/provision.py`
+send), and a build made for publishing carries no keys. The installer page (`/flash/`) and the update
+signer (`/sign/`) are on the site.
 
-**Proposed change (decision 4):** move the grid passphrase and keys out of the build and into NVS at
-provisioning time. The device ID already works this way (the `lgid` partition). The first access
-point generates the grid's keys at setup on the admin page, and other devices receive them over a
-cable or a short pairing step. Once that works:
+What still stands between the project and a download:
 
-1. `release.yml` in Braino's form: a `v*` tag builds every firmware and target, refuses a tag with
-   no matching `CHANGELOG.md` section, packs merged images with `SHA256SUMS.txt`, and publishes a
-   GitHub release with notes lifted from the changelog.
-2. A browser installer on the site using [ESP Web Tools](https://esphome.github.io/esp-web-tools/)
-   over Web Serial, with images served from the Pages origin, as in Braino.
-3. A **Show HN** or equivalent launch. Being able to flash a board from a browser in two minutes is
-   what turns interest into users.
+1. **No release workflow.** `release.yml` in Braino's form is not written: a `v*` tag that builds
+   every firmware and target, refuses a tag with no matching `CHANGELOG.md` section, packs merged
+   images with `SHA256SUMS.txt`, and publishes a GitHub release with notes lifted from the changelog.
+2. **No images on the site.** `tools/gen_site.py --firmware` puts release images beside the
+   installer, but the Pages workflow builds no firmware and passes none, so the installer has nothing
+   to offer. CI still builds with throwaway keys generated on each run and never uploads the images.
+3. Then a **Show HN** or equivalent launch. Being able to flash a board from a browser in two minutes
+   is what turns interest into users.
 
-Until then the site offers the source, the design documents, and the admin page preview.
+Until then the site offers the source, the design documents, the admin page preview, the installer
+and the signer, and people build from source.
 
 ## 4. CI/CD, branches, and environments
 
@@ -164,8 +166,12 @@ Linux and how long it takes.
 
 ## 6. Telling people about it
 
-**Positioning.** Today LocalGrid is not a LoRa mesh (LoRa for access points and handhelds is being explored, and the site says so). Meshtastic and its relatives trade bandwidth
-for kilometres and usually lean on a phone. LocalGrid uses Wi-Fi and ESP-NOW. It covers a smaller
+**Positioning.** LocalGrid is not a LoRa mesh. LoRa works in it as a second path: between access
+points when ESP-NOW cannot reach (D71, D74, D104, D105), and to a handheld that carries a module,
+always through an access point (D77, D80, D109). Handhelds never talk to each other over LoRa (D77)
+and do not relay (D47, planned, not built), voice never crosses it (D71), and no LoRa range has been
+measured. Meshtastic and its relatives trade bandwidth for range and usually lean on a phone.
+LocalGrid's main links are Wi-Fi and ESP-NOW. It covers a smaller
 area and needs powered access points, and in return the handhelds stand alone with no phone, carry
 push-to-talk voice, and show who read an emergency. Say this plainly; the comparison will be made
 anyway, and honesty about range earns trust.

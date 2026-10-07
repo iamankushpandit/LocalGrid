@@ -104,8 +104,10 @@ positions, the Bluetooth watchers, and the chaos framework.
   and needs a way to inject faults remotely. The
   [chaos write-up](docs/chaos-engineering.md#what-is-next-chaos-in-the-field) sets out the approach.
 - **Measured ranges.** The distances on the project site are estimates, not measurements.
-- **No binaries are published.** A built image carries the network's compiled-in keys, so downloads
-  wait until keys are provisioned at runtime (see [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md)).
+- **No binaries are published.** Keys are no longer built in: a device is given its network's keys at
+  setup (D96), so one image could serve every network, and the installer page can flash one. But no
+  release workflow builds and publishes images yet, and the site offers none, so build from source
+  (see [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md)).
 
 ## Hardware
 

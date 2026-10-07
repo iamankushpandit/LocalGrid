@@ -76,45 +76,6 @@
   ul.symbols li { display: grid; grid-template-columns: 56px 1fr; gap: 12px; align-items: center; font-size: 15px; }
 
   @media (max-width: 720px) { .diagram { min-width: 680px; } }
-  .diagram-scroll { overflow-x: auto; border-radius: 20px; }
-  .legend { display: grid; grid-template-columns: 1.7fr 1fr; gap: 28px; }
-  @media (max-width: 860px) { .legend { grid-template-columns: 1fr; } }
-  .legend h3 { margin: 0 0 12px; font-size: 17px; }
-  .legend td { font-size: 14.5px; }
-  .legend td:first-child { width: 72px; }
-  .sw { width: 56px; height: 20px; display: block; }
-  .est { color: var(--muted); font-size: 13px; }
-  .note-small { color: var(--muted); font-size: 14px; margin: 12px 0 0; }
-  ul.symbols { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
-  ul.symbols li { display: grid; grid-template-columns: 56px 1fr; gap: 12px; align-items: center; font-size: 15px; }
-
-  @media (max-width: 720px) { .diagram { min-width: 680px; } }
-  .diagram-scroll { overflow-x: auto; border-radius: 20px; }
-  .legend { display: grid; grid-template-columns: 1.7fr 1fr; gap: 28px; }
-  @media (max-width: 860px) { .legend { grid-template-columns: 1fr; } }
-  .legend h3 { margin: 0 0 12px; font-size: 17px; }
-  .legend td { font-size: 14.5px; }
-  .legend td:first-child { width: 72px; }
-  .sw { width: 56px; height: 20px; display: block; }
-  .est { color: var(--muted); font-size: 13px; }
-  .note-small { color: var(--muted); font-size: 14px; margin: 12px 0 0; }
-  ul.symbols { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
-  ul.symbols li { display: grid; grid-template-columns: 56px 1fr; gap: 12px; align-items: center; font-size: 15px; }
-
-  @media (max-width: 720px) { .diagram { min-width: 680px; } }
-  .diagram-scroll { overflow-x: auto; border-radius: 20px; }
-  .legend { display: grid; grid-template-columns: 1.7fr 1fr; gap: 28px; }
-  @media (max-width: 860px) { .legend { grid-template-columns: 1fr; } }
-  .legend h3 { margin: 0 0 12px; font-size: 17px; }
-  .legend td { font-size: 14.5px; }
-  .legend td:first-child { width: 72px; }
-  .sw { width: 56px; height: 20px; display: block; }
-  .est { color: var(--muted); font-size: 13px; }
-  .note-small { color: var(--muted); font-size: 14px; margin: 12px 0 0; }
-  ul.symbols { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
-  ul.symbols li { display: grid; grid-template-columns: 56px 1fr; gap: 12px; align-items: center; font-size: 15px; }
-
-  @media (max-width: 720px) { .diagram { min-width: 680px; } }
 
   section { padding: 56px 0; border-top: 1px solid var(--line); }
   h2 { font-size: clamp(26px, 3.4vw, 34px); margin: 0 0 8px; letter-spacing: -.01em; }
@@ -213,7 +174,7 @@
               <tr><td><svg class="sw" viewBox="0 0 56 20" aria-hidden="true"><path d="M4 10 H52" stroke="#5FD38D" stroke-width="1.6" opacity=".75"/></svg></td><td>A handheld's Wi-Fi link to its access point.</td><td>Six ESP32 display boards supported; built-in antennas</td><td>~30&#8211;60 m<br><span class="est">estimate, handheld in a pocket</span></td></tr>
               <tr><td><svg class="sw" viewBox="0 0 56 20" aria-hidden="true"><path d="M4 10 H52" stroke="#9DB8A8" stroke-width="2" stroke-dasharray="3 6" stroke-linecap="round"/></svg></td><td>GPS signal to MAIN: time and location. Receive only; optional.</td><td>GT-U7 GPS module on MAIN</td><td>From orbit<br><span class="est">needs open sky</span></td></tr>
               <tr><td><svg class="sw" viewBox="0 0 56 20" aria-hidden="true"><path d="M4 10 H52" stroke="#F0A064" stroke-width="2" stroke-dasharray="3 6" stroke-linecap="round"/></svg></td><td>GPS signal to a handheld. Receive only; optional.</td><td>GPS module on a Freenove handheld</td><td>From orbit<br><span class="est">needs open sky</span></td></tr>
-              <tr><td><svg class="sw" viewBox="0 0 56 20" aria-hidden="true"><path d="M4 10 H52" stroke="#F0A064" stroke-width="2.6" stroke-dasharray="10 7" stroke-linecap="round"/></svg></td><td>A LoRa link between access points, used when the ESP-NOW link cannot reach. Carries messages, alerts and positions; never live talk.</td><td>LoRa modules on all three access points, in use (D74)</td><td>Kilometres<br><span class="est">general figure for LoRa, not measured here</span></td></tr>
+              <tr><td><svg class="sw" viewBox="0 0 56 20" aria-hidden="true"><path d="M4 10 H52" stroke="#F0A064" stroke-width="2.6" stroke-dasharray="10 7" stroke-linecap="round"/></svg></td><td>A LoRa link between access points, used when the ESP-NOW link cannot reach. Carries messages, alerts and positions; never live talk.</td><td>LoRa modules on all three access points, in use (D74)</td><td>Not measured<br><span class="est">longer than ESP-NOW; no figure yet</span></td></tr>
               <tr><td><svg class="sw" viewBox="0 0 56 20" aria-hidden="true"><path d="M4 10 H52" stroke="#9DB8A8" stroke-width="1.6" stroke-dasharray="2 6" stroke-linecap="round"/></svg></td><td>A laptop or phone beside the grid, watching its health over Bluetooth. Read-only, and never part of the network.</td><td>Built into every ESP32 access point</td><td>~10&#8211;30 m<br><span class="est">typical Bluetooth range</span></td></tr>
             </tbody>
           </table>
@@ -250,8 +211,11 @@
           spreads across access points, and a handheld switches as you walk. Up to 32 handhelds.</div></li>
         <li><div><strong>Messages hop between access points.</strong> Private, group, and everyone messages hop from
           access point to access point until they reach the right people, and the sender sees when they arrive.</div></li>
-        <li><div><strong>Set it up from any phone or laptop.</strong> Join the network's Wi-Fi and open
-          <code>http://192.168.4.1/</code> to name the network, add people and groups, and set the time.</div></li>
+        <li><div><strong>Set it up from any phone or laptop.</strong> Join the network's Wi-Fi and open the admin page
+          to name the network, add people and groups, and set the time. A new access point serves it in setup mode;
+          after that it runs only when an admin turns it on, with <code>web on</code> at the console or over the
+          Bluetooth admin link, and switches itself off when that window closes (15 minutes by default), so the access point's memory goes to
+          handhelds (D91).</div></li>
       </ol>
       <div class="card">
         <h3>Designed to keep working</h3>
@@ -309,7 +273,7 @@
       <div class="card"><h3>Emergencies get through</h3>
         <p>An urgent message appears on every screen, even a locked one, and the sender sees who has read it.</p></div>
       <div class="card"><h3>Push-to-talk</h3>
-        <p>Hold a person or a group to talk, like a walkie-talkie. Voice is encrypted like text and levels itself so quiet
+        <p>Hold a person, a group, or everyone to talk, like a walkie-talkie (D88). Voice is encrypted like text and levels itself so quiet
           and loud voices come through evenly. The Freenove handheld has a microphone and can talk; the Hosyond has none,
           so it listens.</p></div>
       <div class="card"><h3>Recovers after a restart</h3>
@@ -321,8 +285,9 @@
           on its admin page. A handheld can carry its own GPS too, and then it backs up the time as well.</p></div>
       <div class="card"><h3>Everyone on a map</h3>
         <p>A handheld with a GPS shares its position with the network, so the admin page can show where people are and a
-          handheld can show how far it is from the main access point. Positions are held in memory only, never written to
-          storage, and a handheld without a GPS simply does not appear.</p></div>
+          handheld can show how far it is from the main access point. A single position is held in memory only; the last
+          steps of a walk, its trail, are kept in flash so they survive every device being off (D106). A handheld
+          without a GPS simply does not appear.</p></div>
       <div class="card"><h3>Watch the network without joining it</h3>
         <p>Every access point broadcasts a sealed Bluetooth status. A laptop or phone nearby can show the health of each
           access point, who is online, batteries, and any alert, without joining the network. It only listens: no message
@@ -337,15 +302,15 @@
 <section id="lora">
   <div class="wrap">
     <h2>LoRa: the second path</h2>
-    <p class="sub">LoRa is a low-power, long-range radio that works below the Wi-Fi band. It reaches kilometres
-      instead of a couple of hundred metres, but carries far less data. ESP32 chips have no LoRa radio, so it means
+    <p class="sub">LoRa is a low-power, long-range radio that works below the Wi-Fi band. It is built to reach farther
+      than Wi-Fi, but carries far less data; LocalGrid has not measured its range yet. ESP32 chips have no LoRa radio, so it means
       adding a small LoRa module to a board. The access points use it today: a message is acknowledged over LoRa and sent
       again until it arrives (D104), and one that Wi-Fi could not deliver goes over LoRa at once (D105).</p>
     <div class="tablewrap">
       <table>
         <thead><tr><th></th><th>Wi-Fi and ESP-NOW</th><th>LoRa</th></tr></thead>
         <tbody>
-          <tr><td><strong>Range</strong></td><td>~100&#8211;200 m between access points, ~30&#8211;60 m to a handheld (estimates)</td><td>Kilometres with a clear line of sight; less through trees and hills</td></tr>
+          <tr><td><strong>Range</strong></td><td>~100&#8211;200 m between access points, ~30&#8211;60 m to a handheld (estimates)</td><td>Not measured yet; longer than Wi-Fi is the point of it, and trees and hills shorten it</td></tr>
           <tr><td><strong>Speed</strong></td><td>1 Mbps between access points</td><td>Roughly 0.3 to 20 kbps, depending on settings; slower goes farther</td></tr>
           <tr><td><strong>Text and emergencies</strong></td><td>Yes</td><td>Yes, in seconds rather than instantly</td></tr>
           <tr><td><strong>Push-to-talk voice</strong></td><td>Yes</td><td>No: voice needs more data than LoRa carries</td></tr>
@@ -355,8 +320,8 @@
     </div>
     <div class="grid" style="margin-top:20px">
       <div class="card"><h3>Access points first</h3>
-        <p>Access points too far apart for ESP-NOW still reach each other, so two groups of access points, say at two
-          sites a few kilometres apart, become one network. The LoRa link carries messages, alerts, who is around, positions
+        <p>Access points too far apart for ESP-NOW still reach each other, so two groups of access points that Wi-Fi
+          cannot bridge become one network. The LoRa link carries messages, alerts, who is around, positions
           and the time, but never live talk. A module is optional: an access point without one simply uses Wi-Fi
           alone.</p></div>
       <div class="card"><h3>Handhelds too</h3>
@@ -384,6 +349,7 @@
         <tbody>
 {{BOARDS}}
 <tr><td>GPS module, GT-U7 (u-blox 7 class, NMEA at 9600 baud), optional</td><td>UART</td><td>On MAIN</td><td>Gives the grid its time from satellites, and shows MAIN's location on its admin page as coordinates and map links. Receive only; the grid works the same without one.</td></tr>
+<tr><td>LoRa module, Reyax RYLR998 (SX1262, AT commands, 868/915 MHz), optional</td><td>UART</td><td>On access points, and on a Freenove handheld</td><td>The second, longer link between access points when ESP-NOW cannot reach (D71, D74), and a handheld's way to an access point when it is out of Wi-Fi range (D77). Carries text, alerts and positions, never live talk. Without one, a device uses Wi-Fi alone.</td></tr>
         </tbody>
       </table>
     </div>
@@ -410,9 +376,8 @@
           <p>The network's core claim is that it heals itself, so it is tested by attacking it: a framework randomly kills
             access points and handhelds, cuts their power and switches their radios off, for hours at a time, unattended,
             while the handhelds keep messaging each other. In a ten-hour run: <strong>55 faults injected, 55 recovered</strong>,
-            the backbone whole again in a median of 3.7&nbsp;s. It found three bugs that code review and unit tests could not.
+            the backbone whole again in a median of 3.7&nbsp;s. It found five bugs that code review and unit tests could not.
             <a href="{{REPO}}/blob/main/docs/chaos-engineering.md">How it was chaos tested &rarr;</a></p>
-
           <h3>Still to do</h3>
           <p>Purpose-built handhelds carrying GPS and LoRa are still being designed, and the access points have no cases yet.
             Every test so far has run on one workbench, with every board in radio range and on a cable: chaos testing in the
@@ -454,7 +419,7 @@
             D69). With the admin password it also sees what the admin page shows, such as the map. It has no way to read a
             message, hear a talk, or send anything (D70).</p></div></details>
         <details><summary>How is it different from Meshtastic and other LoRa meshes?</summary><div class="a">
-          <p>LoRa meshes such as Meshtastic trade bandwidth for kilometres and usually pair each radio with a phone.
+          <p>LoRa meshes such as Meshtastic trade bandwidth for range and usually pair each radio with a phone.
             LocalGrid's main links are Wi-Fi: ESP-NOW between access points, and Wi-Fi from each handheld to its access
             point. That covers a smaller area and needs powered access points; in return the handhelds stand alone with no
             phone, carry live push-to-talk, and show who has read an emergency.</p>
@@ -630,6 +595,9 @@
         checked against published test values. Careful reviewers are welcome.</p></div>
     </div>
     <p style="margin-top:24px"><a class="btn primary" href="{{REPO}}/blob/main/CONTRIBUTING.md">Read CONTRIBUTING.md</a></p>
+    <p class="note-small">In the browser: the <a href="flash/">installer</a> sets up a board over its USB cable and gives it
+      its place in your network (no images are published yet, so flash one built from source first), and the
+      <a href="sign/">update signer</a> makes a release key and signs firmware.</p>
     <p class="note" style="margin-top:28px"><strong>Licence.</strong> {{LICENCE}}</p>
   </div>
 </section>

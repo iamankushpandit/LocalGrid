@@ -63,6 +63,7 @@ Every line above is backed by something on the bench. If a script changes, check
 | A device restarts and gets its state back; losing one loses its coverage only | D48, D53 |
 | The list says who is reachable, right away | Presence, and D13: a message to someone offline is refused, not held |
 | No Internet, no SIM, no account, no server | The product's central promise |
+| A message still gets through when Wi-Fi cannot reach (if a LoRa line is added) | D71, D74, D104, D105 between access points; D77, D80, D109 to a handheld with a module. Text and alerts only, never voice, and no distance |
 
 **Lines we must not write:**
 
@@ -74,9 +75,13 @@ Every line above is backed by something on the bench. If a script changes, check
   30 to 60 metres, so the convoy in ad 2 must look like cars within sight of each other, not
   scattered across a county. Say nothing about range until the field test measures it.
 - **"Talk to anyone, anywhere."** It is a local network, by design.
-- **Anything about LoRa working.** The modules are fitted to the access points; the firmware is
-  being written. When it works, ad 2 gets a new question ("And when the convoy stretches out?") and
-  ad 1 gets one about the far end of a big site.
+- **Any LoRa range, or LoRa as a mesh of handhelds.** LoRa works: it is a second path between
+  access points (D71, D74), acknowledged and sent again until it arrives (D104), taken at once when
+  Wi-Fi fails (D105), and it reaches a handheld that carries a module through an access point (D77,
+  D80, D109). It has never been range-tested, so the distance rule above covers it too: no
+  "kilometres". Handhelds talk over LoRa only to access points, never to each other (D77), and do not
+  relay (D47). Voice never crosses it (D71). A LoRa question ("And when the convoy stretches out?")
+  may say a message still gets through; it may not say how far.
 - **Encryption claims beyond the design.** One-to-one messages are end to end. Group and everyone
   messages are encrypted over the air but readable by an access point (D5). No ad should imply
   otherwise.

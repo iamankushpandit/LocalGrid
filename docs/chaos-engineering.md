@@ -1,7 +1,8 @@
 # Chaos-testing an offline mesh network
 
-How LocalGrid's self-healing claim was tested by attacking it for hours at a time, and the three
-bugs that came out — none of which a code review or a unit test could have found.
+How LocalGrid's self-healing claim was tested by attacking it for hours at a time, and the five
+bugs it found — none of which a code review or a unit test could have found — with the ones found
+beside it.
 
 Evidence for every number here: [the 10-hour run of 2026-09-18](chaos/2026-09-18-night-run.md).
 
