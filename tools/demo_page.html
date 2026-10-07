@@ -183,25 +183,31 @@ pref("lg-demo-light", $("light"), on => { document.documentElement.dataset.theme
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const synth = window.speechSynthesis || null;
 let openedAt = 0;
-function narrating() { return !!synth && $("speak").checked; }
+let speakingAudio = null;
+function narrating() { return (!!synth || !!localVoice) && $("speak").checked; }
 function tellNarrate() { fetch("/api/narrate?on=" + (narrating() ? 1 : 0), { method: "POST" }).catch(() => {}); }
 pref("lg-demo-speak", $("speak"), on => { if (!on && synth) synth.cancel(); tellNarrate(); }, true);
 
+let localVoice = null;            // a Piper voice tools/demo.py makes on this laptop, if it has one
+const PIPER = "piper:";
 function fillVoices() {
-  if (!synth) { $("voice").hidden = true; $("speak").disabled = true; return; }
-  const voices = synth.getVoices().filter(v => /^en/i.test(v.lang));
-  if (!voices.length) return;
+  const voices = synth ? synth.getVoices().filter(v => /^en/i.test(v.lang)) : [];
+  if (!voices.length && !localVoice) { if (!synth) { $("voice").hidden = true; $("speak").disabled = true; } return; }
   let saved = null;
   try { saved = localStorage.getItem("lg-demo-voice"); } catch (e) {}
-  // A voice installed on this laptop first: it works with no Internet, which is the product's point too.
-  const pick = voices.find(v => v.name === saved) || voices.find(v => v.localService && /natural/i.test(v.name))
-    || voices.find(v => v.localService && /en-US/i.test(v.lang)) || voices[0];
+  // The most natural voice there is: a neural voice made on this laptop, then a browser's natural ones
+  // (Edge has them; they are online), then whatever is installed.
+  const options = (localVoice ? [{ value: PIPER + localVoice, label: localVoice + " (natural, on this laptop)" }] : [])
+    .concat(voices.map(v => ({ value: v.name, label: v.name.replace(/^Microsoft /, "") + (v.localService ? "" : " (online)"),
+                               natural: /natural|neural/i.test(v.name), local: v.localService, us: /en-US/i.test(v.lang) })));
+  const pick = options.find(o => o.value === saved) || options.find(o => o.value.startsWith(PIPER))
+    || options.find(o => o.natural && o.us) || options.find(o => o.natural) || options.find(o => o.local && o.us) || options[0];
   $("voice").innerHTML = "";
-  voices.forEach(v => {
-    const o = document.createElement("option");
-    o.value = v.name; o.textContent = v.name.replace(/^Microsoft /, "") + (v.localService ? "" : " (online)");
-    if (v === pick) o.selected = true;
-    $("voice").appendChild(o);
+  options.forEach(o => {
+    const el = document.createElement("option");
+    el.value = o.value; el.textContent = o.label;
+    if (o === pick) el.selected = true;
+    $("voice").appendChild(el);
   });
 }
 if (synth) { fillVoices(); synth.onvoiceschanged = fillVoices; }
@@ -215,7 +221,27 @@ function spokenForm(text) {
 // Spoken a sentence at a time: Chrome can stop a long utterance part-way, and a chapter's caption then
 // shows the sentence being said rather than a paragraph.
 function sentences(text) { return text.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g) || [text]; }
+const audioCache = new Map();
+function piperAudio(text) {
+  const key = spokenForm(text);
+  if (!audioCache.has(key)) {
+    const a = new Audio("/api/tts?text=" + encodeURIComponent(key));
+    a.preload = "auto";
+    audioCache.set(key, a);
+    if (audioCache.size > 80) audioCache.delete(audioCache.keys().next().value);
+  }
+  return audioCache.get(key);
+}
 function sayOne(text) {
+  if ($("voice").value.startsWith(PIPER)) {
+    return new Promise(resolve => {
+      const a = piperAudio(text);
+      a.currentTime = 0;
+      a.onended = resolve; a.onerror = resolve;
+      a.play().catch(resolve);
+      speakingAudio = a;
+    });
+  }
   return new Promise(resolve => {
     const u = new SpeechSynthesisUtterance(spokenForm(text));
     const v = synth.getVoices().find(x => x.name === $("voice").value);
@@ -229,9 +255,12 @@ async function say(text, n, caption) {
     if (caption) $("caption").textContent = text;
     if (!n) await sleep(Math.min(12000, 1500 + text.split(/\s+/).length * 330));
   } else {
-    for (const s of sentences(text)) {
-      if (caption) { if (!playing) break; $("caption").textContent = s.trim(); }
-      await sayOne(s.trim());
+    const parts = sentences(text).map(s => s.trim()).filter(Boolean);
+    // The next sentence is made while this one plays, so there is no gap between them.
+    if ($("voice").value.startsWith(PIPER)) parts.forEach(piperAudio);
+    for (const s of parts) {
+      if (caption) { if (!playing) break; $("caption").textContent = s; }
+      await sayOne(s);
     }
   }
   if (n) fetch("/api/spoken?n=" + n, { method: "POST" }).catch(() => {});
@@ -249,7 +278,7 @@ function shortPart(c) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 function chapterState(c) {
-  if (c.action === "untether")
+  if (c.action === "untether" || c.action === "tether")
     return { live: true, why: !boards ? "page only: no boards are open" : null };
   if (!c.demo) return { live: false };
   const s = scenarios[c.demo];
@@ -280,7 +309,7 @@ function renderControls() {
   $("prev").disabled = playing || at === 0;
   $("next").disabled = playing || at >= chapters.length - 1;
   $("here").disabled = playing || !!state.busy || (st.live && (!!st.why || !state.ready))
-    || (c.action === "untether" && state.untethered);
+    || (c.action === "untether" && !!state.untethered) || (c.action === "tether" && !state.untethered);
   $("stop").disabled = !playing && !state.busy;
   $("reset").disabled = !boards || !!state.busy || playing || !!state.untethered;
   const how = state.untethered ? "heard over Bluetooth, no cables" : "on the bench";
@@ -493,10 +522,11 @@ async function present(i) {
   const st = chapterState(c);
   await say(c.say, 0, true);
   if (!playing) return;
-  if (c.action === "untether" && boards) {
-    if (!state.untethered && await post("/api/untether")) {
+  if ((c.action === "untether" || c.action === "tether") && boards) {
+    const want = c.action === "untether";
+    if (!!state.untethered !== want && await post("/api/" + c.action)) {
       await sleep(1000);
-      while (playing && (state.busy || !state.untethered)) await sleep(500);
+      while (playing && (state.busy || !!state.untethered !== want)) await sleep(500);
     }
     await refreshScenarios();
     if (playing) await sleep(2500);
@@ -528,6 +558,7 @@ async function playOne() {
 function stopAll() {
   playing = false;
   if (synth) synth.cancel();
+  if (speakingAudio) { speakingAudio.pause(); speakingAudio.onended && speakingAudio.onended(); }
   if (state.busy) post("/api/stop");
   demoDone_resolve();
   renderControls();
@@ -571,7 +602,7 @@ function onMessage(m) {
   if (m.type === "state") {
     const was = state.untethered;
     state = m;
-    if (m.untethered && !was) refreshScenarios();
+    if (!!m.untethered !== !!was) refreshScenarios();
     if (viewNow === "map") drawMap();
     renderControls();
     return;
@@ -646,7 +677,7 @@ document.addEventListener("keydown", e => {
 
 Promise.all([fetch("/api/scenarios").then(r => r.json()), fetch("/api/story").then(r => r.json())]).then(([s, story]) => {
   s.scenarios.forEach(x => scenarios[x.key] = x);
-  boards = s.boards; watchUrl = s.watch;
+  boards = s.boards; watchUrl = s.watch; localVoice = s.tts; fillVoices();
   chapters = story.chapters;
   show(0);
   connect();

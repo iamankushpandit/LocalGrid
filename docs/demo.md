@@ -4,11 +4,18 @@
 and then proves each claim live on the bench boards. One button, **Play all**, runs the whole thing
 with the browser's own voice reading every line, so a recording needs nobody speaking (D89).
 
-The presentation is in [`tools/demo_story.json`](../tools/demo_story.json): what LocalGrid is, why it
-exists, how it works, the hardware (read from the boards themselves), the concepts, key decisions,
-and how it was chaos tested. Then come the live chapters, the Bluetooth view, a part with no cables
-at all, and what it is not yet. Every claim in it cites a decision or comes from the README; change
-the file when a claim changes.
+The presentation is in [`tools/demo_story.json`](../tools/demo_story.json), in two halves:
+
+1. **The product, with no cables.** What LocalGrid is, why it exists and how it works, then the grid
+   as people would use it: every board on its own battery, the laptop only listening to the access
+   points' Bluetooth beacons, and the presenter raising an SOS, pulling a plug and switching everything
+   off by hand while the page times what the grid does.
+2. **How it was built and tested, with the cables.** Chaos testing; then every board is plugged into
+   the laptop, the hardware is read from the boards themselves, the concepts and key decisions are
+   explained, and each claim is broken on cue through the cables and measured.
+
+It ends with what else works today, what it is not yet, and where to find it. Every claim cites a
+decision or comes from the README; change the file when a claim changes.
 
 ## Running it
 
@@ -16,10 +23,10 @@ the file when a claim changes.
 python tools/demo.py
 ```
 
-Every board on a USB cable is found by its own device ID and restarted, so the demo starts from a
-known point. The access points then form the grid by themselves, and the page reports how long that took.
-The page is local to this laptop and talks to nothing else. `--page-only` serves the presentation with
-no boards, to rehearse the words.
+It starts with no cables, listening over Bluetooth. At "The bench" chapter it asks for every board to
+be plugged in, finds each by its own device ID and restarts it, so every measured demo starts from a
+known point. `--bench` starts on the cables instead, for the second half alone; `--page-only` serves
+the presentation with no boards, to rehearse the words. The page is served to this laptop only.
 
 | Key | Does |
 |---|---|
@@ -29,9 +36,20 @@ no boards, to rehearse the words.
 | Esc | Stop: the running demo ends where it is and the grid is put back |
 | R | Reset the grid: every radio on, every board powered |
 
-The narrator's voice is chosen at the top of the page; voices installed on the laptop work offline.
 Each live demo waits for each spoken line to finish before it acts, so what is said and what
 happens stay together.
+
+### The narrator's voice
+
+Chosen at the top of the page, most natural first:
+
+- **Piper, on this laptop.** An open-source neural voice, made locally, the same in every recording,
+  and offline like the product. Install it once with `pip install piper-tts` and put a voice model
+  (an `.onnx` file and its `.onnx.json`, from the Piper voices collection) in `build/voices/`, or name
+  one with `--voice-model`. The page then offers it first.
+- **A browser's natural voices.** Microsoft Edge offers "Natural" voices; they sound close to a person
+  but are online, so the narration text goes to Microsoft.
+- **The voices installed in Windows** (David, Mark, Zira): offline, and robotic.
 
 ## The live chapters
 
@@ -53,8 +71,11 @@ themselves, and the laptop never joins the grid (D25).
 | The worst case | Every access point's power cut for 20 s; links, time and handhelds timed back | Holdable ports |
 | Updates | A signed handheld update given to one AP spreads by itself, then is withdrawn | `--update FILE` |
 | Getting started | A board is installed from the installer page in a real browser and joins | `--install-board NAME` |
-| No cables | The laptop lets go of every port; the presenter unplugs them | Batteries or chargers |
-| By hand | Pull a plug, raise an SOS from a screen, switch everything off: the laptop sees each over Bluetooth | |
+| No cables | Every board on its own power; the laptop listens over Bluetooth only | Batteries or chargers |
+| An SOS, by hand | Raised from a handheld's screen; Read pressed on others; then Safe | |
+| Pull a plug, by hand | Any access point unplugged; its handhelds seen arriving on the others; plugged back | |
+| All off, by hand | Every access point off, then on: the grid re-forms and gets its time back | |
+| The bench | Every board plugged into the laptop and restarted | Cables |
 
 A chapter that needs setup says what in the chapter list, and Play all passes over it.
 
@@ -81,18 +102,11 @@ published image, not the bench build, so flash it again with `tools/flash.py` be
 
 ## No cables
 
-The part after "Watching it" lets go of every cable. From then on the page is drawn from the access
-points' Bluetooth beacons (D68), the same ones `tools/grid_watch.py` reads, and the laptop can only
-listen. Give each access point a battery or a charger before unplugging it: taking a cable out
-otherwise cuts its power, which the grid survives, but it is not the point being made.
-
-To start with no cables at all, for a demo away from the bench:
-
-```bash
-python tools/demo.py --untethered
-```
-
-The hands-on chapters wait up to three minutes for the presenter, then time what the grid does.
+The first half is drawn from the access points' Bluetooth beacons (D68), the same ones
+`tools/grid_watch.py` reads, and the laptop can only listen. Give each access point a battery or a
+charger; the handhelds run on their own. The hands-on chapters wait up to three minutes for the
+presenter, then time what the grid does. If the session is on the cables, the "No cables" chapter
+lets go of every port first, and the cables can then be pulled.
 
 ## Before recording
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. Every claim here is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py), flasher (site/flash), or none. A chapter with 'action': 'untether' lets go of every cable; the hands-on chapters after it are watched over Bluetooth only.",
+  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash).",
   "chapters": [
     {
       "id": "intro",
@@ -40,6 +40,97 @@
       "view": "map"
     },
     {
+      "id": "untether",
+      "part": "Live: no cables",
+      "title": "Everything here runs on its own batteries",
+      "body": [
+        "No cable to any board: access points on batteries or chargers, handhelds on their own batteries.",
+        "This laptop only listens to the access points' Bluetooth beacons; it cannot send, change or break anything (D68).",
+        "What you see on the map is what the grid says about itself, live."
+      ],
+      "say": "First, the product, the way people would use it. There is no cable to any board here. The access points run on batteries or chargers, and the handhelds on their own batteries. This laptop only listens to the Bluetooth beacon every access point sends, so it cannot send anything, change anything or break anything. Everything on this map is the grid describing itself, live.",
+      "action": "untether",
+      "view": "map"
+    },
+    {
+      "id": "d-hands-sos",
+      "part": "Live: an SOS, by hand",
+      "title": "An SOS from a handheld's own screen",
+      "body": [
+        "Raise an SOS on any handheld.",
+        "Every other screen shows it; pressing Read tells the sender who has seen it (D58).",
+        "The sender marks themselves safe, and it is stood down everywhere (D79)."
+      ],
+      "say": "The reason it exists. Somebody needs help. They raise an S O S from their handheld's screen.",
+      "demo": "hands_sos",
+      "view": "map"
+    },
+    {
+      "id": "d-hands-ap",
+      "part": "Live: pull a plug, by hand",
+      "title": "Pull the plug on an access point, by hand",
+      "body": [
+        "Unplug any access point you like.",
+        "The laptop sees it go quiet over Bluetooth, and sees its handhelds turn up on the others.",
+        "Plug it back in, and it rejoins."
+      ],
+      "say": "Now something goes wrong. An access point loses power. Pull the plug on any one of them.",
+      "demo": "hands_ap",
+      "view": "map"
+    },
+    {
+      "id": "d-hands-blackout",
+      "part": "Live: all off, by hand",
+      "title": "Every access point off, then on, with no cables",
+      "body": [
+        "Switch every access point off; the handhelds keep the time on their own batteries.",
+        "Switch them back on: they find each other, and the handhelds give them the time back (D53)."
+      ],
+      "say": "And the worst case. Every access point goes off at once.",
+      "demo": "hands_blackout",
+      "view": "map"
+    },
+    {
+      "id": "watch",
+      "part": "Watching it",
+      "title": "A laptop or a phone watches the grid without joining it",
+      "body": [
+        "Every access point broadcasts a small sealed status over Bluetooth; anyone with the key can read it (D68).",
+        "After a login, the same tabs the admin page shows: network, handhelds, traffic (D70).",
+        "Read-only by construction: a watcher can never send, change or take part (D69, D70).",
+        "Every access point also serves the admin page itself, on request (D45, D91)."
+      ],
+      "say": "You do not have to join the network to see how it is doing. What drew that map is the same view anyone can open: every access point broadcasts a small, sealed status over Bluetooth, and this laptop listens without being part of the grid. There is an Android app that does the same, and it is read only by construction: a watcher can never send a message or change anything.",
+      "view": "watch"
+    },
+    {
+      "id": "chaos",
+      "part": "How it was built",
+      "title": "Tested by breaking it, for hours, unattended",
+      "body": [
+        "A framework kills access points and handhelds at random, cuts their power and switches their radios off, while the handhelds keep messaging each other.",
+        "In a 10-hour run: 55 faults injected, 55 recovered, none needing a human. The backbone re-formed in a median of 3.7 s.",
+        "It found five bugs code review and unit tests never could, including one that made the self-healing promise untrue.",
+        "This demo uses the same engine, with a script instead of a random schedule."
+      ],
+      "say": "So that is the product. Here is how we know it holds up. The central claim is that it heals itself, so it was tested by attacking it. A framework kills access points and handhelds at random, cuts their power and turns their radios off, for hours, while the handhelds keep messaging each other. In one ten hour run, fifty five faults were injected and all fifty five recovered without a human. It also found five real bugs that code review never could.",
+      "view": "map"
+    },
+    {
+      "id": "bench",
+      "part": "Live: the bench",
+      "title": "Every board on a cable, so each claim can be broken on cue and measured",
+      "body": [
+        "Each board is plugged into this laptop: to cut its power on cue, and to read what it says.",
+        "Faults go through the cable and no other way; nothing in the firmware can break the grid on request (D103).",
+        "Every message is still sent and received by the handhelds themselves. The laptop never joins the grid (D25).",
+        "Each board is restarted as it is plugged in, so every test starts from a known point."
+      ],
+      "say": "To measure all of this, we plug every board into this laptop. Not because the grid needs it, but so the laptop can cut a board's power on cue and read what each one says about itself. The handhelds still send and receive every message themselves. Plug them in now.",
+      "view": "map",
+      "action": "tether"
+    },
+    {
       "id": "hardware",
       "part": "Hardware",
       "title": "The boards on this bench, as they describe themselves",
@@ -49,7 +140,7 @@
         "Every module is optional: with no GPS an admin sets the time, and with no LoRa the access points use Wi-Fi alone.",
         "Board facts live in data-only profiles; a new display board is often a profile and a touch check away."
       ],
-      "say": "The hardware is deliberately ordinary. The access points are plain E S P 32 development boards. Some carry a LoRa module, and one can carry a GPS for time and location. The handhelds are off-the-shelf touchscreen boards. Several models run it today, on three different chips. Every module is optional. This table is not typed in: each board on the bench reported it, a moment ago.",
+      "say": "The hardware is deliberately ordinary. The access points are plain E S P 32 development boards. Some carry a LoRa module, and one can carry a GPS for time and location. The handhelds are off-the-shelf touchscreen boards. Several models run it today, on three different chips. Every module is optional. This table is not typed in: each board reported it as it was plugged in.",
       "view": "hardware"
     },
     {
@@ -82,32 +173,6 @@
       "view": "map"
     },
     {
-      "id": "chaos",
-      "part": "Tested by breaking it",
-      "title": "Chaos testing, for hours, unattended",
-      "body": [
-        "A framework kills access points and handhelds at random, cuts their power and switches their radios off, while the handhelds keep messaging each other.",
-        "In a 10-hour run: 55 faults injected, 55 recovered, none needing a human. The backbone re-formed in a median of 3.7 s.",
-        "It found five bugs code review and unit tests never could, including one that made the self-healing promise untrue.",
-        "This demo uses the same engine, with a script instead of a random schedule."
-      ],
-      "say": "The central claim is that it heals itself, so it was tested by attacking it. A framework kills access points and handhelds at random, cuts their power and turns their radios off, for hours, while the handhelds keep messaging each other. In one ten hour run, fifty five faults were injected and all fifty five recovered without a human. It also found five real bugs that code review never could. This demo is that same engine, with a script instead of dice.",
-      "view": "map"
-    },
-    {
-      "id": "bench",
-      "part": "On the bench",
-      "title": "Everything is wired, for now, so it can be broken on cue",
-      "body": [
-        "Each board is on a USB cable to this laptop, for two reasons: to cut its power on cue, and to read what it says.",
-        "Faults go through the cable and no other way; nothing in the firmware can break the grid on request (D103).",
-        "Every message is sent and received by the handhelds themselves. The laptop never joins the grid (D25).",
-        "Later, the cables come out."
-      ],
-      "say": "For the first part, every board is on a cable to this laptop. Not because the grid needs it, but so the demo can cut a board's power on cue, and read what each one says about itself. The handhelds still send and receive every message themselves, and the laptop never joins the grid. Later on, the cables come out.",
-      "view": "map"
-    },
-    {
       "id": "d-tour",
       "part": "Live: the handhelds",
       "title": "One screen per person, no phone needed",
@@ -116,13 +181,13 @@
         "Messages to everyone, to a group, or to one person; a mark shows sent, delivered and read (D42).",
         "Battery, screen lock and a screen saver; the firmware it runs is on its status screen (D62, D110)."
       ],
-      "say": "First, the handhelds themselves. Watch their screens.",
+      "say": "With the cables in, the laptop can drive each handheld's screen. A closer look at them.",
       "demo": "tour",
       "view": "map"
     },
     {
       "id": "d-emergency",
-      "part": "Live: an emergency",
+      "part": "Live: an emergency, measured",
       "title": "An SOS breaks through every screen",
       "body": [
         "Sent from the handheld's own screen; it takes over every other screen, even a locked one (D57).",
@@ -130,7 +195,7 @@
         "Read is how an alert is dismissed, and the sender sees who has read it (D58).",
         "The sender marks themselves safe, and one message stands it down everywhere (D79)."
       ],
-      "say": "The reason this exists. One handheld raises an S O S.",
+      "say": "The S O S again, this time measured: how long it takes to reach each screen, and which radios carried it.",
       "demo": "emergency",
       "view": "map"
     },
@@ -249,70 +314,6 @@
       "say": "And finally, how anyone gets started. A board is installed from a web page: press install, choose the port, and give it your grid's file. Nothing to install on the computer.",
       "demo": "install",
       "view": "flasher"
-    },
-    {
-      "id": "watch",
-      "part": "Watching it",
-      "title": "A laptop or a phone watches the grid without joining it",
-      "body": [
-        "Every access point broadcasts a small sealed status over Bluetooth; anyone with the key can read it (D68).",
-        "After a login, the same tabs the admin page shows: network, handhelds, traffic (D70).",
-        "Read-only by construction: a watcher can never send, change or take part (D69, D70).",
-        "Every access point also serves the admin page itself, on request (D45, D91)."
-      ],
-      "say": "You do not have to join the network to see how it is doing. Every access point broadcasts a small, sealed status over Bluetooth, and this laptop is listening to it right now, without being part of the grid. The same view exists as an Android app, and it is read only by construction: a watcher can never send a message or change anything.",
-      "view": "watch"
-    },
-    {
-      "id": "untether",
-      "part": "Live: no cables",
-      "title": "Now, every cable comes out",
-      "body": [
-        "The laptop lets go of every port; from here it only listens over Bluetooth.",
-        "Access points run from batteries or chargers, handhelds from their own batteries.",
-        "Nothing from here on can be faked by the laptop: it has no way in."
-      ],
-      "say": "Everything so far ran with cables, so we could break things on cue. A real deployment has none. So the laptop now lets go of every cable, and we unplug them. From here on, it can only listen.",
-      "action": "untether",
-      "view": "map"
-    },
-    {
-      "id": "d-hands-ap",
-      "part": "Live: pull a plug, by hand",
-      "title": "Pull the plug on an access point, by hand",
-      "body": [
-        "Unplug any access point you like.",
-        "The laptop sees it go quiet over Bluetooth, and sees its handhelds turn up on the others.",
-        "Plug it back in, and it rejoins."
-      ],
-      "say": "Now the faults are done by hand. Pull the power on any access point.",
-      "demo": "hands_ap",
-      "view": "map"
-    },
-    {
-      "id": "d-hands-sos",
-      "part": "Live: an SOS, by hand",
-      "title": "An SOS from a handheld's own screen",
-      "body": [
-        "Raise an SOS on any handheld.",
-        "Every other screen shows it; pressing Read tells the sender who has seen it (D58).",
-        "The sender marks themselves safe, and it is stood down everywhere (D79)."
-      ],
-      "say": "An S O S, raised the way a person would, from the screen.",
-      "demo": "hands_sos",
-      "view": "map"
-    },
-    {
-      "id": "d-hands-blackout",
-      "part": "Live: all off, by hand",
-      "title": "Every access point off, then on, with no cables",
-      "body": [
-        "Switch every access point off; the handhelds keep the time on their own batteries.",
-        "Switch them back on: they find each other, and the handhelds give them the time back (D53)."
-      ],
-      "say": "And the whole grid, off and on again, with no cable anywhere.",
-      "demo": "hands_blackout",
-      "view": "map"
     },
     {
       "id": "more",

@@ -9,8 +9,14 @@ The page reads every caption and result aloud with the browser's own voice (on b
 chosen on the page), so a recording needs nobody speaking, and the demo waits for each spoken line to
 finish before it acts.
 
-  python tools/demo.py                 # open the boards and serve the page at http://127.0.0.1:8770/
-  python tools/demo.py --page-only     # the page with no boards, to look at the layout
+  python tools/demo.py                 # serve the page at http://127.0.0.1:8770/, the grid heard over Bluetooth
+  python tools/demo.py --bench         # start with every board on its cable instead
+  python tools/demo.py --page-only     # the page with no boards, to rehearse the words
+
+The presentation leads with the product as people would use it, with no cables: the laptop only listens
+to the access points' Bluetooth beacons, and the presenter pulls a plug, raises an SOS or switches
+everything off by hand. Halfway, every board is plugged into the laptop for the story of how it was
+built and tested: each claim broken on cue through the cables and measured.
 
 The page is local to this laptop and talks to nothing else.
 
@@ -23,7 +29,9 @@ commands and reads logs, and never joins the grid (D25).
 Output (gitignored): chaos-runs/demo/<start time>/ with the raw log and events.jsonl of the session.
 """
 import argparse
+import hashlib
 import http.server
+import io
 import json
 import pathlib
 import queue
@@ -44,6 +52,7 @@ PAGE = ROOT / "tools" / "demo_page.html"
 STORY = ROOT / "tools" / "demo_story.json"
 FLASHER = ROOT / "site" / "flash" / "index.html"
 WATCH_PORT = 8768        # tools/grid_watch.py's own default
+VOICES = ROOT / "build" / "voices"   # Piper voice models (.onnx with its .onnx.json); build/ is not in git
 chaos.RUNS = ROOT / "chaos-runs" / "demo"
 
 # Broadcast, group and alert text is logged in full by the receiving handheld; 1:1 text never is
@@ -362,6 +371,7 @@ class Grid(chaos.Chaos):
     def warm_up_untethered(self):
         self.caption("No cables: this laptop listens to the grid over Bluetooth only.")
         self.untethered = True
+        self.args.bench = False
         if not self.start_eyes():
             return
         self.wait(30, until=lambda: any(self.heard(a) for a in self.beacon()["aps"]))
@@ -370,11 +380,33 @@ class Grid(chaos.Chaos):
         self.caption(f"Ready: {sum(self.heard(a) for a in snap['aps'])} access points heard over Bluetooth.")
 
     def warm_up(self):
-        if self.args.untethered:
+        if not self.args.bench:
             return self.warm_up_untethered()
-        self.caption("Finding the boards on this laptop's cables. Each one is restarted so the demo "
+        self.warm_up_tethered()
+
+    def tether(self):
+        """Every board plugged into this laptop: the bench, where each claim is broken on cue and measured."""
+        self.caption("Every board is now plugged into this laptop. Each one is restarted, so each test "
                      "starts from a known point.")
+        try:
+            acquire_lock()    # the same lock as flash.py and chaos.py: one tool on the boards at a time
+        except SystemExit as e:
+            self.caption(f"The boards are in use by another tool. {e}")
+            return
+        self.ready = False
+        try:
+            self.warm_up_tethered()
+        except SystemExit as e:   # no board answered, or one runs a build that is not the current one
+            self.ready = True
+            self.caption(f"Not ready: {str(e).strip()}")
+
+    def warm_up_tethered(self):
+        self.caption("Finding the boards on this laptop's cables.")
+        self.boards, self.aps, self.hhs, self.by_name = [], [], [], {}
         self.start_boards()
+        self.untethered = False
+        self.args.bench = True
+        self.background()
         self.caption("The access points are finding each other by themselves.")
         t = time.monotonic()
         if self.wait(90, until=self.backbone_whole):
@@ -1240,9 +1272,9 @@ class Grid(chaos.Chaos):
     def unavailable(self, key):
         """Why a scenario cannot run on this session, or None."""
         if key in self.HANDS_ON and not self.untethered:
-            return "runs once the cables are unplugged"
+            return "runs with the cables unplugged"
         if key not in self.HANDS_ON and self.untethered:
-            return "needs the boards on their cables"
+            return "runs once the boards are plugged in"
         if key == "update" and not self.args.update:
             return "start the demo with --update <a signed handheld .lgfw file>"
         if key == "install" and not self.args.install_board:
@@ -1283,6 +1315,13 @@ class Grid(chaos.Chaos):
                 continue
             if kind == "run":
                 self.run_scenario(arg)
+            elif kind == "tether":
+                self.busy = "tether"
+                try:
+                    self.tether()
+                finally:
+                    self.busy = None
+                    self.background()
             elif kind == "untether":
                 self.busy = "untether"
                 try:
@@ -1297,6 +1336,47 @@ class Grid(chaos.Chaos):
                 finally:
                     self.busy = None
                     self.background()
+
+
+class Narrator:
+    """A natural voice made on this laptop with Piper (an open-source neural speech synthesiser), if it
+    is installed and a voice model is in build/voices/. Nothing leaves the laptop. Without it the page
+    falls back to the browser's own voices."""
+
+    def __init__(self, model=None):
+        self.voice = None
+        self.name = None
+        self.error = None
+        self.lock = threading.Lock()
+        self.cache = {}
+        path = pathlib.Path(model) if model else next(iter(sorted(VOICES.glob("*.onnx"))), None)
+        if path is None:
+            self.error = f"no voice model in {VOICES}"
+            return
+        try:
+            from piper import PiperVoice
+            self.voice = PiperVoice.load(str(path))
+            self.name = path.stem
+        except Exception as e:   # not installed, or a model it cannot read: the browser's voices still work
+            self.error = f"{type(e).__name__}: {e}"
+
+    def wav(self, text):
+        import wave
+        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self.lock:
+            if key in self.cache:
+                return self.cache[key]
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                if hasattr(self.voice, "synthesize_wav"):
+                    self.voice.synthesize_wav(text, w)
+                else:
+                    self.voice.synthesize(text, w)
+            data = buf.getvalue()
+            if len(self.cache) > 400:          # bounded: the story and a session's captions fit easily
+                self.cache.clear()
+            self.cache[key] = data
+            return data
 
 
 def scenario_list(grid):
@@ -1325,7 +1405,7 @@ def hardware(grid):
     return {"boards": rows}
 
 
-def make_handler(bus, grid, watch_url=None):
+def make_handler(bus, grid, watch_url=None, narrator=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -1345,7 +1425,13 @@ def make_handler(bus, grid, watch_url=None):
                 return self.reply(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             if path == "/api/scenarios":
                 return self.reply(200, {"scenarios": scenario_list(grid), "boards": grid is not None,
-                                        "watch": watch_url})
+                                        "watch": watch_url,
+                                        "tts": narrator.name if narrator and narrator.voice else None})
+            if path == "/api/tts":
+                if not narrator or not narrator.voice:
+                    return self.reply(404, {"error": "no local voice"})
+                text = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("text") or [""])[0][:600]
+                return self.reply(200, narrator.wav(text), "audio/wav")
             if path == "/api/story":
                 return self.reply(200, STORY.read_bytes())
             if path == "/api/hardware":
@@ -1380,6 +1466,8 @@ def make_handler(bus, grid, watch_url=None):
             path = urllib.parse.urlparse(self.path).path
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             if grid is None:
+                if path in ("/api/narrate", "/api/spoken"):
+                    return self.reply(200, {"ok": True})     # nothing waits for the voice with no boards
                 return self.reply(409, {"error": "page only: no boards are open"})
             if path == "/api/run":
                 key = (qs.get("s") or [""])[0]
@@ -1390,6 +1478,11 @@ def make_handler(bus, grid, watch_url=None):
                 if grid.busy or not grid.ready or not grid.requests.empty():
                     return self.reply(409, {"error": "busy" if grid.ready else "warming up"})
                 grid.requests.put(("run", key))
+                return self.reply(202, {"ok": True})
+            if path == "/api/tether":
+                if grid.busy or not grid.untethered or not grid.requests.empty():
+                    return self.reply(409, {"error": "busy" if grid.busy else "already on the cables"})
+                grid.requests.put(("tether", None))
                 return self.reply(202, {"ok": True})
             if path == "/api/untether":
                 if grid.busy or grid.untethered or not grid.requests.empty():
@@ -1435,8 +1528,11 @@ def main():
                     help="a bench handheld the 'install from the browser' demo may reinstall (its settings are "
                          "cleared, its identity kept; it then runs the published image, not the bench build)")
     ap.add_argument("--release", metavar="FILE", help="a release public key (hex) the installer gives that board")
-    ap.add_argument("--untethered", action="store_true",
-                    help="no cables at all: watch the grid over Bluetooth only, for the hands-on demos")
+    ap.add_argument("--bench", action="store_true",
+                    help="start with every board on its cable (the default starts with none: the product "
+                         "first, watched over Bluetooth, and the cables come in halfway)")
+    ap.add_argument("--voice-model", metavar="FILE",
+                    help=f"a Piper voice model (.onnx); default: the first in {VOICES.relative_to(ROOT)}")
     ap.add_argument("--no-watch", dest="watch", action="store_false",
                     help="do not start tools/grid_watch.py (the laptop's Bluetooth view of the grid)")
     args = ap.parse_args()
@@ -1448,7 +1544,7 @@ def main():
             names = {d["id"]: d["name"] for d in load_map().get("devices", []) if d.get("id")}
         except (OSError, ValueError):
             names = {}
-        if not args.untethered:
+        if args.bench:
             acquire_lock()    # the same lock as flash.py and chaos.py: one tool on the boards at a time
         chaos.keep_awake()
         # The harness's own settings, fixed: no schedule, no random traffic, no BLE, no alert quiet hours.
@@ -1460,7 +1556,7 @@ def main():
                                    blackout=False, max_aps_down=2, min_gap=3, max_gap=15, aps=3, handhelds=2,
                                    lora_check=args.lora_check, update=args.update,
                                    install_board=args.install_board, release=args.release,
-                                   untethered=args.untethered, secrets=str(ROOT / "firmware" / "common" / "lg_secrets.h"))
+                                   bench=args.bench, secrets=str(ROOT / "firmware" / "common" / "lg_secrets.h"))
         grid = Grid(hargs, names, bus)
 
     watch, watch_url = None, None
@@ -1471,7 +1567,10 @@ def main():
                                   "--no-map-tiles", "--port", str(WATCH_PORT)], cwd=str(ROOT),
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         watch_url = f"http://127.0.0.1:{WATCH_PORT}/"
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(bus, grid, watch_url))
+    narrator = Narrator(args.voice_model)
+    print(f"Narrator: {narrator.name} (Piper, on this laptop)" if narrator.voice else
+          f"Narrator: the browser's voices ({narrator.error})", flush=True)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(bus, grid, watch_url, narrator))
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"Demo page: http://127.0.0.1:{args.port}/", flush=True)
