@@ -1541,10 +1541,10 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
                 if "/" in name or "\\" in name or f.suffix.lower() not in MEDIA_TYPES or not f.is_file():
                     return self.reply(404, {"error": "not found"})
                 return self.reply(200, f.read_bytes(), MEDIA_TYPES[f.suffix.lower()])
-            if path == "/assets/network-diagram.svg":
-                # The site's own diagram of the network (README, project site): the presentation zooms
-                # into it rather than drawing another one.
-                return self.reply(200, (ROOT / "assets" / "network-diagram.svg").read_bytes(), "image/svg+xml")
+            if path in ("/assets/network-diagram.svg", "/assets/brand/localgrid-icon.svg"):
+                # The site's own diagram of the network and the product's icon: the presentation uses
+                # these rather than drawing its own (owner, 2026-10-07).
+                return self.reply(200, (ROOT / path.lstrip("/")).read_bytes(), "image/svg+xml")
             if path in ("/flash", "/flash/"):
                 return self.reply(200, FLASHER.read_bytes(), "text/html; charset=utf-8")
             if path == "/events":

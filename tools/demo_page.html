@@ -76,6 +76,23 @@ ol.chapters .na { margin-left: auto; font-size: 10px; color: var(--muted); }
 .legend span::before { content: ""; display: inline-block; width: 18px; height: 0; margin-right: 6px; vertical-align: middle; border-top: 3px solid var(--wifi); }
 .legend span.l::before { border-top: 3px dashed var(--lora); }
 .legend em { font-style: normal; }
+.view svg [data-part] { transition: opacity .6s ease; }
+.view svg.pointing [data-part] { opacity: .14; }
+.view svg.pointing [data-part].hl { opacity: 1; animation: glow 1.1s ease-in-out infinite alternate; }
+@keyframes glow { from { filter: drop-shadow(0 0 0 rgba(255,255,255,0)); } to { filter: drop-shadow(0 0 7px rgba(255,255,255,.9)); } }
+.view svg.live [data-part="hops"], .view svg.live [data-part="hhlinks"], .view svg.live [data-part="halo"],
+.view svg.live [data-part="gps"], .view svg.live [data-part="nointernet"] { opacity: .12; }
+.view svg.live [data-part="lora"] { opacity: .3; }
+.view svg.live [data-part="lora"].used { opacity: 1; }
+.view svg.live [data-part="aps"] circle:not(.used), .view svg.live g[data-part="handhelds"] rect:not(.used),
+.view svg.live [data-part="hhsym"] { opacity: .12; }
+.pointer { position: absolute; width: auto; height: auto; inset: auto; transform: translate(-50%, -100%); background: #F2F5F3;
+           color: #0B1510; font-weight: 600; font-size: 16px; padding: 7px 12px; border-radius: 8px; max-width: 70%; text-align: center;
+           box-shadow: 0 4px 18px rgba(0,0,0,.5); pointer-events: none; animation: in .4s ease-out; }
+.pointer::after { content: ""; position: absolute; left: 50%; bottom: -8px; margin-left: -8px; border: 8px solid transparent;
+                  border-bottom: 0; border-top-color: #F2F5F3; }
+.pointer.below { transform: translate(-50%, 0); }
+.pointer.below::after { bottom: auto; top: -8px; border-top: 0; border-bottom: 8px solid #F2F5F3; }
 table.hw { position: static; width: 100%; height: auto; border-collapse: collapse; font-size: 16px; }
 .hwwrap { overflow: auto; padding: 14px 18px; }
 table.hw th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
@@ -138,7 +155,7 @@ footer .caption { font-size: 24px; line-height: 1.3; min-height: 62px; display: 
 <body>
 <header>
   <div class="brand">
-    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4 L28 26 H4 Z" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linejoin="round"/><circle cx="16" cy="4" r="3" fill="var(--ap)"/><circle cx="4" cy="26" r="3" fill="var(--ap)"/><circle cx="28" cy="26" r="3" fill="var(--ap)"/><rect x="13" y="16" width="6" height="9" rx="1.5" fill="var(--text)"/></svg>
+    <img src="/assets/brand/localgrid-icon.svg" width="28" height="28" alt="">
     LocalGrid
   </div>
   <span class="status" id="status">Connecting…</span>
@@ -202,7 +219,7 @@ function pref(key, el, apply, dflt) {
   apply(el.checked);
   el.addEventListener("change", () => { try { localStorage.setItem(key, el.checked ? "1" : "0"); } catch (e) {} apply(el.checked); });
 }
-pref("lg-demo-light", $("light"), on => { document.documentElement.dataset.theme = on ? "light" : "dark"; drawMap(); }, false);
+pref("lg-demo-light", $("light"), on => { document.documentElement.dataset.theme = on ? "light" : "dark"; setTimeout(drawMap, 0); }, false);
 
 // ---- narration: the browser's own voice, so a recording needs nobody speaking ----
 // Lines are spoken in turn, never cut off. The demo is told when each of its lines ends and waits for
@@ -369,7 +386,7 @@ function show(i) {
   bulletsOf(c).forEach(t => { const li = document.createElement("li"); li.textContent = t; $("body").appendChild(li); });
   $("slide").className = "slide" + (c.view === "map" || !c.view ? "" : " compact");
   setView(logsOn ? "logs" : (c.view || "map"));
-  if ((c.view || "map") === "diagram") focusOn(c.focus || (c.points && c.points[0] && c.points[0].focus) || "all");
+  if ((c.view || "map") === "diagram") focusOn(c.lead_focus || c.focus || (c.points && c.points[0] && c.points[0].focus) || "all");
   showMedia(c);
   $("caption").textContent = st.live && st.why ? "This live demo needs setup: " + st.why + "." : "";
   renderChapters(); renderControls();
@@ -453,9 +470,11 @@ function toggleLogs() {
 }
 $("logsbtn").onclick = toggleLogs;
 
-// ---- the site's diagram, zoomed to what is being said ----
-// Regions of assets/network-diagram.svg (viewBox 0 0 960 680), named for what they show. If the diagram
-// is redrawn, these are the numbers to move.
+// ---- the site's diagram: explained, pointed at, and drawn live ----
+// Everything on the stage is assets/network-diagram.svg, the diagram in the README and on the site
+// (owner, 2026-10-07: no new diagrams). Explanations zoom into it and make the part being talked about
+// glow, with a label; the live demos draw the bench's real boards on it. Regions are in its viewBox
+// (0 0 960 680); if the diagram is redrawn, these are the numbers to move.
 const FOCUS = {
   all:       [0, 0, 960, 680],
   aps:       [100, 175, 760, 538],     // the ring of access points and the hops between them
@@ -465,8 +484,22 @@ const FOCUS = {
   gps:       [60, 0, 840, 300],        // the satellites: time and location, optional
   watch:     [0, 120, 360, 255],       // the laptop watching over Bluetooth
   offline:   [250, 0, 360, 255],       // "no Internet"
+  bench:     [-90, 125, 1140, 450],      // the three access points the bench's boards are drawn on
 };
-let diagramSvg = null, vbNow = FOCUS.all.slice(), vbTween = null;
+// What glows for each, and what the label says.
+const POINT = {
+  aps:       { parts: ["aps", "hops"], label: "Access points: the circles. Green dashes: the Wi-Fi hops between them" },
+  main:      { parts: ["main", "aps"], label: "MAIN: the access point with a GPS" },
+  handhelds: { parts: ["handhelds", "hhsym", "hhlinks"], label: "Handhelds: each one linked to the access point it is on" },
+  lora:      { parts: ["lora", "antennas"], label: "LoRa: the orange arcs between the access points that have a module" },
+  gps:       { parts: ["gps"], label: "GPS satellites: time and location, optional" },
+  watch:     { parts: ["laptop"], label: "A laptop, watching over Bluetooth without joining" },
+  offline:   { parts: ["nointernet"], label: "No Internet, anywhere" },
+};
+let diagramSvg = null, vbNow = FOCUS.all.slice(), vbTween = null, pointing = null;
+let spots = [];                    // diagram access point circles, in the order bench access points take them
+const iconsAt = new Map();         // spot -> the handheld icons drawn around it [{x, y, el}]
+
 async function loadDiagram() {
   if (diagramSvg) return diagramSvg;
   const text = await fetch("/assets/network-diagram.svg").then(r => r.text());
@@ -475,8 +508,45 @@ async function loadDiagram() {
   diagramSvg = holder.querySelector("svg");
   diagramSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   diagramSvg.style.background = "#02040A";
+  tagDiagram(diagramSvg);
   return diagramSvg;
 }
+function tagDiagram(svg) {
+  const q = s => [...svg.querySelectorAll(s)];
+  const texts = re => q("text").filter(x => re.test(x.textContent.trim()));
+  const tag = (els, part) => els.forEach(e => { if (e) e.setAttribute("data-part", part); });
+  tag(q('g[transform^="translate(118 58)"], g[transform^="translate(842 58)"], path[stroke-dasharray="3 7"], g[stroke-dasharray="3 7"]'), "gps");
+  tag(texts(/^GPS time/), "gps");
+  tag(q('g[transform="translate(300 34)"]').concat(texts(/^no Internet$/)), "nointernet");
+  tag(q('g[fill="url(#halo)"]'), "halo");
+  tag(q('g[stroke-dasharray="6 6"]'), "hops");
+  tag(q('g[stroke-width="1.3"]'), "hhlinks");
+  const apg = svg.querySelector('g[fill="#0B1510"]');
+  tag([apg], "aps");
+  tag(texts(/^(MAIN|GPS \+ LoRa)$/), "main");
+  // The handhelds are the small rectangles in one group; the scaled groups beside them are their microphone
+  // and speaker symbols, and the green pins are the handhelds that have a GPS.
+  tag(q('g[fill="#152A21"][stroke="#E4F2E9"]'), "handhelds");
+  tag(q('g[transform*="scale(1.4)"]').concat(q('g[fill="#5FD38D"]')), "hhsym");
+  tag(q('g[stroke-dasharray="10 7"]').concat(texts(/^LoRa:/)), "lora");
+  const antennas = q('g[stroke="#F0A064"]:not([stroke-dasharray])');
+  tag([...new Set(antennas.map(g => g.parentNode))], "antennas");
+  tag(q('g[transform^="translate(78 208)"], g[stroke-dasharray="2 6"]').concat(texts(/watching over BLE/)), "laptop");
+  // Where bench access points go: MAIN first (Everest is MAIN, with the GPS), then the other access points
+  // that carry LoRa, then the rest of the ring.
+  const tr = g => (g.getAttribute("transform").match(/translate\(([-\d.]+) ([-\d.]+)\)/) || []).slice(1).map(Number);
+  const circles = apg ? [...apg.querySelectorAll("circle")].map(c => ({ x: +c.getAttribute("cx"), y: +c.getAttribute("cy"), r: +c.getAttribute("r"), el: c })) : [];
+  const near = (x, y) => circles.reduce((b, c) => Math.hypot(c.x - x, c.y - y) < Math.hypot(b.x - x, b.y - y) ? c : b, circles[0]);
+  const withLora = new Set(antennas.map(g => near(...tr(g))));
+  spots = circles.slice().sort((a, b) => (b.r - a.r) || (withLora.has(b) - withLora.has(a)) || (a.x - b.x));
+  q('g[fill="#152A21"][stroke="#E4F2E9"] rect').forEach(r => {
+    const x = +r.getAttribute("x") + 6, y = +r.getAttribute("y") + 9, c = near(x, y);
+    if (!iconsAt.has(c)) iconsAt.set(c, []);
+    iconsAt.get(c).push({ x, y, el: r });
+  });
+  iconsAt.forEach(list => list.sort((a, b) => Math.atan2(a.y - 0, a.x) - Math.atan2(b.y, b.x)));
+}
+
 function focusOn(name) {
   const to = FOCUS[name] || FOCUS.all;
   const from = vbNow.slice(), t0 = performance.now(), dur = 1400;
@@ -488,8 +558,38 @@ function focusOn(name) {
     const k = Math.min(1, (performance.now() - t0) / dur), e = ease(k);
     vbNow = from.map((v, i) => v + (to[i] - v) * e);
     if (diagramSvg) diagramSvg.setAttribute("viewBox", vbNow.join(" "));
+    placePointer();
     if (k >= 1) { clearInterval(vbTween); vbTween = null; }
   }, 16);
+  point(viewNow === "diagram" ? name : null);
+}
+// Make the part being talked about glow, dim the rest, and put its name beside it.
+function point(name) {
+  pointing = POINT[name] ? name : null;
+  if (!diagramSvg) return;
+  diagramSvg.classList.toggle("pointing", !!pointing);
+  diagramSvg.querySelectorAll("[data-part]").forEach(e => e.classList.toggle("hl", !!pointing && POINT[pointing].parts.includes(e.getAttribute("data-part"))));
+  let tag = document.getElementById("pointer");
+  if (!pointing) { if (tag) tag.remove(); return; }
+  if (!tag) { tag = document.createElement("div"); tag.id = "pointer"; tag.className = "pointer"; }
+  tag.textContent = POINT[pointing].label;
+  if (tag.parentNode !== $("view")) $("view").appendChild(tag);
+  placePointer();
+}
+function placePointer() {
+  const tag = document.getElementById("pointer");
+  if (!tag || !pointing || !diagramSvg) return;
+  const view = $("view").getBoundingClientRect();
+  const boxes = [...diagramSvg.querySelectorAll(".hl")].map(e => e.getBoundingClientRect()).filter(r => r.width || r.height);
+  if (!boxes.length) return;
+  const top = Math.min(...boxes.map(r => r.top)), bottom = Math.max(...boxes.map(r => r.bottom));
+  const left = Math.min(...boxes.map(r => r.left)), right = Math.max(...boxes.map(r => r.right));
+  const half = tag.offsetWidth / 2 + 10;        // the label stays inside the frame
+  const cx = Math.max(half, Math.min(view.width - half, (left + right) / 2 - view.left));
+  const above = top - view.top > 60;
+  tag.classList.toggle("below", !above);
+  tag.style.left = cx + "px";
+  tag.style.top = (above ? Math.max(8, top - view.top - 14) : Math.min(view.height - 40, bottom - view.top + 14)) + "px";
 }
 
 let viewNow = null;
@@ -498,16 +598,26 @@ function setView(kind) {
   if (kind === viewNow && kind !== "hardware") return;
   viewNow = kind;
   v.innerHTML = "";
-  if (kind === "map") {
-    const svg = document.createElementNS(NS, "svg");
-    svg.id = "map"; svg.setAttribute("viewBox", "0 0 1000 700");
-    svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "The grid: access points, their links, and the handhelds on each");
-    v.appendChild(svg);
-    const lg = document.createElement("div"); lg.className = "legend";
-    lg.innerHTML = state.untethered ? "<span>Wi-Fi link</span><em>LoRa links show once the boards are on their cables; the Bluetooth beacon does not carry them</em>"
-                                    : "<span>Wi-Fi link</span><span class='l'>LoRa link</span>";
-    v.appendChild(lg);
-    drawMap();
+  if (kind === "map" || kind === "diagram") {
+    loadDiagram().then(svg => {
+      if (viewNow !== kind) return;
+      v.innerHTML = ""; v.appendChild(svg);
+      if (kind === "map") {
+        const lg = document.createElement("div"); lg.className = "legend";
+        lg.innerHTML = "<em>Bright: the boards on this bench, live</em><span>Wi-Fi link up</span>" +
+          (state.untethered ? "<em>LoRa links show once the boards are on their cables; the Bluetooth beacon does not carry them</em>"
+                            : "<span class='l'>LoRa</span>");
+        v.appendChild(lg);
+        point(null);
+        focusOn("bench");
+        drawMap();
+      } else {
+        svg.classList.remove("live");
+        const live = svg.querySelector("#live"); if (live) live.remove();
+        svg.querySelectorAll(".used").forEach(e => e.classList.remove("used"));
+        svg.setAttribute("viewBox", vbNow.join(" "));
+      }
+    });
   } else if (kind === "hardware") {
     const w = document.createElement("div"); w.className = "hwwrap"; v.appendChild(w);
     w.innerHTML = "<div class='empty'>Asking the boards…</div>";
@@ -531,12 +641,6 @@ function setView(kind) {
   } else if (kind === "watch") {
     if (watchUrl) { const f = document.createElement("iframe"); f.src = watchUrl; f.title = "Grid watch"; v.appendChild(f); }
     else v.innerHTML = "<div class='empty'>The Bluetooth view (tools/grid_watch.py) starts with the boards.</div>";
-  } else if (kind === "diagram") {
-    loadDiagram().then(svg => {
-      if (viewNow !== "diagram") return;
-      v.innerHTML = ""; v.appendChild(svg);
-      svg.setAttribute("viewBox", vbNow.join(" "));
-    });
   } else if (kind === "logs") {
     const box = document.createElement("div"); box.className = "logs"; v.appendChild(box);
     drawLogsNow();
@@ -545,30 +649,7 @@ function setView(kind) {
   }
 }
 
-// ---- the map ----
-function layout() {
-  const pos = {};
-  const n = state.aps.length, cx = 500, cy = 340, R = n > 1 ? 190 : 0;
-  state.aps.forEach((a, i) => {
-    const ang = -Math.PI / 2 + i * 2 * Math.PI / Math.max(n, 1);
-    pos["ap" + a.index] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang), ang };
-  });
-  const groups = {}, loose = [];
-  state.handhelds.forEach(h => {
-    if (h.node !== null && h.node !== undefined && pos["ap" + h.node]) (groups[h.node] = groups[h.node] || []).push(h);
-    else loose.push(h);
-  });
-  Object.entries(groups).forEach(([node, hs]) => {
-    const ap = pos["ap" + node];
-    const out = n > 1 ? ap.ang : Math.PI / 2;
-    hs.forEach((h, j) => {
-      const a = out + (j - (hs.length - 1) / 2) * 0.95;
-      pos["hh" + h.index] = { x: ap.x + 125 * Math.cos(a), y: ap.y + 125 * Math.sin(a) };
-    });
-  });
-  loose.forEach((h, j) => { pos["hh" + h.index] = { x: 500 + (j - (loose.length - 1) / 2) * 130, y: 655 }; });
-  return pos;
-}
+// ---- the live grid, drawn on the same diagram ----
 function el(tag, attrs, parent, text) {
   const e = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
@@ -578,57 +659,85 @@ function el(tag, attrs, parent, text) {
 }
 let pos = {};
 function drawMap() {
-  const svg = document.getElementById("map");
-  if (!svg) return;
-  svg.innerHTML = "";
-  pos = layout();
+  const svg = diagramSvg;
+  if (!svg || viewNow !== "map") return;
+  svg.classList.add("live");
+  let live = svg.querySelector("#live");
+  if (!live) { live = el("g", { id: "live" }, svg); }
+  live.innerHTML = "";
+  let fx = svg.querySelector("#fx");
+  if (fx) fx.remove();
+  pos = {};
+  svg.querySelectorAll(".used").forEach(e => e.classList.remove("used"));
   if (!state.aps.length) {
-    el("text", { x: 500, y: 350, "text-anchor": "middle", fill: "var(--muted)", "font-size": 22 }, svg,
-       boards ? "Waiting for the boards…" : "The live grid appears here when tools/demo.py has the boards");
+    el("text", { x: 480, y: 330, "text-anchor": "middle", fill: "#9DB8A8", "font-size": 22, "paint-order": "stroke", stroke: "#02040A", "stroke-width": 6 }, live,
+       boards ? "Waiting for the boards…" : "The bench's boards appear here when tools/demo.py has them");
+    el("g", { id: "fx" }, svg);
     return;
   }
-  const links = el("g", {}, svg);
+  const apSpot = {};
+  [...state.aps].sort((a, b) => a.index - b.index).forEach((a, i) => { if (spots[i]) { apSpot[a.index] = spots[i]; pos["ap" + a.index] = spots[i]; } });
+  const label = (x, y, text, fill, size, anchor) => el("text", { x, y, "text-anchor": anchor || "middle", fill, "font-size": size || 15,
+    "font-weight": 600, "paint-order": "stroke", stroke: "#02040A", "stroke-width": 5, "stroke-linejoin": "round" }, live, text);
+  // Wi-Fi links that are up, between the bench's access points.
   const aps = state.aps;
   for (let i = 0; i < aps.length; i++) for (let j = i + 1; j < aps.length; j++) {
-    const a = aps[i], b = aps[j], p = pos["ap" + a.index], q = pos["ap" + b.index];
-    if (a.held || b.held || !a.present || !b.present) continue;   // a board with no power has no links
-    const wifi = !a.bb_off && !b.bb_off && (a.links.includes(b.index) || b.links.includes(a.index));
-    const lora = !a.lora_off && !b.lora_off && (a.lora_links.includes(b.index) || b.lora_links.includes(a.index));
-    const dx = q.x - p.x, dy = q.y - p.y, L = Math.hypot(dx, dy) || 1, ox = -dy / L * 9, oy = dx / L * 9;
-    if (wifi) el("line", { x1: p.x - ox, y1: p.y - oy, x2: q.x - ox, y2: q.y - oy, stroke: "var(--wifi)", "stroke-width": 4 }, links);
-    if (lora) el("line", { x1: p.x + ox, y1: p.y + oy, x2: q.x + ox, y2: q.y + oy, stroke: "var(--lora)", "stroke-width": 3, "stroke-dasharray": "10 7" }, links);
+    const a = aps[i], b = aps[j], p = apSpot[a.index], q = apSpot[b.index];
+    if (!p || !q || a.held || b.held || !a.present || !b.present || a.bb_off || b.bb_off) continue;
+    if (a.links.includes(b.index) || b.links.includes(a.index))
+      el("line", { x1: p.x, y1: p.y, x2: q.x, y2: q.y, stroke: "#5FD38D", "stroke-width": 3.5, opacity: .9 }, live);
   }
-  state.handhelds.forEach(h => {
-    const p = pos["hh" + h.index];
-    if (h.node !== null && h.node !== undefined && pos["ap" + h.node]) {
-      const q = pos["ap" + h.node];
-      el("line", { x1: p.x, y1: p.y, x2: q.x, y2: q.y, stroke: "var(--wifi)", "stroke-width": 2, opacity: .55 }, links);
-    }
-  });
-  if (state.handhelds.some(h => h.node === null || h.node === undefined))
-    el("text", { x: 500, y: 612, "text-anchor": "middle", fill: "var(--muted)", "font-size": 15 }, svg, "No Wi-Fi session");
+  // LoRa: the diagram's own orange arcs are the bench's links. Bright when the boards say the links are
+  // up; faint with no cables, because the Bluetooth beacon does not say.
+  const loraUp = aps.some(a => a.lora_links.length);
+  svg.querySelectorAll('[data-part="lora"]').forEach(e => e.classList.toggle("used", loraUp));
+  // The access points themselves.
   aps.forEach(a => {
-    const p = pos["ap" + a.index];
+    const p = apSpot[a.index]; if (!p) return;
+    p.el.classList.add("used");
     const dead = a.held || !a.present;
-    const g = el("g", {}, svg);
-    el("circle", { cx: p.x, cy: p.y, r: 46, fill: "var(--panel2)", stroke: dead ? "var(--off)" : "var(--ap)", "stroke-width": 4,
-                   "stroke-dasharray": dead ? "6 6" : "none" }, g);
-    el("text", { x: p.x, y: p.y + 2, "text-anchor": "middle", fill: dead ? "var(--off)" : "var(--text)", "font-size": 17, "font-weight": 600 }, g, a.name);
-    el("text", { x: p.x, y: p.y + 21, "text-anchor": "middle", fill: a.held ? "var(--bad)" : "var(--muted)", "font-size": 12 }, g,
-       a.held ? "power cut" : !a.present ? (state.untethered ? "not heard" : "no cable") : a.bb_off && a.lora_off ? "cut off" : a.bb_off ? "Wi-Fi link off" : "access point");
+    el("circle", { cx: p.x, cy: p.y, r: p.r + 7, fill: "none", stroke: dead ? "#E5534B" : "#5FD38D", "stroke-width": dead ? 3 : 2.5,
+                   "stroke-dasharray": dead ? "5 5" : "none", opacity: dead ? 1 : .9 }, live);
+    const side = p.x < 400 ? -1 : p.x > 560 ? 1 : 0;
+    const lx = p.x + side * (p.r + 16), ly = side ? p.y - 22 : p.y - p.r - 30;
+    label(lx, ly, a.name, dead ? "#9DB8A8" : "#E4F2E9", 17, side < 0 ? "end" : side > 0 ? "start" : "middle");
+    const status = a.held ? "power cut" : !a.present ? (state.untethered ? "not heard" : "no cable") :
+                   a.bb_off && a.lora_off ? "cut off" : a.bb_off ? "Wi-Fi link off" : "";
+    if (status) label(lx, ly + 17, status, dead ? "#E5534B" : "#F0A064", 13, side < 0 ? "end" : side > 0 ? "start" : "middle");
   });
+  // The handhelds, on the diagram's own handheld icons around the access point each one is on.
+  const byAp = {}, loose = [];
   state.handhelds.forEach(h => {
-    const p = pos["hh" + h.index];
-    const off = !h.present;
-    const g = el("g", {}, svg);
-    el("rect", { x: p.x - 54, y: p.y - 20, width: 108, height: 40, rx: 8, fill: "var(--panel2)",
-                 stroke: off ? "var(--off)" : h.wifi_off ? "var(--lora)" : "var(--hh)", "stroke-width": 2 }, g);
-    const sub = h.wifi_off || off || (h.battery !== null && h.battery !== undefined);
-    el("text", { x: p.x, y: p.y + (sub ? -1 : 5), "text-anchor": "middle", fill: off ? "var(--off)" : "var(--text)", "font-size": 15 }, g, h.name);
-    if (h.wifi_off) el("text", { x: p.x, y: p.y + 14, "text-anchor": "middle", fill: "var(--lora)", "font-size": 11 }, g, "LoRa only");
-    else if (h.battery !== null && h.battery !== undefined)
-      el("text", { x: p.x, y: p.y + 14, "text-anchor": "middle", fill: h.battery <= 15 ? "var(--bad)" : "var(--muted)", "font-size": 11 }, g, `battery ${h.battery} %`);
-    else if (off) el("text", { x: p.x, y: p.y + 14, "text-anchor": "middle", fill: "var(--muted)", "font-size": 11 }, g, "installing");
+    if (h.node !== null && h.node !== undefined && apSpot[h.node]) (byAp[h.node] = byAp[h.node] || []).push(h); else loose.push(h);
+  });
+  Object.entries(byAp).forEach(([node, hs]) => {
+    const p = apSpot[node], icons = (iconsAt.get(p) || []).slice();
+    hs.sort((a, b) => a.index - b.index).forEach((h, k) => {
+      let slot = icons[k];
+      if (!slot) {        // more handhelds than the diagram drew here: further round the same arc
+        const base = Math.atan2(p.y - 340, p.x - 480), ang = base + (k - 1) * 0.55;
+        slot = { x: p.x + 70 * Math.cos(ang), y: p.y + 70 * Math.sin(ang) };
+        el("rect", { x: slot.x - 6, y: slot.y - 9, width: 12, height: 18, rx: 2.5, fill: "#152A21", stroke: "#E4F2E9", "stroke-width": 1.4 }, live);
+      } else slot.el.classList.add("used");
+      pos["hh" + h.index] = slot;
+      el("line", { x1: slot.x, y1: slot.y, x2: p.x, y2: p.y, stroke: h.wifi_off ? "#F0A064" : "#5FD38D", "stroke-width": 1.6, opacity: .8,
+                   "stroke-dasharray": h.wifi_off ? "4 4" : "none" }, live);
+      // Name and battery on one line, pointing away from the access point, so neighbours do not overlap.
+      const dx = slot.x - p.x, dy = slot.y - p.y, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+      const anchor = ux > .35 ? "start" : ux < -.35 ? "end" : "middle";
+      const t = label(slot.x + ux * 14, slot.y + uy * 18 + 5, h.name, h.wifi_off ? "#F0A064" : "#E4F2E9", 13, anchor);
+      if (h.battery !== null && h.battery !== undefined) {
+        const b = el("tspan", { fill: h.battery <= 15 ? "#E5534B" : "#9DB8A8", "font-size": 11, "font-weight": 400 }, t);
+        b.textContent = "  " + h.battery + " %";
+      }
+    });
+  });
+  loose.forEach((h, k) => {
+    const x = 480 + (k - (loose.length - 1) / 2) * 110, y = 520;
+    pos["hh" + h.index] = { x, y };
+    el("rect", { x: x - 6, y: y - 9, width: 12, height: 18, rx: 2.5, fill: "#152A21", stroke: h.wifi_off ? "#F0A064" : "#9DB8A8", "stroke-width": 1.4 }, live);
+    label(x, y + 26, h.name, h.wifi_off ? "#F0A064" : "#9DB8A8", 13);
+    label(x, y + 40, h.wifi_off ? "LoRa only" : "no Wi-Fi session", h.wifi_off ? "#F0A064" : "#9DB8A8", 11);
   });
   el("g", { id: "fx" }, svg);
 }
