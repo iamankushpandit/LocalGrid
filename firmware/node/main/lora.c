@@ -51,7 +51,14 @@ static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set t
  */
 #define ACK_TURN_MS       500u
 #define ACK_JITTER_MS     80u
-#define ACK_MARGIN_MS     400u      /* on top of the last turn, before the sender stops listening */
+/*
+ * On top of the last turn, before the sender stops listening. It has to cover a part the answering AP
+ * is already putting on the air when its answer comes due, since a transfer in progress is never
+ * interrupted for one, and that part can be a full one, about 940 ms. At 400 ms, with the Wi-Fi backbone
+ * off on the bench, Denali heard 5 of Everest's 11 answers in time and sent 10 frames again that had
+ * arrived the first time (2026-10-07): airtime spent twice, on a channel that had none to spare.
+ */
+#define ACK_MARGIN_MS     1500u
 #define ACK_RESEND_SPAN_MS 600u     /* and a random wait more before it sends again */
 #define WEDGE_BACKOFF_MAX 60000u
 #define IDLE_WAIT_MS      50u       /* how long the task listens for a line when it has work to do */
