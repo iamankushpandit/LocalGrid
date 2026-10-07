@@ -15,7 +15,12 @@
         },
         {
           "text": "After a one-time setup, access points find each other and form the network on their own.",
-          "say": "A few access points find each other, and form the network on their own. The only setup is once, when each board is installed: it is given the grid's keys. After that, nobody configures anything.",
+          "say": "A few access points find each other, and form the network on their own. The only setup is once, when each board is installed: it is given the grid's keys.",
+          "focus": "aps"
+        },
+        {
+          "text": "The grid's keys make it your network: only devices holding them can join, and every message is sealed with them (D96).",
+          "say": "Those keys are what make it your network. Only a device holding them can join, and every message between devices is sealed with them, so a stranger cannot join it or read it, and two networks side by side stay apart. The keys live on the devices, not in the firmware, so one firmware serves everyone. After that one step, nobody configures anything.",
           "focus": "aps"
         },
         {
