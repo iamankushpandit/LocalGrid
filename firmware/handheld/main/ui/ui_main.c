@@ -587,6 +587,15 @@ static void handle_request(const ui_req_t *r)
     case UI_HOME:
         ui_go(NAV_HOME, 0, 0, NULL);   /* through navigation, so it waits while locked */
         break;
+    case UI_CLEAR:
+        /* `ui clear`: every alert read and closed, no banner, nothing unread, and the home screen - the
+         * state a demonstration starts each step from, so a screen never carries the last one's leftovers. */
+        for (int i = 0; i < 16 && ui_overlay_ack(); i++) {
+        }
+        ui_overlay_drop_banner();
+        ui_notify_mark_all_seen();
+        ui_go(NAV_HOME, 0, 0, NULL);
+        break;
     case UI_STATUS:
         ui_go(NAV_STATUS, 0, 0, NULL);
         break;

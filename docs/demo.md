@@ -2,141 +2,131 @@
 
 `tools/demo.py` serves a narrated presentation at `http://127.0.0.1:8770/` that explains the project
 and then proves each claim live on the bench boards. One button, **Play all**, runs the whole thing
-with the browser's own voice reading every line, so a recording needs nobody speaking (D89).
+with a narrator's voice made on this laptop, so a recording needs nobody speaking (D89).
 
 The presentation is in [`tools/demo_story.json`](../tools/demo_story.json), in two halves:
 
-1. **The product, with no cables.** What LocalGrid is, why it exists and how it works, then the grid
-   as people would use it: every board on its own battery, the laptop only listening to the access
-   points' Bluetooth beacons, and the presenter raising an SOS, pulling a plug and switching everything
-   off by hand while the page times what the grid does.
+1. **The product, with no cables.** What LocalGrid is, its three radios, ESP-NOW, how a handheld
+   joins, and the boards on the bench. Then the grid as people would use it: every board on its own
+   power, the laptop only listening to the access points' Bluetooth beacons, and the presenter pulling
+   a plug and switching everything off while the page times what the grid does, down to the handhelds
+   spreading themselves out again. Then the watcher, tab by tab.
 2. **How it was built and tested, with the cables.** Chaos testing; then every board is plugged into
-   the laptop, the hardware is read from the boards themselves, the concepts and key decisions are
-   explained, and each claim is broken on cue through the cables and measured.
+   the laptop, the hardware is read from the boards, the core ideas and key decisions are explained,
+   and everything else is driven through the cables and measured: messages to one person, a group and
+   everyone, push to talk with real speech, a new name, the SOS, every kind of failure, both ways of
+   updating, and installing a board from the web page.
 
-It ends with what else works today, what it is not yet, and where to find it. Every claim cites a
-decision or comes from the README; change the file when a claim changes.
+It ends with what else works today, how it can be extended, where it fits, what it is not yet, and
+where to find it. Every claim cites a decision or comes from the README; change the file when a claim
+changes.
 
 ## Running it
 
 ```bash
-python tools/demo.py
+python tools/demo.py --sign-key <release key .pem> --install-board e28 --release <release key .pub.hex>
 ```
 
-It starts with no cables, listening over Bluetooth. At "The bench" chapter it asks for every board to
-be plugged in, finds each by its own device ID and restarts it, so every measured demo starts from a
-known point. `--bench` starts on the cables instead, for the second half alone; `--page-only` serves
-the presentation with no boards, to rehearse the words. The page is served to this laptop only.
+It starts with no cables, listening over Bluetooth. At "The bench" it asks for every board to be
+plugged in, finds each by its own device ID and restarts it, so every measured demo starts from a
+known point, and sets every handheld's volume to high. `--bench` starts on the cables instead, for the
+second half alone; `--page-only` serves the presentation with no boards, to rehearse the words. The
+page is served to this laptop only. Set `LG_ADMIN_PASSWORD` in the environment to have the watcher log
+in by itself; otherwise its chapter asks the presenter to log in.
 
 | Key | Does |
 |---|---|
-| Space | Play all from this chapter, or pause |
+| Space | Play all from this chapter, or pause; Continue on a step only the presenter can do |
 | Left, Right | Previous, next chapter |
 | Enter | Present this chapter only |
+| C | The chapter list (it also slides out briefly between chapters) |
+| L | Every board's own output, live, or the Bluetooth event log with no cables |
 | Esc | Stop: the running demo ends where it is and the grid is put back |
 | R | Reset the grid: every radio on, every board powered |
 
-Each live demo waits for each spoken line to finish before it acts, so what is said and what
-happens stay together.
+Each live demo waits for each spoken line to finish before it acts, so what is said and what happens
+stay together. Everything is drawn on the site's own network diagram (`assets/network-diagram.svg`):
+explanations zoom into it and make the part being talked about glow, and the live chapters draw the
+bench's boards on it.
+
+### Recording, one chapter a video
+
+Tick **Recording** in the header: the controls disappear, and **Present this chapter** (Enter) plays
+the chapter between a title card and a held last frame, a clean cut. Open a chapter directly with its
+id in the address, for example `http://127.0.0.1:8770/#d-voice`.
 
 ### The narrator's voice
 
-Chosen at the top of the page, most natural first:
-
-- **Piper, on this laptop.** An open-source neural voice, made locally, the same in every recording,
-  and offline like the product. Install it once with `pip install piper-tts` and put a voice model
-  (an `.onnx` file and its `.onnx.json`, from the Piper voices collection) in `build/voices/`, or name
-  one with `--voice-model`. The page then offers it first. The voice is Amy (`en_US-amy-medium`), the
-  owner's choice; the others downloaded with it stay in the list.
-- **A browser's natural voices.** Microsoft Edge offers "Natural" voices; they sound close to a person
-  but are online, so the narration text goes to Microsoft.
-- **The voices installed in Windows** (David, Mark, Zira): offline, and robotic.
+Chosen at the top of the page. The default is Amy (`en_US-amy-medium`), a Piper voice: open-source,
+made on this laptop, the same in every recording and offline like the product. Install it once with
+`pip install piper-tts` and put voice models (an `.onnx` file and its `.onnx.json`) in `build/voices/`.
+A browser's own voices are offered after it.
 
 ## The live chapters
 
-Each one checks the grid is ready, says what is about to happen, does it through the cables, shows it
-on a live map with a stopwatch, ends with what the boards themselves printed, then puts the grid back.
-Faults go through the cable and no other way (D103); the handhelds send and receive every message
-themselves, and the laptop never joins the grid (D25).
-
 | Chapter | What happens | Needs |
 |---|---|---|
-| The handhelds | Status, messages, groups and settings opened on every handheld's screen | |
-| An emergency | An SOS, timed to every other screen, with the LoRa frames that carried it too; then the all clear | Two handhelds |
-| Voice | Push to talk to everyone with a generated voice; frames played per listener | Two handhelds, one with a speaker |
-| Losing an access point | Power cut on the busiest one; each handheld's move timed; a message across; power back | A holdable port (CP210x, CH34x, FTDI) |
-| A crash | A restart; links, time, settings, groups and handhelds timed back | |
-| The second radio | Wi-Fi between access points off everywhere; a message crosses by LoRa | LoRa modules on the APs |
-| Out of range | A handheld's Wi-Fi off; messages both ways over LoRa | A handheld with a LoRa module |
-| A split grid | One access point cut off; a group renamed on its side; the halves meet and agree | Handhelds on two APs |
-| The worst case | Every access point's power cut for 20 s; links, time and handhelds timed back | Holdable ports |
-| Updates | A signed handheld update given to one AP spreads by itself, then is withdrawn | `--update FILE` |
-| Getting started | A board is installed from the installer page in a real browser and joins | `--install-board NAME` |
-| No cables | Every board on its own power; the laptop listens over Bluetooth only | Batteries or chargers |
-| An SOS, by hand | Raised from a handheld's screen; Read pressed on others; then Safe | |
-| Pull a plug, by hand | Any access point unplugged; its handhelds seen arriving on the others; plugged back | |
-| All off, by hand | Every access point off, then on: the grid re-forms and gets its time back | |
-| The bench | Every board plugged into the laptop and restarted | Cables |
+| Pulling a plug | The presenter unplugs any access point; the laptop sees it go quiet over Bluetooth and its handhelds arrive on the others | No cables |
+| Everything off | Every access point off, then on: the grid re-forms, gets its time back, and the handhelds spread out (D54) | No cables |
+| Watching the grid | The watcher's overview, then after a login its Network, Handhelds and Traffic tabs (the Map stays shut) | `LG_ADMIN_PASSWORD`, or the presenter logs in |
+| The handheld screens | Status, messages, groups and settings opened on every handheld | Cables |
+| One to one, a group, an announcement | Each sent by a handheld, timed to every screen it should reach, with the conversations open | Cables |
+| Push to talk | Real speech, made here with Piper and given to a handheld over its cable (D112), to everyone, the group and one person; frames played per listener, and that nobody else played the 1:1 talk | Cables |
+| A new name | A handheld renames itself; the time until another knows it | Cables |
+| An SOS, timed | To every screen, with the LoRa frames that carried it too; then the all clear | Cables |
+| A power cut, a crash, a handheld restarting | Each timed back, with what came back | Holdable ports for the power cut |
+| LoRa between access points, a handheld on LoRa | Wi-Fi taken away; messages and voice cross by LoRa | LoRa modules |
+| A split grid, a blackout | Halves that agree again; everything off and back, with the load balancing | Holdable ports |
+| Updates | A fresh signed update by cable to one access point, spreading by itself | `--sign-key` |
+| An update from a browser | The laptop joins the grid's Wi-Fi, the admin page takes the update, the grid passes it on; the laptop goes back to its own network | `--sign-key`, the presenter at the upload |
+| Installing from a web page | A board installed through the installer page in a real browser, then joining | `--install-board`, `tools/build_release.py` images |
 
 A chapter that needs setup says what in the chapter list, and Play all passes over it.
 
-### Updates (`--update`)
+### Updates (`--sign-key`)
 
-Sign the current handheld build with the release key the boards were given:
+Each update chapter signs a fresh update from the current handheld build with the release key the
+boards were given, because a device takes only an update newer than the last one it saw. It is the
+same code with a newer serial, so the handhelds restart into what they already run. Only a device
+given that release key takes it (D97). It takes minutes: handhelds wait until they are idle, including
+five minutes after an urgent message. Each ends with `spread drop`, which withdraws the update from the
+whole grid.
 
-```bash
-python tools/lgfw.py sign --key <release key> --role H --chip esp32 --version demo firmware/handheld/build-esp32/lg_handheld.bin -o hh-demo.lgfw
-python tools/demo.py --update hh-demo.lgfw
-```
+The browser update has the laptop join the grid's Wi-Fi with a profile made from the grid's secrets
+file, which is deleted afterwards, and then rejoin the network it was on. Nothing else on the laptop
+reaches the Internet meanwhile; the page and the narrator are served from the laptop itself.
 
-The same code with a newer serial, so the handhelds restart into what they already run. Only a
-handheld given that release key takes it (D97); the others refuse, and the page says so. It takes
-minutes: handhelds wait until they are idle, including five minutes after an urgent message. The demo
-ends with `spread drop`, which withdraws the update from the whole grid.
-
-### Getting started (`--install-board`)
+### Installing from a web page (`--install-board`)
 
 `tools/test_installer_page.py` installs the named bench handheld through the installer page in a real
 Chrome or Edge window, which is what the camera should see. It needs `tools/build_release.py` to have
 built the published images. The board's settings are cleared and its identity kept; it then runs the
 published image, not the bench build, so flash it again with `tools/flash.py` before a chaos run.
 
-## No cables
-
-The first half is drawn from the access points' Bluetooth beacons (D68), the same ones
-`tools/grid_watch.py` reads, and the laptop can only listen. Give each access point a battery or a
-charger; the handhelds run on their own. The hands-on chapters wait up to three minutes for the
-presenter, then time what the grid does. If the session is on the cables, the "No cables" chapter
-lets go of every port first, and the cables can then be pulled.
-
 ## Photos and clips
 
-A chapter can show the owner's photos or short clips under its stage. They are looked for in
-`build/demo-media/` (not in git, because they show the bench) by the names the story gives, and a
-chapter whose photo is not there yet shows none. The shot list:
+A chapter can show the owner's photos or short clips under its stage, or one full size on the stage at
+a given point. They are looked for in `build/demo-media/` (not in git, because they show the bench) by
+the names the story gives, and a chapter whose photo is not there yet shows none. The shot list:
 
 | File | Chapter | What |
 |---|---|---|
 | `hero-handheld.jpg` | LocalGrid | A handheld in a hand, Messages screen on, ideally outdoors |
-| `handhelds-row.jpg` | LocalGrid | Every handheld model side by side, screens on |
-| `bench-wide.jpg` | How it works | The whole grid on one table |
+| `handhelds-row.jpg` | LocalGrid, the demo's hardware | Every handheld model side by side, screens on |
+| `bench-wide.jpg` | The demo's hardware | The whole grid on one table |
 | `batteries.jpg` | No cables | Access points on battery packs, no laptop in sight |
-| `sos-lockscreen.jpg` | An SOS, by hand | An SOS on a locked handheld |
-| `sos-read-by.jpg` | An SOS, by hand | The "Read by" line under the sender's SOS |
-| `android-watch.png` | Watching it | A screenshot of the Android app (no Map tab) |
-| `ap-lora.jpg`, `ap-gps.jpg` | Hardware | An access point with its LoRa module; MAIN's GPS |
+| `android-watch.png` | Watching the grid | A screenshot of the Android app (no Map tab) |
+| `ap-lora.jpg`, `ap-gps.jpg` | Hardware | An access point with its LoRa module; Everest's GPS |
 | `handheld-back.jpg` | Hardware | The back of a handheld with its LoRa module wired on |
-| `status-screen.jpg`, `keyboard.jpg`, `screensaver.jpg` | The handhelds | Three of the handheld's screens |
-| `talk.mp4` | Voice | A few seconds of push to talk, muted (it loops) |
-| `installer.png` | Getting started | The installer page part-way through an install |
+| `status-screen.jpg`, `keyboard.jpg`, `screensaver.jpg` | The handheld screens | Three of the handheld's screens |
+| `installer.png` | Installing from a web page | The installer page part-way through an install |
 
 Photos at 1600 px on the long side are plenty. Keep coordinates, faces and addresses out of frame.
 
 ## Before recording
 
-- **Positions.** "Watching it" shows `tools/grid_watch.py` without the admin password, so it shows
-  the beacon only. Do not log in on camera: the Map tab would show where the bench is.
+- **Positions.** The watcher's Map tab shows where the bench is: the demo never opens it.
 - **Sound.** An SOS sounds on every handheld, even with the volume off (D40).
-- **Run each chapter once** with `Present this chapter` before Play all. A live demo that fails on
+- **Run each chapter once** with Present this chapter before recording it. A live demo that fails on
   camera is worse than none; every result it shows is what the boards printed, including failures.
 - Session logs are kept in `chaos-runs/demo/<start time>/`, which git ignores.

@@ -90,6 +90,8 @@ ol.chapters .na { margin-left: auto; font-size: 10px; color: var(--muted); }
 .view svg.live [data-part="gps"], .view svg.live [data-part="nointernet"] { opacity: .12; }
 .view svg.live [data-part="lora"] { opacity: .3; }
 .view svg.live [data-part="lora"].used { opacity: 1; }
+.view svg.lora-busy [data-part="lora"], .view svg.lora-busy #live .lora-link { opacity: 1;
+  animation: glow 0.7s ease-in-out infinite alternate; }
 .view svg.live [data-part="aps"] circle:not(.used), .view svg.live g[data-part="handhelds"] rect:not(.used),
 .view svg.live [data-part="hhsym"] { opacity: .12; }
 .pointer { position: absolute; width: auto; height: auto; inset: auto; transform: translate(-50%, -100%); background: #F2F5F3;
@@ -282,6 +284,8 @@ if (synth) { fillVoices(); synth.onvoiceschanged = fillVoices; }
 $("voice").addEventListener("change", () => { try { localStorage.setItem("lg-demo-voice", $("voice").value); } catch (e) {} });
 
 function spokenForm(text) {
+  // "0.2" is said "zero point two": the narrator otherwise dropped the "zero point" and said "two".
+  text = text.replace(/(\d+)\.(\d+)/g, (m, a, b) => `${a === "0" ? "zero" : a} point ${b.split("").join(" ")}`);
   return text.replace(/(\d) s\b/g, "$1 seconds").replace(/(\d) %/g, "$1 percent")
              .replace(/\bSOS\b/g, "S O S").replace(/\bAP\b/g, "access point").replace(/\bD(\d+)\b/g, "decision $1");
 }
@@ -735,7 +739,7 @@ function drawMap() {
   }
   // LoRa: the diagram's own orange arcs are the bench's links. Bright when the boards say the links are
   // up; faint with no cables, because the Bluetooth beacon does not say.
-  const loraUp = aps.some(a => a.lora_links.length);
+  const loraUp = aps.some(a => a.lora_links.length) || [...flows.values()].some(f => f.path === "lora");
   svg.querySelectorAll('[data-part="lora"]').forEach(e => e.classList.toggle("used", loraUp));
   // The access points themselves.
   aps.forEach(a => {
@@ -786,7 +790,7 @@ function drawMap() {
     const ap = apSpot[h.last_node] || spots.slice(0, 3).reduce((b, c) => Math.hypot(c.x - slot.x, c.y - slot.y) < Math.hypot(b.x - slot.x, b.y - slot.y) ? c : b, spots[0]);
     pos["hh" + h.index] = slot;
     if (ap) el("path", { d: `M${slot.x} ${slot.y} Q${(slot.x + ap.x) / 2} ${slot.y - 40} ${ap.x} ${ap.y}`, fill: "none", stroke: "#F0A064",
-                         "stroke-width": 2.5, "stroke-dasharray": "6 5" }, live);
+                         "stroke-width": 2.5, "stroke-dasharray": "6 5", class: "lora-link" }, live);
     el("rect", { x: slot.x - 6, y: slot.y - 9, width: 12, height: 18, rx: 2.5, fill: "#152A21", stroke: "#F0A064", "stroke-width": 1.6 }, live);
     label(slot.x, slot.y - 22, h.name, "#F0A064", 14);   // the diagram's own "LoRa only" is under it
   });
@@ -1034,6 +1038,12 @@ function onMessage(m) {
     return;
   }
   if (m.type === "flow") {
+    // LoRa lights up while something is crossing it, as the Wi-Fi links do.
+    setTimeout(() => {
+      const busy = [...flows.values()].some(f => f.path === "lora");
+      if (diagramSvg) diagramSvg.classList.toggle("lora-busy", busy);
+      if (viewNow === "map") drawMap();
+    }, 0);
     if (m.phase === "sent") flows.set(m.token, { from: m.sender, to: new Set(m.to), path: m.path, born: performance.now() });
     else if (m.phase === "landed") {
       bursts.push({ name: m.to, at: performance.now() });
@@ -1049,7 +1059,8 @@ function onMessage(m) {
       const i = chapters.findIndex(c => c.demo === m.key);
       if (i >= 0 && i !== at && !playing) show(i);
       state.busy = m.key;
-    } else { flows.clear(); timerStart = null; state.busy = null; demoDone_resolve(); }
+    } else { flows.clear(); timerStart = null; state.busy = null; demoDone_resolve();
+             if (diagramSvg) diagramSvg.classList.remove("lora-busy"); }
     renderControls();
     return;
   }

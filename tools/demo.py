@@ -175,7 +175,8 @@ class Grid(chaos.Chaos):
         self.log_sent_at = 0.0
         self.ble_events_seen = 0.0    # the newest Bluetooth event already shown
         self.kept = {}                # port -> held open, lines released, while the cables are not in use
-        self.go = threading.Event()   # the presenter pressed Continue on a step only they can do
+        self.go = threading.Event()
+        self.last_link_up = 0.0       # when the newest backbone link came up   # the presenter pressed Continue on a step only they can do
         self.kept_at = 0.0
 
     # ---- what the page sees ----
@@ -268,6 +269,8 @@ class Grid(chaos.Chaos):
 
     def event(self, what, /, **fields):
         rec = super().event(what, **fields)
+        if what == "link_up":
+            self.last_link_up = time.monotonic()
         if what == "registered" and self.watch_since is not None:
             name = fields.get("board")
             if name in self.rejoins and self.rejoins[name] is None:
@@ -371,6 +374,8 @@ class Grid(chaos.Chaos):
             for p in self.tracked.values():
                 if not p["direct"] and p["token"] in m.group(3) and b.name in p["got"]:
                     self.landed(p, b, now)
+                elif not p["direct"] and p["token"] in m.group(3) and b.name in p["silent"]:
+                    p["leak"].add(b.name)
         elif m := NOT_SENT_TEXT.search(line):
             for p in self.tracked.values():
                 if not p["direct"] and p["token"] in m.group(2) and p["sender"] is b:
@@ -387,7 +392,7 @@ class Grid(chaos.Chaos):
         self.msg_n += 1
         token = f"[{self.msg_n}]"
         direct = not isinstance(target, str)
-        p = {"token": token, "direct": direct, "sender": sender, "path": path,
+        p = {"token": token, "direct": direct, "sender": sender, "path": path, "silent": set(), "leak": set(),
              "target": target.index if direct else None, "msg_id": None, "refused": None,
              "got": {r.name: None for r in receivers}, "mono": time.monotonic()}
         self.tracked[token] = p
@@ -531,9 +536,12 @@ class Grid(chaos.Chaos):
         self.args.bench = True
         self.background()
         self.caption("The access points are finding each other by themselves.")
-        t = time.monotonic()
         if self.wait(90, until=self.backbone_whole):
-            self.fact(f"The access points formed the grid by themselves in {time.monotonic() - t:.0f} s")
+            # From the newest restart, which discovery caused: they link while the boards still say who they are.
+            booted = max((a.boot_at for a in self.aps if a.boot_at), default=0.0)
+            if booted and self.last_link_up > booted:
+                self.fact(f"The access points formed the grid by themselves {self.last_link_up - booted:.0f} s after "
+                          "the last of them started")
         if self.args.set_time:
             self.set_time()
         self.wait(STEADY_S, until=lambda: not self.unsteady())
@@ -545,6 +553,7 @@ class Grid(chaos.Chaos):
         self.wait(5)
         if self.args.lora_check:
             self.lora_query(self.aps + self.hhs)
+        self.clean_screens()
         self.ready = True
         why = self.unsteady()
         self.caption("Ready." if not why else "Ready, though not everything is settled: " + "; ".join(why))
@@ -554,8 +563,20 @@ class Grid(chaos.Chaos):
         self.event("start", boards=[{"name": b.name, "id": b.id, "role": b.role, "index": b.index}
                                     for b in self.boards])
 
+    def clean_screens(self):
+        """Alerts read and closed, nothing unread, the home screen: each demo starts from the same screens."""
+        if self.untethered:
+            return
+        for h in self.hhs:
+            if self.present(h):
+                self.write(h, "ui clear")
+
     def restore(self):
         """Every fault this demo can leave behind, undone. Each hook also restores itself on the board."""
+        if getattr(self, "renamed", None):
+            h, old = self.renamed
+            self.write(h, f"name {old}")
+            self.renamed = None
         for b in self.boards:
             if b.held:
                 self.release_hold(b)
@@ -714,6 +735,12 @@ class Grid(chaos.Chaos):
                 self.fact(f"{self.label(b) if b else name} heard it {secs:.1f} s later, over LoRa")
             if not got:
                 self.fact("The test message did not cross", ok=False)
+        if pair:
+            s, r = pair
+            self.caption(f"And voice: {self.label(s)} talks to {self.label(r)}. Live talk is too big for LoRa, so a "
+                         "compact copy of the same words crosses it instead (D95).")
+            self.talk_clip(s, str(r.index), f"{self.label(r)}, this came over LoRa between the access points.", [r],
+                           path="lora")
         after = self.lora_query(live)
         delta = self.lora_delta(before, after)
         sent = {n: r.get("frames_out") for n, r in delta.items() if r.get("frames_out")}
@@ -892,7 +919,7 @@ class Grid(chaos.Chaos):
                   ok=secs is not None)
         self.caption(f"{self.label(peer)} talks to {self.label(v)} as well. Live talk needs Wi-Fi, so a compact copy "
                      "of the same words, a fraction of the size, crosses LoRa instead (D95).")
-        self.talk_clip(peer, str(v.index), f"{self.label(v)}, can you hear me over LoRa?", [v])
+        self.talk_clip(peer, str(v.index), f"{self.label(v)}, can you hear me over LoRa?", [v], path="lora")
         self.caption(f"Wi-Fi comes back on {self.label(v)}.")
         t = time.monotonic()
         self.write(v, "wifi on")
@@ -947,17 +974,26 @@ class Grid(chaos.Chaos):
                       "both now show the other's message as read")
         self.wait(4)
 
-    def ensure_group(self, makers):
-        """The demo's group, with every handheld on the grid in it. Returns (id, name)."""
+    def group_members(self):
+        """Who the demo's group holds: every handheld on the grid but two, so the two show who is left out.
+        The handhelds with a microphone are always in it, so the group can be talked to."""
+        on = self.on_grid()
+        keep = [h for h in on if h.can_talk] + [h for h in on if not h.can_talk]
+        n = max(2, len(on) - 2)
+        return sorted(keep[:n], key=lambda h: h.index), sorted(keep[n:], key=lambda h: h.index)
+
+    def ensure_group(self, makers, members=None):
+        """The demo's group, holding exactly members (default: every handheld on the grid). Returns (id, name)."""
+        members = members or self.on_grid()
+        want = ",".join(str(h.index) for h in members)
         tables = self.read_groups(makers[:1])
         for i, (name, mem) in tables[makers[0].name].items():
             if name in DEMO_GROUPS:
-                want = ",".join(str(h.index) for h in self.on_grid())
                 if set(mem.split(",")) != set(want.split(",")):
                     self.write(makers[0], f"group set {i} {name} {want}")
-                    self.wait(6)
+                    self.wait(20, until=lambda: set((self.read_groups(makers[:1], 3)[makers[0].name].get(i) or ("", ""))[1].split(",")) == set(want.split(",")))
                 return i, name
-        members = ",".join(str(h.index) for h in self.on_grid())
+        members = want
         self.write(makers[0], f"group new {DEMO_GROUPS[0]} {members}")
         self.wait(20, until=lambda: any(n == DEMO_GROUPS[0] for n, _ in self.read_groups(makers[:1], 3)[makers[0].name].values()))
         for i, (name, _) in self.read_groups(makers[:1])[makers[0].name].items():
@@ -969,22 +1005,31 @@ class Grid(chaos.Chaos):
         """A message to a group reaches every member, wherever they are (D52)."""
         if not self.precheck():
             return
-        on = self.on_grid()
-        s = on[0]
-        gid, gname = self.ensure_group([s])
+        inside, outside = self.group_members()
+        s = inside[0]
+        gid, gname = self.ensure_group([s], inside)
         if gid is None:
             self.fact("The group could not be made", ok=False)
             return
-        others = [h for h in on if h is not s]
-        self.caption(f"The group {gname} was made on a handheld, and everybody here is in it. "
-                     f"{self.label(s)} writes to the group.")
-        self.open_screens([(h, gname) for h in on])
+        others = [h for h in inside if h is not s]
+        names = ", ".join(self.label(h) for h in inside[:-1]) + " and " + self.label(inside[-1])
+        self.caption(f"The group {gname} was made on a handheld. Its members are {names}. "
+                     + (", ".join(self.label(h) for h in outside) + (" is" if len(outside) == 1 else " are")
+                        + " not in it." if outside else ""))
+        self.fact(f"{gname}: {names}")
+        self.open_screens([(h, gname) for h in inside] + [(h, "all") for h in outside])
+        self.caption(f"{self.label(s)} writes to the group.")
         self.timer(f"To {gname}", "start")
         p = self.send(s, gname, "Group: we meet at the north gate at seven.", others)
+        p["silent"] = {h.name for h in outside}
         got = self.settle_message(p, DELIVERY_S)
         reached = {n: x for n, x in got.items() if x is not None}
         self.timer(f"To {gname}", "stop", max(reached.values()) if reached else None)
-        aps = {h.registered_node for h in on}
+        aps = {h.registered_node for h in inside}
+        if outside and not p["leak"]:
+            self.fact("Nobody outside the group got it: " + ", ".join(self.label(h) for h in outside))
+        for n in p["leak"]:
+            self.fact(f"{self.label(self.by_name[n])} got a group message it is not in", ok=False)
         if len(reached) == len(others):
             self.fact(f"Every member had it within {max(reached.values()):.1f} s, on {len(aps)} access points")
         for n, x in got.items():
@@ -1029,12 +1074,16 @@ class Grid(chaos.Chaos):
                 return None
         return len(pcm) / voiceclip.RATE
 
-    def talk_clip(self, sender, target, text, listeners, silent=()):
+    def talk_clip(self, sender, target, text, listeners, silent=(), path="wifi"):
         """One talk of real speech; facts for who played it, and for who rightly did not."""
         secs = self.give_clip(sender, text)
         if secs is None:
             return
         before = set(sender.voice_sent)
+        self.msg_n += 1
+        token = f"[talk {self.msg_n}]"
+        self.publish("flow", phase="sent", token=token, sender=self.label(sender), path=path,
+                     to=[self.label(h) for h in listeners])
         sender.clip_reply = None
         self.timer("Talking", "start")
         self.write(sender, f"clip talk {target}")
@@ -1055,6 +1104,9 @@ class Grid(chaos.Chaos):
             self.fact(f"{self.label(sender)} did not send the talk" + (f": {sender.voice_refused}" if sender.voice_refused else ""), ok=False)
             return
         frames = sender.voice_sent[t_][0]
+        for h in listeners:
+            if heard(h):
+                self.publish("flow", phase="landed", token=token, to=self.label(h), path=path)
         for h in listeners:
             got = heard(h)
             self.fact(f"{self.label(h)} played {got[1]} of {frames} frames of it" if got
@@ -1082,12 +1134,16 @@ class Grid(chaos.Chaos):
         self.open_screens([(h, "all") for h in on])
         self.talk_clip(a, "all", f"Hello everyone, this is {self.label(a)}. The trail is clear, and we are heading back.",
                        [h for h in hear if h is not a])
-        gid, gname = self.ensure_group([a])
+        inside, outside = self.group_members()
+        gid, gname = self.ensure_group([a], inside)
         if gid is not None and b is not None:
-            self.caption(f"Next, {self.label(b)} talks to the group {gname}.")
-            self.open_screens([(h, gname) for h in on])
+            self.caption(f"Next, {self.label(b)} talks to the group {gname}: "
+                         + ", ".join(self.label(h) for h in inside) + ". "
+                         + (" and ".join(self.label(h) for h in outside) + " should hear nothing." if outside else ""))
+            self.open_screens([(h, gname) for h in inside])
             self.talk_clip(b, gname, f"{self.label(b)} to the group. Meet at the north gate in ten minutes.",
-                           [h for h in hear if h is not b])
+                           [h for h in hear if h is not b and h in inside],
+                           silent=[h for h in hear if h in outside])
         if b is not None:
             self.caption(f"And {self.label(a)} talks to {self.label(b)} alone. Only {self.label(b)} should hear it.")
             self.open_screens([(a, str(b.index)), (b, str(a.index))])
@@ -1107,6 +1163,7 @@ class Grid(chaos.Chaos):
         self.caption(f"A handheld chooses its own name. {old} becomes {new}.")
         t0 = time.monotonic()
         self.write(h, f"name {new}")
+        self.renamed = (h, old)   # put back by restore() even if this demo is stopped part-way
 
         def seen():
             self.people.pop(h.index, None)
@@ -1876,6 +1933,7 @@ class Grid(chaos.Chaos):
             self.watch_since = None
             self.tracked.clear()
             self.restore()
+            self.clean_screens()
         self.publish("scenario", phase="end", key=key, title=title, outcome=outcome)
         self.event("demo_scenario", key=key, outcome=outcome)
 

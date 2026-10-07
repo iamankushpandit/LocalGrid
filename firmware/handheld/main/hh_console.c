@@ -949,6 +949,9 @@ static int cmd_ui(int argc, char **argv)
         ui_request_cmd(UI_KEYBOARD, strcmp(argv[2], "on") == 0, NULL);
     } else if (argc >= 3 && strcmp(argv[1], "type") == 0) {
         ui_request_cmd(UI_TYPE, 0, argv[2]);
+    } else if (argc == 2 && strcmp(argv[1], "clear") == 0) {
+        ui_request_cmd(UI_CLEAR, 0, NULL);   /* alerts read and closed, nothing unread, home */
+        printf("cleared\n");
     } else if (argc >= 2 && strcmp(argv[1], "log") == 0) {
         ui_request_cmd(UI_LOG, 0, NULL);
     } else if (argc == 4 && strcmp(argv[1], "tap") == 0) {
@@ -964,7 +967,7 @@ static int cmd_ui(int argc, char **argv)
         long id = strtol(argv[2], NULL, 10);
         ui_request_cmd(UI_BUTTON, (int)((id << 1) | (strcmp(argv[3], "hold") == 0 ? 1 : 0)), NULL);
     } else {
-        printf("usage: ui tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | "
+        printf("usage: ui clear | tap <x> <y> | scroll <px> | kb <on|off> | type <word> | page <letters|numbers|emoji|shift> | "
 "button <n> <press|hold> | log\n");
         return 1;
     }
