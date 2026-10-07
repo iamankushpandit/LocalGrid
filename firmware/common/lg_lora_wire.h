@@ -302,6 +302,11 @@ size_t lora_ack_build(uint32_t seq, uint8_t *out, size_t cap);
 bool   lora_ack_parse(const uint8_t *in, size_t len, uint32_t *seq);
 
 #define LORA_TX_TRIES  3u      /* times a frame that wants an acknowledgement goes on the air before it is given up */
+/*
+ * D109: in a slot's `await`, the one handheld the frame is addressed to, rather than an access point
+ * by index. Its acknowledgement is matched on this bit, and a repeat keeps the handheld's address.
+ */
+#define LORA_AWAIT_HANDHELD 0x8000u
 
 /* ---- the bounded send queue ---- */
 

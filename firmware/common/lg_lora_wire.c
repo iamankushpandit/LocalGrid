@@ -647,8 +647,9 @@ lora_txq_slot_t *lora_txq_peek_for(lora_txq_t *q, uint32_t now_ms, bool listenin
             c->waiting = false;
             c->part = 0;
             q->resent++;
-            if ((c->await & (uint16_t)(c->await - 1u)) == 0u) {   /* one AP left to answer: only it need listen */
-                for (uint16_t n = 0; n < 16u; n++) {
+            if ((c->await & (uint16_t)(c->await - 1u)) == 0u && c->await != LORA_AWAIT_HANDHELD) {
+                /* one AP left to answer: only it need listen. (A handheld's frame was addressed to it already.) */
+                for (uint16_t n = 0; n < 15u; n++) {
                     if (c->await == (uint16_t)(1u << n)) {
                         c->dest = LG_LORA_ADDR_AP(n);
                     }

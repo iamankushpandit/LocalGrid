@@ -577,6 +577,9 @@ static bool transmit_a_part(unsigned *fails)
                 turns = turn > turns ? turn : turns;
             }
         }
+        if ((slot->await & LORA_AWAIT_HANDHELD) != 0u && turns == 0u) {
+            turns = 1;   /* D109: the one handheld it is for answers at once */
+        }
         uint32_t done = app_now_ms();
         uint32_t listen = turns * ACK_TURN_MS + ACK_MARGIN_MS;
         if (lora_txq_sent(&L.txq, slot, done + listen + rand_ms(ACK_RESEND_SPAN_MS))) {
@@ -736,6 +739,11 @@ static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, siz
     }
     if (ok) {
         L.msg_id++;
+        /* D109: a message for a handheld on LoRa alone is acknowledged by it, and sent again until it is,
+         * as one between APs is (D104). A broadcast address has nobody in particular to answer. */
+        if (dest != LORA_ADDR_BROADCAST && lora_frame_wants_ack(frame, len)) {
+            lora_txq_want_ack(slot, lg_rd32(slot->data + 8), LORA_AWAIT_HANDHELD);
+        }
     }
     unlock();
     if (!ok) {
@@ -1155,6 +1163,20 @@ static void deliver_from_handheld(const lora_rx_t *r, uint32_t now)
     }
     uint32_t device = LGLH_INDEX(sender);
     if (device == 0 || device > LG_MAX_DEVICES) {
+        return;
+    }
+    uint32_t acked_seq = 0;
+    if (lora_ack_parse(inner, n, &acked_seq)) {
+        /* D109: the handheld has a frame of ours. Not a grid frame: nothing for the core, nothing to route. */
+        lock();
+        bool waited = lora_txq_acked(&L.txq, acked_seq, 15u);
+        unlock();
+        if (waited) {
+            L.acks_in++;
+        } else {
+            L.acks_late++;
+        }
+        L.hh_frames_in++;
         return;
     }
     /* D77: the closed list. Checked here as well as on the handheld, because this is the side that

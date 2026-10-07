@@ -998,6 +998,14 @@ static void stat_rows(void)
     const hh_status_t *st = ui_status();
     char value[SLIST_VALUE_MAX];
     stat_put(ROW_FACT, "Name", st->name, false);
+    /* D110: which firmware this is, and whether it will take an update at all. */
+    if (st->fw_running_serial != 0) {
+        snprintf(value, sizeof(value), "%s (serial %" PRIu32 ")%s", st->fw_running_version, st->fw_running_serial,
+                 st->fw_release_key ? "" : ", takes no update");
+    } else {
+        snprintf(value, sizeof(value), "installed by cable%s", st->fw_release_key ? "" : ", takes no update");
+    }
+    stat_put(ROW_FACT, "Firmware", value, false);
     if (st->fw_serial != 0) {   /* D107: an update arriving from the AP, said while it is happening */
         if (st->fw_percent >= 100u) {
             snprintf(value, sizeof(value), "serial %" PRIu32 ": restarting soon", st->fw_serial);

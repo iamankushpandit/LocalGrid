@@ -2528,6 +2528,19 @@ static void publish(void)
     st->node_ssid[0] = '\0';
     st->on_ap_since_ms = s.link == HH_LINK_ONLINE ? s_on_ap_since_ms : 0;
     st->fw_serial = fw.fetching || fw.restart_at_ms != 0 ? fw.serial : 0;   /* D107 */
+    {
+        static bool fw_known;
+        static uint32_t fw_run_serial;
+        static char fw_run_version[LG_FWU_VERSION_MAX + 1u];
+        if (!fw_known) {   /* D110: fixed for the life of this boot; read once, not every publish */
+            fw_known = true;
+            fw_run_serial = lg_fwu_running_serial();
+            lg_fwu_running_version(fw_run_version);
+        }
+        st->fw_running_serial = fw_run_serial;
+        snprintf(st->fw_running_version, sizeof(st->fw_running_version), "%s", fw_run_version);
+        st->fw_release_key = lg_gridkeys()->has_release;
+    }
     st->fw_percent = fw.restart_at_ms != 0 ? 100u
                    : fw.fetching && fw.file_len != 0 ? (uint8_t)(fw.have * 100u / fw.file_len) : 0u;
     memset(st->ip, 0, sizeof(st->ip));

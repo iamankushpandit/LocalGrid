@@ -199,7 +199,7 @@
       </table>
     </div>
     <div id="loc-trails"></div>
-    <p class="hint">Positions stay in memory on the APs and handhelds, never in flash, and are shown only here, behind the login.</p>
+    <p class="hint">Positions stay in memory on the APs and handhelds and are shown only here, behind the login. Trails are also kept in flash, so a device found later still says where it went.</p>
   </section>
 
   <section id="security-card" data-tab="settings" hidden>
@@ -214,6 +214,21 @@
       <div class="row"><button type="submit">Change password</button></div>
       <p class="hint">Every AP takes the new password within a few seconds. Anyone else logged in to this AP is logged out.</p>
       <div class="msg" id="pw-msg"></div>
+    </form>
+  </section>
+
+  <section id="fw-card" data-tab="settings" hidden>
+    <h2>Firmware</h2>
+    <p><span class="dim">This AP runs</span> <span id="fw-running">--</span></p>
+    <p><span class="dim">Updates:</span> <span id="fw-key">--</span></p>
+    <p><span class="dim">For handhelds:</span> <span id="fw-carried">--</span></p>
+    <form id="fw-form">
+      <label for="fw-file">A signed update file (.lgfw), for an access point or for handhelds</label>
+      <input id="fw-file" type="file" accept=".lgfw">
+      <p class="hint" id="fw-what"></p>
+      <div class="row"><button type="submit" id="fw-send" disabled>Send it to this AP</button></div>
+      <p class="hint">An access point's update installs here and then reaches the other access points by itself. A handheld's is kept by this AP, passed to the others, and offered to every handheld it is for; each takes it when it is idle. Only a file signed with this grid's release key is accepted.</p>
+      <div class="msg" id="fw-msg"></div>
     </form>
   </section>
 
@@ -997,7 +1012,7 @@
 
   function beginDashboard() {
     show(["time-card", "grid-card", "location-card", "nodes-card", "lora-card", "avail-card", "incidents-card",
-          "groups-card", "announce-card", "devices-card", "security-card"]);
+          "groups-card", "announce-card", "devices-card", "security-card", "fw-card"]);
     refresh();
     clearInterval(poll);
     poll = setInterval(refresh, 5000);
@@ -1126,6 +1141,61 @@
     renderIncidents();
   });
 
+  // D110: what this AP runs and carries, from /api/status; and an update file, read here before it is sent.
+  const CHIPS = { 1: "ESP32", 2: "ESP32-S3", 3: "ESP32-C6" };
+  function showFirmware(f) {
+    if (!f) { $("fw-running").textContent = "not reported by this firmware"; return; }
+    $("fw-running").textContent = f.serial ? `${f.version} (serial ${f.serial}), from ${f.slot}` : `the build installed by cable (${f.slot})`;
+    $("fw-key").textContent = f.release_key ? "accepted when signed with this grid's release key"
+      : "none accepted: this AP was not given a release key";
+    $("fw-key").className = f.release_key ? "" : "warn";
+    $("fw-carried").textContent = f.carried
+      ? `carrying ${f.carried.version} (serial ${f.carried.serial}) for ${CHIPS[f.carried.chip] || "chip " + f.carried.chip} handhelds`
+      : f.carry_floor ? `none (serial ${f.carry_floor} and older were withdrawn here)` : "none";
+  }
+  /* The signed header's layout: docs/firmware-updates.md and tools/lgfw.py. Read for show only; the AP checks it. */
+  function readUpdateHeader(buf) {
+    const b = new Uint8Array(buf);
+    if (b.length < 192 || String.fromCharCode(b[0], b[1], b[2], b[3]) !== "LGFW" || b[4] !== 1) return null;
+    const v = new DataView(buf);
+    let version = "";
+    for (let i = 56; i < 88 && b[i]; i++) version += String.fromCharCode(b[i]);
+    return { role: String.fromCharCode(b[5]), chip: b[6], serial: v.getUint32(8, true), image: v.getUint32(12, true), version };
+  }
+  let fwFile = null;
+  $("fw-file").onchange = async (ev) => {
+    fwFile = null; $("fw-send").disabled = true; $("fw-msg").textContent = "";
+    const file = ev.target.files[0];
+    if (!file) { $("fw-what").textContent = ""; return; }
+    const h = readUpdateHeader(await file.slice(0, 192).arrayBuffer());
+    if (!h || file.size !== 192 + h.image) {
+      $("fw-what").textContent = "That is not a LocalGrid update file.";
+      return;
+    }
+    $("fw-what").textContent = `${h.role === "N" ? "An access point" : h.role === "H" ? "A handheld" : "Unknown"} update for ${CHIPS[h.chip] || "chip " + h.chip}: ${h.version}, serial ${h.serial}, ${Math.round(h.image / 1024)} KB.`;
+    fwFile = file; $("fw-send").disabled = false;
+  };
+  $("fw-form").onsubmit = (ev) => {
+    ev.preventDefault();
+    if (!fwFile) return;
+    $("fw-send").disabled = true;
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/update");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    if (csrf) xhr.setRequestHeader("X-CSRF", csrf);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) say("fw-msg", `Sending… ${Math.round(100 * e.loaded / e.total)}%`, true); };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (e) { /* empty */ }
+      if (xhr.status >= 200 && xhr.status < 300) say("fw-msg", data.note || "Taken.", true);
+      else say("fw-msg", data.error || `Refused (${xhr.status}).`, false);
+      $("fw-send").disabled = false;
+      refresh();
+    };
+    xhr.onerror = () => { say("fw-msg", "The upload stopped. Nothing was changed.", false); $("fw-send").disabled = false; };
+    xhr.send(fwFile);
+  };
+
   async function refresh() {
     let s;
     try { s = await api("/api/status"); }
@@ -1166,6 +1236,7 @@
     $("s-uptime").textContent = fmtDur(s.uptime_s);
     $("s-handhelds").textContent = s.handhelds;
     $("s-heap").textContent = `${Math.round(s.heap_free / 1024)} KB`;
+    showFirmware(s.firmware);
 
     // Where the time on this page came from: carried from which AP, and where and when an admin set it.
     const ts = s.time_set || {};

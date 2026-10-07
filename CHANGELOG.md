@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The admin page gives an update, and every screen says what firmware runs (D110)
+
+- **Settings > Firmware** on the admin page: what this access point runs (or "installed by cable"),
+  whether it takes updates at all, and the handheld update it carries; and a file picker that reads
+  an update's signed header in the browser, says what it is, refuses anything that is not an update,
+  and sends it with a progress figure and the access point's answer.
+- `/api/status` carries the same as `firmware`, so the dashboard shows it per access point.
+- The handheld's Status screen has a `Firmware` row.
+- `tools/test_admin_page.py`: 118 checks, six of them new for this card.
+
+### An access point's LoRa message to a handheld is acknowledged and sent again (D109)
+
+- The last hop D104 left out: a handheld on LoRa alone answers a text, a delivery report or an alert
+  sealed for it, and the access point repeats the frame until it does, three times at most.
+
 ### The installer page is tested in a real browser, and found a flaw (D108)
 
 - **`tools/test_installer_page.py`** puts LocalGrid on a bench board through the installer page the

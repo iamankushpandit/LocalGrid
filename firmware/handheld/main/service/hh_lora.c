@@ -112,6 +112,7 @@ static struct {
     int8_t   rssi, snr;
     uint32_t frames_out, frames_in, parts_out, parts_in, parts_dropped;
     uint32_t refused_type, retries, airtime_ms, restarts;
+    uint32_t acks_out;   /* D109: acknowledgements sent to an AP for a frame it is waiting to hear about */
 } L;
 
 static void lock(void)   { if (L.lock != NULL) { xSemaphoreTake(L.lock, portMAX_DELAY); } }
@@ -705,6 +706,31 @@ static void note_peer(uint16_t ap, uint32_t now)
     }
 }
 
+/*
+ * D109: tell AP `ap` that its frame sealed as `seq` arrived here. Six bytes sealed with the handheld LoRa
+ * key, sent at once and ahead of anything waiting: the AP listens for it for about a second.
+ */
+static void queue_ack(uint16_t ap, uint32_t seq)
+{
+    uint8_t body[LORA_ACK_LEN];
+    if (lora_ack_build(seq, body, sizeof(body)) == 0u) {
+        return;
+    }
+    lock();
+    lora_txq_slot_t *s = lora_txq_reserve_ranked(&L.txq, LG_LORA_ADDR_AP(ap), LORA_RANK_MESSAGE, ++L.next_id,
+                                                 LGLH_OUTER_LEN + sizeof(body) + LG_AEAD_TAG_LEN, now_ms() + rand_ms(80u));
+    int sealed = s != NULL ? lglh_seal(&L.seal, s->data, s->cap, body, sizeof(body)) : -1;
+    if (s != NULL && (sealed <= 0 || !lora_txq_commit(&L.txq, s, (size_t)sealed))) {
+        lora_txq_release(&L.txq, s);
+        s = NULL;
+    }
+    if (s != NULL) {
+        s->is_ack = true;
+        L.acks_out++;
+    }
+    unlock();
+}
+
 void hh_lora_poll(uint32_t now)
 {
     if (!L.started) {
@@ -735,6 +761,19 @@ void hh_lora_poll(uint32_t now)
         size_t flen = 0;
         uint16_t sender = 0;
         lglh_open_t r = lglh_open(&L.seal, e.slot->data, e.slot->total, &sender, frame, sizeof(frame), &flen);
+        if (r == LGLH_OPEN_REPLAY && e.slot->total > LGLH_OUTER_LEN + LG_AEAD_TAG_LEN) {
+            /*
+             * D109: the same sealed frame again means its AP never heard this handheld's answer - the frame
+             * arrived, the acknowledgement did not - so the answer is given again, and the frame is not
+             * handled twice. lglh_open authenticated and opened it before it found the number used.
+             */
+            uint16_t from = lg_rd16(e.slot->data + 2);
+            uint32_t seq = lg_rd32(e.slot->data + 8);
+            size_t plain = e.slot->total - LGLH_OUTER_LEN - LG_AEAD_TAG_LEN;
+            if (LGLH_KIND(from) == LGLH_KIND_AP && LGLH_INDEX(from) < LG_MAX_NODES && lora_frame_wants_ack(frame, plain)) {
+                queue_ack(LGLH_INDEX(from), seq);
+            }
+        }
         lora_asm_done(&L.asmb, e.slot);
         if (r != LGLH_OPEN_OK) {
             continue;   /* lglh_open counts every refusal, and NOT_MINE is not one */
@@ -751,6 +790,9 @@ void hh_lora_poll(uint32_t now)
         L.frames_in++;
         L.heard_ms = now != 0 ? now : 1u;
         note_peer(ap, now);
+        if (ap < LG_MAX_NODES && lora_frame_wants_ack(frame, flen)) {
+            queue_ack(ap, lg_rd32(e.slot->data + 8));   /* D109: answered before it is handled */
+        }
         if (L.on_frame != NULL) {
             L.on_frame(frame, flen, ap);
         }

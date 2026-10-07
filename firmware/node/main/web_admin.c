@@ -12,6 +12,7 @@
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"   /* D81: the admin page can replace this AP's firmware */
 #include "lg_fwupdate.h"   /* D97: and only with a signed update file */
+#include "lg_gridkeys.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -912,10 +913,34 @@ static bool emit_status(const web_sink_t *sink)
      * D71: the second backbone, so the page can show whether the radio is there and whether it is
      * earning its keep. Facts only; the page does the arithmetic and the wording (D49).
      */
+    /*
+     * D110: what this AP runs, whether it will take an update at all, and the handheld update it carries
+     * (D107). Read here, not in the snapshot: they change only when an update is taken.
+     */
+    {
+        char ver[LG_FWU_VERSION_MAX + 1u];
+        char vesc[2 * sizeof(ver) + 8];
+        lg_fwu_running_version(ver);
+        json_escape(ver, vesc, sizeof(vesc));
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        jout(o, "],\"firmware\":{\"serial\":%" PRIu32 ",\"version\":\"%s\",\"slot\":\"%s\",\"chip\":%u,"
+                "\"release_key\":%s,\"carried\":",
+             lg_fwu_running_serial(), vesc, run != NULL ? run->label : "", lg_fwu_this_chip(),
+             lg_gridkeys()->has_release ? "true" : "false");
+        lg_fwu_info_t c;
+        if (lg_fwu_carried(&c, NULL)) {
+            char cesc[2 * sizeof(c.version) + 8];
+            json_escape(c.version, cesc, sizeof(cesc));
+            jout(o, "{\"serial\":%" PRIu32 ",\"version\":\"%s\",\"chip\":%u}", c.serial, cesc, c.chip);
+        } else {
+            jout(o, "null");
+        }
+        jout(o, ",\"carry_floor\":%" PRIu32 "}", lg_fwu_carry_floor());
+    }
     const lora_traffic_t *lr = &s->lora;
     char lv[2 * sizeof(s->lora_version) + 8];
     json_escape(s->lora_version, lv, sizeof(lv));
-    jout(o, "],\"lora\":{\"fitted\":%s,\"configured\":%s,\"off\":%s,\"broadcast\":%s,\"big\":%s,\"power\":%d,"
+    jout(o, ",\"lora\":{\"fitted\":%s,\"configured\":%s,\"off\":%s,\"broadcast\":%s,\"big\":%s,\"power\":%d,"
             "\"version\":\"%s\",\"address\":%u,\"network\":%u,\"rssi\":%d,\"snr\":%d,"
             "\"frames_out\":%" PRIu32 ",\"frames_in\":%" PRIu32 ",\"frames_first\":%" PRIu32
             ",\"parts_out\":%" PRIu32 ",\"parts_in\":%" PRIu32 ",\"parts_dropped\":%" PRIu32

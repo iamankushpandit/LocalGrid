@@ -816,6 +816,24 @@ static void test_ack(void)
     CHECK_EQ(q.unacked, 1);
     CHECK_EQ(q.dropped_messages, 0);
     CHECK(lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 10, 64, 0) == NULL);   /* routine still never does */
+
+    /*
+     * D109: a frame for one handheld waits for that handheld's answer, and a repeat keeps its address -
+     * it is not readdressed to an access point the way a broadcast's repeat is.
+     */
+    txq_setup(&q, false);
+    const uint16_t hh = 101u;   /* a handheld's LoRa address */
+    s = lora_txq_reserve_ranked(&q, hh, LORA_RANK_MESSAGE, 11, 64, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 64));
+    lora_txq_want_ack(s, 900, LORA_AWAIT_HANDHELD);
+    CHECK(lora_txq_sent(&q, s, 1000));
+    CHECK(!lora_txq_acked(&q, 900, 1));               /* an access point's answer is not the handheld's */
+    CHECK(lora_txq_peek(&q, 1000) == s);              /* no answer: again */
+    CHECK_EQ(s->dest, hh);
+    CHECK(lora_txq_sent(&q, s, 2000));
+    CHECK(lora_txq_acked(&q, 900, 15));               /* the handheld's answer */
+    CHECK_EQ(q.depth, 0);
+    CHECK_EQ(q.acked, 1);
 }
 
 void test_lora(void)

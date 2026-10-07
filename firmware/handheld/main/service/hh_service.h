@@ -169,6 +169,9 @@ typedef struct {
     bool           wifi_off;
     uint32_t       fw_serial;                /* D107: an update being taken from the AP, or waiting to restart; 0 none */
     uint8_t        fw_percent;               /* how much of it has arrived; 100 once it is in its slot */
+    uint32_t       fw_running_serial;        /* D110: the update serial running now; 0 for a build put on by cable */
+    char           fw_running_version[33];
+    bool           fw_release_key;           /* given a release key, so it can take an update at all */
 } hh_status_t;
 
 /* Starts the service task. On failure the snapshot carries the problem for the screen. */

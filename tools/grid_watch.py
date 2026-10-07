@@ -2569,6 +2569,16 @@ function renderTraffic(list, sec, status) {
     row(pDl, "CPU busy", p.cpu_busy == null ? "not measured" : p.cpu_busy + "%",
         p.cpu_busy != null && p.cpu_busy >= LIM.cpuWarn ? "dangertext" : "");
     card.append(el("h3", "sub-h", "This AP's performance"), pDl);
+    /* D110: what it runs and carries - only in the full status, so only for the AP that sent it. */
+    if (status && status.node === t.ap && status.firmware) {
+      const f = status.firmware, fDl = el("dl"), chips = { 1: "ESP32", 2: "ESP32-S3", 3: "ESP32-C6" };
+      row(fDl, "Running", f.serial ? f.version + " (serial " + f.serial + "), " + f.slot : "the build installed by cable, " + f.slot);
+      row(fDl, "Updates", f.release_key ? "accepted when signed with the grid's release key" : "none: no release key given",
+          f.release_key ? "" : "warntext");
+      row(fDl, "For handhelds", f.carried ? f.carried.version + " (serial " + f.carried.serial + ") for " +
+          (chips[f.carried.chip] || "chip " + f.carried.chip) : "nothing carried");
+      card.append(el("h3", "sub-h", "Firmware"), fDl);
+    }
     box.append(card);
   }
 
@@ -3022,6 +3032,8 @@ def sample_status_json():
              "fix_time": 1789699800, "sats": 7}],
         # D71: the same LoRa facts the admin page reads, with the per-peer signal the packed
         # traffic record has no room for.
+        "firmware": {"serial": 0, "version": "", "slot": "ota_0", "chip": 1, "release_key": True, "carried": None,
+                     "carry_floor": 0},
         "lora": {"fitted": True, "configured": True, "off": False, "broadcast": True, "big": False,
                  "version": "RYLR998_REYAX_V1.2.6", "address": 1, "network": 14,
                  "rssi": -14, "snr": 9, "frames_out": 412, "frames_in": 388, "frames_first": 19,

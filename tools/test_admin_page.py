@@ -242,8 +242,34 @@ FIRST_RUN = """<script>
     $("announce-form").requestSubmit();
     step("letting everyone announce is saved", await until(() => txt("announce-msg") === "Everyone can announce.") && txt("announce-msg"));
 
-    /* ---- Settings: the admin password ---- */
+    /* ---- Settings: firmware (D110) ---- */
     tab("settings");
+    step("the Settings tab says what this AP runs", await until(() => shown($("fw-card")) && /cable/.test(txt("fw-running"))) && txt("fw-running"));
+    out.fw = { running: txt("fw-running"), key: txt("fw-key"), carried_before: txt("fw-carried") };
+    const lgfw = (magic, role, chip, serial, version, imageLen) => {
+      const b = new Uint8Array(192 + imageLen), v = new DataView(b.buffer);
+      b.set(magic ? [76, 71, 70, 87, 1] : [77, 90, 0, 0, 0], 0);
+      b[5] = role.charCodeAt(0); b[6] = chip; v.setUint32(8, serial, true); v.setUint32(12, imageLen, true);
+      for (let i = 0; i < version.length; i++) b[56 + i] = version.charCodeAt(i);
+      for (let i = 192; i < b.length; i++) b[i] = i & 0xff;
+      return new File([b], "update.lgfw");
+    };
+    const pick = async (f) => {
+      const dt = new DataTransfer(); dt.items.add(f); $("fw-file").files = dt.files;
+      $("fw-what").textContent = ""; $("fw-file").dispatchEvent(new Event("change"));
+      await until(() => txt("fw-what") !== "");
+    };
+    await pick(lgfw(false, "H", 1, 7000, "hh-test", 4096));
+    out.fw.bad = txt("fw-what"); out.fw.bad_send_disabled = $("fw-send").disabled;
+    await pick(lgfw(true, "H", 1, 7000, "hh-test", 4096));
+    out.fw.what = txt("fw-what"); out.fw.send_enabled = !$("fw-send").disabled;
+    $("fw-form").requestSubmit();
+    step("a handheld update is sent and the AP's answer is shown", await until(() => /carrying it/.test(txt("fw-msg"))) && txt("fw-msg"));
+    out.fw.msg = txt("fw-msg");
+    step("the card then says what this AP carries", await until(() => /hh-test/.test(txt("fw-carried"))) && txt("fw-carried"));
+    out.fw.carried_after = txt("fw-carried");
+
+    /* ---- Settings: the admin password ---- */
     step("the Settings tab has the password form", await until(() => shown($("password-form"))));
     out.only_settings_cards = !shown($("groups-card")) && !shown($("time-card")) && !shown($("nodes-card"));
     const pw = async (cur, a, b) => { $("pw-current").value = cur; $("pw-new").value = a; $("pw-again").value = b; $("password-form").requestSubmit(); await pause(200); };
@@ -331,6 +357,8 @@ class StandInAP:
         self.announce_all, self.announcers = sample["announce_all"], list(sample["announcers"])
         self.gps_fix = True
         self.power = 22
+        self.carried = None      # D110: the handheld update this stand-in was given, as the status says it
+        self.uploads = []        # (bytes, X-CSRF header, had the session cookie)
         self.token = self.csrf = None
         self.posts = []          # (path, body, X-CSRF header, had the session cookie, when)
         self.refused = []        # (method, path, status)
@@ -347,6 +375,7 @@ class StandInAP:
                  groups=self.groups, announce_all=self.announce_all, announcers=self.announcers)
         s["gps"]["fix"] = self.gps_fix
         s["lora"]["power"] = self.power
+        s["firmware"]["carried"] = self.carried
         for d in s["devices"]:
             d["name"] = next((u["name"] for u in self.users if u["device"] == d["device"]), d["name"])
         return json.dumps(s).encode("utf-8")
@@ -455,6 +484,24 @@ def make_handler(ap, page_bytes):
                 if json.loads(raw.decode("utf-8")).get("expire"):
                     ap.token = ap.csrf = None     # as an AP that restarted, or an admin who changed the password
                 return self._send(b"{}")
+            if path == "/api/update":
+                # D110: the body is the update file's bytes. The real AP checks the signature; this one
+                # only reads what the header says, as the AP does once the signature has passed.
+                ap.uploads.append((raw, self.headers.get("X-CSRF"), self._session()))
+                if not self._session():
+                    return self._error(401, "Log in to update the firmware.")
+                if ap.csrf is None or self.headers.get("X-CSRF") != ap.csrf:
+                    return self._error(403, "Request blocked. Reload the page and try again.")
+                if len(raw) <= 192 or raw[:4] != b"LGFW":
+                    return self._error(400, "That is not a LocalGrid update file.")
+                if raw[5:6] == b"H":
+                    version = raw[56:88].split(b"\0")[0].decode("ascii", "replace")
+                    ap.carried = {"serial": int.from_bytes(raw[8:12], "little"), "version": version, "chip": raw[6]}
+                    return self._send(json.dumps({"ok": True, "slot": "carried", "note": "That is a handheld update. "
+                                      "This access point is carrying it and will offer it to handhelds and to the other "
+                                      "access points. Nothing restarts here."}).encode())
+                return self._send(json.dumps({"ok": True, "slot": "pending", "note": "Restart this access point to "
+                                  "run the new firmware."}).encode())
             try:
                 body = json.loads(raw.decode("utf-8") or "{}")
             except ValueError:
@@ -577,6 +624,8 @@ def judge_first_run(ap, started):
     r = ap.result or {}
     o, m, n, h = r.get("overview") or {}, r.get("map") or {}, r.get("network") or {}, r.get("handhelds") or {}
     g, a, pwd, power = r.get("groups") or {}, r.get("announce") or {}, r.get("password") or {}, r.get("power") or {}
+    fw = r.get("fw") or {}
+    good_uploads = [u for u in ap.uploads if u[1] and u[1] == u[1] and u[2]]
     posts = lambda path: [p for p in ap.posts if p[0] == path]      # noqa: E731
     setups, times, group_posts = posts("/api/setup"), posts("/api/time"), posts("/api/groups")
     good_setup = setups[-1][1] if setups else {}
@@ -721,6 +770,20 @@ def judge_first_run(ap, started):
         ("a new password that is too short is refused by the page", pwd.get("short") == "The new password must be 12 to 64 characters.", pwd.get("short")),
         ("a wrong current password is answered in the AP's words", pwd.get("wrong_current") == "The current password is wrong.", pwd.get("wrong_current")),
         ("no password is left in the form", pwd.get("fields_after") == ["", "", ""], pwd.get("fields_after")),
+        # firmware (D110)
+        ("Settings says what this AP runs and that it takes signed updates",
+         "installed by cable" in (fw.get("running") or "") and "release key" in (fw.get("key") or ""), (fw.get("running"), fw.get("key"))),
+        ("before anything is carried, the card says so", fw.get("carried_before") == "none", fw.get("carried_before")),
+        ("a file that is not an update is refused by the page, and nothing can be sent",
+         fw.get("bad") == "That is not a LocalGrid update file." and fw.get("bad_send_disabled") is True, (fw.get("bad"), fw.get("bad_send_disabled"))),
+        ("the page reads the update's own header and says what it is",
+         fw.get("what") == "A handheld update for ESP32: hh-test, serial 7000, 4 KB." and fw.get("send_enabled") is True, fw.get("what")),
+        ("the file went to the AP whole, with the session and its CSRF token",
+         len(good_uploads) == 1 and len(good_uploads[0][0]) == 192 + 4096 and good_uploads[0][2]
+         and good_uploads[0][0][192:200] == bytes(range(192, 200)), [(len(u[0]), bool(u[1]), u[2]) for u in ap.uploads]),
+        ("the AP's answer is shown, and the card then says what it carries",
+         "carrying it" in (fw.get("msg") or "") and fw.get("carried_after") == "carrying hh-test (serial 7000) for ESP32 handhelds",
+         (fw.get("msg"), fw.get("carried_after"))),
         ("the AP was asked to change the password twice - the wrong current, then the right - and nothing else",
          [(p[1].get("current"), p[1].get("password")) for p in posts("/api/password")] ==
          [("not the password", NEW_PASSWORD), (SETUP_PASSWORD, NEW_PASSWORD)] and ap.password == NEW_PASSWORD,
