@@ -588,6 +588,13 @@
         <details><summary>Is it a product I can buy?</summary><div class="a">
           <p>No. LocalGrid is an open-source prototype. It runs on development boards with modules wired on; purpose-built
             handhelds are still being designed, and the access points have no cases yet.</p></div></details>
+        <details><summary>Can it carry things other than text and voice?</summary><div class="a">
+          <p>The network itself carries typed, sealed messages between devices; text and voice are two of those types,
+            alongside names, positions, groups and firmware updates. Adding a new type is a documented change to the
+            protocol core (its envelope, body layout and tests), so sensor readings, drone telemetry, trackers or a gate
+            that reports being opened are all possible. None of them is built, and the code is open for anyone to
+            build them. The same goes for watching: the laptop and Android watchers read the access points' Bluetooth
+            beacon and only listen (D68, D70), and the same pattern could become a sensor or drone watcher.</p></div></details>
         <details><summary>What does it not do yet?</summary><div class="a">
           <p>Measured range and field testing; purpose-built handhelds and cases; handhelds relaying for each other, which is
             planned (D47); holding messages for someone offline (D13); and LoRa directly between two handhelds, which goes

@@ -465,6 +465,36 @@
       ]
     },
     {
+      "id": "extend",
+      "part": "Built to be extended",
+      "title": "Text and voice are two applications on it",
+      "view": "diagram",
+      "lead": "One more thing about what this is.",
+      "lead_focus": "all",
+      "points": [
+        {
+          "text": "The network carries typed, sealed messages; text and voice are two of those types.",
+          "say": "Text and voice are not the network. They are two applications that ride on it. Underneath, it carries typed, sealed messages between devices.",
+          "focus": "aps"
+        },
+        {
+          "text": "A new kind of message is a documented change to the protocol core, open to anyone.",
+          "say": "A new kind of message is a documented change to the protocol code, and the code is open for anyone to make it.",
+          "focus": "aps"
+        },
+        {
+          "text": "Ideas we have not built: sensors, drone telemetry, trackers, gate and door alerts.",
+          "say": "We have not built these, but the same network could carry readings from sensors, telemetry from drones, trackers, or a gate that says it was opened.",
+          "focus": "handhelds"
+        },
+        {
+          "text": "The watcher is one example: the same pattern could watch sensors, or drones.",
+          "say": "And the watcher you saw is one example of an application that only listens. The same pattern could become a sensor watcher, or a drone watcher.",
+          "focus": "watch"
+        }
+      ]
+    },
+    {
       "id": "uses",
       "part": "Where it fits",
       "title": "Some places it could be used",
