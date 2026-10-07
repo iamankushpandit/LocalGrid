@@ -1,17 +1,30 @@
 {
-  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown.",
+  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown. A chapter may give 'lead' and 'points' instead of 'say' and 'body': the title shows alone while the lead is said, then each point appears as its own line is said.",
   "chapters": [
     {
       "id": "intro",
       "part": "LocalGrid",
-      "title": "An offline network you can build from inexpensive boards",
-      "body": [
-        "Access points find each other and form a network by themselves.",
-        "Touchscreen handhelds send text, emergencies and push-to-talk voice across it.",
-        "No Internet, no phones, no cell service. Ever."
-      ],
-      "say": "This is LocalGrid. An offline messaging network built from inexpensive E S P 32 boards. A few access points find each other and form the network by themselves, and touchscreen handhelds send text, emergencies and voice across it. There is no Internet, no phone and no cell service involved, at any point.",
+      "title": "A messaging network you build yourself",
       "view": "map",
+      "lead": "This is LocalGrid.",
+      "points": [
+        {
+          "text": "Made from small, inexpensive ESP32 boards.",
+          "say": "It is a messaging network you build yourself, from small, inexpensive boards."
+        },
+        {
+          "text": "Access points find each other and form the network on their own.",
+          "say": "A few access points find each other, and form the network on their own. Nobody configures them."
+        },
+        {
+          "text": "Touchscreen handhelds send text, alerts and voice across it.",
+          "say": "People carry touchscreen handhelds, and send text, alerts and voice to each other across it."
+        },
+        {
+          "text": "No Internet, no phones, no accounts.",
+          "say": "It needs no Internet, no phone, and no account. Everything stays on the network itself."
+        }
+      ],
       "media": [
         {
           "file": "hero-handheld.jpg",
@@ -24,34 +37,37 @@
       ]
     },
     {
-      "id": "why",
-      "part": "Why it exists",
-      "title": "For the moment the infrastructure everyone relies on is not there",
-      "body": [
-        "A group trip several families share, far from any signal.",
-        "A festival site, a disaster drill, a power cut that takes the towers with it.",
-        "Working looks like nothing happening, so today we break it on purpose and watch it recover."
-      ],
-      "say": "It is meant for the moment the infrastructure everyone relies on is not there. A group trip several families share, far from any signal. An event site. A storm that takes the towers down. The trouble with a network like this is that when it works, nothing seems to happen. So in this demo we break it on purpose, live, and let the boards report how it recovers.",
-      "view": "map"
-    },
-    {
       "id": "how",
       "part": "How it works",
       "title": "Three radios, each with a job",
-      "body": [
-        "Wi-Fi (ESP-NOW) between access points, and each handheld's link to its access point (D2).",
-        "LoRa: a second, much longer path between access points, and to handhelds that have a module (D71, D77).",
-        "Bluetooth: a laptop or phone watches the grid's health without joining it (D68).",
-        "No master: every access point holds the whole grid's settings, groups and time (D45, D46).",
-        "Handhelds spread themselves across access points, and move when one disappears (D54)."
-      ],
-      "say": "Three radios, each with a job. Wi-Fi carries normal traffic: between access points over E S P now, and from each handheld to its access point. LoRa is a second, much longer path, between access points and to handhelds that carry a module. Bluetooth lets a laptop or a phone watch the grid without ever joining it. There is no master. Every access point holds a full copy of the settings, the groups and the time, and the handhelds spread themselves out across the access points. What you see here is live: these are the boards on this bench, and who is connected to whom right now.",
       "view": "map",
       "media": [
         {
           "file": "bench-wide.jpg",
           "caption": "The whole grid on one table"
+        }
+      ],
+      "lead": "Three radios, each with a job.",
+      "points": [
+        {
+          "text": "Wi-Fi (ESP-NOW) between access points, and each handheld's link to its access point (D2).",
+          "say": "Wi-Fi carries the everyday traffic: between access points, and from each handheld to its access point."
+        },
+        {
+          "text": "LoRa: a second, much longer path between access points, and to handhelds that have a module (D71, D77).",
+          "say": "LoRa is a second, longer path, between access points, and to handhelds that have a module."
+        },
+        {
+          "text": "Bluetooth: a laptop or phone watches the grid's health without joining it (D68).",
+          "say": "Bluetooth lets a laptop or a phone watch the network, without ever joining it."
+        },
+        {
+          "text": "No master: every access point holds the whole grid's settings, groups and time (D45, D46).",
+          "say": "There is no master. Every access point holds a full copy of the settings, the groups and the time."
+        },
+        {
+          "text": "Handhelds spread themselves across access points, and move when one disappears (D54).",
+          "say": "And the handhelds spread themselves across the access points. The map is live: these boards, right now."
         }
       ]
     },
@@ -59,18 +75,27 @@
       "id": "untether",
       "part": "Live: no cables",
       "title": "Everything here runs on its own batteries",
-      "body": [
-        "No cable to any board: access points on batteries or chargers, handhelds on their own batteries.",
-        "This laptop only listens to the access points' Bluetooth beacons; it cannot send, change or break anything (D68).",
-        "What you see on the map is what the grid says about itself, live."
-      ],
-      "say": "First, the product, the way people would use it. There is no cable to any board here. The access points run on batteries or chargers, and the handhelds on their own batteries. This laptop only listens to the Bluetooth beacon every access point sends, so it cannot send anything, change anything or break anything. Everything on this map is the grid describing itself, live.",
       "action": "untether",
       "view": "map",
       "media": [
         {
           "file": "batteries.jpg",
           "caption": "Access points on their own power"
+        }
+      ],
+      "lead": "First, the product, the way people would use it.",
+      "points": [
+        {
+          "text": "No cable to any board: access points on batteries or chargers, handhelds on their own batteries.",
+          "say": "There is no cable to any board. The access points run on batteries or chargers, and the handhelds on their own batteries."
+        },
+        {
+          "text": "This laptop only listens to the access points' Bluetooth beacons; it cannot send, change or break anything (D68).",
+          "say": "This laptop only listens to a Bluetooth beacon each access point sends. It cannot send, change, or break anything."
+        },
+        {
+          "text": "What you see on the map is what the grid says about itself, live.",
+          "say": "So everything on this map is the network describing itself."
         }
       ]
     },
@@ -151,7 +176,7 @@
         "It found five bugs code review and unit tests never could, including one that made the self-healing promise untrue.",
         "This demo uses the same engine, with a script instead of a random schedule."
       ],
-      "say": "So that is the product. Here is how we know it holds up. The central claim is that it heals itself, so it was tested by attacking it. A framework kills access points and handhelds at random, cuts their power and turns their radios off, for hours, while the handhelds keep messaging each other. In one ten hour run, fifty five faults were injected and all fifty five recovered without a human. It also found five real bugs that code review never could.",
+      "say": "So that is the product. Now, how we know it holds up. The central claim is that it heals itself, so it was tested by attacking it. A framework kills access points and handhelds at random, cuts their power and turns their radios off, for hours, while the handhelds keep messaging each other. In one ten hour run, fifty five faults were injected and all fifty five recovered without a human. It also found five real bugs that code review never could.",
       "view": "map"
     },
     {
@@ -406,6 +431,31 @@
       ],
       "say": "There is more than we have time to break today. Groups made on the handhelds, while the grid runs. A GPS that gives the grid its time and location, and handhelds that share where they are and leave a trail. Voice notes that cross LoRa. A small alert unit that does nothing but show alerts and raise an S O S. And a self test every time a handheld starts.",
       "view": "map"
+    },
+    {
+      "id": "uses",
+      "part": "Where it fits",
+      "title": "Some places it could be used",
+      "view": "map",
+      "lead": "A few places it could be used.",
+      "points": [
+        {
+          "text": "A group trip that several families share.",
+          "say": "A group trip that several families share."
+        },
+        {
+          "text": "An event or festival site.",
+          "say": "An event, or a festival site."
+        },
+        {
+          "text": "A training exercise or a drill.",
+          "say": "A training exercise, or a drill."
+        },
+        {
+          "text": "Anywhere people spread out and want a network of their own.",
+          "say": "Anywhere people spread out, and want a network of their own."
+        }
+      ]
     },
     {
       "id": "limits",

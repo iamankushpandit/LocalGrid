@@ -57,7 +57,8 @@ ol.chapters .na { margin-left: auto; font-size: 10px; color: var(--muted); }
 .slide .part .livebadge { color: #fff; background: var(--live); border-radius: 4px; padding: 1px 7px; font-size: 12px; letter-spacing: 1px; }
 .slide h1 { font-size: 34px; line-height: 1.15; margin: 6px 0 10px; letter-spacing: -.3px; }
 .slide ul { margin: 0; padding-left: 22px; font-size: 19px; line-height: 1.45; color: var(--text); }
-.slide ul li { margin: 3px 0; }
+.slide ul li { margin: 3px 0; transition: opacity .6s ease, transform .6s ease; }
+.slide ul li.pending { opacity: 0; transform: translateY(6px); }
 .slide ul li::marker { color: var(--accent); }
 .slide.compact h1 { font-size: 26px; margin-bottom: 4px; }
 .slide.compact ul { font-size: 16px; }
@@ -83,6 +84,24 @@ table.hw td .d { color: var(--muted); font-size: 13px; }
 .tag { display: inline-block; font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; margin: 1px 3px 1px 0; color: var(--muted); }
 .tag.y { color: var(--ok); border-color: var(--ok); }
 
+.logs { padding: 10px; display: grid; gap: 8px; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
+        grid-auto-rows: minmax(0, 1fr); background: var(--bg); }
+.logs .tile { min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px;
+              background: #0a0d12; overflow: hidden; }
+:root[data-theme="light"] .logs .tile { background: #fbfcfd; }
+.logs .tile h3 { margin: 0; padding: 5px 9px; font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--line);
+                 display: flex; gap: 8px; align-items: center; color: var(--text); }
+.logs .tile h3 .role { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+.logs .tile h3 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ap); }
+.logs .tile.hh h3 .dot { background: var(--hh); }
+.logs .tile.ble h3 .dot { background: var(--wifi); }
+.logs pre { margin: 0; padding: 6px 9px; flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+            font: 11px/1.45 ui-monospace, Consolas, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+.logs pre span { display: block; }
+.logs pre span.W { color: var(--lora); }
+.logs pre span.E { color: var(--bad); }
+.logs pre span.hot { color: var(--text); }
+.btn.on { border-color: var(--accent); color: var(--accent); }
 .timer { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
 .timer .label { color: var(--muted); font-size: 13px; min-height: 18px; }
 .timer .clock { font: 600 42px/1.1 ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
@@ -154,6 +173,7 @@ footer .caption { font-size: 24px; line-height: 1.3; min-height: 62px; display: 
     <button class="btn primary" id="play" title="Space">▶ Play all</button>
     <button class="btn" id="here" title="Enter">Present this chapter</button>
     <button class="btn" id="next" title="Right arrow">▶</button>
+    <button class="btn" id="logsbtn" title="L">Logs</button>
     <button class="btn stop" id="stop" title="Esc">Stop</button>
     <button class="btn" id="reset" title="R">Reset grid</button>
   </div>
@@ -187,6 +207,8 @@ pref("lg-demo-light", $("light"), on => { document.documentElement.dataset.theme
 // Lines are spoken in turn, never cut off. The demo is told when each of its lines ends and waits for
 // it before acting, so the words and what happens on the boards stay together.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Time to take things in (owner, 2026-10-07: the opening went by too fast to absorb).
+const PACE = { title: 1800, afterLead: 1000, sentence: 550, afterPoint: 1300, chapterEnd: 3500, afterDemo: 4000 };
 const synth = window.speechSynthesis || null;
 let openedAt = 0;
 let speakingAudio = null;
@@ -268,9 +290,11 @@ async function say(text, n, caption) {
     const parts = sentences(text).map(s => s.trim()).filter(Boolean);
     // The next sentence is made while this one plays, so there is no gap between them.
     if ($("voice").value.startsWith(PIPER)) parts.forEach(piperAudio);
-    for (const s of parts) {
+    for (let k = 0; k < parts.length; k++) {
+      const s = parts[k];
       if (caption) { if (!playing) break; $("caption").textContent = s; }
       await sayOne(s);
+      if (caption && k < parts.length - 1) await sleep(PACE.sentence);
     }
   }
   if (n) fetch("/api/spoken?n=" + n, { method: "POST" }).catch(() => {});
@@ -327,6 +351,11 @@ function renderControls() {
     state.busy ? "Live demo running" : `${state.aps.length} access points, ${state.handhelds.length} handhelds ${how}`;
 }
 
+function bulletsOf(c) { return c.points ? c.points.map(p => p.text) : (c.body || []); }
+// While playing, a chapter's points appear one at a time, as they are said.
+function hideBullets() { [...$("body").children].forEach(li => li.classList.add("pending")); }
+function reveal(k) { const li = $("body").children[k]; if (li) li.classList.remove("pending"); }
+function revealAll() { [...$("body").children].forEach(li => li.classList.remove("pending")); }
 function show(i) {
   at = Math.max(0, Math.min(chapters.length - 1, i));
   const c = chapters[at];
@@ -336,9 +365,9 @@ function show(i) {
   if (st.live) { const b = document.createElement("span"); b.className = "livebadge"; b.textContent = "LIVE"; $("part").prepend(b); }
   $("title").textContent = c.title;
   $("body").innerHTML = "";
-  (c.body || []).forEach(t => { const li = document.createElement("li"); li.textContent = t; $("body").appendChild(li); });
+  bulletsOf(c).forEach(t => { const li = document.createElement("li"); li.textContent = t; $("body").appendChild(li); });
   $("slide").className = "slide" + (c.view === "map" || !c.view ? "" : " compact");
-  setView(c.view || "map");
+  setView(logsOn ? "logs" : (c.view || "map"));
   showMedia(c);
   $("caption").textContent = st.live && st.why ? "This live demo needs setup: " + st.why + "." : "";
   renderChapters(); renderControls();
@@ -362,6 +391,66 @@ function showMedia(c) {
     f.append(el, cap); box.appendChild(f);
   });
 }
+// ---- every board's own output ----
+const logBuf = new Map();          // board label -> {role, lines: [[level, text]]}
+const LOG_SHOW = 60;
+const HOT = /\[(MSG|GRID|NET|BB|LORA|ROAM|TIME|BLE)\]/;
+let logsOn = false;
+function addLogLines(lines) {
+  lines.forEach(([key, role, level, text, name]) => {
+    if (!logBuf.has(key)) logBuf.set(key, { role, name: name || key, lines: [] });
+    const b = logBuf.get(key);
+    if (role) b.role = role;
+    if (name) b.name = name;
+    b.lines.push([level, text]);
+    if (b.lines.length > LOG_SHOW) b.lines.splice(0, b.lines.length - LOG_SHOW);
+  });
+  if (viewNow === "logs") drawLogs();
+}
+let logsDrawPending = false;
+function drawLogs() {
+  if (logsDrawPending) return;
+  logsDrawPending = true;
+  requestAnimationFrame(() => { logsDrawPending = false; drawLogsNow(); });
+  setTimeout(() => { if (logsDrawPending) { logsDrawPending = false; drawLogsNow(); } }, 400);   // a hidden tab gets no frames
+}
+function drawLogsNow() {
+  const box = document.querySelector(".logs");
+  if (!box) return;
+  const order = [...logBuf.entries()].filter(([, b]) => b.role).sort((a, b) => (a[1].role === b[1].role ? a[1].name.localeCompare(b[1].name) :
+    ["ble", "ap", "hh"].indexOf(a[1].role) - ["ble", "ap", "hh"].indexOf(b[1].role)));
+  if (!order.length) { box.innerHTML = "<div class='empty'>Board output appears here once the boards are on their cables.</div>"; return; }
+  box.style.setProperty("--cols", order.length <= 1 ? 1 : order.length <= 4 ? 2 : order.length <= 9 ? 3 : 4);
+  const want = order.map(([k, b]) => k + ":" + b.name + ":" + b.role).join("|");
+  if (box.dataset.boards !== want) {
+    box.innerHTML = "";
+    order.forEach(([who, b]) => {
+      const tile = document.createElement("div"); tile.className = "tile " + b.role;
+      tile.innerHTML = "<h3><span class='dot'></span><span class='n'></span><span class='role'></span></h3><pre></pre>";
+      tile.querySelector(".n").textContent = b.name;
+      tile.querySelector(".role").textContent = b.role === "ap" ? "access point" : b.role === "hh" ? "handheld" : "over Bluetooth";
+      box.appendChild(tile);
+    });
+    box.dataset.boards = want;
+  }
+  order.forEach(([who, b], i) => {
+    const pre = box.children[i].querySelector("pre");
+    pre.innerHTML = "";
+    b.lines.slice(-40).forEach(([level, text]) => {
+      const s = document.createElement("span");
+      s.className = (level === "W" || level === "E" ? level : "") + (HOT.test(text) ? " hot" : "");
+      s.textContent = text;
+      pre.appendChild(s);
+    });
+  });
+}
+function toggleLogs() {
+  logsOn = !logsOn;
+  $("logsbtn").classList.toggle("on", logsOn);
+  setView(logsOn ? "logs" : (chapters[at] || {}).view || "map");
+}
+$("logsbtn").onclick = toggleLogs;
+
 let viewNow = null;
 function setView(kind) {
   const v = $("view");
@@ -400,6 +489,9 @@ function setView(kind) {
   } else if (kind === "watch") {
     if (watchUrl) { const f = document.createElement("iframe"); f.src = watchUrl; f.title = "Grid watch"; v.appendChild(f); }
     else v.innerHTML = "<div class='empty'>The Bluetooth view (tools/grid_watch.py) starts with the boards.</div>";
+  } else if (kind === "logs") {
+    const box = document.createElement("div"); box.className = "logs"; v.appendChild(box);
+    drawLogsNow();
   } else if (kind === "flasher") {
     const f = document.createElement("iframe"); f.src = "/flash/"; f.title = "The installer page"; v.appendChild(f);
   }
@@ -549,7 +641,27 @@ async function present(i) {
   show(i);
   const c = chapters[i];
   const st = chapterState(c);
-  await say(c.say, 0, true);
+  hideBullets();
+  await sleep(PACE.title);
+  if (!playing) { revealAll(); return; }
+  if (c.points) {
+    if (c.lead) { await say(c.lead, 0, true); await sleep(PACE.afterLead); }
+    for (let k = 0; k < c.points.length && playing; k++) {
+      reveal(k);
+      await say(c.points[k].say, 0, true);
+      await sleep(PACE.afterPoint);
+    }
+  } else {
+    // One narration for the whole chapter: its points appear in step with its sentences.
+    const parts = sentences(c.say || "").map(s => s.trim()).filter(Boolean);
+    const n = $("body").children.length;
+    for (let k = 0; k < parts.length && playing; k++) {
+      for (let j = 0; j < Math.ceil((k + 1) * n / parts.length); j++) reveal(j);
+      await say(parts[k], 0, true);
+      await sleep(PACE.sentence);
+    }
+  }
+  revealAll();
   if (!playing) return;
   if ((c.action === "untether" || c.action === "tether") && boards) {
     const want = c.action === "untether";
@@ -565,12 +677,12 @@ async function present(i) {
     demoDone = new Promise(r => { demoDone_resolve = r; });
     if (await post("/api/run?s=" + encodeURIComponent(c.demo))) await demoDone;
     demoDone = null;
-    if (playing) await sleep(2500);
+    if (playing) await sleep(PACE.afterDemo);
   } else if (st.live) {
     $("caption").textContent = !boards ? "This chapter runs live on the boards." : "This live demo needs setup: " + st.why + ".";
     await sleep(2500);
   } else {
-    await sleep(900);
+    await sleep(PACE.chapterEnd);
   }
 }
 let demoDone_resolve = () => {};
@@ -674,6 +786,7 @@ function onMessage(m) {
     renderControls();
     return;
   }
+  if (m.type === "logs") { addLogLines(m.lines); return; }
   if (m.type === "log" && LOG_TEXT[m.event]) addLog(LOG_TEXT[m.event](m));
 }
 function connect() {
@@ -701,12 +814,16 @@ document.addEventListener("keydown", e => {
   else if (e.key === "ArrowLeft" && !playing) show(at - 1);
   else if (e.key === "Enter" && !$("here").disabled) playOne();
   else if (e.key === "Escape") stopAll();
+  else if (e.key === "l" || e.key === "L") toggleLogs();
   else if ((e.key === "r" || e.key === "R") && !$("reset").disabled) post("/api/reset");
 });
 
 Promise.all([fetch("/api/scenarios").then(r => r.json()), fetch("/api/story").then(r => r.json()),
              fetch("/api/media").then(r => r.json()).catch(() => ({ files: [] }))]).then(([s, story, media]) => {
   mediaFiles = new Set(media.files);
+  fetch("/api/logs").then(r => r.json()).then(j => {
+    Object.entries(j.logs || {}).forEach(([key, b]) => addLogLines(b.lines.map(([lv, tx]) => [key, b.role, lv, tx, b.name])));
+  }).catch(() => {});
   s.scenarios.forEach(x => scenarios[x.key] = x);
   boards = s.boards; watchUrl = s.watch; localVoices = s.tts || []; localVoiceDefault = s.tts_default; fillVoices();
   chapters = story.chapters;

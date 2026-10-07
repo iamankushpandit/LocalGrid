@@ -75,6 +75,12 @@ HH_TAKEN = re.compile(r"\[GRID\] Update serial (\d+) taken from the AP in (\d+) 
 HH_RESTARTING = re.compile(r"\[GRID\] Restarting into update serial (\d+)")
 HH_UPDATE_NO = re.compile(r"\[GRID\] Update from the AP not (?:taken|installed): (.*)$")
 
+LOG_PREFIX = re.compile(r"^\x1b\[[0-9;]*m|\x1b\[0m$")
+DEVICE_ID = re.compile(r"(LG-[NH]-[A-Z0-9]{3}-)[A-Z2-7]{10}")   # IDs are shortened on screen
+IDF_LINE = re.compile(r"^([IWED]) \((\d+)\) [^:]+: (.*)$")   # "I (1234) TAG: text" -> level and text
+LOG_KEEP = 200            # lines kept per board, for a page opened mid-session
+LOG_BATCH_S = 0.3         # lines go to the page in batches, not one message each
+
 DEMO_GROUPS = ("Trail-Crew", "Ridge-Crew")   # the split demo renames one into the other
 
 DELIVERY_S = 30          # a message over Wi-Fi that has not landed by then has not landed
@@ -85,7 +91,9 @@ STEADY_S = 180
 SPLIT_S = 300            # every radio the split demo turns off comes back by itself after this
 BLACKOUT_S = 20          # how long every access point is without power
 UPDATE_S = 1500          # a handheld update crossing the grid and being installed (minutes, not seconds)
-GONE_S = 5               # a beacon goes out every 500 ms (D68): this much silence is an access point that is off
+# A beacon goes out every 500 ms (D68), but this laptop's scanner misses several seconds at a time: at 5 s
+# a busy moment read as "Denali went silent" with Denali running (2026-10-07). This much is an AP that is off.
+GONE_S = 15
 HANDS_S = 180            # how long a hands-on demo waits for the presenter to do something
 
 
@@ -152,6 +160,11 @@ class Grid(chaos.Chaos):
         self.updates = []             # (time, board name, what, detail) seen during the update demo
         self.installing = None        # the board the installer demo has handed to the browser
         self.untethered = False       # every cable let go: the grid is seen over Bluetooth only (D68)
+        self.seen_online = set()      # handheld device numbers seen online over Bluetooth this session
+        self.logs = {}                # board label -> {role, the last LOG_KEEP lines as (level, text)}
+        self.log_out = []             # lines not yet sent to the page
+        self.log_sent_at = 0.0
+        self.ble_events_seen = 0.0    # the newest Bluetooth event already shown
 
     # ---- what the page sees ----
 
@@ -210,9 +223,12 @@ class Grid(chaos.Chaos):
                         "links": links if self.heard(a) else [], "lora_links": [], "bb_off": False,
                         "lora_off": False, "time": h.get("time_quality")})
         live = {a["index"] for a in aps if a["present"]}
+        # Only handhelds that have been on the grid this session: the grid also remembers names of ones
+        # that are not here at all, and showing those would put boards on the map that are not on the bench.
+        self.seen_online |= {h["device"] for h in snap["handhelds"] if h["online"]}
         hhs = [{"index": h["device"], "name": h["name"], "present": True,
                 "node": h["ap"] if h["online"] and h["ap"] in live else None, "last_node": h["ap"],
-                "wifi_off": False, "battery": h["battery"]} for h in snap["handhelds"]]
+                "wifi_off": False, "battery": h["battery"]} for h in snap["handhelds"] if h["device"] in self.seen_online]
         return {"aps": aps, "handhelds": hhs, "busy": self.busy, "ready": self.ready, "untethered": True,
                 "alert": snap.get("alert")}
 
@@ -229,6 +245,7 @@ class Grid(chaos.Chaos):
 
     def background(self):
         super().background()
+        self.flush_logs()
         snap = self.snapshot()
         key = json.dumps(snap, sort_keys=True)
         if key != self.state_key:
@@ -258,8 +275,43 @@ class Grid(chaos.Chaos):
 
     # ---- messages this demo sends, followed to every screen they should reach ----
 
+    def log_line(self, key, role, line, who=None):
+        """One console line for the page's log view. Keys, passphrases and 1:1 text are never logged by
+        the firmware (AGENTS.md), hardware addresses are masked by the reader (D21), and positions are
+        never logged (D65), so what the boards print can be shown as it is."""
+        who = who or key
+        line = DEVICE_ID.sub(r"…", LOG_PREFIX.sub("", line)).rstrip()
+        if not line.strip():
+            return
+        m = IDF_LINE.match(line)
+        level, text = (m.group(1), m.group(3)) if m else ("", line)
+        entry = self.logs.setdefault(key, {"role": role, "name": who, "lines": []})
+        entry.update(role=role, name=who)
+        entry["lines"].append((level, text))
+        del entry["lines"][:-LOG_KEEP]
+        self.log_out.append([key, role, level, text, who])
+
+    def flush_logs(self):
+        now = time.monotonic()
+        if self.untethered and self.eyes is not None and self.eyes.state is not None:
+            try:
+                events = list(self.eyes.state.events)
+            except Exception:
+                events = []
+            for e in events:
+                if e.get("t", 0) > self.ble_events_seen:
+                    self.ble_events_seen = e["t"]
+                    self.log_line("Bluetooth", "ble", f"{time.strftime('%H:%M:%S', time.localtime(e['t']))}  {e['text']}")
+        if self.log_out and now - self.log_sent_at >= LOG_BATCH_S:
+            self.publish("logs", lines=self.log_out[-400:])
+            self.log_out = []
+            self.log_sent_at = now
+
     def handle(self, b, line):
         super().handle(b, line)
+        # Keyed by port: a board's name is learned as it talks (port, then its ID, then the name the grid
+        # knows it by), and keying by name split one board's output across three panels.
+        self.log_line(b.port, "ap" if b.is_ap else "hh" if b.role else "", line, self.label(b))
         now = time.monotonic()
         if not b.is_ap and (m := PEOPLE_ROW.search(line)):
             self.people[int(m.group(1))] = m.group(2).strip()
@@ -378,7 +430,13 @@ class Grid(chaos.Chaos):
         self.args.bench = False
         if not self.start_eyes():
             return
-        self.wait(30, until=lambda: any(self.heard(a) for a in self.beacon()["aps"]))
+        # Every access point the bench map knows, or whatever has been heard after 30 s.
+        try:
+            want = sum(1 for d in load_map().get("devices", []) if d.get("role") == "N" and d.get("port"))
+        except (OSError, ValueError):
+            want = 1
+        self.wait(30, until=lambda: sum(self.heard(a) for a in self.beacon()["aps"]) >= want)
+        self.wait(8)                  # and a moment for the handhelds' frames to say who is where
         self.ready = True
         snap = self.beacon()
         self.caption(f"Ready: {sum(self.heard(a) for a in snap['aps'])} access points heard over Bluetooth.")
@@ -1189,7 +1247,15 @@ class Grid(chaos.Chaos):
         self.fact(f"SOS from {got['name']}, near {got['near']}, carried across the grid and seen from here")
         self.caption("Every other handheld is showing it now. Press Read on a few of them.")
         reads = got.get("reads") or 0
-        self.wait(45, until=lambda: ((self.beacon().get("alert") or {}).get("reads") or 0) > reads + 1)
+        # Wait for Reads to come in, then for the count to stop moving, so the number said is the last one.
+        seen = {"n": reads, "at": time.monotonic()}
+
+        def settled():
+            n = (self.beacon().get("alert") or {}).get("reads") or 0
+            if n != seen["n"]:
+                seen.update(n=n, at=time.monotonic())
+            return n > reads and time.monotonic() - seen["at"] > 10
+        self.wait(90, until=settled)
         a = self.beacon().get("alert") or {}
         if (a.get("reads") or 0) > reads:
             self.fact(f"Read by {a['reads']} handheld{'s' if a['reads'] != 1 else ''}, and the sender can see who")
@@ -1298,6 +1364,7 @@ class Grid(chaos.Chaos):
             getattr(self, method)()
         except Stopped:
             outcome = "stopped"
+            self.cancel.clear()      # or the caption's own wait is stopped too, and the server with it
             self.caption("Stopped.")
         finally:
             self.cancel.clear()
@@ -1362,6 +1429,15 @@ class Narrator:
             self.error = "Piper is not installed (pip install piper-tts)"
             return
         self.paths = {m.stem: m for m in models}
+        # Loaded now, before anything starts Bluetooth: once the Bluetooth listener is running in this
+        # process, onnxruntime's DLL fails to initialise ("A dynamic link library (DLL) initialization
+        # routine failed", 2026-10-07), and every line was silently skipped.
+        try:
+            from piper import PiperVoice
+            self.loaded[self.default] = PiperVoice.load(str(self.paths[self.default]))
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"
+            self.paths = {}
 
     @property
     def names(self):
@@ -1450,6 +1526,8 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 text = (q.get("text") or [""])[0][:600]
                 return self.reply(200, narrator.wav(text, (q.get("voice") or [None])[0]), "audio/wav")
+            if path == "/api/logs":
+                return self.reply(200, {"logs": grid.logs if grid is not None else {}})
             if path == "/api/story":
                 return self.reply(200, STORY.read_bytes())
             if path == "/api/hardware":
