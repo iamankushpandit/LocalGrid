@@ -53,6 +53,9 @@ STORY = ROOT / "tools" / "demo_story.json"
 FLASHER = ROOT / "site" / "flash" / "index.html"
 WATCH_PORT = 8768        # tools/grid_watch.py's own default
 VOICES = ROOT / "build" / "voices"   # Piper voice models (.onnx with its .onnx.json); build/ is not in git
+MEDIA = ROOT / "build" / "demo-media"  # the owner's photos for the chapters; not in git (they show the bench)
+MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+               ".mp4": "video/mp4", ".webm": "video/webm"}
 chaos.RUNS = ROOT / "chaos-runs" / "demo"
 
 # Broadcast, group and alert text is logged in full by the receiving handheld; 1:1 text never is
@@ -1344,34 +1347,42 @@ class Narrator:
     falls back to the browser's own voices."""
 
     def __init__(self, model=None):
-        self.voice = None
-        self.name = None
+        self.paths = {}               # voice name -> model file; each is loaded the first time it speaks
+        self.loaded = {}
         self.error = None
         self.lock = threading.Lock()
         self.cache = {}
-        path = pathlib.Path(model) if model else next(iter(sorted(VOICES.glob("*.onnx"))), None)
-        if path is None:
+        models = [pathlib.Path(model)] if model else sorted(VOICES.glob("*.onnx"))
+        if not models:
             self.error = f"no voice model in {VOICES}"
             return
-        try:
-            from piper import PiperVoice
-            self.voice = PiperVoice.load(str(path))
-            self.name = path.stem
-        except Exception as e:   # not installed, or a model it cannot read: the browser's voices still work
-            self.error = f"{type(e).__name__}: {e}"
+        import importlib.util
+        if importlib.util.find_spec("piper") is None:   # not installed: the browser's voices still work
+            self.error = "Piper is not installed (pip install piper-tts)"
+            return
+        self.paths = {m.stem: m for m in models}
 
-    def wav(self, text):
+    @property
+    def names(self):
+        return list(self.paths)
+
+    def wav(self, text, name=None):
         import wave
-        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        from piper import PiperVoice
+        name = name if name in self.paths else next(iter(self.paths))
+        key = hashlib.sha256((name + "\0" + text).encode("utf-8")).hexdigest()
         with self.lock:
             if key in self.cache:
                 return self.cache[key]
+            if name not in self.loaded:
+                self.loaded[name] = PiperVoice.load(str(self.paths[name]))
+            voice = self.loaded[name]
             buf = io.BytesIO()
             with wave.open(buf, "wb") as w:
-                if hasattr(self.voice, "synthesize_wav"):
-                    self.voice.synthesize_wav(text, w)
+                if hasattr(voice, "synthesize_wav"):
+                    voice.synthesize_wav(text, w)
                 else:
-                    self.voice.synthesize(text, w)
+                    voice.synthesize(text, w)
             data = buf.getvalue()
             if len(self.cache) > 400:          # bounded: the story and a session's captions fit easily
                 self.cache.clear()
@@ -1426,16 +1437,26 @@ def make_handler(bus, grid, watch_url=None, narrator=None):
             if path == "/api/scenarios":
                 return self.reply(200, {"scenarios": scenario_list(grid), "boards": grid is not None,
                                         "watch": watch_url,
-                                        "tts": narrator.name if narrator and narrator.voice else None})
+                                        "tts": narrator.names if narrator else []})
             if path == "/api/tts":
-                if not narrator or not narrator.voice:
+                if not narrator or not narrator.paths:
                     return self.reply(404, {"error": "no local voice"})
-                text = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("text") or [""])[0][:600]
-                return self.reply(200, narrator.wav(text), "audio/wav")
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                text = (q.get("text") or [""])[0][:600]
+                return self.reply(200, narrator.wav(text, (q.get("voice") or [None])[0]), "audio/wav")
             if path == "/api/story":
                 return self.reply(200, STORY.read_bytes())
             if path == "/api/hardware":
                 return self.reply(200, hardware(grid))
+            if path == "/api/media":
+                have = sorted(f.name for f in MEDIA.glob("*") if f.suffix.lower() in MEDIA_TYPES) if MEDIA.is_dir() else []
+                return self.reply(200, {"files": have})
+            if path.startswith("/media/"):
+                name = urllib.parse.unquote(path[len("/media/"):])
+                f = MEDIA / name
+                if "/" in name or "\\" in name or f.suffix.lower() not in MEDIA_TYPES or not f.is_file():
+                    return self.reply(404, {"error": "not found"})
+                return self.reply(200, f.read_bytes(), MEDIA_TYPES[f.suffix.lower()])
             if path in ("/flash", "/flash/"):
                 return self.reply(200, FLASHER.read_bytes(), "text/html; charset=utf-8")
             if path == "/events":
@@ -1568,7 +1589,7 @@ def main():
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         watch_url = f"http://127.0.0.1:{WATCH_PORT}/"
     narrator = Narrator(args.voice_model)
-    print(f"Narrator: {narrator.name} (Piper, on this laptop)" if narrator.voice else
+    print(f"Narrator: Piper on this laptop, voices {', '.join(narrator.names)}" if narrator.paths else
           f"Narrator: the browser's voices ({narrator.error})", flush=True)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(bus, grid, watch_url, narrator))
     server.daemon_threads = True

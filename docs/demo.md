@@ -108,6 +108,29 @@ charger; the handhelds run on their own. The hands-on chapters wait up to three 
 presenter, then time what the grid does. If the session is on the cables, the "No cables" chapter
 lets go of every port first, and the cables can then be pulled.
 
+## Photos and clips
+
+A chapter can show the owner's photos or short clips under its stage. They are looked for in
+`build/demo-media/` (not in git, because they show the bench) by the names the story gives, and a
+chapter whose photo is not there yet shows none. The shot list:
+
+| File | Chapter | What |
+|---|---|---|
+| `hero-handheld.jpg` | LocalGrid | A handheld in a hand, Messages screen on, ideally outdoors |
+| `handhelds-row.jpg` | LocalGrid | Every handheld model side by side, screens on |
+| `bench-wide.jpg` | How it works | The whole grid on one table |
+| `batteries.jpg` | No cables | Access points on battery packs, no laptop in sight |
+| `sos-lockscreen.jpg` | An SOS, by hand | An SOS on a locked handheld |
+| `sos-read-by.jpg` | An SOS, by hand | The "Read by" line under the sender's SOS |
+| `android-watch.png` | Watching it | A screenshot of the Android app (no Map tab) |
+| `ap-lora.jpg`, `ap-gps.jpg` | Hardware | An access point with its LoRa module; MAIN's GPS |
+| `handheld-back.jpg` | Hardware | The back of a handheld with its LoRa module wired on |
+| `status-screen.jpg`, `keyboard.jpg`, `screensaver.jpg` | The handhelds | Three of the handheld's screens |
+| `talk.mp4` | Voice | A few seconds of push to talk, muted (it loops) |
+| `installer.png` | Getting started | The installer page part-way through an install |
+
+Photos at 1600 px on the long side are plenty. Keep coordinates, faces and addresses out of frame.
+
 ## Before recording
 
 - **Positions.** "Watching it" shows `tools/grid_watch.py` without the admin password, so it shows

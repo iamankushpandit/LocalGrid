@@ -1,5 +1,5 @@
 {
-  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash).",
+  "_comment": "The demo's presentation, read by tools/demo_page.html through tools/demo.py. The product comes first with no cables, watched over Bluetooth; then every board is plugged in ('action': 'tether') for the story of how it was built and tested, each claim broken on cue and measured. Every claim is backed by README.md or docs/DECISIONS.md; cite the decision, and change this file when a claim changes. 'say' is what the narrator reads; 'body' is what the screen shows. A chapter with 'demo' runs that scenario live after its narration. 'view' picks what fills the stage: map, hardware, watch (tools/grid_watch.py) or flasher (site/flash). 'media' names the owner's photos or short clips for that chapter, looked for in build/demo-media/ (not in git); one that is not there is not shown.",
   "chapters": [
     {
       "id": "intro",
@@ -11,7 +11,17 @@
         "No Internet, no phones, no cell service. Ever."
       ],
       "say": "This is LocalGrid. An offline messaging network built from inexpensive E S P 32 boards. A few access points find each other and form the network by themselves, and touchscreen handhelds send text, emergencies and voice across it. There is no Internet, no phone and no cell service involved, at any point.",
-      "view": "map"
+      "view": "map",
+      "media": [
+        {
+          "file": "hero-handheld.jpg",
+          "caption": "A handheld, in a hand"
+        },
+        {
+          "file": "handhelds-row.jpg",
+          "caption": "Every handheld model, side by side"
+        }
+      ]
     },
     {
       "id": "why",
@@ -37,7 +47,13 @@
         "Handhelds spread themselves across access points, and move when one disappears (D54)."
       ],
       "say": "Three radios, each with a job. Wi-Fi carries normal traffic: between access points over E S P now, and from each handheld to its access point. LoRa is a second, much longer path, between access points and to handhelds that carry a module. Bluetooth lets a laptop or a phone watch the grid without ever joining it. There is no master. Every access point holds a full copy of the settings, the groups and the time, and the handhelds spread themselves out across the access points. What you see here is live: these are the boards on this bench, and who is connected to whom right now.",
-      "view": "map"
+      "view": "map",
+      "media": [
+        {
+          "file": "bench-wide.jpg",
+          "caption": "The whole grid on one table"
+        }
+      ]
     },
     {
       "id": "untether",
@@ -50,7 +66,13 @@
       ],
       "say": "First, the product, the way people would use it. There is no cable to any board here. The access points run on batteries or chargers, and the handhelds on their own batteries. This laptop only listens to the Bluetooth beacon every access point sends, so it cannot send anything, change anything or break anything. Everything on this map is the grid describing itself, live.",
       "action": "untether",
-      "view": "map"
+      "view": "map",
+      "media": [
+        {
+          "file": "batteries.jpg",
+          "caption": "Access points on their own power"
+        }
+      ]
     },
     {
       "id": "d-hands-sos",
@@ -63,7 +85,17 @@
       ],
       "say": "The reason it exists. Somebody needs help. They raise an S O S from their handheld's screen.",
       "demo": "hands_sos",
-      "view": "map"
+      "view": "map",
+      "media": [
+        {
+          "file": "sos-lockscreen.jpg",
+          "caption": "An SOS on a locked handheld"
+        },
+        {
+          "file": "sos-read-by.jpg",
+          "caption": "Who has read it"
+        }
+      ]
     },
     {
       "id": "d-hands-ap",
@@ -101,7 +133,13 @@
         "Every access point also serves the admin page itself, on request (D45, D91)."
       ],
       "say": "You do not have to join the network to see how it is doing. What drew that map is the same view anyone can open: every access point broadcasts a small, sealed status over Bluetooth, and this laptop listens without being part of the grid. There is an Android app that does the same, and it is read only by construction: a watcher can never send a message or change anything.",
-      "view": "watch"
+      "view": "watch",
+      "media": [
+        {
+          "file": "android-watch.png",
+          "caption": "The Android app"
+        }
+      ]
     },
     {
       "id": "chaos",
@@ -141,7 +179,21 @@
         "Board facts live in data-only profiles; a new display board is often a profile and a touch check away."
       ],
       "say": "The hardware is deliberately ordinary. The access points are plain E S P 32 development boards. Some carry a LoRa module, and one can carry a GPS for time and location. The handhelds are off-the-shelf touchscreen boards. Several models run it today, on three different chips. Every module is optional. This table is not typed in: each board reported it as it was plugged in.",
-      "view": "hardware"
+      "view": "hardware",
+      "media": [
+        {
+          "file": "ap-lora.jpg",
+          "caption": "An access point with its LoRa module"
+        },
+        {
+          "file": "ap-gps.jpg",
+          "caption": "The GPS on MAIN"
+        },
+        {
+          "file": "handheld-back.jpg",
+          "caption": "A handheld's LoRa module, wired on"
+        }
+      ]
     },
     {
       "id": "concepts",
@@ -183,7 +235,21 @@
       ],
       "say": "With the cables in, the laptop can drive each handheld's screen. A closer look at them.",
       "demo": "tour",
-      "view": "map"
+      "view": "map",
+      "media": [
+        {
+          "file": "status-screen.jpg",
+          "caption": "Status"
+        },
+        {
+          "file": "keyboard.jpg",
+          "caption": "The keyboard"
+        },
+        {
+          "file": "screensaver.jpg",
+          "caption": "The screen saver"
+        }
+      ]
     },
     {
       "id": "d-emergency",
@@ -210,7 +276,13 @@
       ],
       "say": "Voice. Push to talk, to one person, a group, or everyone.",
       "demo": "voice",
-      "view": "map"
+      "view": "map",
+      "media": [
+        {
+          "file": "talk.mp4",
+          "caption": "Push to talk"
+        }
+      ]
     },
     {
       "id": "d-ap-out",
@@ -313,7 +385,13 @@
       ],
       "say": "And finally, how anyone gets started. A board is installed from a web page: press install, choose the port, and give it your grid's file. Nothing to install on the computer.",
       "demo": "install",
-      "view": "flasher"
+      "view": "flasher",
+      "media": [
+        {
+          "file": "installer.png",
+          "caption": "The installer page"
+        }
+      ]
     },
     {
       "id": "more",
