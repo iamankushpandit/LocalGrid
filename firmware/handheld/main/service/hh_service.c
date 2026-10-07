@@ -1767,32 +1767,44 @@ static bool balance_move_due(uint32_t now)
         (s.last_balance_ms != 0 && now - s.last_balance_ms < BALANCE_HOLDOFF_MS)) {
         return false;
     }
-    const node_cand_t *here = &s.cand[current];
-    int best = pick_node(now);
-    if (best < 0 || best == current || !here->valid || s.cand[best].rssi < BALANCE_RSSI_DBM ||
-        others_on(best) >= others_on(current)) {
-        s.uneven_since_ms = 0;
-        return false;
-    }
     /*
      * The stagger counts from when this handheld first sees the uneven load, not only from when it came
      * online. Counted from coming online alone, every handheld long online acted on the same scan:
      * three left Denali for Everest in one second, and Everest went from one handheld to four
      * (2026-10-07). Staggered from here, the first to move leaves gracefully, and the next one's fresh
      * scan already counts it.
+     *
+     * Only a fresh view decides. What a scan heard is forgotten after NODE_FRESH_MS and the next routine
+     * scan is RESCAN_ONLINE_MS away, so between scans pick_node() finds nothing better; read as "the load
+     * is even", that restarted the stagger every minute and only a handheld with no stagger ever moved
+     * (2026-10-07). With a stale view the timer keeps running, and a scan is asked for once it is due.
      */
+    uint32_t stagger = BALANCE_STAGGER_MS * (s.device % 8u);
+    if (s_scanning) {
+        return false;
+    }
+    if (now - s.last_scan_ms >= NODE_FRESH_MS) {
+        if (s.uneven_since_ms != 0 && now - s.uneven_since_ms >= stagger) {
+            start_scan(now);   /* its turn has come: look again before moving */
+        }
+        return false;
+    }
+    const node_cand_t *here = &s.cand[current];
+    int best = pick_node(now);
+    if (best < 0 || best == current || !here->valid || s.cand[best].rssi < BALANCE_RSSI_DBM ||
+        others_on(best) >= others_on(current)) {
+        s.uneven_since_ms = 0;   /* a fresh scan says the load is even, or there is nowhere better */
+        return false;
+    }
     if (s.uneven_since_ms == 0) {
         s.uneven_since_ms = now ? now : 1u;
         return false;
     }
-    if (now - s.uneven_since_ms < BALANCE_STAGGER_MS * (s.device % 8u)) {
+    if (now - s.uneven_since_ms < stagger) {
         return false;
     }
     if (now - s.last_scan_ms >= BALANCE_SCAN_AGE_MS) {
         start_scan(now);   /* decide on fresh counts: another handheld may just have moved */
-        return false;
-    }
-    if (s_scanning) {
         return false;
     }
     s.last_balance_ms = now;

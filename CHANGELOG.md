@@ -25,7 +25,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Denali for Everest in one second, and Everest went from one handheld to four. Each handheld now also
   waits its stagger from when it first sees the uneven load; the first to move leaves gracefully, and the
   next one's fresh scan already counts it. On the bench, with Fuji carrying three, only Marshall moved,
-  and the load stayed 2, 2, 2.
+  and the load stayed 2, 2, 2. That first version restarted the stagger whenever the view went stale
+  between scans, so only a handheld with no stagger ever moved; it now decides only on a fresh scan. With
+  Marshall pinned to a crowded Fuji, Jolly moved and Chase, seeing an even load, stayed.
 - **Demo.** The two LoRa demos pin their handhelds to their access points for the demo (`node <n>`, back
   to `node auto` after, and at warm-up), so the message and the talk really cross LoRa. A talk over LoRa is
   checked against the compact copy that crosses it (D95), by packets and checksum: Channi had played every

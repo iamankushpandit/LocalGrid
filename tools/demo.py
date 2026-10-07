@@ -683,6 +683,7 @@ class Grid(chaos.Chaos):
         receiver = (others or [h for h in riders if h is not sender and h.registered_node is not None] or [None])[0]
         if sender and receiver:
             self.caption(f"{self.label(sender)} writes to {self.label(receiver)}.", hold=2)
+            self.open_screens([(sender, str(receiver.index)), (receiver, str(sender.index))])
             self.timer("Message on its way", "start")
             p = self.send(sender, receiver, f"{self.label(v)} lost power. This found another way.", [receiver])
             got = self.settle_message(p, DELIVERY_S)
@@ -740,6 +741,7 @@ class Grid(chaos.Chaos):
             ra = next(a for a in self.aps if a.index == r.registered_node)
             self.caption(f"{self.label(s)}, on {self.label(sa)}, writes to {self.label(r)}, on {self.label(ra)}.",
                          hold=2)
+            self.open_screens([(s, str(r.index)), (r, str(s.index))])   # both conversations on screen, not a screen saver
             self.timer("Crossing by LoRa", "start")
             p = self.send(s, r, "Sent with the Wi-Fi between access points switched off.", [r], path="lora")
             got = self.settle_message(p, LORA_DELIVERY_S)
@@ -774,6 +776,7 @@ class Grid(chaos.Chaos):
             s, r = pair
             self.caption(f"And voice: {self.label(s)} talks to {self.label(r)}. Live talk is too big for LoRa, so a "
                          "compact copy of the same words crosses it instead (D95).")
+            self.open_screens([(s, str(r.index)), (r, str(s.index))])
             self.talk_clip(s, str(r.index), f"{self.label(r)}, this came over LoRa between the access points.", [r],
                            path="lora")
         after = self.lora_query(live)
@@ -936,6 +939,7 @@ class Grid(chaos.Chaos):
                      "and the grid knows it is on LoRa alone.", hold=chaos.LORA_HH_SETTLE_S / 3)
         self.wait(chaos.LORA_HH_SETTLE_S * 2 / 3)
         self.caption(f"{self.label(peer)} writes to {self.label(v)}.")
+        self.open_screens([(peer, str(v.index)), (v, str(peer.index))])
         self.timer(f"To {self.label(v)} over LoRa", "start")
         p = self.send(peer, v, "This reached you over LoRa, with your Wi-Fi off.", [v], path="lora")
         got = self.settle_message(p, LORA_DELIVERY_S)
@@ -955,6 +959,7 @@ class Grid(chaos.Chaos):
                   ok=secs is not None)
         self.caption(f"{self.label(peer)} talks to {self.label(v)} as well. Live talk needs Wi-Fi, so a compact copy "
                      "of the same words, a fraction of the size, crosses LoRa instead (D95).")
+        self.open_screens([(peer, str(v.index)), (v, str(peer.index))])
         self.talk_clip(peer, str(v.index), f"{self.label(v)}, can you hear me over LoRa?", [v], path="lora")
         self.caption(f"Wi-Fi comes back on {self.label(v)}.")
         t = time.monotonic()
