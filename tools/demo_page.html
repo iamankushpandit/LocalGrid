@@ -297,7 +297,9 @@ function spokenForm(text) {
 // Resolves when the text has been spoken, or after the time it would take to read when nobody speaks.
 // Spoken a sentence at a time: Chrome can stop a long utterance part-way, and a chapter's caption then
 // shows the sentence being said rather than a paragraph.
-function sentences(text) { return text.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g) || [text]; }
+// A sentence ends at . ! or ? with a space or the end after it. Splitting at every "." cut "0.3 s" in two,
+// so the narrator said "3 seconds" for 0.3 s (2026-10-07).
+function sentences(text) { return text.split(/(?<=[.!?])\s+/).filter(s => s.trim()); }
 const audioCache = new Map();
 function piperAudio(text) {
   const key = spokenForm(text) + "";
