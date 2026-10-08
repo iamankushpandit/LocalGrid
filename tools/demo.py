@@ -746,22 +746,26 @@ class Grid(chaos.Chaos):
         best-heard pair. On the bench some pairs barely hear each other: after Everest's antenna was moved,
         Fuji did not hear Everest at all, and a message between them never crossed (2026-10-07). Each
         handheld is moved onto its access point if it is not there already, and pinned for the demo."""
-        def link(a, b):
+        def link(a, b, fresh):
             p = (snap.get(a.name) or {}).get("peers", {}).get(b.index)
-            return p if p and p["up"] and p["age_ms"] < 90000 else None
+            return p if p and p["up"] and (not fresh or p["age_ms"] < 90000) else None
         best = None
-        for a in live:
-            for b in live:
-                if a is b:
-                    continue
-                ab, ba = link(a, b), link(b, a)
-                if ab and ba:
-                    score = min(ab["snr"], ba["snr"])
-                    if best is None or score > best[0]:
-                        best = (score, a, b)
-        if best is None:
-            return None
-        _, sa, ra = best
+        # The best mutually fresh pair; failing that, any pair with a link up; failing that, the first
+        # two: right after a restart only one direction may be fresh, and giving up then had the
+        # chapter claim every handheld sat on one access point while they visibly did not (2026-10-08).
+        for fresh in (True, False):
+            for a in live:
+                for b in live:
+                    if a is b:
+                        continue
+                    ab, ba = link(a, b, fresh), link(b, a, fresh)
+                    if ab and ba:
+                        score = min(ab["snr"], ba["snr"])
+                        if best is None or score > best[0]:
+                            best = (score, a, b)
+            if best is not None:
+                break
+        _, sa, ra = best if best is not None else (0, live[0], live[1])
         on = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
         talkers = sorted([h for h in on if h.can_talk], key=lambda h: h.registered_node != sa.index)
         if not talkers:
