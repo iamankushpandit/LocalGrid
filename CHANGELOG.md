@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### LoRa radios leave the air quiet after every packet, and hold while a frame is mid-flight
+
+- The module also loses packets that follow the previous one too closely: back-to-back
+  120-character frames 0.8 s apart arrived 14 of 16, while 2 s apart arrived 16 of 16, measured
+  again on a quiet 867.5 MHz with the third radio off, so it is the receiver's own recovery, not
+  the band or a collision. Every sender now leaves 1.5 s of idle air after each of its own
+  transmissions (alerts excepted), on APs and handhelds alike.
+- Carrier sense at the protocol layer: a part header says how many parts are still coming, so
+  every radio that hears one holds its own non-alert sends for that much airtime instead of
+  transmitting over the rest of the frame. The `lora` status counts the holds.
+- Whole three-part frames between APs went from 3-7 of 8 to 7-9 of 8 unacknowledged; text and
+  notes between APs also ride D104's acknowledge-and-resend on top.
+
 ### A LoRa part is 120 characters, because the module drops longer ones
 
 - The demo's flaky "Cut the Wi-Fi between access points" chapter came down to the radio module

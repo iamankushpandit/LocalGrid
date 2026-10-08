@@ -46,6 +46,12 @@ static int s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set to *
 #define DETECT_TRIES      3u
 #define PART_TRIES        3u
 #define BACKOFF_MAX_MS    300u     /* random wait before every transmission: no carrier sense */
+/* How long another sender's remaining parts keep this radio quiet, and the quiet the module needs
+ * between packets as a receiver (as on the APs, measured 2026-10-08). */
+#define PART_GAP_MIN_MS   1500u
+#define AIR_PART_GAP_MS   1600u
+#define AIR_HOLD_MARGIN_MS 300u
+#define AIR_HOLD_CAP_MS   8000u
 #define RETRY_MIN_MS      800u
 #define RETRY_SPAN_MS     2200u
 #define RX_RING           2u
@@ -113,6 +119,9 @@ static struct {
     uint32_t frames_out, frames_in, parts_out, parts_in, parts_dropped;
     uint32_t refused_type, retries, airtime_ms, restarts;
     uint32_t acks_out;   /* D109: acknowledgements sent to an AP for a frame it is waiting to hear about */
+    uint32_t air_busy_until_ms;   /* somebody's multi-part frame is mid-flight: hold non-alert sends */
+    uint32_t held_for_air;
+    uint32_t last_tx_end_ms;      /* when this handheld's own last transmission finished */
 } L;
 
 static void lock(void)   { if (L.lock != NULL) { xSemaphoreTake(L.lock, portMAX_DELAY); } }
@@ -339,6 +348,19 @@ static void handle_rcv(const lora_at_t *at)
         L.parts_dropped++;
         return;
     }
+    /* Carrier sense at the protocol layer, as on the APs (2026-10-08): a part with more to come
+     * means the air is taken for that much longer, and transmitting into it loses a part for
+     * everyone. Only an alert may interrupt. */
+    lora_part_t ph;
+    if (lora_part_parse(raw, n, &ph) && ph.part + 1u < ph.of) {
+        uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
+        uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS) + AIR_HOLD_MARGIN_MS;
+        wait = wait > AIR_HOLD_CAP_MS ? AIR_HOLD_CAP_MS : wait;
+        uint32_t until = now_ms() + wait;
+        if ((int32_t)(until - L.air_busy_until_ms) > 0) {
+            L.air_busy_until_ms = until;
+        }
+    }
     lora_asm_slot_t *slot = NULL;
     if (lora_asm_feed(&L.asmb, now_ms(), raw, n, &slot) != LORA_ASM_COMPLETE) {
         return;   /* lora_asm_feed counts everything it refused, oversize included */
@@ -454,6 +476,16 @@ static bool transmit_a_part(unsigned *fails)
 {
     lock();
     lora_txq_slot_t *s = lora_txq_peek(&L.txq, now_ms());
+    if (s != NULL && !s->alert && s->part == 0u && (int32_t)(now_ms() - L.air_busy_until_ms) < 0) {
+        L.held_for_air++;   /* somebody's frame is mid-flight: wait for the air, keep listening */
+        unlock();
+        return false;
+    }
+    /* Receivers need PART_GAP_MIN_MS of quiet after each packet, ours included (as on the APs). */
+    if (s != NULL && !s->alert && (int32_t)(now_ms() - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
+        unlock();
+        return false;
+    }
     unlock();
     if (s == NULL) {
         return false;
@@ -461,6 +493,7 @@ static bool transmit_a_part(unsigned *fails)
     s->sending = true;
     bool ok = send_one(s->dest, s->id, s->data, s->len, s->part, s->of);
     lock();
+    L.last_tx_end_ms = now_ms();
     if (!ok) {
         (*fails)++;
         lora_txq_release(&L.txq, s);

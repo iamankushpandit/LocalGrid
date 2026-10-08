@@ -49,6 +49,17 @@ static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set t
  * gone to all of them at once and two answers at the same moment are two answers lost. A turn is the
  * acknowledgement's time on the air and the module's own delay. See ack_turn() for how turns are counted.
  */
+/*
+ * The module needs quiet time between packets as a RECEIVER: back-to-back 120-character frames
+ * 0.8 s apart arrived 14 of 16 on the bench, 1.2 s apart 13-16 of 16, and 1.5 s or more apart
+ * 15-16 of 16 (2026-10-08). So every sender leaves PART_GAP_MIN_MS of idle air after each of its
+ * own transmissions, except before an alert, and a holder's estimate of a mid-flight frame counts
+ * the same gap.
+ */
+#define PART_GAP_MIN_MS   1500u
+#define AIR_PART_GAP_MS   1600u
+#define AIR_HOLD_MARGIN_MS 300u
+#define AIR_HOLD_CAP_MS   8000u
 #define ACK_TURN_MS       500u
 #define ACK_JITTER_MS     80u
 /*
@@ -165,6 +176,10 @@ static struct {
     uint32_t acks_in;         /* acknowledgements that answered a frame waiting here */
     uint32_t acks_late;       /* acknowledgements for a frame no longer waiting: answered twice, or given up */
     uint32_t listen_until_ms; /* only alerts and acknowledgements are transmitted before this */
+    uint32_t air_busy_until_ms; /* somebody's multi-part frame is mid-flight: hold non-alert sends */
+    uint32_t held_for_air;    /* times a send waited for it */
+    bool     holding_for_air;
+    uint32_t last_tx_end_ms;  /* when this AP's own last transmission finished */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -444,6 +459,22 @@ static void handle_rcv(const lora_at_t *at)
         ESP_LOGI(TAG, "[LORA] Part %u/%u of %u from peer 0x%02X, %u chars, RSSI %d dBm, SNR %d",
                  (unsigned)(ph.part + 1u), (unsigned)ph.of, (unsigned)ph.id, (unsigned)ph.peer,
                  (unsigned)at->len, (int)L.rssi, (int)L.snr);
+        /*
+         * Carrier sense at the protocol layer (2026-10-08). The radios have none of their own, and a
+         * receiver that transmits while somebody's multi-part frame is mid-flight is deaf for a part
+         * of it: with three-part frames on the bench, one witness kept 8 of 8 while the other, busier,
+         * kept 3 of 8. The header says how many parts are still coming, so everything that hears one
+         * waits that much airtime before its own non-alert transmissions.
+         */
+        if (ph.part + 1u < ph.of) {
+            uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
+            uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS) + AIR_HOLD_MARGIN_MS;
+            wait = wait > AIR_HOLD_CAP_MS ? AIR_HOLD_CAP_MS : wait;
+            uint32_t until = app_now_ms() + wait;
+            if ((int32_t)(until - L.air_busy_until_ms) > 0) {
+                L.air_busy_until_ms = until;
+            }
+        }
     }
     lora_asm_slot_t *slot = NULL;
     lora_asm_result_t r = lora_asm_feed(&L.asmb, app_now_ms(), raw, n, &slot);
@@ -594,6 +625,23 @@ static bool transmit_a_part(unsigned *fails)
         unlock();
         return false;
     }
+    /* Somebody else's frame is mid-flight: everything but an alert, and but a frame of our own
+     * already under way (its receivers are holding for us in turn), waits for the air. */
+    if (!slot->alert && slot->part == 0u && (int32_t)(now - L.air_busy_until_ms) < 0) {
+        if (!L.holding_for_air) {
+            L.holding_for_air = true;
+            L.held_for_air++;
+        }
+        unlock();
+        return false;
+    }
+    /* And the receivers need PART_GAP_MIN_MS of quiet after each packet, ours included, or they
+     * miss the next one; the task keeps listening meanwhile. An alert alone goes at once. */
+    if (!slot->alert && (int32_t)(now - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
+        unlock();
+        return false;
+    }
+    L.holding_for_air = false;
     slot->sending = true;
     dest = slot->dest;
     id = slot->id;
@@ -610,6 +658,7 @@ static bool transmit_a_part(unsigned *fails)
     bool ok = send_one(dest, id, data, len, part, of);
 
     lock();
+    L.last_tx_end_ms = app_now_ms();   /* receivers need quiet from here, sent or not */
     if (!slot->in_use || slot->id != id) {
         unlock();   /* it was released under us (the module was reset): nothing to finish */
         return true;
@@ -1546,6 +1595,7 @@ void lora_print(void)
     printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
     printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
     printf("  module lines that parsed as nothing: %" PRIu32 "\n", s_at_noise);
+    printf("  sends held while another's frame was mid-air: %" PRIu32 "\n", L.held_for_air);
     printf("  messages taken over from ESP-NOW when it could not deliver them: %" PRIu32 "\n", L.took_over);
     printf("  messages the queue had no room for (the rest of its drops were routine): %" PRIu32 "\n",
            L.txq.dropped_messages);
