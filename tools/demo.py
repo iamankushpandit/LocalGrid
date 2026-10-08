@@ -1251,6 +1251,7 @@ class Grid(chaos.Chaos):
         groups_before = {n for n, _ in self.read_groups([h])[h.name].values()}
         self.caption(f"{self.label(h)} restarts, the way a flat battery and a recharge would. Watch what it still knows.")
         t0 = time.monotonic()
+        h.injected_at = t0   # the demo's own restart, not a crash: chaos would otherwise report it as one
         self.write(h, "reboot")
         self.wait(15, until=lambda: h.boot_at > t0)
         self.timer(f"{self.label(h)} back", "start")
