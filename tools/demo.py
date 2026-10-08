@@ -848,12 +848,14 @@ class Grid(chaos.Chaos):
                       "not cross LoRa; it is left out", ok=False)
         elif pair:
             s, r = pair
-            self.caption(f"And voice: {self.label(s)} talks to {self.label(r)}. Live talk is too big for LoRa, so a "
-                         "compact copy of the same words crosses it instead (D95).")
+            self.caption(f"And voice: {self.label(s)} says a few words to {self.label(r)}. Live talk is too big for "
+                         "LoRa, so a compact copy crosses it instead, a few seconds of speech in a few packets, "
+                         "each acknowledged like a message. It arrives late and in one piece (D95).")
             self.lora_air_quiet(live, limit=60)   # the message and its answers, off the air first
             self.open_screens([(s, str(r.index)), (r, str(s.index))])
-            self.talk_clip(s, str(r.index), f"{self.label(r)}, this came over LoRa between the access points.", [r],
-                           path="lora")
+            # Short on purpose: LoRa carries about a packet of speech every nine seconds (measured
+            # 2026-10-08), and a demonstration proves the mechanism, not a stress test.
+            self.talk_clip(s, str(r.index), "This crossed on LoRa.", [r], path="lora")
         after = self.lora_query(live)
         delta = self.lora_delta(before, after)
         sent = {n: r.get("frames_out") for n, r in delta.items() if r.get("frames_out")}
@@ -1023,6 +1025,13 @@ class Grid(chaos.Chaos):
         self.timer(f"To {self.label(v)} over LoRa", "start")
         p = self.send(peer, v, "This reached you over LoRa, with your Wi-Fi off.", [v], path="lora")
         got = self.settle_message(p, LORA_DELIVERY_S)
+        if got.get(v.name) is None and p["refused"] and "offline" in p["refused"]:
+            # The grid had not yet heard that the handheld is on LoRa alone: say so, give it a
+            # moment, and send once more (seen twice on 2026-10-08).
+            self.caption(f"The grid had not yet heard where {self.label(v)} is. {self.label(peer)} sends again.")
+            self.wait(20)
+            p = self.send(peer, v, "This reached you over LoRa, with your Wi-Fi off.", [v], path="lora")
+            got = self.settle_message(p, LORA_DELIVERY_S)
         secs = got.get(v.name)
         self.timer(f"To {self.label(v)} over LoRa", "stop", secs)
         self.fact(f"{self.label(v)} got it over LoRa in {secs:.1f} s, and its access point heard it say so"
@@ -1037,10 +1046,11 @@ class Grid(chaos.Chaos):
         self.fact(f"Its answer reached {self.label(peer)} in {secs:.1f} s" if secs is not None
                   else "Its answer did not arrive" + (f" ({p['refused']})" if p["refused"] else ""),
                   ok=secs is not None)
-        self.caption(f"{self.label(peer)} talks to {self.label(v)} as well. Live talk needs Wi-Fi, so a compact copy "
-                     "of the same words, a fraction of the size, crosses LoRa instead (D95).")
+        self.caption(f"{self.label(peer)} says a few words to {self.label(v)} as well. Live talk needs Wi-Fi, so a "
+                     "compact copy, a few seconds in a few packets, crosses LoRa instead and arrives late and in "
+                     "one piece (D95).")
         self.open_screens([(peer, str(v.index)), (v, str(peer.index))])
-        self.talk_clip(peer, str(v.index), f"{self.label(v)}, can you hear me over LoRa?", [v], path="lora")
+        self.talk_clip(peer, str(v.index), "Can you hear this?", [v], path="lora")
         self.caption(f"Wi-Fi comes back on {self.label(v)}.")
         t = time.monotonic()
         self.write(v, "wifi on")
@@ -1223,8 +1233,9 @@ class Grid(chaos.Chaos):
             t_ = tid()
             got = h.note_heard.get(t_) if t_ is not None else None
             return got if got and got[0] == sender.index else None
-        # A note is made after the talk ends and crosses LoRa at about a second a packet.
-        self.wait(secs + (60 if path == "lora" else 20),
+        # A note is made after the talk ends; on LoRa a packet takes about nine seconds, a lost one
+        # is resent, and a partial note replays whole when the rest lands, so the wait is generous.
+        self.wait(secs + (150 if path == "lora" else 20),
                   until=lambda: tid() is not None and all(heard(h) or heard_note(h) for h in listeners))
         self.wait(2)
         t_ = tid()
