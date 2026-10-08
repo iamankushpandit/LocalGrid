@@ -275,6 +275,10 @@ class Grid(chaos.Chaos):
             name = fields.get("board")
             if name in self.rejoins and self.rejoins[name] is None:
                 self.rejoins[name] = round(time.monotonic() - self.watch_since, 1)
+        # A harness finding is this laptop working round a USB cable (a power line that needed a second
+        # try), not the grid: it stays in the session log and off the page.
+        if what == "finding" and fields.get("harness"):
+            return rec
         if what in ("registered", "handheld_down", "link_up", "link_down", "boot", "bb_off", "bb_on",
                     "wifi_off", "wifi_on", "lora_link_up", "lora_link_down", "finding"):
             self.publish("log", event=what, **{k: v for k, v in fields.items() if isinstance(v, (str, int, float))})
@@ -713,6 +717,25 @@ class Grid(chaos.Chaos):
             self.fact(f"{self.label(v)} had not linked to every access point {RELINK_S} s after power came back",
                       ok=False)
 
+    def lora_air_quiet(self, live, limit=90):
+        """Wait for the LoRa channel to calm down. With the Wi-Fi link cut, everything the access points
+        were keeping in step moves to LoRa at once, and after an access point restarts that is a lot: on
+        2026-10-07 the three of them were on the air for 70 s of 100, a radio cannot hear while it sends,
+        and a message from Fuji never reached Everest. Quiet: every queue empty and under 30 % of the air
+        used, over ten seconds."""
+        t = time.monotonic()
+        before = self.lora_query(live)
+        while time.monotonic() - t < limit:
+            self.wait(10)
+            after = self.lora_query(live)
+            used = sum(max(0, (after[n].get("airtime_ms") or 0) - (before.get(n, {}).get("airtime_ms") or 0))
+                       for n in after)
+            empty = all(not (s.get("queue_depth") or 0) for s in after.values())
+            if empty and used < 3000:
+                return round(time.monotonic() - t)
+            before = after
+        return None
+
     def sc_lora_bridge(self):
         """The Wi-Fi link between access points is cut everywhere. The next message crosses by LoRa."""
         if not self.precheck():
@@ -737,6 +760,11 @@ class Grid(chaos.Chaos):
         self.publish("log", event="backbone_cut", board="every access point")
         self.caption("The Wi-Fi link between the access points is gone. The only way between them is LoRa.",
                      hold=3)
+        self.caption("Everything they were keeping in step over Wi-Fi now goes over LoRa too, a few hundred "
+                     "bytes a second at most. We let that settle before anybody writes.")
+        settled = self.lora_air_quiet(live)
+        if settled is not None:
+            self.fact(f"The LoRa channel was quiet again {settled} s later")
         if pair:
             s, r = pair
             sa = next(a for a in self.aps if a.index == s.registered_node)
@@ -778,6 +806,7 @@ class Grid(chaos.Chaos):
             s, r = pair
             self.caption(f"And voice: {self.label(s)} talks to {self.label(r)}. Live talk is too big for LoRa, so a "
                          "compact copy of the same words crosses it instead (D95).")
+            self.lora_air_quiet(live, limit=60)   # the message and its answers, off the air first
             self.open_screens([(s, str(r.index)), (r, str(s.index))])
             self.talk_clip(s, str(r.index), f"{self.label(r)}, this came over LoRa between the access points.", [r],
                            path="lora")

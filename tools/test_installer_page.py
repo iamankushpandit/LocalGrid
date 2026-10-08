@@ -502,9 +502,20 @@ def main():
     check("this board, and not another, now runs the published image (its boot banner names that build)",
           now and published.startswith(now), (now, published[:16]))
     time.sleep(8)
+    import serial
+    held = []
     for port, ident in others.items():   # nothing else was touched
-        if ident and ask(port, "id", "LGID") and ident not in ask(port, "id", "LGID"):
+        if not ident:
+            continue
+        try:
+            said = ask(port, "id", "LGID")
+        except serial.SerialException:
+            held.append(port)   # tools/demo.py holds the others open, and watches those boards itself
+            continue
+        if said and ident not in said:
             check(f"the board on {port} is still the one it was", False, ident)
+    if held:
+        print(f"        (not asked: {', '.join(held)} are held open by another tool)", flush=True)
     after = ask(d["port"], "id", "LGID")
     check("after all of it the board still answers with its own ID", d["id"] in after, after)
     version = ask(d["port"], "update", "LGFWU:")
