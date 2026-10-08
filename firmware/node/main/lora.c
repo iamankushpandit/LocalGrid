@@ -625,9 +625,12 @@ static bool transmit_a_part(unsigned *fails)
         unlock();
         return false;
     }
-    /* Somebody else's frame is mid-flight: everything but an alert, and but a frame of our own
-     * already under way (its receivers are holding for us in turn), waits for the air. */
-    if (!slot->alert && slot->part == 0u && (int32_t)(now - L.air_busy_until_ms) < 0) {
+    /* Somebody else's frame is mid-flight: everything but an alert and an acknowledgement, and but
+     * a frame of our own already under way (its receivers are holding for us in turn), waits for
+     * the air. Acknowledgements are never held: held behind a sender's resend stream, the ack that
+     * would stop the stream never went, the sender resent, and the hold renewed - Everest put 31
+     * frames on the air while Denali, hearing every one, answered 4 (2026-10-08). */
+    if (!slot->alert && !slot->is_ack && slot->part == 0u && (int32_t)(now - L.air_busy_until_ms) < 0) {
         if (!L.holding_for_air) {
             L.holding_for_air = true;
             L.held_for_air++;
@@ -636,8 +639,8 @@ static bool transmit_a_part(unsigned *fails)
         return false;
     }
     /* And the receivers need PART_GAP_MIN_MS of quiet after each packet, ours included, or they
-     * miss the next one; the task keeps listening meanwhile. An alert alone goes at once. */
-    if (!slot->alert && (int32_t)(now - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
+     * miss the next one; the task keeps listening meanwhile. An alert or an ack goes at once. */
+    if (!slot->alert && !slot->is_ack && (int32_t)(now - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
         unlock();
         return false;
     }

@@ -476,13 +476,15 @@ static bool transmit_a_part(unsigned *fails)
 {
     lock();
     lora_txq_slot_t *s = lora_txq_peek(&L.txq, now_ms());
-    if (s != NULL && !s->alert && s->part == 0u && (int32_t)(now_ms() - L.air_busy_until_ms) < 0) {
+    if (s != NULL && !s->alert && !s->is_ack && s->part == 0u &&
+        (int32_t)(now_ms() - L.air_busy_until_ms) < 0) {
         L.held_for_air++;   /* somebody's frame is mid-flight: wait for the air, keep listening */
         unlock();
         return false;
     }
-    /* Receivers need PART_GAP_MIN_MS of quiet after each packet, ours included (as on the APs). */
-    if (s != NULL && !s->alert && (int32_t)(now_ms() - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
+    /* Receivers need PART_GAP_MIN_MS of quiet after each packet, ours included (as on the APs).
+     * An acknowledgement is never held: the sender is listening for it right now. */
+    if (s != NULL && !s->alert && !s->is_ack && (int32_t)(now_ms() - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
         unlock();
         return false;
     }
