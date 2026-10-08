@@ -83,6 +83,7 @@ LOG_KEEP = 200            # lines kept per board, for a page opened mid-session
 LOG_BATCH_S = 0.3         # lines go to the page in batches, not one message each
 
 CLIP_REPLY = re.compile(r"CLIP: (.*)$")
+STATUS_LINK = re.compile(r"^\s*link: ONLINE on .* \(node (\d+)\)")
 GRID_SSID = "LocalGrid Access Point"     # every access point's network (D46, lg_proto_config.h)
 ADMIN_URL = "http://192.168.4.1/"
 NAME_LINE = re.compile(r"Name: (.+)$")
@@ -341,6 +342,10 @@ class Grid(chaos.Chaos):
             self.gtab.setdefault(b.name, {})[int(m.group(1))] = (m.group(2), members)
         if not b.is_ap and (m := CLIP_REPLY.search(line)):
             b.clip_reply = m.group(1).strip()
+        # `status` says which AP a handheld is on: after another tool held its port, the "Registered with"
+        # line went to that tool, and this is how the demo learns it instead.
+        if not b.is_ap and b.registered_node is None and (m := STATUS_LINK.search(line)):
+            b.registered_node = int(m.group(1))
         if b.is_ap and (m := AP_GROUPS.search(line)):
             b.groups_version = int(m.group(1))
         for rx, what in ((AP_CARRYING, "carrying"), (AP_HANDING, "handing"), (HH_OFFERED, "offered"),
@@ -1539,6 +1544,11 @@ class Grid(chaos.Chaos):
             v.injected_at = time.monotonic()   # still transferring: keep the silence watchdog off this board
             return "%" in line or "LGFWU" in line or "lgfw" in line
         code = self.run_tool(["tools/lgfw.py", "send", str(path), name], 900, show=show)
+        if code not in (0, None):
+            # A megabyte over a cable can stall once with the board still running ("stopped at byte
+            # 879264", 2026-10-07): once more before calling it a failure.
+            self.caption(f"The cable transfer to {self.label(v)} stalled; once more.")
+            code = self.run_tool(["tools/lgfw.py", "send", str(path), name], 900, show=show)
         self.reopen_quiet(v)
         v.injected_at = time.monotonic()
         given = round(time.monotonic() - t_give, 1)
@@ -1758,6 +1768,8 @@ class Grid(chaos.Chaos):
             self.fact(f"The installer did not finish (exit {code})", ok=False)
             return
         self.fact(f"Installed from the browser and set up for this grid in {time.monotonic() - t:.0f} s")
+        b.injected_at = time.monotonic()   # restarted by the install, not by a fault
+        self.write(b, "status")            # it registered while the installer held its port: ask where it is
         self.write(b, "people")
         back = self.wait(120, until=lambda: b.registered_node is not None)
         if back:

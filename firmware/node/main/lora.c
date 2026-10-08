@@ -45,9 +45,9 @@ static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set t
 #define WEDGE_FAILS       5u        /* consecutive failed parts before the module is reset */
 #define WEDGE_BACKOFF_MS  2000u
 /*
- * D104. Every AP that owes an acknowledgement sends it in a turn of its own, counted from the sender's
- * index, because the frame may have gone to all of them at once and two answers at the same moment are
- * two answers lost. A turn is the acknowledgement's time on the air and the module's own delay.
+ * D104. Every AP that owes an acknowledgement sends it in a turn of its own, because the frame may have
+ * gone to all of them at once and two answers at the same moment are two answers lost. A turn is the
+ * acknowledgement's time on the air and the module's own delay. See ack_turn() for how turns are counted.
  */
 #define ACK_TURN_MS       500u
 #define ACK_JITTER_MS     80u
@@ -447,6 +447,33 @@ static void handle_rcv(const lora_at_t *at)
     unlock();
 }
 
+/*
+ * D104: the turn in which AP `answerer` acknowledges a frame from AP `src`, from 1. The APs that could
+ * answer go in order of index after the sender's, counting only those present: this AP itself and its
+ * LoRa peers that are up. The sender and the answerer each count from their own list of peers, and the
+ * two lists can differ by an AP that one of them has just heard or lost; that moves an answer by one
+ * turn, inside the sender's ACK_MARGIN_MS.
+ *
+ * Counted over all LG_MAX_NODES indices, as it was, Everest (0) answering Denali (2) waited six turns,
+ * 2.5 s, on a grid of three. Denali, holding back everything but answers while it listened, could not
+ * keep up with a talk's compact copy arriving every 2.8 s: its queue dropped 8 frames and one packet of
+ * four crossed (2026-10-07). Now the one AP addressed answers at once.
+ */
+static uint32_t ack_turn(uint16_t src, uint16_t answerer)
+{
+    uint32_t dist = (uint32_t)((answerer + LG_MAX_NODES - src) % LG_MAX_NODES);
+    uint32_t turn = 1;
+    for (uint16_t p = 0; p < LG_MAX_NODES; p++) {
+        if (p == src || p == answerer || !(p == L.index || L.peers[p].up)) {
+            continue;
+        }
+        if ((uint32_t)((p + LG_MAX_NODES - src) % LG_MAX_NODES) < dist) {
+            turn++;
+        }
+    }
+    return turn;
+}
+
 /* ---- transmit ---- */
 
 static bool send_part(uint16_t dest, const char *b64, size_t b64_len)
@@ -580,7 +607,7 @@ static bool transmit_a_part(unsigned *fails)
         uint32_t turns = 0;
         for (uint16_t n = 0; n < LG_MAX_NODES; n++) {
             if ((slot->await & (1u << n)) != 0u) {
-                uint32_t turn = (uint32_t)((n + LG_MAX_NODES - L.index) % LG_MAX_NODES);   /* 1 .. LG_MAX_NODES-1 */
+                uint32_t turn = ack_turn(L.index, n);
                 turns = turn > turns ? turn : turns;
             }
         }
@@ -816,8 +843,7 @@ static void queue_ack(uint16_t src, uint32_t seq)
     if (src >= LG_MAX_NODES || src == L.index || lora_ack_build(seq, body, sizeof(body)) == 0u) {
         return;
     }
-    uint32_t turn = (uint32_t)((L.index + LG_MAX_NODES - src) % LG_MAX_NODES);   /* 1 .. LG_MAX_NODES-1 */
-    uint32_t wait = (turn - 1u) * ACK_TURN_MS + 1u + rand_ms(ACK_JITTER_MS);
+    uint32_t wait = (ack_turn(src, L.index) - 1u) * ACK_TURN_MS + 1u + rand_ms(ACK_JITTER_MS);
     if (queue_sealed_for((uint16_t)LORA_ADDR_AP(src), false, body, sizeof(body), 0, wait)) {
         L.acks_out++;
     }
