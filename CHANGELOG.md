@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - The owner's replay (2026-10-08): a note plays what arrived when it goes quiet, as before, but now
   stays open another 25 s; if the missing packets land - an AP resends them - the handheld joins
   everything and plays the whole talk once more, and the log says it was replayed whole.
+- A talker spaces the compact packets 9 s apart, not 2.8 s: a packet is three paced parts and an
+  acknowledgement, about 8 s of air, and packets offered faster were evicted from an AP's four-slot
+  queue - a talk arrived 1 packet in 3. Late and in one piece is the compact copy's deal (D95).
 
 ### LoRa radios leave the air quiet after every packet, and hold while a frame is mid-flight
 

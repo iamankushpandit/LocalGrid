@@ -327,7 +327,13 @@ static void synth(int16_t *pcm, size_t n)
 #define C2_DEC_STACK      24576     /* 14 KB overflowed on the first note played (2026-10-04); about 18 KB is used */
 #define C2_PRIORITY       3         /* below capture and playback (4): live talk is never held up by this */
 #define C2_PCM_BUFFER     (FRAME_SAMPLES * 5u * sizeof(int16_t))   /* half a second of samples waiting */
-#define C2_SPACING_MS     2800      /* between packets: each goes twice, about 2.6 s on the air, and queues are four deep */
+/*
+ * Between packets. A packet is three 120-character parts since 2026-10-08, and the radios leave
+ * 1.5 s of quiet air after each transmission, so one packet is about 8 s of airtime with its
+ * acknowledgement; packets offered faster than that piled up in an AP's four-slot queue and the
+ * older ones were evicted - a talk arrived 1 packet in 3. Late and in one piece is the deal (D95).
+ */
+#define C2_SPACING_MS     9000
 #define NOTE_STRAGGLE_MS  3000      /* after the last packet has come, how long to wait for a missing one */
 #define NOTE_GIVE_UP_MS   10000     /* no packet for this long (three spacings and a bit): play what there is */
 #define NOTE_BUSY_WAIT_MS 20000     /* how long a finished note waits for this handheld to stop talking or playing */
