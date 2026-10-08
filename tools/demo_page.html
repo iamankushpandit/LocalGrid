@@ -45,6 +45,21 @@ aside.left { position: absolute; z-index: 5; left: 0; top: 0; bottom: 0; width: 
               border-right: 1px solid var(--line); box-shadow: 8px 0 24px rgba(0,0,0,.4); transform: translateX(-105%);
               transition: transform .25s ease; }
 aside.left.open { transform: none; }
+/* A tab on each edge of the stage opens or closes its panel by mouse: chapters on the left, the stopwatch,
+   results and events on the right. Each sits on the edge of its panel and moves with it. */
+.edge { position: absolute; z-index: 6; top: 50%; transform: translateY(-50%); width: 18px; height: 72px; padding: 0;
+        border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; font-size: 15px;
+        opacity: .5; transition: left .25s ease, right .4s ease, opacity .2s ease; }
+.edge:hover { opacity: 1; color: var(--text); border-color: var(--accent); }
+#edgeL { left: 0; border-left: 0; border-radius: 0 8px 8px 0; }
+#edgeL::before { content: "›"; }
+aside.left.open ~ #edgeL { left: 280px; }
+aside.left.open ~ #edgeL::before { content: "‹"; }
+#edgeR { right: 360px; border-right: 0; border-radius: 8px 0 0 8px; }
+#edgeR::before { content: "›"; }
+body.noside #edgeR { right: 0; }
+body.noside #edgeR::before { content: "‹"; }
+body.recording .edge { display: none; }
 aside.right { border-left: 1px solid var(--line); display: grid; gap: 8px; overflow: hidden;
                grid-template-rows: auto auto minmax(0, 1.2fr) auto minmax(0, 1fr); }
 aside.right .win { min-height: 0; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px;
@@ -196,6 +211,8 @@ body.recording header label:has(#rec) { visibility: visible; opacity: .25; }
     <h2>Chapters</h2>
     <ol class="chapters" id="chapters"></ol>
   </aside>
+  <button class="edge" id="edgeL" title="Chapters: open or close (C)"></button>
+  <button class="edge" id="edgeR" title="Stopwatch, results and events: open or close (E). Opened by hand, it stays open."></button>
   <section class="stage">
     <div class="slide" id="slide"><div class="part" id="part"></div><h1 id="title"></h1><ul id="body"></ul></div>
     <div class="view" id="view"></div>
@@ -233,6 +250,7 @@ let boards = false;
 let watchUrl = null;
 let at = 0;                       // the chapter on screen
 let playing = false;              // Play all, or one chapter, is running
+let sidePinned = false;           // the right panel was opened by hand, so chapters do not close it
 let demoDone = null;              // resolves when the scenario running now ends
 const flows = new Map();          // token -> {from, to:Set, path, born}
 const bursts = [];
@@ -421,7 +439,7 @@ function show(i) {
   if ((c.view || "map") === "diagram") focusOn(c.lead_focus || c.focus || (c.points && c.points[0] && c.points[0].focus) || "all");
   showMedia(c);
   $("caption").textContent = st.live && st.why ? "This live demo needs setup: " + st.why + "." : "";
-  document.body.classList.toggle("noside", !st.live);
+  if (!sidePinned) document.body.classList.toggle("noside", !st.live);   // opened by hand, it stays open
   renderChapters(); renderControls();
 }
 
@@ -516,6 +534,11 @@ function toggleLogs() {
 $("logsbtn").onclick = toggleLogs;
 function toggleChapters() { $("chapbtn").classList.toggle("on", document.querySelector("aside.left").classList.toggle("open")); }
 $("chapbtn").onclick = toggleChapters;
+$("edgeL").onclick = toggleChapters;
+// The right panel comes out by itself for live chapters. Opened by hand it is pinned open for every chapter;
+// closed by hand it goes back to coming out by itself.
+function toggleSide() { sidePinned = !document.body.classList.toggle("noside"); }
+$("edgeR").onclick = toggleSide;
 
 // ---- the site's diagram: explained, pointed at, and drawn live ----
 // Everything on the stage is assets/network-diagram.svg, the diagram in the README and on the site
@@ -1157,7 +1180,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Escape") stopAll();
   else if (e.key === "l" || e.key === "L") toggleLogs();
   else if (e.key === "c" || e.key === "C") toggleChapters();
-  else if (e.key === "e" || e.key === "E") document.body.classList.toggle("noside");
+  else if (e.key === "e" || e.key === "E") toggleSide();
   else if ((e.key === "r" || e.key === "R") && !$("reset").disabled) post("/api/reset");
 });
 
