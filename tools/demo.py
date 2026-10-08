@@ -741,6 +741,48 @@ class Grid(chaos.Chaos):
             before = after
         return None
 
+    def lora_pair(self, live, snap):
+        """A talker and a listener on two access points that hear each other over LoRa both ways, the
+        best-heard pair. On the bench some pairs barely hear each other: after Everest's antenna was moved,
+        Fuji did not hear Everest at all, and a message between them never crossed (2026-10-07). Each
+        handheld is moved onto its access point if it is not there already, and pinned for the demo."""
+        def link(a, b):
+            p = (snap.get(a.name) or {}).get("peers", {}).get(b.index)
+            return p if p and p["up"] and p["age_ms"] < 90000 else None
+        best = None
+        for a in live:
+            for b in live:
+                if a is b:
+                    continue
+                ab, ba = link(a, b), link(b, a)
+                if ab and ba:
+                    score = min(ab["snr"], ba["snr"])
+                    if best is None or score > best[0]:
+                        best = (score, a, b)
+        if best is None:
+            return None
+        _, sa, ra = best
+        on = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
+        talkers = sorted([h for h in on if h.can_talk], key=lambda h: h.registered_node != sa.index)
+        if not talkers:
+            return None
+        s = talkers[0]
+        hear = sorted([h for h in on if h is not s and h.can_hear is not False],
+                      key=lambda h: h.registered_node != ra.index)
+        if not hear:
+            return None
+        r = hear[0]
+        for h, ap in ((s, sa), (r, ra)):
+            if h.registered_node != ap.index:
+                self.caption(f"{self.label(h)} moves to {self.label(ap)} for this.")
+                self.pinned = getattr(self, "pinned", []) + [h]   # restore() sets it back to automatic
+                self.write(h, f"node {ap.index}")
+                self.wait(45, until=lambda h=h, ap=ap: h.registered_node == ap.index)
+        if s.registered_node != sa.index or r.registered_node != ra.index:
+            return None
+        self.pin(s, r)   # on two access points until the end, so what crosses has to cross LoRa
+        return s, r
+
     def sc_lora_bridge(self):
         """The Wi-Fi link between access points is cut everywhere. The next message crosses by LoRa."""
         if not self.precheck():
@@ -749,14 +791,11 @@ class Grid(chaos.Chaos):
         if len(live) < 2:
             self.caption("This needs two access points.")
             return
-        on = [h for h in self.hhs if self.present(h) and h.registered_node is not None]
-        pair = next(((s, r) for s in on for r in on if s.registered_node != r.registered_node), None)
-        if pair:
-            self.pin(*pair)   # on two access points until the end, so what crosses has to cross LoRa
         before = self.lora_query(live)
         if not any(s.get("fitted") for s in before.values()):
             self.caption("No access point has a LoRa module answering, so there is no second path to show.")
             return
+        pair = self.lora_pair(live, before)
         self.caption("Access points normally pass messages to each other over Wi-Fi. "
                      "We switch that link off on every one of them.", hold=4)
         for a in live:
