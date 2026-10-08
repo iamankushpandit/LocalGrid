@@ -897,7 +897,9 @@ class Grid(chaos.Chaos):
             self.fact(f"The SOS was not sent: {p['refused']}", ok=False)
         for name, secs in sorted(got.items(), key=lambda kv: (kv[1] is None, kv[1] or 0)):
             b = self.by_name[name]
-            self.fact(f"{self.label(b)}: on screen in {secs:.1f} s" if secs is not None
+            # "had it": the measured moment is the board's own [MSG] arrival line; its screen logs
+            # the alert about half a second later (verified against board clocks, 2026-10-08).
+            self.fact(f"{self.label(b)}: had it in {secs:.1f} s, on screen moments later" if secs is not None
                       else f"{self.label(b)}: did not show it within {DELIVERY_S} s", ok=secs is not None)
         after = self.lora_query(live)
         delta = self.lora_delta(before, after)
@@ -1098,7 +1100,10 @@ class Grid(chaos.Chaos):
         if secs is not None:
             self.fact(f"{self.label(r)} had it in {secs:.1f} s, across two access points" if sa is not ra
                       else f"{self.label(r)} had it in {secs:.1f} s")
-            self.fact("Sealed end to end: the access points carried it without being able to read it")
+            # A recorded design fact (D5, D42), cited rather than measured: the boards never log
+            # message plaintext, so a log cannot show what an access point could not read.
+            self.fact("By design it is sealed end to end: the access points carry it without being "
+                      "able to read it (D5)")
         else:
             self.fact("It did not arrive" + (f" ({p['refused']})" if p["refused"] else ""), ok=False)
         self.caption(f"{self.label(r)} answers.")
@@ -1330,7 +1335,7 @@ class Grid(chaos.Chaos):
         ok = self.wait(45, until=seen)
         secs = round(time.monotonic() - t0, 1)
         self.timer("New name across the grid", "stop", secs if ok else None)
-        self.fact(f"{self.label(other)} knows it as {new} {secs:.0f} s later; so does the map" if ok
+        self.fact(f"{self.label(other)} knows it as {new} {secs:.0f} s later" if ok
                   else f"{self.label(other)} did not show the new name", ok=ok)
         self.wait(3)
         self.caption(f"And back to {old}.")
@@ -1384,6 +1389,12 @@ class Grid(chaos.Chaos):
         self.caption(f"{self.label(v)} crashes and restarts. There is no master copy anywhere: whatever it "
                      f"knew has to come back from its own flash and from the others.", hold=1)
         t = time.monotonic()
+        # The crash kills every session this AP carried, so its riders must register afresh; a
+        # handheld's remembered state is stale at the moment of the crash, and counting it said
+        # "0 s after the crash" while the boards were still noticing (2026-10-08).
+        riders = [h for h in self.hhs if self.present(h) and h.registered_node == v.index]
+        self.watch_since = t
+        self.rejoins = {h.name: None for h in riders}
         self.pulse(v)
         self.on_down(v)
         v.settings_version = None
@@ -1395,7 +1406,8 @@ class Grid(chaos.Chaos):
         checks = {
             "linked": lambda: v.links >= want,
             "time": lambda: bool(v.status) and v.status["time"] != "UNSET",
-            "handhelds": lambda: all(h.registered_node is not None for h in self.hhs if self.present(h)),
+            "handhelds": lambda: all(x is not None for x in self.rejoins.values())
+                                 and all(h.registered_node is not None for h in self.hhs if self.present(h)),
         }
         if settings:
             checks["settings"] = lambda: (v.settings_version or 0) >= settings
@@ -1411,7 +1423,7 @@ class Grid(chaos.Chaos):
                          f"Did not reach settings version {settings}"),
             "groups": (f"Had groups version {groups}, the same as the others, {{s}} s after restarting",
                        f"Did not reach groups version {groups}"),
-            "handhelds": ("Every handheld was on an access point again {s} s after the crash",
+            "handhelds": ("Every handheld had registered with an access point again {s} s after the crash",
                           "Not every handheld was back on an access point"),
         }
         for name in checks:
