@@ -331,6 +331,7 @@ static void synth(int16_t *pcm, size_t n)
 #define NOTE_STRAGGLE_MS  3000      /* after the last packet has come, how long to wait for a missing one */
 #define NOTE_GIVE_UP_MS   10000     /* no packet for this long (three spacings and a bit): play what there is */
 #define NOTE_BUSY_WAIT_MS 20000     /* how long a finished note waits for this handheld to stop talking or playing */
+#define NOTE_REPLAY_WAIT_MS 25000   /* owner, 2026-10-08: a partial note stays; when the rest lands, replay it whole */
 
 static struct {
     TaskHandle_t          task;      /* NULL when no talk is being encoded */
@@ -522,79 +523,107 @@ static void c2_play_task(void *arg)
             break;
         }
     }
-    n->closed = true;
-    int top = n->last >= 0 ? n->last : (int)C2_PACKETS_MAX - 1;
-    while (top >= 0 && !n->have[top]) {
-        top--;
-    }
-    unsigned packets = 0, missing = 0, bytes = 0;
-    uint32_t crc = 0;
-    for (int i = 0; i <= top; i++) {
-        if (n->have[i]) {
-            packets++;
-            bytes += n->len[i];
-            crc = esp_rom_crc32_le(crc, n->data[i], n->len[i]);
-        } else {
-            missing++;
+    bool replayed = false;
+    for (;;) {
+        n->closed = true;
+        int top = n->last >= 0 ? n->last : (int)C2_PACKETS_MAX - 1;
+        while (top >= 0 && !n->have[top]) {
+            top--;
         }
-    }
-    /* Half duplex, and one talker at a time: a note waits for a talk in either direction to finish. */
-    bool free_to_play = false;
-    for (uint32_t waited = 0; waited < NOTE_BUSY_WAIT_MS && bytes > 0; waited += 100) {
-        taskENTER_CRITICAL(&v.mux);
-        free_to_play = !v.st.talking && v.st.heard == 0 && !v.talk_req;
+        unsigned packets = 0, missing = 0, bytes = 0;
+        uint32_t crc = 0;
+        for (int i = 0; i <= top; i++) {
+            if (n->have[i]) {
+                packets++;
+                bytes += n->len[i];
+                crc = esp_rom_crc32_le(crc, n->data[i], n->len[i]);
+            } else {
+                missing++;
+            }
+        }
+        /* Half duplex, and one talker at a time: a note waits for a talk in either direction to finish. */
+        bool free_to_play = false;
+        for (uint32_t waited = 0; waited < NOTE_BUSY_WAIT_MS && bytes > 0; waited += 100) {
+            taskENTER_CRITICAL(&v.mux);
+            free_to_play = !v.st.talking && v.st.heard == 0 && !v.talk_req;
+            if (free_to_play) {
+                v.st.heard = n->author;
+                v.st.heard_scope = n->scope;
+                v.st.heard_target = n->target;
+                v.st.version++;
+            }
+            taskEXIT_CRITICAL(&v.mux);
+            if (free_to_play) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        struct CODEC2 *c = free_to_play ? codec2_create(CODEC2_MODE_1200) : NULL;
+        int16_t *pcm = free_to_play ? malloc(C2_SAMPLES * sizeof(int16_t)) : NULL;
+        uint32_t worst_ms = 0;
+        if (c != NULL && pcm != NULL) {
+            ESP_LOGI(TAG, "[MSG] Hearing device %" PRIu32 " (%s %" PRIu32 "), a note%s", n->author,
+                     n->scope == LG_SCOPE_GROUP ? "group" : n->scope == LG_SCOPE_BROADCAST ? "everyone" : "1:1",
+                     n->target, replayed ? ", whole this time" : "");
+            lg_bsp_audio_cue(LG_CUE_TALK);
+            vTaskDelay(pdMS_TO_TICKS(PREBUFFER_MS));
+            if (lg_bsp_audio_voice_start() == ESP_OK) {
+                for (int i = 0; i <= top && !v.talk_req; i++) {
+                    for (unsigned off = 0; n->have[i] && off + LG_VOICE_C2_FRAME_LEN <= n->len[i];
+                         off += LG_VOICE_C2_FRAME_LEN) {
+                        uint32_t t0 = now_ms();
+                        codec2_decode(c, pcm, n->data[i] + off);
+                        uint32_t took = now_ms() - t0;
+                        worst_ms = took > worst_ms ? took : worst_ms;
+                        (void)lg_bsp_audio_voice_write(pcm, C2_SAMPLES, SPEAKER_WAIT_MS);
+                    }
+                }
+                lg_bsp_audio_voice_stop();
+            } else {
+                ESP_LOGW(TAG, "[MSG] The speaker would not open for a note");
+            }
+        } else if (bytes > 0) {
+            ESP_LOGW(TAG, "[MSG] A note from device %" PRIu32 " was not played: %s", n->author,
+                     free_to_play ? "no memory for the decoder" : "this handheld stayed busy");
+        }
+        if (c != NULL) {
+            codec2_destroy(c);
+        }
+        free(pcm);
         if (free_to_play) {
-            v.st.heard = n->author;
-            v.st.heard_scope = n->scope;
-            v.st.heard_target = n->target;
-            v.st.version++;
+            set_heard(0, 0, 0);
         }
-        taskEXIT_CRITICAL(&v.mux);
-        if (free_to_play) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    struct CODEC2 *c = free_to_play ? codec2_create(CODEC2_MODE_1200) : NULL;
-    int16_t *pcm = free_to_play ? malloc(C2_SAMPLES * sizeof(int16_t)) : NULL;
-    uint32_t worst_ms = 0;
-    if (c != NULL && pcm != NULL) {
-        ESP_LOGI(TAG, "[MSG] Hearing device %" PRIu32 " (%s %" PRIu32 "), a note", n->author,
-                 n->scope == LG_SCOPE_GROUP ? "group" : n->scope == LG_SCOPE_BROADCAST ? "everyone" : "1:1",
-                 n->target);
-        lg_bsp_audio_cue(LG_CUE_TALK);
-        vTaskDelay(pdMS_TO_TICKS(PREBUFFER_MS));
-        if (lg_bsp_audio_voice_start() == ESP_OK) {
-            for (int i = 0; i <= top && !v.talk_req; i++) {
-                for (unsigned off = 0; n->have[i] && off + LG_VOICE_C2_FRAME_LEN <= n->len[i];
-                     off += LG_VOICE_C2_FRAME_LEN) {
-                    uint32_t t0 = now_ms();
-                    codec2_decode(c, pcm, n->data[i] + off);
-                    uint32_t took = now_ms() - t0;
-                    worst_ms = took > worst_ms ? took : worst_ms;
-                    (void)lg_bsp_audio_voice_write(pcm, C2_SAMPLES, SPEAKER_WAIT_MS);
+        /* The listener's half of the measurement: the same crc as the sender's "Note sent" means every byte. */
+        ESP_LOGI(TAG, "[MSG] Heard note %u from %" PRIu32 ": %u packet(s), %u missing, %u bytes, crc %08" PRIx32
+                 ", slowest decode %" PRIu32 " ms, stack left %u%s%s",
+                 n->talk, n->author, packets, missing, bytes, crc, worst_ms,
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL), n->last >= 0 ? "" : ", no last packet",
+                 replayed ? ", replayed whole after the rest arrived" : "");
+        /*
+         * The owner's replay (2026-10-08): what came played as it came, but packets missing when the
+         * note went quiet can still arrive - the AP sends an unacknowledged one again. Keep the note
+         * open; if the rest lands, join everything and play the whole talk once more.
+         */
+        if (!replayed && bytes > 0 && (missing > 0 || n->last < 0)) {
+            n->closed = false;
+            bool whole = false;
+            for (uint32_t waited = 0; waited < NOTE_REPLAY_WAIT_MS && !whole; waited += 200) {
+                vTaskDelay(pdMS_TO_TICKS(200));
+                if (n->last >= 0) {
+                    whole = true;
+                    for (int i = 0; i <= n->last; i++) {
+                        whole = whole && n->have[i];
+                    }
                 }
             }
-            lg_bsp_audio_voice_stop();
-        } else {
-            ESP_LOGW(TAG, "[MSG] The speaker would not open for a note");
+            n->closed = true;
+            if (whole) {
+                replayed = true;
+                continue;
+            }
         }
-    } else if (bytes > 0) {
-        ESP_LOGW(TAG, "[MSG] A note from device %" PRIu32 " was not played: %s", n->author,
-                 free_to_play ? "no memory for the decoder" : "this handheld stayed busy");
+        break;
     }
-    if (free_to_play) {
-        set_heard(0, 0, 0);
-    }
-    /* The listener's half of the measurement: the same crc as the sender's "Note sent" means every byte. */
-    ESP_LOGI(TAG, "[MSG] Heard note %u from %" PRIu32 ": %u packet(s), %u missing, %u bytes, crc %08" PRIx32
-             ", slowest decode %" PRIu32 " ms, stack left %u%s",
-             n->talk, n->author, packets, missing, bytes, crc, worst_ms,
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), n->last >= 0 ? "" : ", no last packet");
-    if (c != NULL) {
-        codec2_destroy(c);
-    }
-    free(pcm);
     c2rx = NULL;
     free(n);
     vTaskDelete(NULL);

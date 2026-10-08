@@ -5,6 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A talk's compact copy is acknowledged to a handheld too, and a partial note replays whole
+
+- An AP's compact voice packet to a handheld on LoRa goes once and is acknowledged and sent again
+  until it lands (D109), instead of twice with no answer: with the radio's quiet time a duplicate
+  is expensive air, and unacknowledged it still lost a packet in three on the bench. A handheld's
+  own notes stay said twice: its frames are broadcast, so no one AP owes it an answer.
+- The owner's replay (2026-10-08): a note plays what arrived when it goes quiet, as before, but now
+  stays open another 25 s; if the missing packets land - an AP resends them - the handheld joins
+  everything and plays the whole talk once more, and the log says it was replayed whole.
+
 ### LoRa radios leave the air quiet after every packet, and hold while a frame is mid-flight
 
 - The module also loses packets that follow the previous one too closely: back-to-back

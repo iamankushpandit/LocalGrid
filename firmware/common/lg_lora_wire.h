@@ -264,12 +264,11 @@ typedef enum {
 lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len);
 
 /*
- * A frame of voice in the compact codec (D95). A handheld or an AP sending one to a handheld sends it
- * twice: it is a few parts, any of which can be lost, nothing acknowledges it and nothing sends it
- * again, and on the bench on 2026-10-04 two packets in five of a talk did not arrive when sent once.
- * The second copy is sealed afresh, so the link does not see a replay; the core's newest-only rule for
- * voice drops whichever copy comes second. Between two APs it goes once and is acknowledged instead
- * (lora_frame_wants_ap_ack).
+ * A frame of voice in the compact codec (D95). Between two APs, and from an AP to a handheld, it goes
+ * once and is acknowledged and resent like text (lora_frame_wants_ap_ack, D104, D109). Only a
+ * handheld's own notes still go twice: its frames are broadcast, so no one AP owes it an answer. The
+ * second copy is sealed afresh, so the link does not see a replay; the core's newest-only rule for
+ * voice drops whichever copy comes second.
  */
 bool lora_frame_is_compact_voice(const uint8_t *frame, size_t len);
 

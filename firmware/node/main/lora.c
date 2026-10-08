@@ -851,8 +851,9 @@ static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, siz
     if (ok) {
         L.msg_id++;
         /* D109: a message for a handheld on LoRa alone is acknowledged by it, and sent again until it is,
-         * as one between APs is (D104). A broadcast address has nobody in particular to answer. */
-        if (dest != LORA_ADDR_BROADCAST && lora_frame_wants_ack(frame, len)) {
+         * as one between APs is (D104); since 2026-10-08 a talk's compact copy too, instead of being
+         * said twice (D95). A broadcast address has nobody in particular to answer. */
+        if (dest != LORA_ADDR_BROADCAST && lora_frame_wants_ap_ack(frame, len)) {
             lora_txq_want_ack(slot, lg_rd32(slot->data + 8), LORA_AWAIT_HANDHELD);
         }
     }
@@ -1033,10 +1034,10 @@ void lora_offer_handheld(uint32_t device, const uint8_t *frame, size_t len, bool
         L.hh_refused_type++;
         return;
     }
+    /* A compact voice packet to a handheld goes once and is acknowledged like text (D109), not said
+     * twice: with the radio's 1.5 s quiet time a duplicate is expensive air, and unacknowledged it
+     * still lost a packet in three on the bench (2026-10-08). */
     (void)queue_sealed_hh(LG_LORA_ADDR_HANDHELD(device), p == LORA_SEND_ALWAYS, frame, len);
-    if (lora_frame_is_compact_voice(frame, len)) {
-        (void)queue_sealed_hh(LG_LORA_ADDR_HANDHELD(device), false, frame, len);   /* D95: said twice */
-    }
 }
 
 void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok)

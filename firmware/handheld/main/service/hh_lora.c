@@ -803,7 +803,8 @@ void hh_lora_poll(uint32_t now)
             uint16_t from = lg_rd16(e.slot->data + 2);
             uint32_t seq = lg_rd32(e.slot->data + 8);
             size_t plain = e.slot->total - LGLH_OUTER_LEN - LG_AEAD_TAG_LEN;
-            if (LGLH_KIND(from) == LGLH_KIND_AP && LGLH_INDEX(from) < LG_MAX_NODES && lora_frame_wants_ack(frame, plain)) {
+            if (LGLH_KIND(from) == LGLH_KIND_AP && LGLH_INDEX(from) < LG_MAX_NODES &&
+                lora_frame_wants_ap_ack(frame, plain)) {
                 queue_ack(LGLH_INDEX(from), seq);
             }
         }
@@ -823,7 +824,7 @@ void hh_lora_poll(uint32_t now)
         L.frames_in++;
         L.heard_ms = now != 0 ? now : 1u;
         note_peer(ap, now);
-        if (ap < LG_MAX_NODES && lora_frame_wants_ack(frame, flen)) {
+        if (ap < LG_MAX_NODES && lora_frame_wants_ap_ack(frame, flen)) {
             queue_ack(ap, lg_rd32(e.slot->data + 8));   /* D109: answered before it is handled */
         }
         if (L.on_frame != NULL) {
@@ -869,7 +870,9 @@ void hh_lora_offer(const uint8_t *frame, size_t len, bool wifi_ok)
         return;
     }
     bool alert = p == LORA_SEND_ALWAYS;
-    int copies = lora_frame_is_compact_voice(frame, len) ? 2 : 1;   /* D95: said twice, nothing resends it */
+    /* The handheld's own notes still go twice: its frames are broadcast, so no one AP owes it an
+     * answer; an AP's note to a handheld is acknowledged instead (D109). */
+    int copies = lora_frame_is_compact_voice(frame, len) ? 2 : 1;
 
     lock();
     for (int copy = 0; copy < copies; copy++) {
