@@ -124,7 +124,7 @@ brownouts rise after fitting it, give the module its own 3.3 V supply and join t
 ## Frames on the air
 
 A backbone frame (up to 288 bytes today, `BB_FRAME_MAX` allows more) is sealed exactly as it is
-for ESP-NOW, then split into slices of at most **130 bytes**. Each slice gets a five-byte header,
+for ESP-NOW, then split into slices of at most **85 bytes**. Each slice gets a five-byte header,
 and header and slice are base64-encoded **together** into the one token `AT+SEND` carries:
 
 | Field | Size | Meaning |
@@ -133,26 +133,29 @@ and header and slice are base64-encoded **together** into the one token `AT+SEND
 | sender | 1 | kind in the high nibble (0 an AP, 1 a handheld), index in the low nibble |
 | id | 1 | message number, so parts of different payloads never mix |
 | part | 1 | part number, 0-based |
-| of | 1 | part count, 1 to 48 |
-| — | — | the five bytes above plus the slice are base64: **180 characters**, exactly one `AT+SEND` |
+| of | 1 | part count, 1 to 74 |
+| — | — | the five bytes above plus the slice are base64: **120 characters**, exactly one `AT+SEND` |
 
 **Three things here differ from the first sketch, and this is the record of why.**
 
 1. **The header is base64-encoded with the slice, not sent beside it.** `AT+SEND` takes text that
    ends at a newline and separates its fields with commas, and a raw header byte can be either.
    One base64 token keeps every byte on the air text-safe and keeps the fields exactly as listed.
-   180 characters decode to 135 bytes with no padding: 5 of header and 130 of payload.
+   120 characters decode to 90 bytes with no padding: 5 of header and 85 of payload. The first
+   sketch carried 180 characters; measured on the bench on 2026-10-08, the RYLR998 (firmware
+   V1.2.4) delivered 124-character payloads 24 of 24 and 140-character payloads 2 of 12, on a
+   quiet channel at SNR 9, so a part stays one measured step below that cliff.
 2. **The sender is a whole byte** (owner, "Ready for handhelds later"), so a handheld peer needs no
    format change. The low nibble limits a handheld's index to 0-15; devices above that would need
    a second byte, which is a change to make before handhelds get modules, not after.
-3. **The part number and the count are whole bytes**, so the format carries 48 parts, which is
-   6240 bytes: the owner's 6 KB voice-note ceiling with room to spare. Nibbles would have capped it
+3. **The part number and the count are whole bytes**, so the format carries 74 parts, which is
+   6290 bytes: the owner's 6 KB voice-note ceiling with room to spare. Nibbles would have capped it
    at 15 parts and made voice notes a breaking change.
 
 A receiver joins the parts and hands the result to the same code that handles an ESP-NOW frame. A
 part that arrives twice is ignored; a payload whose seal fails is dropped and counted. A set is
 given up when **no new part has arrived for 10 s** - an idle timeout, not ten seconds from the
-first part, because 48 parts are nearly a minute of airtime - or after 180 s in total.
+first part, because 74 parts are nearly a minute of airtime - or after 180 s in total.
 
 **What an AP has room for.** The format carries 6 KB; the memory to hold one is not free. Every
 buffer is taken **once, the first time a module answers**, and never again, so the heap cannot
@@ -476,10 +479,10 @@ AT+MODE=0               transceiver
 AT+ADDRESS?  AT+NETWORKID?  AT+PARAMETER?    read back, and log what is really set
 ```
 
-At these settings one full part (180 characters) is **about 0.93 s on the air**, so a 288-byte
-frame is three parts, roughly **2.8 s** plus a random backoff of up to 0.3 s before each; that is
-about **140 bytes a second** of sealed frame, or 1.1 kbit/s. A 6 KB payload would be 48 parts, near
-45 s. Airtime is added up per transmission and reported.
+At these settings one full part (120 characters) is **about 0.65 s on the air**, so a 288-byte
+frame is four parts, roughly **2.6 s** plus a random backoff of up to 0.3 s before each; that is
+about **110 bytes a second** of sealed frame, or 0.9 kbit/s. A 6 KB payload would be 74 parts, near
+48 s. Airtime is added up per transmission and reported.
 
 ## Chaos testing it
 

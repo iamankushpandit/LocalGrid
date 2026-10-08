@@ -52,21 +52,27 @@ extern "C" {
 #define LORA_MAGIC          0x4Cu   /* 'L' */
 #define LORA_PART_HDR       5u
 /*
- * 180 base64 characters is what one AT+SEND carries (docs/lora.md). 180 characters decode to
- * exactly 135 bytes with no padding, of which five are the header.
+ * 120 base64 characters is what one AT+SEND carries; they decode to exactly 90 bytes with no
+ * padding, of which five are the header.
+ *
+ * The first sketch carried 180 (docs/lora.md). Measured on the bench on 2026-10-08 (RYLR998
+ * firmware V1.2.4, SF9 BW125, 868.5 MHz, RSSI -43 dBm, SNR 9, quiet channel), delivery fell off a
+ * cliff with payload length: 124 characters or less arrived 24 of 24, 132 arrived 11 of 12, 140
+ * arrived 2 of 12, and 180 almost never - module behaviour, not the air, and exactly the range a
+ * sealed text message landed in. 120 keeps one measured step of margin below the cliff.
  */
-#define LORA_PART_B64_MAX   180u
-#define LORA_PART_RAW_MAX   135u
-#define LORA_SLICE_MAX      (LORA_PART_RAW_MAX - LORA_PART_HDR)   /* 130 */
-#define LORA_PARTS_MAX      48u
+#define LORA_PART_B64_MAX   120u
+#define LORA_PART_RAW_MAX   90u
+#define LORA_SLICE_MAX      (LORA_PART_RAW_MAX - LORA_PART_HDR)   /* 85 */
+#define LORA_PARTS_MAX      74u
 
 /*
  * The payload ceiling the owner settled (docs/lora.md, "Push-to-talk over LoRa") is 6 KB: a
- * 30-second Codec2 voice note at 1200 bit/s, with headroom. 48 parts of 130 bytes hold 6240, which
+ * 30-second Codec2 voice note at 1200 bit/s, with headroom. 74 parts of 85 bytes hold 6290, which
  * is that ceiling rounded up to whole parts, so the wire format never has to change for one.
  * Anything larger is refused with a reason, never truncated.
  */
-#define LORA_PAYLOAD_MAX    (LORA_PARTS_MAX * LORA_SLICE_MAX)   /* 6240 */
+#define LORA_PAYLOAD_MAX    (LORA_PARTS_MAX * LORA_SLICE_MAX)   /* 6290 */
 
 /*
  * Every frame the grid sends today is under 300 bytes. Slots of this size hold all of them, and
@@ -259,7 +265,7 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len);
 
 /*
  * A frame of voice in the compact codec (D95). A handheld or an AP sending one to a handheld sends it
- * twice: it is two parts, either of which can be lost, nothing acknowledges it and nothing sends it
+ * twice: it is a few parts, any of which can be lost, nothing acknowledges it and nothing sends it
  * again, and on the bench on 2026-10-04 two packets in five of a talk did not arrive when sent once.
  * The second copy is sealed afresh, so the link does not see a replay; the core's newest-only rule for
  * voice drops whichever copy comes second. Between two APs it goes once and is acknowledged instead

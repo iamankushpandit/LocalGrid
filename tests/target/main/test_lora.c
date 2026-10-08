@@ -33,7 +33,7 @@ static void test_base64(void)
     CHECK_EQ(lora_b64_decode("Zm9vYmFy", 8, back, sizeof(back)), 6);
     CHECK(memcmp(back, "foobar", 6) == 0);
 
-    /* Every length up to a full part round-trips, and a full part is exactly the 180 characters
+    /* Every length up to a full part round-trips, and a full part is exactly the characters
      * one AT+SEND carries. */
     static uint8_t in[LORA_PART_RAW_MAX];
     for (size_t i = 0; i < sizeof(in); i++) {
@@ -78,11 +78,11 @@ static void test_parts(void)
     CHECK_EQ(lora_part_count(1), 1);
     CHECK_EQ(lora_part_count(LORA_SLICE_MAX), 1);
     CHECK_EQ(lora_part_count(LORA_SLICE_MAX + 1u), 2);
-    CHECK_EQ(lora_part_count(300), 3);
+    CHECK_EQ(lora_part_count(300), (300u + LORA_SLICE_MAX - 1u) / LORA_SLICE_MAX);
     /* The owner's 6 KB ceiling, rounded up to whole parts, and one byte past it. */
-    CHECK_EQ(LORA_PAYLOAD_MAX, 6240);
+    CHECK_EQ(LORA_PAYLOAD_MAX, LORA_PARTS_MAX * LORA_SLICE_MAX);
     CHECK(LORA_PAYLOAD_MAX >= 6144);
-    CHECK_EQ(lora_part_count(LORA_PAYLOAD_MAX), 48);
+    CHECK_EQ(lora_part_count(LORA_PAYLOAD_MAX), LORA_PARTS_MAX);
     CHECK(lora_part_count(LORA_PAYLOAD_MAX) <= LORA_PARTS_MAX);
     CHECK_EQ(lora_part_count(LORA_PAYLOAD_MAX + 1u), 0);   /* refused, never cut short */
     CHECK_EQ(lora_part_count(0), 0);
@@ -161,33 +161,34 @@ static void test_reassembly(void)
     lora_asm_done(&a, slot);
 
     /* Three parts, out of order, with one arriving twice. */
-    n = build(part, sizeof(part), PEER_ONE, 2, 2, 3, payload, sizeof(payload));
+    const size_t len3 = 3u * LORA_SLICE_MAX - 10u;   /* whatever the slice size, three parts */
+    n = build(part, sizeof(part), PEER_ONE, 2, 2, 3, payload, len3);
     CHECK_EQ(lora_asm_feed(&a, 1000, part, n, &slot), LORA_ASM_NEED_MORE);
-    n = build(part, sizeof(part), PEER_ONE, 2, 0, 3, payload, sizeof(payload));
+    n = build(part, sizeof(part), PEER_ONE, 2, 0, 3, payload, len3);
     CHECK_EQ(lora_asm_feed(&a, 1100, part, n, &slot), LORA_ASM_NEED_MORE);
     CHECK_EQ(lora_asm_feed(&a, 1150, part, n, &slot), LORA_ASM_DUPLICATE);
-    n = build(part, sizeof(part), PEER_ONE, 2, 1, 3, payload, sizeof(payload));
+    n = build(part, sizeof(part), PEER_ONE, 2, 1, 3, payload, len3);
     CHECK_EQ(lora_asm_feed(&a, 1200, part, n, &slot), LORA_ASM_COMPLETE);
-    CHECK(slot != NULL && slot->total == sizeof(payload));
-    CHECK(memcmp(slot->data, payload, sizeof(payload)) == 0);
+    CHECK(slot != NULL && slot->total == len3);
+    CHECK(memcmp(slot->data, payload, len3) == 0);
     lora_asm_done(&a, slot);
 
     /* A missing part is given up after the idle timeout and never half delivered. */
     asm_setup(&a, true);
-    n = build(part, sizeof(part), PEER_ONE, 3, 0, 3, payload, sizeof(payload));
+    n = build(part, sizeof(part), PEER_ONE, 3, 0, 3, payload, len3);
     CHECK_EQ(lora_asm_feed(&a, 10000, part, n, &slot), LORA_ASM_NEED_MORE);
     CHECK_EQ(lora_asm_expire(&a, 10000 + LORA_ASM_TIMEOUT_MS), 0);
     CHECK_EQ(lora_asm_expire(&a, 10001 + LORA_ASM_TIMEOUT_MS), 1);
     CHECK_EQ(a.timeouts, 1);
 
-    /* A long payload: every part restarts the ten seconds, so 48 parts at a second each finish. */
+    /* A long payload: every part restarts the ten seconds, so every part at a second each finishes. */
     static uint8_t big[LORA_PAYLOAD_MAX];
     for (size_t i = 0; i < sizeof(big); i++) {
         big[i] = (uint8_t)(i * 5u + 9u);
     }
     asm_setup(&a, true);
     size_t of = lora_part_count(sizeof(big));
-    CHECK_EQ(of, 48);
+    CHECK_EQ(of, LORA_PARTS_MAX);
     lora_asm_result_t r = LORA_ASM_NEED_MORE;
     for (size_t i = 0; i < of; i++) {
         n = build(part, sizeof(part), PEER_ONE, 11, (uint8_t)i, (uint8_t)of, big, sizeof(big));
@@ -443,7 +444,7 @@ static void test_queue(void)
     CHECK_EQ(lora_txq_capacity(&q), LORA_PAYLOAD_MAX);
     CHECK(lora_txq_push(&q, 2, false, 1, big, sizeof(big), 0));
     s = lora_txq_peek(&q, 0);
-    CHECK(s != NULL && s->len == LORA_PAYLOAD_MAX && s->of == 48);
+    CHECK(s != NULL && s->len == LORA_PAYLOAD_MAX && s->of == LORA_PARTS_MAX);
     txq_setup(&q, false);
     CHECK_EQ(lora_txq_capacity(&q), LORA_SMALL_MAX);
     CHECK(!lora_txq_push(&q, 2, false, 1, big, sizeof(big), 0));
@@ -637,7 +638,7 @@ static void test_round_trip(void)
     /* 288 bytes is the frame size docs/lora.md sizes the radio against. */
     const size_t len = 288;
     size_t of = lora_part_count(len);
-    CHECK_EQ(of, 3);
+    CHECK_EQ(of, (len + LORA_SLICE_MAX - 1u) / LORA_SLICE_MAX);
     asm_setup(&a, true);
     lora_asm_result_t r = LORA_ASM_NEED_MORE;
     for (size_t i = 0; i < of; i++) {
@@ -659,16 +660,17 @@ static void test_round_trip(void)
 
 static void test_airtime(void)
 {
-    /* SF9, BW125, CR4/5, preamble 12. A full part is about a second; three of them, plus the
-     * random backoff, are the couple of seconds docs/lora.md promises for one 288-byte frame. */
+    /* SF9, BW125, CR4/5, preamble 12. A full 120-character part is about two thirds of a second;
+     * four of them, plus the random backoff, are the couple of seconds docs/lora.md promises for
+     * one 288-byte frame. */
     uint32_t full = lora_airtime_ms(LORA_PART_B64_MAX);
-    CHECK(full > 800 && full < 1100);
+    CHECK(full > 500 && full < 800);
     CHECK(lora_airtime_ms(8) < full);
     CHECK(lora_airtime_ms(0) > 0);   /* the preamble and header cost something on their own */
     CHECK(lora_airtime_ms(240) > full);
-    /* A 6 KB voice note is 48 of them: under a minute of airtime, which is why its reassembly
-     * timeout has to be an idle one and not ten seconds from the first part. */
-    CHECK(48u * full < LORA_ASM_MAX_MS);
+    /* A 6 KB voice note is LORA_PARTS_MAX of them: under a minute of airtime, which is why its
+     * reassembly timeout has to be an idle one and not ten seconds from the first part. */
+    CHECK(LORA_PARTS_MAX * full < LORA_ASM_MAX_MS);
 }
 
 /*

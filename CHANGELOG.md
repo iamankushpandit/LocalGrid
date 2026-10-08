@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A LoRa part is 120 characters, because the module drops longer ones
+
+- The demo's flaky "Cut the Wi-Fi between access points" chapter came down to the radio module
+  itself: measured on the bench with a controlled transmit matrix (every AP flooding diagnostic
+  frames, the other two as witnesses), the RYLR998 (firmware V1.2.4) delivers `AT+SEND` payloads of
+  124 characters or less 24 of 24, 132 in 11 of 12, 140 in 2 of 12, and the old full part of 180
+  almost never — on a quiet channel, at SNR 9, in every direction equally. A sealed text message
+  was 147–176 characters: exactly the dead zone. Everest's antenna, first suspected, measured clean.
+- A part now carries 120 base64 characters (90 bytes, 85 of payload), one measured step under the
+  cliff; `LORA_PARTS_MAX` rises to 74, so the 6 KB voice-note ceiling stands (docs/lora.md updated).
+  A full part is about 0.65 s on the air.
+- Every arriving part is logged with its size and signal, a garbled part is said out loud, and the
+  `lora` status counts module lines that parsed as nothing: the loss was invisible before.
+- `tests/target`: 4543 checks, 0 failures on Fuji; part-count checks now derive from the constants.
+
 ### A voice packet between two APs goes once and is acknowledged (D95 amended)
 
 - Between two APs a compact voice packet is now sent once and acknowledged and sent again until it is

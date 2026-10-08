@@ -31,7 +31,7 @@ static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set t
 #define LORA_UART         UART_NUM_1
 #define UART_RX_BUF       1024
 #define UART_TX_BUF       512
-#define LORA_LINE_MAX     320u      /* "+RCV=" plus 180 characters of data plus its numbers */
+#define LORA_LINE_MAX     320u      /* "+RCV=" plus a part's characters plus its numbers, with room over */
 #define TASK_STACK        4096
 #define TASK_PRIORITY     3         /* below the core task (5): airtime can wait */
 #define AT_TIMEOUT_MS     1000u
@@ -218,6 +218,25 @@ static bool take_buffers(void);
 static bool lora_air_is_quiet(void);
 
 /*
+ * Diagnosis counter (2026-10-08): on the bench, a quarter of full-size parts never reached
+ * parts_in with a clean channel and SNR 10, and nothing counted them. A line the module prints
+ * that parses as nothing is the one way a part can vanish inside this firmware, so it is counted
+ * where it is ignored.
+ */
+static uint32_t s_at_noise;
+
+static bool parse_or_count(char *line, lora_at_t *at)
+{
+    if (lora_at_parse(line, at)) {
+        return true;
+    }
+    if (line != NULL && line[0] != '\0') {
+        s_at_noise++;
+    }
+    return false;
+}
+
+/*
  * Waits for one kind of reply. Frames arriving while we wait are never lost: +RCV is handled
  * wherever it turns up, including in the middle of a transmission.
  */
@@ -234,7 +253,7 @@ static bool at_wait(lora_at_kind_t want, uint32_t timeout_ms, char *value, size_
             return false;
         }
         lora_at_t at;
-        if (!lora_at_parse(line, &at)) {
+        if (!parse_or_count(line, &at)) {
             continue;
         }
         if (at.kind == LORA_AT_RCV) {
@@ -415,7 +434,16 @@ static void handle_rcv(const lora_at_t *at)
     size_t n = lora_b64_decode(at->data, at->len, raw, sizeof(raw));
     if (n == 0) {
         L.parts_dropped++;
+        ESP_LOGW(TAG, "[LORA] A part arrived garbled: %u characters that were not base64", (unsigned)at->len);
         return;
+    }
+    /* Every piece of a multi-part frame is named as it arrives: the one trace that says where a
+     * frame died when only some of it ever came (2026-10-08). */
+    lora_part_t ph;
+    if (lora_part_parse(raw, n, &ph)) {
+        ESP_LOGI(TAG, "[LORA] Part %u/%u of %u from peer 0x%02X, %u chars, RSSI %d dBm, SNR %d",
+                 (unsigned)(ph.part + 1u), (unsigned)ph.of, (unsigned)ph.id, (unsigned)ph.peer,
+                 (unsigned)at->len, (int)L.rssi, (int)L.snr);
     }
     lora_asm_slot_t *slot = NULL;
     lora_asm_result_t r = lora_asm_feed(&L.asmb, app_now_ms(), raw, n, &slot);
@@ -728,7 +756,7 @@ static void lora_task(void *arg)
         char *line = NULL;
         if (read_line(IDLE_WAIT_MS, &line)) {
             lora_at_t at;
-            if (lora_at_parse(line, &at)) {
+            if (parse_or_count(line, &at)) {
                 if (at.kind == LORA_AT_RCV) {
                     handle_rcv(&at);
                 } else if (at.kind == LORA_AT_READY) {
@@ -1517,6 +1545,7 @@ void lora_print(void)
     printf("  shared state and names that gave way to busier traffic: %" PRIu32 "\n", L.gave_way);
     printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
     printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
+    printf("  module lines that parsed as nothing: %" PRIu32 "\n", s_at_noise);
     printf("  messages taken over from ESP-NOW when it could not deliver them: %" PRIu32 "\n", L.took_over);
     printf("  messages the queue had no room for (the rest of its drops were routine): %" PRIu32 "\n",
            L.txq.dropped_messages);

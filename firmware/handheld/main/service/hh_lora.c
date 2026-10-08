@@ -38,7 +38,7 @@ static int s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set to *
 #endif
 #define UART_RX_BUF       1024
 #define UART_TX_BUF       512
-#define LORA_LINE_MAX     320u     /* "+RCV=" plus 180 characters of data plus its numbers */
+#define LORA_LINE_MAX     320u     /* "+RCV=" plus a part's characters plus its numbers, with room over */
 #define TASK_STACK        4096
 #define TASK_PRIORITY     2        /* below the service task (5): airtime can wait, a message cannot */
 #define AT_TIMEOUT_MS     1000u
