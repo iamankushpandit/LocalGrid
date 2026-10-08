@@ -1631,8 +1631,8 @@ class Grid(chaos.Chaos):
             wrong = [h for h in other if h.name in took]
             kind = self.chip_of(other[0]).upper().replace("ESP32S3", "ESP32-S3").replace("ESP32C6", "ESP32-C6")
             names = " and ".join(self.label(h) for h in other)
-            self.fact(f"{names} run on another chip ({kind}), and rightly took none of it: an update is "
-                      "built for one chip (D111)" if not wrong else
+            self.fact(f"{names} {'runs' if len(other) == 1 else 'run'} on another chip ({kind}), and rightly took "
+                      "none of it: an update is built for one chip (D111)" if not wrong else
                       f"{', '.join(self.label(h) for h in wrong)} took an update built for another chip", ok=not wrong)
         self.caption(f"Finally, one command on {self.label(v)} withdraws the update from the whole grid.")
         self.write(v, "spread drop")
