@@ -342,6 +342,8 @@ class Grid(chaos.Chaos):
         for rx, what in ((AP_CARRYING, "carrying"), (AP_HANDING, "handing"), (HH_OFFERED, "offered"),
                          (HH_TAKEN, "taken"), (HH_RESTARTING, "restarting"), (HH_UPDATE_NO, "refused")):
             if m := rx.search(line):
+                if what in ("taken", "restarting"):
+                    b.injected_at = now   # restarting into an update is what it is meant to do, not a crash
                 self.updates.append((now, b.name, what, m.groups()))
                 self.publish("log", event="update_" + what, board=self.label(b), detail=" ".join(m.groups()))
         if m := chaos.RX["sent_direct"].search(line):
@@ -889,8 +891,11 @@ class Grid(chaos.Chaos):
 
     def run_tool(self, argv, timeout, show=None):
         """Another bench tool, its output shown on the page line by line as it runs. Returns its exit code."""
+        # UTF-8 both ways: piped, a child's stdout is cp1252 on Windows, and the installer page's own
+        # "Installation complete" carries an emoji that took test_installer_page.py down at 100 % (2026-10-07).
         proc = subprocess.Popen([sys.executable, *argv], cwd=str(ROOT), stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+                                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         lines = queue.Queue()
         threading.Thread(target=lambda: [lines.put(x) for x in proc.stdout] and None, daemon=True).start()
         end = time.monotonic() + timeout
@@ -902,6 +907,8 @@ class Grid(chaos.Chaos):
                 try:
                     line = lines.get(timeout=0.2).rstrip()
                 except queue.Empty:
+                    if show is not None:
+                        show("")   # the tool is still running, if quietly
                     self.wait(0.05)
                     continue
                 self.write_raw(f"[{argv[0]}] {line}")
@@ -1496,10 +1503,15 @@ class Grid(chaos.Chaos):
         self.timer(f"Giving it to {self.label(v)}", "start")
         t_give = time.monotonic()
         name = next((d["name"] for d in load_map().get("devices", []) if d.get("id") == v.id), v.name)
+        v.injected_at = time.monotonic()   # its port is lent to lgfw.py: silence here is not the board's
         self.release_port(v)
-        code = self.run_tool(["tools/lgfw.py", "send", str(path), name], 900,
-                             show=lambda line: "%" in line or "LGFWU" in line or "lgfw" in line)
+
+        def show(line):
+            v.injected_at = time.monotonic()   # still transferring: keep the silence watchdog off this board
+            return "%" in line or "LGFWU" in line or "lgfw" in line
+        code = self.run_tool(["tools/lgfw.py", "send", str(path), name], 900, show=show)
         self.reopen_quiet(v)
+        v.injected_at = time.monotonic()
         given = round(time.monotonic() - t_give, 1)
         self.timer(f"Giving it to {self.label(v)}", "stop", given if code == 0 else None)
         if code != 0:
@@ -1534,6 +1546,16 @@ class Grid(chaos.Chaos):
         self.wait(UPDATE_S, until=progress)
         progress()
         self.timer("Spreading", "stop", round(time.monotonic() - t, 1))
+        # D111: an image is for one chip. The handhelds on another chip are offered none of it.
+        other = [h for h in self.hhs if self.present(h) and self.chip_of(h) and self.chip_of(h) != chip]
+        took = {board for _, board, what, _ in self.updates if what in ("taken", "restarting")}
+        if other:
+            wrong = [h for h in other if h.name in took]
+            kind = self.chip_of(other[0]).upper().replace("ESP32S3", "ESP32-S3").replace("ESP32C6", "ESP32-C6")
+            names = " and ".join(self.label(h) for h in other)
+            self.fact(f"{names} run on another chip ({kind}), and rightly took none of it: an update is "
+                      "built for one chip (D111)" if not wrong else
+                      f"{', '.join(self.label(h) for h in wrong)} took an update built for another chip", ok=not wrong)
         self.caption(f"Finally, one command on {self.label(v)} withdraws the update from the whole grid.")
         self.write(v, "spread drop")
         self.wait(10)

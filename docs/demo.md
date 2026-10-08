@@ -24,7 +24,7 @@ changes.
 ## Running it
 
 ```bash
-python tools/demo.py --sign-key <release key .pem> --install-board e28 --release <release key .pub.hex>
+python tools/demo.py --sign-key <release key .pem> --install-board fnk0104b_c --release <release key .pub.hex>
 ```
 
 It starts with no cables, listening over Bluetooth. At "The bench" it asks for every board to be
@@ -102,6 +102,12 @@ reaches the Internet meanwhile; the page and the narrator are served from the la
 Chrome or Edge window, which is what the camera should see. It needs `tools/build_release.py` to have
 built the published images. The board's settings are cleared and its identity kept; it then runs the
 published image, not the bench build, so flash it again with `tools/flash.py` before a chaos run.
+
+Install onto a board with capacitive touch, such as Jolly (`fnk0104b_c`). The published image is one
+file from address 0, so it clears the settings store with everything else, and on a resistive-touch
+board that includes the touch calibration: the board then waits on its screen for somebody to tap three
+targets. Chase (`e28`) did exactly that on 2026-10-07. Do not put an old copy of the settings back
+instead: it would wind back the boot counter that nonces are made from.
 
 ## Photos and clips
 

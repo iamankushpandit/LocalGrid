@@ -316,6 +316,9 @@ def serve(folder):
 
 
 def main():
+    # The installer page's own words include an emoji; a console or pipe in cp1252 cannot print it.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("board", help="a handheld or access point from tools/bench_devices.json")
     ap.add_argument("--firmware", default=str(ROOT / "build" / "release"),
