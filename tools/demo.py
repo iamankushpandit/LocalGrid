@@ -799,6 +799,23 @@ class Grid(chaos.Chaos):
         if not any(s.get("fitted") for s in before.values()):
             self.caption("No access point has a LoRa module answering, so there is no second path to show.")
             return
+        # The LoRa links confirm themselves with a round trip of hellos after a restart. Cutting the
+        # Wi-Fi before the mesh is whole left an AP with a message and, as far as it knew, nobody to
+        # give it to: offered once to a peer not yet up, it was dropped with nothing to retry it
+        # (2026-10-08). So the chapter waits for the mesh the way the grid itself would.
+        def mesh_whole(snap):
+            return all(((snap.get(a.name) or {}).get("peers", {}).get(b.index) or {}).get("up")
+                       for a in live for b in live if a is not b)
+        if not mesh_whole(before):
+            self.caption("The access points are still confirming their LoRa links with each other "
+                         "after the restart. We wait for that, as the grid itself does.")
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 240 and not mesh_whole(before):
+                self.wait(10)
+                before = self.lora_query(live)
+            if not mesh_whole(before):
+                self.fact("The LoRa links did not all confirm; what follows may only have one path",
+                          ok=False)
         pair = self.lora_pair(live, before)
         self.caption("Access points normally pass messages to each other over Wi-Fi. "
                      "We switch that link off on every one of them.", hold=4)

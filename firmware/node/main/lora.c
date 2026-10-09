@@ -180,6 +180,7 @@ static struct {
     uint32_t held_for_air;    /* times a send waited for it */
     bool     holding_for_air;
     uint32_t last_tx_end_ms;  /* when this AP's own last transmission finished */
+    uint32_t configured_at_ms; /* when the module last came up: discovery hellos run fast from here */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -775,6 +776,7 @@ static void lora_task(void *arg)
             drop_queue();
             if (configure()) {
                 L.configured = true;
+                L.configured_at_ms = app_now_ms();
                 fails = 0;
                 backoff = WEDGE_BACKOFF_MS;
                 continue;
@@ -1427,7 +1429,9 @@ static void heartbeat(uint32_t now)
     static uint8_t frame[LG_FRAME_MAX];   /* core task only */
     size_t len = lgbb_build_hello(frame, sizeof(frame));
     if (len == 0) {
-        L.next_hb_ms = now + LORA_HEARTBEAT_MS;
+        /* The backbone was not ready to say hello yet: ask again in half a second, not in a minute.
+         * Waiting the whole period cost every boot its first hello (2026-10-08). */
+        L.next_hb_ms = now + LORA_HEARTBEAT_RETRY_MS;
         return;
     }
     /*
@@ -1446,7 +1450,14 @@ static void heartbeat(uint32_t now)
         L.hb_waited++;
         return;
     }
-    L.next_hb_ms = now + LORA_HEARTBEAT_MS;
+    /*
+     * Discovery runs fast: for two minutes after the module is configured, hellos go every ten
+     * seconds instead of every minute. Links need a round trip of boot-confirmed hellos to come up,
+     * so after all three APs restart together the mesh took up to six minutes at the slow cadence,
+     * and anything LoRa was asked to carry before then was refused for having no peer (2026-10-08).
+     */
+    L.next_hb_ms = now + (now - L.configured_at_ms < LORA_DISCOVERY_MS ? LORA_HELLO_FAST_MS
+                                                                       : LORA_HEARTBEAT_MS);
     if (L.broadcast_ok) {
         (void)queue_sealed(LORA_ADDR_BROADCAST, false, frame, len);
         return;

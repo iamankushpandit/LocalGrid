@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Discovery hellos run fast after a restart, so the LoRa mesh is whole in seconds, not minutes
+
+- The one flaky chapter left ("Cut the Wi-Fi between access points") failed with every radio
+  silent and every counter at zero: no convoy, nothing to send. All three APs restart together at
+  the demo's warm-up, a LoRa link needs a round trip of boot-confirmed hellos, hellos went every
+  60 s, and a hello the backbone could not build yet rescheduled a full minute away - the mesh took
+  up to six minutes, and a message offered before then found no peer up and was dropped silently.
+- A failed hello build retries in half a second; for two minutes after the module comes up, hellos
+  go every ten seconds; and the demo waits for every pairwise link to confirm before cutting the
+  Wi-Fi, saying so on screen.
+
 ### A talk's compact copy is acknowledged to a handheld too, and a partial note replays whole
 
 - An AP's compact voice packet to a handheld on LoRa goes once and is acknowledged and sent again

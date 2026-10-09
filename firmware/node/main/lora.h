@@ -93,6 +93,8 @@ typedef struct {
  */
 #define LORA_HEARTBEAT_MS     60000u
 #define LORA_HEARTBEAT_RETRY_MS 500u   /* a heartbeat the queue has no room for is tried again this soon (D102) */
+#define LORA_HELLO_FAST_MS    10000u   /* the discovery cadence right after the module comes up */
+#define LORA_DISCOVERY_MS     120000u  /* how long hellos run fast: links need a hello round trip */
 #define LORA_HB_STAGGER_MS    3000u    /* times the AP index, so three APs never speak together */
 #define LORA_LINK_TIMEOUT_MS  190000u  /* three missed heartbeats and a little: the link is down */
 #define LORA_PROBE_MS         60000u   /* how often an AP with no module looks for one again */
