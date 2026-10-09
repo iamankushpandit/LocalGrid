@@ -324,16 +324,18 @@ lora_policy_t lora_policy_for_frame(const uint8_t *frame, size_t len)
         return LORA_SEND_ALWAYS;   /* urgent broadcasts, SOS and all clear go on both radios */
     }
     /*
-     * When LoRa is the only way between two APs it carries about one message every three seconds,
-     * where Wi-Fi was carrying thirty-five a minute (bench, 2026-09-20), and most of those were the
-     * grid re-announcing its shared state and handheld names to heal a miss. That housekeeping must
-     * not crowd out what people are waiting for, so it travels only while there is room to spare:
-     * what someone said, who is present, where they are and what the time is go first, and the
-     * shared state catches up when Wi-Fi returns or the air is quiet.
+     * When LoRa is the only way between two APs it carries far less than Wi-Fi did - with the
+     * measured module limits and the quiet time they demand (2026-10-08), about eight frames a
+     * minute where Wi-Fi carried thirty-five a second of housekeeping alone. Everything the grid
+     * says on a cycle must not crowd out what people are waiting for, so it travels only while
+     * there is room to spare: presence, positions and the time repeat themselves within a minute
+     * anyway, and the shared state catches up when Wi-Fi returns or the air is quiet. What someone
+     * said, the word that it arrived, and voice go first - with the saturated channel of the first
+     * sketch, a text between two APs landed on its third try or not at all.
      */
-    if (e.type == LG_T_GRID_STATE || e.type == LG_T_NAME || e.type == LG_T_TRAIL || e.type == LG_T_DEVICE_FW) {
-        /* A trail (D99) is two parts every few seconds while someone walks, and its newest point has
-         * usually gone ahead of it as a position: between APs it waits for room like the rest. */
+    if (e.type == LG_T_GRID_STATE || e.type == LG_T_NAME || e.type == LG_T_TRAIL || e.type == LG_T_DEVICE_FW ||
+        e.type == LG_T_PRESENCE_UPDATE || e.type == LG_T_POSITION || e.type == LG_T_TIME_SYNC ||
+        e.type == LG_T_TIME_ZONE) {
         return LORA_SEND_SPARE_ROOM;
     }
     return LORA_SEND_IF_WIFI_DOWN;
@@ -491,6 +493,12 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
         for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
             lora_txq_slot_t *c = &q->slots[i];
             if (!c->in_use || c->alert || c->sending || c->cap < cap || c->rank > rank) {
+                continue;
+            }
+            /* A message that has been sent and is waiting for its acknowledgement is as good as on
+             * the air: the resend it is owed is the one retry the loss budget is built on, and
+             * evicting it cancelled that retry mid-cycle (2026-10-08). Only an alert outranks it. */
+            if (c->waiting && c->rank >= LORA_RANK_MESSAGE && c->rank == rank) {
                 continue;
             }
             /* Of equal rank, one that has been on the air and is only waiting to hear so (D104) goes

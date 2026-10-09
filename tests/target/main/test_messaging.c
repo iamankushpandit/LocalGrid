@@ -2601,6 +2601,80 @@ static void test_voice_duplicates_and_order(void)
     sim_destroy(s);
 }
 
+/*
+ * D95: a compact packet may arrive after a newer one - it is the acknowledged resend crossing a
+ * slow radio, and dropping it as "late" starved the very replay that was waiting for it. It is
+ * taken out of order, exactly once; live voice still only ever plays forward.
+ */
+static void test_voice_catch_up(void)
+{
+    /* The window itself, straight on the table. */
+    lg_voice_seen_t w = { 0 };
+    CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 10u, true));      /* first sight */
+    CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 13u, true));      /* forward, skipping two */
+    CHECK(!lg_voice_check(&w, 1, LG_VOICE_SEQ_BIT | 13u, true));    /* the newest again: a duplicate */
+    CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 12u, true));      /* catch-up, once */
+    CHECK(!lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 12u, true));     /* and only once */
+    CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 11u, true));      /* the other gap */
+    CHECK(!lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 10u, true));     /* taken before the jump: remembered */
+    CHECK(!lg_voice_check(&w, 1, LG_VOICE_SEQ_BIT | 12u, false));   /* live never looks back */
+    lg_voice_seen_t e = { 0 };
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 100u, true));
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 116u, true));     /* 16 ahead: 100 sits at the edge */
+    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 100u, true));    /* and is remembered there */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 101u, true));     /* 15 back, never seen: taken */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 133u, true));     /* 17 ahead: a clean window */
+    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 116u, true));    /* beyond the window: too old */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 117u, true));     /* 16 back, inside and unseen */
+    CHECK(lg_voice_take(&e, 2, LG_VOICE_SEQ_BIT | 5u, true));       /* a new boot starts clean */
+    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 999u, true));    /* the boot before is over */
+
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    uint8_t p[LG_VOICE_PAYLOAD_MAX];
+    uint8_t frame[LG_FRAME_MAX];
+    size_t n = compact_payload(p, 9, 0, 0, LG_VOICE_C2_FRAMES, 0x44);
+    uint32_t voice0 = s->nodes[0].node.stats.voice;
+    int len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 40u, LG_SCOPE_GROUP, LG_PROTO_FAMILY,
+                          LG_FLAG_COMPACT, p, n);
+    CHECK(len > 0);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 42u, LG_SCOPE_GROUP, LG_PROTO_FAMILY,
+                      LG_FLAG_COMPACT, p, n);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.voice, voice0 + 2u);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 2);
+    /* The resend lands after its successor, across two hops, and is still delivered - once. */
+    uint32_t dups = s->nodes[0].node.stats.duplicates;
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 41u, LG_SCOPE_GROUP, LG_PROTO_FAMILY,
+                      LG_FLAG_COMPACT, p, n);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.voice, voice0 + 3u);
+    CHECK_EQ(s->clients[EMMA].voice_frames, 3);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->nodes[0].node.stats.duplicates, dups + 1u);   /* the same packet twice still falls away */
+    CHECK_EQ(s->clients[EMMA].voice_frames, 3);
+    /* A LIVE frame out of order is still silence that already passed. */
+    uint8_t live[LG_VOICE_PAYLOAD_MAX];
+    size_t ln = voice_payload(live, 7, 0, 0, NULL, 40, 0x21);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 50u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0,
+                      live, ln);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 4);
+    len = voice_frame(frame, LG_PROTO_DAD, 1, LG_VOICE_SEQ_BIT | 49u, LG_SCOPE_GROUP, LG_PROTO_FAMILY, 0,
+                      live, ln);
+    lg_node_on_session_frame(&s->nodes[0].node, &s->clients[DAD].session_device, frame, (size_t)len);
+    CHECK(sim_pump(s));
+    CHECK_EQ(s->clients[EMMA].voice_frames, 4);
+    sim_destroy(s);
+}
+
 static void test_voice_refusals(void)
 {
     sim_t *s = make_chain();
@@ -3657,6 +3731,7 @@ void test_messaging(void)
     test_voice_group();
     test_voice_direct();
     test_voice_duplicates_and_order();
+    test_voice_catch_up();
     test_voice_refusals();
     test_voice_keeps_text_fresh();
 }

@@ -2126,7 +2126,7 @@ class Grid(chaos.Chaos):
         title, _, method = self.SCENARIOS[key]
         self.busy = key
         self.cancel.clear()
-        self.publish("scenario", phase="start", key=key, title=title)
+        self.publish("scenario", phase="start", key=key, title=title, at=time.time())
         self.background()
         outcome = "done"
         try:
@@ -2142,7 +2142,9 @@ class Grid(chaos.Chaos):
             self.tracked.clear()
             self.restore()
             self.clean_screens()
-        self.publish("scenario", phase="end", key=key, title=title, outcome=outcome)
+        # `at` lets a client told the recent events apart from this run's own: the bus replays the
+        # previous run's end to anyone connecting between /api/run and this run's start.
+        self.publish("scenario", phase="end", key=key, title=title, outcome=outcome, at=time.time())
         self.event("demo_scenario", key=key, outcome=outcome)
 
     def serve(self):

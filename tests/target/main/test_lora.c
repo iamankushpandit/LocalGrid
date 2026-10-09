@@ -287,10 +287,14 @@ static void test_policy(void)
 
     n = make_frame(LG_T_TEXT, LG_SCOPE_DIRECT, 0, frame, sizeof(frame), 20);
     CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    /* Everything the grid says on a cycle waits for room: presence, positions and time repeat
+     * themselves within a minute, and on the measured channel they drowned a text (2026-10-08). */
     n = make_frame(LG_T_PRESENCE_UPDATE, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 8);
-    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
     n = make_frame(LG_T_POSITION, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 18);
-    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_IF_WIFI_DOWN);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
+    n = make_frame(LG_T_TIME_SYNC, LG_SCOPE_SYSTEM, 0, frame, sizeof(frame), 12);
+    CHECK_EQ(lora_policy_for_frame(frame, n), LORA_SEND_SPARE_ROOM);
 
     /*
      * Housekeeping gives way. The shared state and the handheld names heal a miss and can wait;
@@ -807,9 +811,11 @@ static void test_ack(void)
     CHECK(lora_txq_peek_for(&q, 0, true) == s);
 
     /*
-     * A full queue: a message that has been on the air and is only waiting to hear so gives way before
-     * one that has never been sent, and is counted as not known to have arrived rather than as dropped
-     * unsent.
+     * A full queue: a message that has been sent and awaits its answer keeps its slot - the resend
+     * it is owed is the one retry the loss budget counts on (2026-10-08) - so another message takes
+     * the oldest never-sent one instead, and that certain loss is counted. When every message in
+     * the queue is waiting to hear, a newcomer message is refused outright; an alert still takes
+     * what it needs.
      */
     txq_setup(&q, false);
     lora_txq_slot_t *four[4];
@@ -821,11 +827,23 @@ static void test_ack(void)
     lora_txq_want_ack(four[2], 800, 1u << 1);      /* the third was sent and waits; the first is the oldest */
     CHECK(lora_txq_sent(&q, four[2], 5000));
     s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 9, 64, 0);
-    CHECK(s == four[2]);
+    CHECK(s == four[0]);                           /* the oldest never-sent message, never the waiting one */
     CHECK(!s->waiting && s->await == 0u && s->tries == 0u);   /* the slot starts clean for its new frame */
-    CHECK_EQ(q.unacked, 1);
-    CHECK_EQ(q.dropped_messages, 0);
+    CHECK(four[2]->waiting && four[2]->await != 0u);          /* the promised resend is still owed */
+    CHECK_EQ(q.unacked, 0);
+    CHECK_EQ(q.dropped_messages, 1);
     CHECK(lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 10, 64, 0) == NULL);   /* routine still never does */
+    lora_txq_want_ack(four[1], 801, 1u << 1);
+    CHECK(lora_txq_sent(&q, four[1], 5000));
+    lora_txq_want_ack(four[3], 802, 1u << 1);
+    CHECK(lora_txq_sent(&q, four[3], 5000));
+    lora_txq_want_ack(s, 803, 1u << 1);
+    CHECK(lora_txq_sent(&q, s, 5000));
+    CHECK(lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 11, 64, 0) == NULL);   /* all waiting: refused */
+    CHECK_EQ(q.dropped_messages, 2);               /* the refused newcomer is the loss this time */
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_ALERT, 12, 64, 0);
+    CHECK(s != NULL);                              /* an alert still outranks a waiting message */
+    CHECK_EQ(q.unacked, 1);
 
     /*
      * D109: a frame for one handheld waits for that handheld's answer, and a repeat keeps its address -

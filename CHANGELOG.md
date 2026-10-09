@@ -5,6 +5,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### A voice note survives everything the bench could throw at it, and housekeeping yields the air
+
+An owner's report - a note playing one packet of three and never replaying whole - led to an
+adversarial audit of the whole voice-note path. Fourteen confirmed defects, every one verified
+against the code by two independent reviewers, all fixed:
+
+- Presence, positions and the time now travel on LoRa only in spare room, like the rest of the
+  grid's housekeeping: offered at ~35 frames a minute to a channel that carries ~8, they drowned
+  the texts and notes people were waiting for.
+- A resent compact packet is no longer dropped as "late" when it lands after its successors.
+  Voice kept only a newest-sequence mark, so the acknowledged resend - the one copy the
+  listener's replay was waiting for - was discarded at the AP and at the listener, after the
+  radio had already answered for it. A 16-deep catch-up window per author now takes a compact
+  packet out of order exactly once; an exact duplicate still falls away, and live voice still
+  only plays forward.
+- The replay decides from the live note, not from counts taken before the pass played: packets
+  are accepted into empty slots mid-play (dropping them was permanent - their ack had gone), a
+  note that became whole during the pass replays at once, and the wait for the rest is paced by
+  the air - up to 45 s of quiet, three minutes at the outside - instead of a flat 25 s that
+  expired with packets still crossing.
+- Half duplex now stops only live sound: a note packet arriving while this handheld talks is
+  bytes to store, not sound to play, and is kept.
+- A finished note outwaits a long live talk (70 s, over the 60 s a talk may legally hold the
+  speaker) instead of being freed unheard - completeness was punished: only partial notes got a
+  second chance.
+- A talker with no Wi-Fi session spaces packets 15 s apart: each goes twice there, two copies
+  are ~14 s of channel, and at 9 s its own queue evicted the redundancy it was paying for. The
+  first pass's give-up rose to 16 s to match, so a flowing note is never cut into fragments.
+- A new talk takes the encoder from the previous talk's still-draining copy instead of silently
+  getting no compact copy at all; a second talker's first packet is held and seeds the next note
+  instead of being swallowed by the open one, which is asked to wind up its waits.
+- The frame staged for the service's voice queue lives on the caller's stack: the capture task
+  and the codec2 encoder send concurrently, and the shared static they interleaved in could tear
+  a packet mid-copy.
+- A message that was sent and awaits its acknowledgement keeps its transmit slot: the resend it
+  is owed is the one retry the loss budget counts on. Another message takes the oldest never-sent
+  one - a counted loss - or is refused when every slot is waiting; an alert still takes what it
+  needs.
+- The demo's scenario events carry a wall-clock stamp, so a chapter runner connecting mid-stream
+  can tell a replayed end from its own run's.
+
 ### The air hold is bounded per episode, and hellos list heard peers
 
 - The mid-flight hold was a ratchet: re-armed by every non-final part heard - resends and a

@@ -44,7 +44,7 @@ static const char *TAG = "VOICE";
 #define GAP_END_MS      1500     /* no frame for this long ends what we were playing (the END was lost) */
 #define SPEAKER_WAIT_MS 400
 #define RX_QUEUE_LEN    12       /* 1.2 s of audio: Wi-Fi delivers in bursts, and a burst must fit */
-#define TASK_STACK      3072
+#define TASK_STACK      3584     /* room for the voice request staged on the sender's stack (~220 B) */
 #define TASK_PRIORITY   4        /* below the network task (5), above drawing (3) and cues (2) */
 
 typedef struct {
@@ -143,8 +143,12 @@ static const char *refusal_text(int reason)
 
 static void on_frame(uint32_t author, uint32_t boot, uint8_t scope, uint32_t target, const uint8_t *frame, size_t len)
 {
-    if (v.rx == NULL || s_play == NULL || len > HH_VOICE_FRAME_MAX || v.talk_req) {
-        return;   /* half duplex: nothing plays while this handheld talks */
+    if (v.rx == NULL || s_play == NULL || len > HH_VOICE_FRAME_MAX) {
+        return;
+    }
+    if (v.talk_req && (len == 0 || frame[0] != LG_VOICE_CODEC_C2_1200)) {
+        return;   /* half duplex for LIVE sound only: a note packet is bytes to store, not sound to
+                     play, and its radio copy was already acknowledged - dropped here it was gone */
     }
     rx_frame_t *item = &s_play->item;   /* the service task is the only caller */
     item->author = author;
@@ -334,15 +338,32 @@ static void synth(int16_t *pcm, size_t n)
  * older ones were evicted - a talk arrived 1 packet in 3. Late and in one piece is the deal (D95).
  */
 #define C2_SPACING_MS     9000
+/*
+ * A talker with no Wi-Fi session sends each packet twice (its frames are broadcast, no AP owes
+ * it an answer), and two copies are ~14 s of channel: spaced at 9 s its own four-slot queue
+ * filled and evicted the very redundancy the second copy was for. Spaced for what is queued.
+ */
+#define C2_SPACING_LORA_MS 15000
 #define NOTE_STRAGGLE_MS  3000      /* after the last packet has come, how long to wait for a missing one */
-#define NOTE_GIVE_UP_MS   10000     /* no packet for this long (three spacings and a bit): play what there is */
-#define NOTE_BUSY_WAIT_MS 20000     /* how long a finished note waits for this handheld to stop talking or playing */
-#define NOTE_REPLAY_WAIT_MS 25000   /* owner, 2026-10-08: a partial note stays; when the rest lands, replay it whole */
+#define NOTE_GIVE_UP_MS   16000     /* no packet for this long: play what there is. A second over the widest
+                                       spacing above, so a note still flowing is never cut into fragments */
+#define NOTE_BUSY_WAIT_MS 70000     /* a live talk may legally hold the speaker MAX_TALK_MS (60 s): a finished
+                                       note outwaits it rather than being freed unheard */
+/*
+ * The owner's replay (2026-10-08): a partial note stays open, and when the rest lands it is played
+ * once more, whole. Packets cross about nine seconds apart, and a lost one is resent behind the
+ * others, so the wait is paced by the air, not by a clock: the note keeps waiting while packets are
+ * still arriving, and gives up only after this much quiet. A first wait of 25 s expired with the
+ * rest still on the way - a note played one packet of three and never got its replay.
+ */
+#define NOTE_REPLAY_QUIET_MS 45000  /* no packet for this long: what is missing is not coming */
+#define NOTE_REPLAY_CAP_MS  180000  /* however it goes, a note lets the handheld go inside three minutes */
 
 static struct {
     TaskHandle_t          task;      /* NULL when no talk is being encoded */
     StreamBufferHandle_t  pcm;
     volatile bool         ending;
+    volatile bool         abandon;   /* a newer talk wants the encoder: stop sending stale speech */
     uint16_t              talk;
     uint8_t               scope;
     uint32_t              target;
@@ -357,12 +378,20 @@ typedef struct {
     volatile int16_t  last;          /* index of the packet that carried END, -1 until it has come */
     volatile uint32_t heard_ms;      /* when the newest packet came */
     volatile bool     closed;        /* playback has begun: later packets are too late */
+    volatile bool     yield;         /* a newer talker is waiting for the slot: wind the waits up */
     bool     have[C2_PACKETS_MAX];
     uint8_t  len[C2_PACKETS_MAX];
     uint8_t  data[C2_PACKETS_MAX][LG_VOICE_C2_DATA_MAX];
 } c2_note_t;
 
 static c2_note_t *volatile c2rx;     /* the note being collected or played; NULL when none */
+
+/* A newer talker's first packet, caught while the one note slot was still held: its radio copy
+ * was acknowledged, so this is the only copy there will ever be. It seeds the next note. */
+static struct {
+    bool       valid;
+    rx_frame_t f;
+} c2_hold;
 
 static void c2_send(uint16_t index, uint8_t flags, uint8_t *pkt, size_t data)
 {
@@ -374,6 +403,8 @@ static void c2_send(uint16_t index, uint8_t flags, uint8_t *pkt, size_t data)
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+    /* Said out loud, because the sender's "Note sent" would otherwise count it as sent. */
+    ESP_LOGW(TAG, "[MSG] Note packet %u found no room in half a second and was not sent", index);
 }
 
 /*
@@ -402,7 +433,7 @@ static void c2_encode_task(void *arg)
     bool sent_end = false;
     bool encoding = c != NULL && in != NULL && pk != NULL;
     bool ok = encoding;
-    while (ok && (encoding || sent < made)) {
+    while (ok && (encoding || sent < made) && !c2tx.abandon) {
         if (encoding) {
             size_t got = xStreamBufferReceive(c2tx.pcm, (uint8_t *)in + have * sizeof(int16_t),
                                               (C2_SAMPLES - have) * sizeof(int16_t), pdMS_TO_TICKS(60));
@@ -439,23 +470,32 @@ static void c2_encode_task(void *arg)
             c2_send(sent, last ? LG_VOICE_END : 0, pk[sent].body, pk[sent].len);
             sent_end = last;
             sent++;
-            next_ms = now_ms() + C2_SPACING_MS;
+            /* With no Wi-Fi session each packet goes twice, so the spacing covers both copies. */
+            next_ms = now_ms() + (hh_service_wifi_session() ? C2_SPACING_MS : C2_SPACING_LORA_MS);
         }
     }
-    if (ok && sent > 0 && !sent_end && sent < C2_PACKETS_MAX) {
+    if (ok && sent > 0 && !sent_end && sent < C2_PACKETS_MAX && !c2tx.abandon) {
         /* Released exactly on a packet boundary, after that packet had gone: an empty last one says so. */
-        while ((int32_t)(now_ms() - next_ms) < 0) {
+        while ((int32_t)(now_ms() - next_ms) < 0 && !c2tx.abandon) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
-        memset(pk[sent].body, 0, sizeof(pk[sent].body));
-        c2_send(sent, LG_VOICE_END, pk[sent].body, 0);
-        sent++;
+        if (!c2tx.abandon) {
+            memset(pk[sent].body, 0, sizeof(pk[sent].body));
+            c2_send(sent, LG_VOICE_END, pk[sent].body, 0);
+            sent++;
+        }
+    }
+    if (ok && c2tx.pcm != NULL) {
+        /* Abandoned before the stream drained; the talk has ended, so nothing feeds it again. */
+        vStreamBufferDelete(c2tx.pcm);
+        c2tx.pcm = NULL;
     }
     /* The sender's half of the measurement, as "Talk ended" is for the live frames. */
     if (ok) {
         ESP_LOGI(TAG, "[MSG] Note sent: talk %u, %u packet(s), %u bytes, crc %08" PRIx32
-                 ", slowest encode %" PRIu32 " ms, stack left %u",
-                 c2tx.talk, sent, (unsigned)bytes, crc, worst_ms, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+                 ", slowest encode %" PRIu32 " ms, stack left %u%s",
+                 c2tx.talk, sent, (unsigned)bytes, crc, worst_ms, (unsigned)uxTaskGetStackHighWaterMark(NULL),
+                 c2tx.abandon ? ", let go for a newer talk" : "");
     } else {
         ESP_LOGW(TAG, "[MSG] No memory for the compact copy of this talk; it went out live only");
         while (!c2tx.ending) {
@@ -474,12 +514,22 @@ static void c2_encode_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* Capture task: a talk is starting. Quietly does nothing when the last talk's copy is still going out. */
+/* Capture task: a talk is starting. The last talk's copy may still be pacing its sends out -
+ * up to ~80 s of spaced packets - and quietly skipping this talk meant a retried talk never
+ * had a compact copy at all. The new talk outranks stale speech: the old copy is told to let
+ * go, and this one takes the encoder when it does. */
 static void c2_talk_begin(uint16_t talk, uint8_t scope, uint32_t target)
 {
     if (c2tx.task != NULL) {
-        return;
+        c2tx.abandon = true;
+        for (int i = 0; i < 40 && c2tx.task != NULL; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (c2tx.task != NULL) {
+            return;   /* it would not let go; this talk goes out live only, as before */
+        }
     }
+    c2tx.abandon = false;
     c2tx.pcm = xStreamBufferCreate(C2_PCM_BUFFER, C2_SAMPLES * sizeof(int16_t));
     if (c2tx.pcm == NULL) {
         return;
@@ -530,6 +580,7 @@ static void c2_play_task(void *arg)
         }
     }
     bool replayed = false;
+    uint16_t played_any = 0;   /* which packets some pass has actually played (C2_PACKETS_MAX <= 16) */
     for (;;) {
         n->closed = true;
         int top = n->last >= 0 ? n->last : (int)C2_PACKETS_MAX - 1;
@@ -583,6 +634,9 @@ static void c2_play_task(void *arg)
                         worst_ms = took > worst_ms ? took : worst_ms;
                         (void)lg_bsp_audio_voice_write(pcm, C2_SAMPLES, SPEAKER_WAIT_MS);
                     }
+                    if (n->have[i]) {
+                        played_any |= (uint16_t)(1u << i);
+                    }
                 }
                 lg_bsp_audio_voice_stop();
             } else {
@@ -607,14 +661,36 @@ static void c2_play_task(void *arg)
                  replayed ? ", replayed whole after the rest arrived" : "");
         /*
          * The owner's replay (2026-10-08): what came played as it came, but packets missing when the
-         * note went quiet can still arrive - the AP sends an unacknowledged one again. Keep the note
-         * open; if the rest lands, join everything and play the whole talk once more.
+         * note went quiet can still arrive - the AP sends an unacknowledged one again, and they are
+         * accepted into empty slots even while a pass plays. The decision is therefore made from the
+         * LIVE state, never from the counts the pass started with: a packet stored mid-play that the
+         * pass walked past must still be heard, and a note that became whole mid-play replays now.
          */
-        if (!replayed && bytes > 0 && (missing > 0 || n->last < 0)) {
+        int live_top = n->last >= 0 ? n->last : (int)C2_PACKETS_MAX - 1;
+        while (live_top >= 0 && !n->have[live_top]) {
+            live_top--;
+        }
+        unsigned live_missing = 0, unplayed = 0;
+        for (int i = 0; i <= live_top; i++) {
+            if (!n->have[i]) {
+                live_missing++;
+            } else if ((played_any & (uint16_t)(1u << i)) == 0u) {
+                unplayed++;
+            }
+        }
+        if (!replayed && !n->yield && live_top >= 0 &&
+            (unplayed > 0 || live_missing > 0 || n->last < 0)) {
+            if (n->last >= 0 && live_missing == 0) {
+                replayed = true;   /* whole already - the rest landed during the pass */
+                continue;
+            }
             n->closed = false;
             bool whole = false;
-            for (uint32_t waited = 0; waited < NOTE_REPLAY_WAIT_MS && !whole; waited += 200) {
+            for (uint32_t waited = 0; waited < NOTE_REPLAY_CAP_MS && !whole; waited += 200) {
                 vTaskDelay(pdMS_TO_TICKS(200));
+                if (n->yield || now_ms() - n->heard_ms >= NOTE_REPLAY_QUIET_MS) {
+                    break;   /* quiet too long - what is missing is not coming - or a newer talker waits */
+                }
                 if (n->last >= 0) {
                     whole = true;
                     for (int i = 0; i <= n->last; i++) {
@@ -635,9 +711,25 @@ static void c2_play_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* Stores one packet into the note; the caller has checked identity and the frame index. */
+static void c2_store(c2_note_t *n, const rx_frame_t *f, const lg_voice_hdr_t *h)
+{
+    size_t data = f->len - LG_VOICE_HDR_LEN;
+    memcpy(n->data[h->frame], f->frame + LG_VOICE_HDR_LEN, data);
+    n->len[h->frame] = (uint8_t)data;
+    n->have[h->frame] = data > 0;
+    n->heard_ms = now_ms();
+    if (h->flags & LG_VOICE_END) {
+        n->last = (int16_t)h->frame;
+    }
+}
+
 /* Playback task: a compact packet of a talk whose live frames this handheld did not hear. */
 static void c2_on_packet(const rx_frame_t *f, const lg_voice_hdr_t *h)
 {
+    if (h->frame >= C2_PACKETS_MAX) {
+        return;
+    }
     c2_note_t *n = c2rx;
     if (n == NULL) {
         n = calloc(1, sizeof(*n));
@@ -658,19 +750,37 @@ static void c2_on_packet(const rx_frame_t *f, const lg_voice_hdr_t *h)
             ESP_LOGW(TAG, "[MSG] No memory to take a note from device %" PRIu32, f->author);
             return;
         }
+        if (c2_hold.valid) {
+            /* The packet held from when the slot was still taken seeds the note it belongs to. */
+            lg_voice_hdr_t held;
+            if (lg_voice_hdr_dec(c2_hold.f.frame, c2_hold.f.len, &held) && held.frame < C2_PACKETS_MAX &&
+                c2_hold.f.author == f->author && c2_hold.f.boot == f->boot && held.talk == h->talk) {
+                c2_store(n, &c2_hold.f, &held);
+            }
+            c2_hold.valid = false;   /* matched or stale, it is spent either way */
+        }
     }
-    if (n->closed || n->author != f->author || n->boot != f->boot || n->talk != h->talk ||
-        h->frame >= C2_PACKETS_MAX) {
-        return;   /* one note at a time; anything else is a second talker, or too late */
+    if (n->author != f->author || n->boot != f->boot || n->talk != h->talk) {
+        /*
+         * One note at a time, and this packet is another talk's. Its radio copy was already
+         * acknowledged, so nothing anywhere will send it again: dropping it silently cost whole
+         * notes. If it is newer than the note holding the slot, keep this one copy, ask the open
+         * note to wind its waits up, and seed the next note from it once the slot is free.
+         */
+        bool newer = n->author != f->author || f->boot > n->boot ||
+                     (f->boot == n->boot && (int16_t)(h->talk - n->talk) > 0);
+        if (newer) {
+            c2_hold.f = *f;
+            c2_hold.valid = true;
+            n->yield = true;
+        }
+        return;
     }
-    size_t data = f->len - LG_VOICE_HDR_LEN;
-    memcpy(n->data[h->frame], f->frame + LG_VOICE_HDR_LEN, data);
-    n->len[h->frame] = (uint8_t)data;
-    n->have[h->frame] = data > 0;
-    n->heard_ms = now_ms();
-    if (h->flags & LG_VOICE_END) {
-        n->last = (int16_t)h->frame;
+    if (n->closed && n->have[h->frame]) {
+        return;   /* mid-playback a duplicate is too late, but a new packet still fills its own slot:
+                     dropping it here lost it for good, and the note could never become whole */
     }
+    c2_store(n, f, h);
 }
 
 static size_t pack(const hh_adpcm_state_t *from, uint16_t talk, uint16_t frame, uint8_t flags, uint8_t *out)
@@ -959,8 +1069,11 @@ static void playback_task(void *arg)
             continue;
         }
         lg_voice_hdr_t h;
-        if (!lg_voice_hdr_dec(f->frame, f->len, &h) || v.talk_req) {
+        if (!lg_voice_hdr_dec(f->frame, f->len, &h)) {
             continue;
+        }
+        if (v.talk_req && h.codec != LG_VOICE_CODEC_C2_1200) {
+            continue;   /* half duplex drops live sound while this handheld talks, never a note packet */
         }
         if (h.codec == LG_VOICE_CODEC_C2_1200) {
             /*

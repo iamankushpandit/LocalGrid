@@ -3211,7 +3211,12 @@ esp_err_t hh_service_voice_send(uint8_t scope, uint32_t target, const uint8_t *f
     if (s.voice_queue == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    static voice_req_t req;   /* only the capture task sends, so one staging copy is enough */
+    /*
+     * On the caller's stack, because two tasks send at once: the capture task its live frames and
+     * the codec2 encoder its note packets (D95). One shared static let them interleave mid-memcpy,
+     * and a torn packet decodes as a burst of noise - or not at all - at every listener.
+     */
+    voice_req_t req;
     req.scope = scope;
     req.target = target;
     req.len = (uint16_t)len;

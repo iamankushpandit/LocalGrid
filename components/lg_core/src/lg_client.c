@@ -777,8 +777,9 @@ static void handle_voice(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
         return;
     }
     lg_voice_seen_t *seen = &c->voice_seen[ui];
-    if (!lg_voice_newer(seen, e->origin_boot, e->origin_seq)) {
-        return;   /* a copy by another path, or late: voice only plays forward */
+    bool catch_up = (e->flags & LG_FLAG_COMPACT) != 0;   /* a resent note packet may arrive late (D95) */
+    if (!lg_voice_check(seen, e->origin_boot, e->origin_seq, catch_up)) {
+        return;   /* a copy by another path, or late: live voice only plays forward */
     }
 
     uint8_t plain[LG_VOICE_PAYLOAD_MAX];
@@ -833,8 +834,7 @@ static void handle_voice(lg_client_t *c, const lg_env_t *e, const uint8_t *body)
         ((e->flags & LG_FLAG_COMPACT) != 0) != (plain[0] == LG_VOICE_CODEC_C2_1200)) {
         return;   /* the envelope and the payload must agree about the codec (D95) */
     }
-    seen->boot = e->origin_boot;
-    seen->seq  = e->origin_seq;
+    (void)lg_voice_take(seen, e->origin_boot, e->origin_seq, catch_up);   /* committed only once valid */
     c->io.on_voice(c->io.ctx, e, plain, plen);
 }
 
