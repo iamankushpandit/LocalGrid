@@ -88,12 +88,14 @@ static const char *TAG = "UI";
  */
 typedef struct {
     int16_t   margin;       /* clear of the flashing border */
+    int16_t   y0;           /* where the alert's own space starts: 0, or below a notification sharing the screen */
     int16_t   kind_y;
     int16_t   who_y;
     int16_t   text_y;
     uint8_t   text_lines;   /* lines of the message that fit above the location */
     uint16_t  starts[ALERT_TEXT_LINES + 1];
     uint8_t   where_lines;  /* 0, 1, or 2 */
+    uint8_t   where_asked;  /* how many there were to show; fewer are laid out when the screen is shared */
     lg_rect_t where;        /* the location lines, empty when the sender's position is not known */
     lg_rect_t read;         /* the Read button */
     lg_rect_t hint;         /* how to read it without touch (alert unit, D66); empty when none */
@@ -129,6 +131,7 @@ static struct {
     bool      banner_down;
     uint32_t  banner_since;
     char      banner_text[HH_TEXT_MAX + 64];
+    bool      banner_restart;   /* it waited behind an alert: its time to be read starts when the alert is read */
     uint8_t   pending_scope;
     uint32_t  pending_target;
     char      pending_title[40];
@@ -142,7 +145,7 @@ static struct {
     uint32_t  repeat_ms;
     uint32_t  alert_id;   /* the message the alert is showing, reported read when Read is tapped */
     uint32_t  alert_author;
-    char      alert_who[HH_NAME_MAX];
+    char      alert_who[HH_NAME_MAX + 16];   /* the sender, and when they sent it: "Chase at 2:32 PM" */
     char      alert_text[HH_TEXT_MAX + 1];
     char      alert_where[2][WHERE_MAX];   /* "240 m NE of you", "position 5 min old" */
     uint32_t  where_ms;
@@ -276,8 +279,10 @@ static void paint_banner(const lg_canvas_t *c, void *ctx)
         lg_paint_text(c, &inner, inner.x, (int16_t)(inner.y + l * F_SMALL->line_height), F_SMALL, F_EMOJI, C_ACCENT,
                       s.banner_text + starts[l], (size_t)(starts[l + 1] - starts[l]));
     }
+    /* Under an alert a tap opens nothing - only Read closes an alert (D41) - so it says so. */
+    const char *hint = s.cover == OV_ALERT ? "Opens after Read" : "Tap to open";
     lg_paint_text(c, &inner, inner.x, (int16_t)(inner.y + inner.h - F_SMALL->line_height), F_SMALL, NULL, C_MUTED,
-                  "Tap to open", 11);
+                  hint, strlen(hint));
 }
 
 static void draw_banner(void)
@@ -353,6 +358,18 @@ static uint8_t alert_where(uint32_t author, char out[2][WHERE_MAX])
 }
 
 /*
+ * An alert and a message notification at the same moment each get their own part of the screen
+ * (owner, 2026-10-09): the notification the strip across the top, the alert everything below it.
+ * The notification used to be drawn over the top of the alert, and the alert's flashing border
+ * over the notification, and neither could be read. With only one of them showing, each has the
+ * screen as it always did.
+ */
+static int16_t alert_y0(void)
+{
+    return s.banner && s.cover == OV_ALERT ? (int16_t)(BANNER_H + 8) : 0;
+}
+
+/*
  * The alert's layout, top to bottom: the kind and sender, the message, the location lines, and
  * Read across the bottom, all inside the flashing border. Read and the location are placed from
  * the bottom up; the message gets the lines that are left (never fewer than it needs to overlap
@@ -363,6 +380,8 @@ static void alert_layout(uint8_t where_lines)
     alert_layout_t *L = &s.lay;
     int16_t w = (int16_t)s.w;
     int16_t h = (int16_t)s.h;
+    L->y0 = alert_y0();
+    L->where_asked = where_lines;
     L->margin = (int16_t)(ALERT_FRAME + UI_PAD);
     int16_t inner_w = (int16_t)(w - 2 * L->margin);
     int16_t bw = (int16_t)(w / 2);
@@ -370,7 +389,15 @@ static void alert_layout(uint8_t where_lines)
     int16_t hint_h = s.read_hint[0] ? (int16_t)(F_SMALL->line_height + UI_GAP) : 0;
     L->hint = (lg_rect_t){ L->margin, (int16_t)(h - L->margin - hint_h), inner_w, hint_h };
     L->read = (lg_rect_t){ (int16_t)((w - bw) / 2), (int16_t)(h - L->margin - hint_h - bh), bw, bh };
+    int16_t top = (int16_t)(L->y0 + L->margin + UI_GAP);
+    int16_t head = (int16_t)(F_TITLE->line_height + 6 + F_SMALL->line_height + 10);
     int16_t bottom = (int16_t)(L->read.y - 2 * UI_GAP);
+    /* A shared screen has less room, and the words of the alert come first: a location line gives
+     * way before the message loses its last line, and is back when the alert has the screen again. */
+    while (where_lines > 0 &&
+           bottom - where_lines * F_BODY->line_height - 2 * UI_GAP - top - head < F_TITLE->line_height) {
+        where_lines--;
+    }
     L->where_lines = where_lines;
     if (where_lines > 0) {
         int16_t wh = (int16_t)(where_lines * F_BODY->line_height);
@@ -379,8 +406,6 @@ static void alert_layout(uint8_t where_lines)
     } else {
         L->where = (lg_rect_t){ 0, 0, 0, 0 };
     }
-    int16_t top = (int16_t)(L->margin + UI_GAP);
-    int16_t head = (int16_t)(F_TITLE->line_height + 6 + F_SMALL->line_height + 10);
     int16_t room = (int16_t)(bottom - top - head);
     int16_t fit = room > 0 ? (int16_t)(room / F_TITLE->line_height) : 0;
     uint8_t max_lines = (uint8_t)(fit > ALERT_TEXT_LINES ? ALERT_TEXT_LINES : fit);
@@ -409,7 +434,7 @@ static void paint_alert(const lg_canvas_t *c, void *ctx)
 {
     (void)ctx;
     const alert_layout_t *L = &s.lay;
-    lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
+    lg_rect_t all = { 0, L->y0, (int16_t)s.w, (int16_t)(s.h - L->y0) };   /* its own space, not a notification's */
     lg_color_t tone = s.all_clear ? C_ACCENT : s.emergency ? C_ERROR : C_WARNING;
     lg_color_t ground = tone;
     lg_color_t ink = C_BG;
@@ -442,7 +467,7 @@ static void paint_alert(const lg_canvas_t *c, void *ctx)
 static void draw_alert(void)
 {
     lg_draw_scroll_area(0, 0);   /* a full-screen cover is drawn unscrolled; the screen is redrawn after */
-    lg_rect_t all = { 0, 0, (int16_t)s.w, (int16_t)s.h };
+    lg_rect_t all = { 0, s.lay.y0, (int16_t)s.w, (int16_t)(s.h - s.lay.y0) };
     lg_draw_region(&all, paint_alert, NULL);
 }
 
@@ -459,12 +484,12 @@ static void alert_where_tick(uint32_t now)
     s.where_ms = now;
     char fresh[2][WHERE_MAX];
     uint8_t lines = alert_where(s.alert_author, fresh);
-    if (lines == s.lay.where_lines && strcmp(fresh[0], s.alert_where[0]) == 0 &&
+    if (lines == s.lay.where_asked && strcmp(fresh[0], s.alert_where[0]) == 0 &&
         strcmp(fresh[1], s.alert_where[1]) == 0) {
         return;
     }
     memcpy(s.alert_where, fresh, sizeof(fresh));
-    if (lines == s.lay.where_lines) {
+    if (lines == s.lay.where_asked) {
         lg_draw_region(&s.lay.where, paint_alert, NULL);
         return;
     }
@@ -480,25 +505,53 @@ static void draw_alert_frame(void)
     lg_color_t edge = s.lit ? C_BG : tone;
     int16_t w = (int16_t)s.w;
     int16_t h = (int16_t)s.h;
+    int16_t y0 = s.lay.y0;   /* the border runs round the alert's own space */
     const lg_rect_t bars[4] = {
-        { 0, 0, w, ALERT_FRAME },
+        { 0, y0, w, ALERT_FRAME },
         { 0, (int16_t)(h - ALERT_FRAME), w, ALERT_FRAME },
-        { 0, ALERT_FRAME, ALERT_FRAME, (int16_t)(h - 2 * ALERT_FRAME) },
-        { (int16_t)(w - ALERT_FRAME), ALERT_FRAME, ALERT_FRAME, (int16_t)(h - 2 * ALERT_FRAME) },
+        { 0, (int16_t)(y0 + ALERT_FRAME), ALERT_FRAME, (int16_t)(h - y0 - 2 * ALERT_FRAME) },
+        { (int16_t)(w - ALERT_FRAME), (int16_t)(y0 + ALERT_FRAME), ALERT_FRAME,
+          (int16_t)(h - y0 - 2 * ALERT_FRAME) },
     };
     for (int i = 0; i < 4; i++) {
         lg_draw_fill(&bars[i], edge);
     }
 }
 
-static void show_alert(bool emergency, const char *who, const char *text, uint32_t id, uint32_t author, uint32_t now)
+/*
+ * The line under the heading: who sent it and when - "Chase at 2:32 PM" (owner, 2026-10-09). An SOS
+ * and its all clear are read late as often as at once, by someone picking a handheld up, and the
+ * first question is how long ago. The time is the message's own: the grid time its author stamped
+ * it with, which every message already carries, so nothing more is sent for this. It is shown in
+ * the grid's zone, as the clock is (D67). A message from before the grid had the time carries none,
+ * and then the name stands alone; a name too long to share the line gives way to the time.
+ */
+static void alert_who_when(const char *who, uint32_t sent_at)
+{
+    if (sent_at == 0) {
+        snprintf(s.alert_who, sizeof(s.alert_who), "%s", who);
+        return;
+    }
+    struct tm lt;
+    hh_local_time(sent_at, &lt);
+    unsigned hour = (unsigned)lt.tm_hour % 24u;
+    char when[12];
+    snprintf(when, sizeof(when), "%u:%02u %s", hour % 12u == 0u ? 12u : hour % 12u, (unsigned)lt.tm_min % 60u,
+             hour < 12u ? "AM" : "PM");
+    snprintf(s.alert_who, sizeof(s.alert_who), "%s at %s", who, when);
+    if (lg_draw_text_width(F_SMALL, F_EMOJI, s.alert_who) > (int)s.w - 2 * (ALERT_FRAME + UI_PAD)) {
+        snprintf(s.alert_who, sizeof(s.alert_who), "at %s", when);
+    }
+}
+
+static void show_alert(bool emergency, const char *who, const char *text, uint32_t id, uint32_t author,
+                       uint32_t sent_at, uint32_t now)
 {
     if (s.cover == OV_ALERT && s.emergency && !emergency) {
         return;   /* an announcement never buries an emergency nobody has acknowledged */
     }
     s.all_clear = false;
-    s.banner = false;
-    s.cover = OV_ALERT;
+    s.cover = OV_ALERT;   /* a notification that is showing stays, in its own strip (alert_y0) */
     s.emergency = emergency;
     s.lit = false;   /* the frame starts dark against the coloured panel, then pulses */
     s.flashes_left = emergency ? 0 : ANNOUNCE_FLASHES;   /* 0: keep flashing */
@@ -507,13 +560,16 @@ static void show_alert(bool emergency, const char *who, const char *text, uint32
     s.alert_id = id;
     s.alert_author = author;
     s.where_ms = now;
-    snprintf(s.alert_who, sizeof(s.alert_who), "%s", who);
+    alert_who_when(who, sent_at);
     snprintf(s.alert_text, sizeof(s.alert_text), "%s", text);
     alert_layout(alert_where(author, s.alert_where));
     draw_alert();
     draw_alert_frame();
+    if (s.banner) {
+        draw_banner();
+    }
     (void)lg_bsp_audio_cue(emergency ? LG_CUE_URGENT : LG_CUE_ANNOUNCE);
-    ESP_LOGI(TAG, "[UI] %s alert: %s", emergency ? "Emergency" : "Announcement", text);
+    ESP_LOGI(TAG, "[UI] %s alert from %s: %s", emergency ? "Emergency" : "Announcement", s.alert_who, text);
     if (s.lay.where_lines > 0) {
         ESP_LOGI(TAG, "[UI] Alert sender is %s%s%s", s.alert_where[0], s.lay.where_lines > 1 ? "; " : "",
                  s.alert_where[1]);
@@ -526,13 +582,13 @@ static void show_alert(bool emergency, const char *who, const char *text, uint32
  * by a calm alert -- the accent colour, no flashing, the ordinary chime. An emergency from anyone
  * else stays up; the all clear is still in the message list.
  */
-static void show_all_clear(const char *who, const char *text, uint32_t id, uint32_t author, uint32_t now)
+static void show_all_clear(const char *who, const char *text, uint32_t id, uint32_t author, uint32_t sent_at,
+                           uint32_t now)
 {
     if (s.cover == OV_ALERT && s.emergency && s.alert_author != author) {
         return;
     }
-    s.banner = false;
-    s.cover = OV_ALERT;
+    s.cover = OV_ALERT;   /* a notification that is showing stays, in its own strip (alert_y0) */
     s.emergency = false;
     s.all_clear = true;
     s.lit = true;
@@ -542,13 +598,17 @@ static void show_all_clear(const char *who, const char *text, uint32_t id, uint3
     s.alert_id = id;
     s.alert_author = author;
     s.where_ms = now;
-    snprintf(s.alert_who, sizeof(s.alert_who), "%s", who);
+    alert_who_when(who, sent_at);
     snprintf(s.alert_text, sizeof(s.alert_text), "%s", text);
     alert_layout(alert_where(author, s.alert_where));
     draw_alert();
     draw_alert_frame();
+    if (s.banner) {
+        draw_banner();
+    }
     (void)lg_bsp_audio_cue(LG_CUE_RECEIVED);
     ESP_LOGI(TAG, "[UI] All clear: %s", text);
+    ESP_LOGI(TAG, "[UI] All clear is from %s", s.alert_who);
 }
 
 /* ---- screen saver ---- */
@@ -1010,9 +1070,9 @@ static void watch(uint32_t now)
     }
     if (n_scope == LG_SCOPE_BROADCAST) {
         if (newest.all_clear) {
-            show_all_clear(who, newest.text, newest.id, newest.author, now);
+            show_all_clear(who, newest.text, newest.id, newest.author, newest.grid_time, now);
         } else {
-            show_alert(newest.urgent, who, newest.text, newest.id, newest.author, now);
+            show_alert(newest.urgent, who, newest.text, newest.id, newest.author, newest.grid_time, now);
         }
         return;
     }
@@ -1076,6 +1136,7 @@ bool ui_overlay_alert_showing(void)
 static void close_alert_as_read(void)
 {
     s.cover = OV_NONE;   /* only Read closes an alert (D41, revised) */
+    s.banner_restart = s.banner;   /* a notification that waited is now the one thing to look at */
     hh_service_mark_read(s.alert_id);   /* Read means read: the sender sees it (D58) */
     ESP_LOGI(TAG, "[UI] Alert closed");
     ui_redraw_current();
@@ -1118,6 +1179,16 @@ void ui_overlay_tick(uint32_t now, uint32_t last_touch_ms)
     }
     switch (s.cover) {
     case OV_ALERT:
+        if (alert_y0() != s.lay.y0) {
+            /* A notification came or went while the alert is up: each gets its own space again. */
+            alert_layout(alert_where(s.alert_author, s.alert_where));
+            draw_alert();
+            draw_alert_frame();
+            if (s.banner) {
+                draw_banner();
+            }
+            ESP_LOGI(TAG, "[UI] Alert %s", s.lay.y0 != 0 ? "shares the screen with a notification" : "has the screen to itself");
+        }
         if ((s.emergency || s.flashes_left > 0) &&
             now - s.flash_ms >= (s.emergency ? EMERGENCY_FLASH_MS : FLASH_MS)) {
             s.flash_ms = now;
@@ -1140,6 +1211,10 @@ void ui_overlay_tick(uint32_t now, uint32_t last_touch_ms)
         }
         break;
     default:
+        if (s.banner && s.banner_restart) {
+            s.banner_restart = false;
+            s.banner_since = now;
+        }
         if (s.banner && now - s.banner_since >= BANNER_MS) {
             hide_banner();
         }

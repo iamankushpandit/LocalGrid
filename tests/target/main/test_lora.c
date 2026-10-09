@@ -402,6 +402,37 @@ static void test_queue_rank(void)
     lora_txq_slot_t *second = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 7, 40, 0);
     CHECK(second != NULL && lora_txq_commit(&q, second, 40));
     CHECK(lora_txq_peek(&q, 0) == first);
+
+    /*
+     * An alert nobody answers is not given up after three tries (2026-10-09): an all clear lost
+     * three times in its own SOS's echo left four handhelds sounding an alarm that had been stood
+     * down. It goes LORA_ALERT_TRIES times; a message still goes three.
+     */
+    txq_setup(&q, false);
+    lora_txq_slot_t *al = lora_txq_reserve_ranked(&q, LG_LORA_ADDR_BROADCAST, LORA_RANK_ALERT, 8, 40, 0);
+    CHECK(al != NULL && lora_txq_commit(&q, al, 40));
+    lora_txq_want_ack(al, 900, 1u << 1);
+    uint32_t at = 0;
+    for (unsigned k = 0; k < LORA_ALERT_TRIES; k++) {
+        CHECK(lora_txq_peek(&q, at) == al);
+        al->part = al->of;
+        CHECK(lora_txq_sent(&q, al, at + 1000u));
+        at += 1000u;
+    }
+    CHECK(lora_txq_peek(&q, at) == NULL);   /* and after that it is let go */
+    CHECK_EQ(q.depth, 0);
+    CHECK_EQ(q.unacked, 1);
+    lora_txq_slot_t *msg = lora_txq_reserve_ranked(&q, LG_LORA_ADDR_BROADCAST, LORA_RANK_MESSAGE, 9, 40, 0);
+    CHECK(msg != NULL && lora_txq_commit(&q, msg, 40));
+    lora_txq_want_ack(msg, 901, 1u << 1);
+    for (unsigned k = 0; k < LORA_TX_TRIES; k++) {
+        CHECK(lora_txq_peek(&q, at) == msg);
+        msg->part = msg->of;
+        CHECK(lora_txq_sent(&q, msg, at + 1000u));
+        at += 1000u;
+    }
+    CHECK(lora_txq_peek(&q, at) == NULL);
+    CHECK_EQ(q.unacked, 2);
 }
 
 static void test_policy(void)

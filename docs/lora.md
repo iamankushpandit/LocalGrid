@@ -472,7 +472,7 @@ AT                      three times, 1 s apart: is anything there at all?
 AT+VER?                 for the log and the admin page
 AT+ADDRESS=<AP index>   0 for MAIN, 1 NORTH, 2 SOUTH
 AT+NETWORKID=<3..15>    3 + (first byte of the grid discriminator mod 13)
-AT+BAND=868500000       change this one number for a 915 MHz region
+AT+BAND=915000000       the region's band: LG_LORA_REGION in firmware/common/lg_lora_wire.h, North America by default (Europe: 868500000)
 AT+PARAMETER=9,7,1,12   SF9, BW 125 kHz, CR 4/5, preamble 12
 AT+CRFOP=22             22 dBm; 14 or 5 if the device was told `lora power medium|low` (D98)
 AT+MODE=0               transceiver

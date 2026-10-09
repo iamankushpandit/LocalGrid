@@ -144,6 +144,25 @@ typedef struct {
     bool     all_clear;   /* it carried LG_FLAG_ALL_CLEAR (D66) */
 } lg_urgent_seen_t;
 
+/*
+ * D48 for alerts (2026-10-09). An urgent broadcast and its all clear used to be one-off events: an
+ * AP that was out of reach when one passed never learned of it. On the bench an all clear was lost
+ * on a LoRa-only link, and four handhelds went on sounding an alarm that had been stood down - still
+ * sounding after the Wi-Fi backbone came back, because nothing ever said it again.
+ *
+ * The newest urgent broadcast is now kept whole and given again: to the neighbours when a link comes
+ * up, and every LG_URGENT_REPEAT_MS while it is active. And each author's newest is remembered by
+ * its identity, apart from the duplicate window, which forgets: so an alert an AP has carried is
+ * never delivered twice however often it is said, and an SOS can never come back after the all
+ * clear that answered it. Identity is (boot, sequence), never the clock.
+ */
+#define LG_URGENT_KEEP_MAX   (LG_ENV_SIZE + LG_TEXT_MAX)
+#define LG_URGENT_REPEAT_MS  60000u
+typedef struct {
+    uint32_t boot;   /* with seq 0: nothing carried from this author since this node started */
+    uint32_t seq;
+} lg_urgent_last_t;
+
 typedef struct {
     uint32_t author;      /* 0: none carried */
     uint32_t age_ms;      /* since it was carried */
@@ -180,6 +199,9 @@ typedef struct {
     /* D68, all indexed by roster user index and kept in RAM only. */
     uint8_t             battery[LG_MAX_DEVICES];    /* from each local handheld's PING; LG_BATTERY_UNKNOWN */
     lg_urgent_seen_t    urgent;                     /* the newest urgent broadcast carried */
+    lg_urgent_last_t    urgent_last[LG_MAX_DEVICES];   /* each author's newest urgent broadcast, by roster user index */
+    uint16_t            urgent_keep_len;               /* 0: none kept */
+    uint8_t             urgent_keep[LG_URGENT_KEEP_MAX];   /* the newest one whole, to give again (D48) */
     uint32_t            urgent_open_ms[LG_MAX_DEVICES];   /* author's last urgent that was not an all clear */
     bool                urgent_open[LG_MAX_DEVICES];      /* ... and no all clear from them since */
     uint8_t             time_quality;               /* last quality this node announced or sent */
@@ -222,6 +244,13 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
 
 /* A neighbor link became usable: re-announce local presence so partitions reconcile. */
 void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor);
+
+/*
+ * Gives the newest urgent broadcast to every neighbour again, while it is younger than
+ * LG_URGENT_ACTIVE_MS here. The glue calls it every LG_URGENT_REPEAT_MS; a link coming up calls it
+ * too. False when there is nothing to say. Those that have it drop it; one that missed it delivers it.
+ */
+bool lg_node_announce_urgent(lg_node_t *n);
 
 /* Sends TIME_SYNC to one attached device. A registering device gets one after REGISTER_ACK when
  * this node has grid time, carrying the quality last announced or sent (CARRIED if none yet). */

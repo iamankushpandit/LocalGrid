@@ -91,10 +91,28 @@ _Static_assert(LORA_PART_HDR + LORA_SLICE_MAX == LORA_PART_RAW_MAX, "a part fill
  * rather than at a desk -- so they live here, in the file both sides already compile, and not in
  * two headers that cannot include each other (D27).
  *
- * Band: 868.5 MHz is the European licence-free LoRa band. A 915 MHz region changes this one number
- * (and only this one) before flashing every board in the grid.
+ * Region (owner, 2026-10-09): where the grid is used decides the band, and it is chosen by name,
+ * here, before flashing every board in the grid. North America is the default - the grid's first
+ * trip is there, and 915 MHz is also what the module itself comes up on, so one that restarts by
+ * itself is at least on the right band. Europe is the other region known so far. The frequency is
+ * all a region sets today; what each allows in power and airtime is the builder's to check.
+ *
+ * It is a build setting and not yet a setting of the grid. A band two devices disagree on splits
+ * the grid without a word, so the place for it is the grid's shared settings, chosen once at setup
+ * and adopted by every AP and handheld; until that exists, one name here is the whole of it.
  */
+#define LG_LORA_REGION_US915 1           /* North America: 902-928 MHz */
+#define LG_LORA_REGION_EU868 2           /* Europe: 863-870 MHz */
+#ifndef LG_LORA_REGION
+#define LG_LORA_REGION       LG_LORA_REGION_US915
+#endif
+#if LG_LORA_REGION == LG_LORA_REGION_US915
+#define LG_LORA_BAND_HZ      915000000u
+#elif LG_LORA_REGION == LG_LORA_REGION_EU868
 #define LG_LORA_BAND_HZ      868500000u
+#else
+#error "LG_LORA_REGION names no region this firmware knows"
+#endif
 #define LG_LORA_UART_BAUD    115200u     /* the RYLR998 leaves the factory at this rate */
 /* AT+PARAMETER: spreading factor 9, bandwidth 125 kHz (code 7), coding rate 4/5 (code 1),
  * preamble 12 -- the module's own default, and required while the network ID is left at 18. */
@@ -350,6 +368,14 @@ bool   lora_ack_parse(const uint8_t *in, size_t len, uint32_t *seq);
 
 #define LORA_TX_TRIES  3u      /* times a frame that wants an acknowledgement goes on the air before it is given up */
 /*
+ * An alert is not given up after three. On 2026-10-09 an all clear sent nine seconds after its SOS
+ * went out three times into the SOS's own echo - every AP relaying and answering at once - was
+ * heard by nobody, and was dropped: four handhelds went on sounding an alarm that had been stood
+ * down, until someone sent it again by hand. An alert keeps trying, more slowly after the third,
+ * for about two minutes; the driver sets the pace.
+ */
+#define LORA_ALERT_TRIES 12u
+/*
  * D109: in a slot's `await`, the one handheld the frame is addressed to, rather than an access point
  * by index. Its acknowledgement is matched on this bit, and a repeat keeps the handheld's address.
  */
@@ -383,6 +409,7 @@ typedef struct {
     uint8_t  tries;        /* times all of it has been on the air */
     uint16_t await;        /* bit n set: AP n has not acknowledged it yet. 0: none is wanted */
     uint32_t seq;          /* the sealed frame's outer sequence number, which an acknowledgement names */
+    uint32_t tag;          /* the driver's own mark; 0 when it has none. An AP marks an alert with its author */
     uint8_t *data;
     size_t   cap;
 } lora_txq_slot_t;

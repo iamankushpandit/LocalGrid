@@ -666,6 +666,8 @@ static void handle_client_trail_req(lg_node_t *n, uint32_t session_device, const
 
 /* ---- delivery ----------------------------------------------------------- */
 
+static void give_urgent_to(lg_node_t *n, uint32_t device);   /* defined with the urgent record */
+
 static void deliver_direct(lg_node_t *n, const lg_env_t *e, const uint8_t *body,
                            const uint8_t *frame, size_t len, uint16_t from_node)
 {
@@ -817,6 +819,73 @@ static void note_urgent(lg_node_t *n, const lg_env_t *e)
     n->urgent.all_clear = clear;
     n->urgent_open[ui]    = !clear;   /* an all clear stands down the author's earlier alert */
     n->urgent_open_ms[ui] = now;
+    n->urgent_last[ui].boot = e->origin_boot;
+    n->urgent_last[ui].seq  = e->origin_seq;
+}
+
+/* Whether this urgent broadcast is one already carried from its author, or older than one that was
+ * (see lg_urgent_last_t): then it is nothing new, whatever the duplicate window still remembers. */
+static bool urgent_known(const lg_node_t *n, const lg_env_t *e)
+{
+    if (e->scope != LG_SCOPE_BROADCAST || (e->flags & LG_FLAG_URGENT) == 0) {
+        return false;
+    }
+    int ui = lg_roster_user_index(n->roster, e->origin_id);
+    if (ui < 0 || ui >= (int)LG_MAX_DEVICES) {
+        return false;
+    }
+    const lg_urgent_last_t *u = &n->urgent_last[ui];
+    if (u->boot == 0 && u->seq == 0) {
+        return false;
+    }
+    return e->origin_boot < u->boot || (e->origin_boot == u->boot && e->origin_seq <= u->seq);
+}
+
+/* Keeps the newest urgent broadcast whole, as it is being sent on, so it can be given again (D48). */
+static void keep_urgent(lg_node_t *n, const lg_env_t *e, const uint8_t *frame, size_t len)
+{
+    if (e->scope != LG_SCOPE_BROADCAST || (e->flags & LG_FLAG_URGENT) == 0) {
+        return;
+    }
+    n->urgent_keep_len = 0;   /* one too long to keep is simply not said again */
+    if (len <= sizeof(n->urgent_keep)) {
+        memcpy(n->urgent_keep, frame, len);
+        n->urgent_keep_len = (uint16_t)len;
+    }
+}
+
+/*
+ * The same alert for one handheld that has just come to this AP: from an AP that never had it, or
+ * back from being switched off or out of reach. On the bench two handhelds moved to another AP a
+ * few seconds after an SOS and were never told of it (2026-10-09). One the handheld has already
+ * had falls to its own duplicate window, so it is shown once however often it moves.
+ */
+static void give_urgent_to(lg_node_t *n, uint32_t device)
+{
+    if (n->urgent_keep_len == 0 || device == n->urgent.author ||
+        node_now_ms(n) - n->urgent.at_ms >= LG_URGENT_ACTIVE_MS) {
+        return;
+    }
+    n->io.to_client(n->io.ctx, device, n->urgent_keep, n->urgent_keep_len);
+}
+
+bool lg_node_announce_urgent(lg_node_t *n)
+{
+    if (n->urgent_keep_len == 0 || node_now_ms(n) - n->urgent.at_ms >= LG_URGENT_ACTIVE_MS) {
+        return false;
+    }
+    lg_env_t e;
+    if (lg_env_decode(n->urgent_keep, n->urgent_keep_len, &e) != LG_OK) {
+        return false;
+    }
+    e.ttl = LG_TTL_DEFAULT;   /* it is being said again, not passed along: a fresh count of hops */
+    uint8_t buf[LG_URGENT_KEEP_MAX];
+    int flen = lg_frame_build(&e, lg_frame_body(n->urgent_keep), e.body_len, buf, sizeof(buf));
+    if (flen < 0) {
+        return false;
+    }
+    flood_frame(n, LG_NODE_NONE, buf, (size_t)flen);
+    return true;
 }
 
 /* A MSG_ACK is passing this node for the first time: count it if it reports the newest urgent read. */
@@ -901,6 +970,7 @@ static void handle_client_text(lg_node_t *n, const lg_env_t *e, const uint8_t *b
     if (f.scope == LG_SCOPE_DIRECT) {
         deliver_direct(n, &f, body, buf, (size_t)flen, LG_NODE_NONE);
     } else {
+        keep_urgent(n, &f, buf, (size_t)flen);
         deliver_fanout(n, &f, body, buf, (size_t)flen, LG_NODE_NONE);
     }
 }
@@ -1225,6 +1295,7 @@ void lg_node_on_session_frame(lg_node_t *n, uint32_t *session_device, const uint
         }
         flood_presence(n, p);
         notify_local_clients(n, p, reg.device);
+        give_urgent_to(n, reg.device);   /* D48: an alert in progress, for one who was elsewhere */
         return;
     }
 
@@ -1366,6 +1437,7 @@ void lg_node_mark_lora_reachable(lg_node_t *n, uint32_t device)
     p->node  = n->self;
     flood_presence(n, p);
     notify_local_clients(n, p, device);
+    give_urgent_to(n, device);   /* D48: and the alert in progress, over the radio it is now reached by */
 }
 
 void lg_node_on_session_closed(lg_node_t *n, uint32_t device)
@@ -1470,7 +1542,12 @@ void lg_node_on_backbone_frame(lg_node_t *n, uint16_t from_node, const uint8_t *
                 n->stats.malformed++;
                 break;
             }
+            if (urgent_known(n, &e)) {
+                n->stats.duplicates++;   /* this alert, or a newer one from its author, has been carried */
+                break;
+            }
             note_urgent(n, &e);
+            keep_urgent(n, &e, frame, len);
             deliver_fanout(n, &e, body, frame, len, from_node);
         }
         break;
@@ -1625,6 +1702,7 @@ void lg_node_on_neighbor_up(lg_node_t *n, uint16_t neighbor)
             flood_devfw(n, &n->devfw[i]);
         }
     }
+    (void)lg_node_announce_urgent(n);   /* D48: an alert, or its all clear, that this neighbour missed */
 }
 
 void lg_node_send_time(lg_node_t *n, uint32_t device, uint8_t quality)

@@ -2676,6 +2676,77 @@ static void test_voice_catch_up(void)
 }
 
 /*
+ * D48 for alerts (2026-10-09): an AP that was out of reach when an alert or its all clear passed
+ * learns of it when the link comes up, its handhelds are told, nobody who has it is told twice,
+ * and an SOS cannot come back after the all clear that answered it.
+ */
+static void test_urgent_heals(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_urgent_info_t u;
+    /* C is out of reach when Dad raises the alarm, and Alex's handheld on B is switched off. */
+    sim_detach(s, ALEX);
+    CHECK(sim_pump(s));
+    sim_link(s, 1, 2, false);
+    s->now_ms += LG_BROADCAST_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT, TXT("SOS from Dad")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[1].node, &u) && u.active);
+    CHECK(!lg_node_urgent(&s->nodes[2].node, &u));
+    uint16_t emma = cl(s, EMMA)->inbox_count;
+
+    /* Alex switches on while the alarm is up: B tells his handheld as it joins, and only once. */
+    uint16_t alex_on = cl(s, ALEX)->inbox_count;
+    sim_attach(s, ALEX, 1);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, ALEX)->inbox_count, alex_on + 1);
+    sim_detach(s, ALEX);
+    CHECK(sim_pump(s));
+    sim_attach(s, ALEX, 1);
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, ALEX)->inbox_count, alex_on + 1);
+
+    /* The link comes back: C learns of it, and Emma's handheld is told. */
+    sim_link(s, 1, 2, true);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[2].node, &u) && u.active && !u.all_clear);
+    CHECK_EQ(cl(s, EMMA)->inbox_count, emma + 1);
+
+    /* It is said again every minute, and nobody who has it is told twice. */
+    uint32_t dups = s->nodes[2].node.stats.duplicates;
+    CHECK(lg_node_announce_urgent(&s->nodes[1].node));
+    CHECK(lg_node_announce_urgent(&s->nodes[0].node));
+    CHECK(sim_pump(s));
+    CHECK_EQ(cl(s, EMMA)->inbox_count, emma + 1);
+    CHECK(s->nodes[2].node.stats.duplicates > dups);
+
+    /* The all clear is missed by C in the same way, and heals in the same way. */
+    sim_link(s, 1, 2, false);
+    s->now_ms += LG_BROADCAST_INTERVAL_MS + 1;
+    CHECK(lg_client_send_text(cl(s, DAD), LG_SCOPE_BROADCAST, 0, LG_FLAG_URGENT | LG_FLAG_ALL_CLEAR,
+                              TXT("Dad is safe")) >= 0);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[1].node, &u) && u.all_clear && !u.active);
+    CHECK(lg_node_urgent(&s->nodes[2].node, &u) && u.active);   /* C still has the alarm on */
+    uint16_t alex = cl(s, ALEX)->inbox_count;
+    /* When the link returns B says the all clear and C, which missed it, says the SOS it still holds. */
+    sim_link(s, 1, 2, true);
+    CHECK(sim_pump(s));
+    CHECK(lg_node_urgent(&s->nodes[2].node, &u) && u.all_clear && !u.active);
+    CHECK_EQ(cl(s, EMMA)->inbox_count, emma + 2);
+    CHECK(lg_node_urgent(&s->nodes[1].node, &u) && u.all_clear && !u.active);   /* the SOS did not come back */
+    CHECK_EQ(cl(s, ALEX)->inbox_count, alex);
+
+    /* Past its fifteen minutes it is not said again. */
+    s->now_ms += LG_URGENT_ACTIVE_MS;
+    CHECK(!lg_node_announce_urgent(&s->nodes[0].node));
+    sim_destroy(s);
+}
+
+/*
  * 2026-10-09: each presence announcement starts one past the record that led the last one. Over
  * Wi-Fi every record crosses anyway; over a link with room for only the first one or two (LoRa)
  * this is what gives every local handheld its turn instead of the same ones every minute.
@@ -3761,6 +3832,7 @@ void test_messaging(void)
     test_voice_duplicates_and_order();
     test_voice_catch_up();
     test_presence_rotation();
+    test_urgent_heals();
     test_voice_refusals();
     test_voice_keeps_text_fresh();
 }

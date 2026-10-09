@@ -1270,6 +1270,13 @@ static void core_task(void *arg)
             last_presence = now;
             lg_node_announce_presence(&g_app.core);   /* D48: a missed presence flood heals within a minute */
         }
+        static uint32_t last_urgent;
+        if (now - last_urgent >= LG_URGENT_REPEAT_MS) {
+            last_urgent = now;
+            lora_note_repeat(true);    /* said again, not a new alert: on LoRa it takes its turn */
+            (void)lg_node_announce_urgent(&g_app.core);   /* D48: an AP that missed an alert has it within a minute */
+            lora_note_repeat(false);
+        }
         static uint32_t last_names;
         if (now - last_names >= NAMES_ANNOUNCE_MS) {
             last_names = now;

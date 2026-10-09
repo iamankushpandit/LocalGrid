@@ -177,6 +177,21 @@ static bool read_line(uint32_t timeout_ms, char **out)
 
 static void handle_rcv(const lora_at_t *at);
 
+/*
+ * +ERR=12 and +ERR=19 are the module saying a packet it was RECEIVING came in broken - a failed
+ * checksum, a bad header - which on a shared channel means two transmissions overlapped. They
+ * arrive whenever that happens, including while this driver waits for the +OK of its own send,
+ * and were taken there for the send being refused: the part was transmitted a second time and the
+ * timing after it ran from the wrong moment (2026-10-09). They are counted as what they are, and
+ * they are the one sign of a collision this module gives.
+ */
+static uint32_t s_rx_broken;
+
+static bool is_rx_error(int err)
+{
+    return err == 12 || err == 19;
+}
+
 /* The module said +READY while a reply to something else was awaited: it restarted by itself,
  * most likely in the middle of its own transmission, and is back on factory settings - the band
  * among them, which it keeps only when told to. The task loop sees this and sets it up again. */
@@ -204,6 +219,12 @@ static bool at_wait(lora_at_kind_t want, uint32_t timeout_ms, char *value, size_
         }
         if (at.kind == LORA_AT_RCV) {
             handle_rcv(&at);
+            continue;
+        }
+        if (at.kind == LORA_AT_ERR && is_rx_error(at.err)) {
+            s_rx_broken++;
+            L.last_rx_ms = now_ms();   /* somebody was on the air until now */
+            L.heard_part = true;
             continue;
         }
         if (at.kind == LORA_AT_ERR && want != LORA_AT_ERR) {

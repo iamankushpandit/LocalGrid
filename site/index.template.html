@@ -464,7 +464,7 @@
             (<a href="{{REPO}}/blob/main/docs/chaos/2026-10-01-night-run.md">the run's report</a>).</p></div></details>
         <details><summary>Is LoRa legal where I am?</summary><div class="a">
           <p>Check your local radio rules before you transmit. The modules used are Reyax RYLR998 for the 868/915 MHz
-            bands (D71). The firmware sets 868.5 MHz, and one setting changes it for a 915 MHz region
+            bands (D71). The firmware is built for a region by name: North America (915 MHz) by default, Europe (868.5 MHz) as the other
             (<a href="{{REPO}}/blob/main/docs/lora.md">LoRa notes</a>). Transmit power is 22 dBm by default and can be
             turned down (D98).</p>
           <p>The firmware counts airtime but does not yet enforce a region's duty-cycle limit, so staying within your

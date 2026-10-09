@@ -47,10 +47,8 @@ typedef struct {
 
 /* ---- radio settings: names kept, values from firmware/common/lg_lora_wire.h (D77) ---- */
 
-/*
- * Band. 868.5 MHz is the European licence-free LoRa band; a 915 MHz region must change this one
- * number (and only this one) before flashing.
- */
+/* Band: set by the region named in firmware/common/lg_lora_wire.h (LG_LORA_REGION), North America
+ * by default. Every board in a grid must be built for the same one. */
 #define LORA_BAND_HZ        LG_LORA_BAND_HZ
 #define LORA_UART_BAUD      LG_LORA_UART_BAUD
 /* AT+PARAMETER: spreading factor 9, bandwidth 125 kHz (code 7), coding rate 4/5 (code 1),
@@ -148,6 +146,11 @@ void lora_print(void);
 
 /* Console: ask the LoRa task to reset and reconfigure the module. Any task. */
 void lora_request_reset(void);
+
+/* Core task: what is flooded between (true) and (false) is an alert being said again, not a new
+ * one (D48's once-a-minute repeat). It uses LoRa only where Wi-Fi is not reaching a peer, and
+ * waits its turn on the air like a message. */
+void lora_note_repeat(bool on);
 
 /* Console: send one AT command and log what comes back, for bring-up. Any task. */
 void lora_request_at(const char *command);

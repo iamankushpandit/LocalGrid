@@ -662,6 +662,7 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
     slot->tries = 0;
     slot->await = 0;
     slot->seq = 0;
+    slot->tag = 0;
     txq_recount(q);
     return slot;
 }
@@ -771,7 +772,7 @@ lora_txq_slot_t *lora_txq_peek_for(lora_txq_t *q, uint32_t now_ms, bool listenin
         }
         if (c->waiting) {
             /* No answer in time (D104): once more from the first part, or enough. */
-            if (c->tries >= LORA_TX_TRIES) {
+            if (c->tries >= (c->alert ? LORA_ALERT_TRIES : LORA_TX_TRIES)) {
                 q->unacked++;
                 lora_txq_release(q, c);
                 continue;

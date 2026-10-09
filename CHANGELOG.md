@@ -5,6 +5,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### An all clear always arrives, and an alert says when it was sent
+
+The owner heard it on the bench: an SOS drill would not stop. With the Wi-Fi backbone cut, the
+all clear sent nine seconds after the SOS reached the one handheld on the sender's AP and none of
+the four across the LoRa bridge - and it never arrived afterwards either, not even when Wi-Fi
+came back. Reproduced with the sending AP's queue on record: the SOS crossed in 1.2 s, the all
+clear took 8.6 s and three tries.
+
+- **An alert is not given up after three tries.** Three is right for a message; an alert that
+  went unheard three times was dropped, and nothing sent it again. It now goes up to twelve
+  times, more slowly after the third, for about two minutes.
+- **A relayed alert waits its turn.** Every AP that heard an alert over LoRa relayed it at once,
+  and alerts skip the channel's pacing, so for ten seconds after an SOS the APs were relaying,
+  answering and resending on top of each other: the all clear died in the echo of the SOS it was
+  standing down. An AP relaying what it heard over LoRa now waits for the sender's answers, then
+  takes a turn of its own.
+- **An all clear stands its author's SOS down in the send queue too.** An SOS still waiting to
+  be sent again is dropped when the all clear for it is queued. Only an all clear does this, so an
+  SOS arriving late by another path cannot take the all clear's place.
+- **The alert screen says when.** Under URGENT or ALL CLEAR it reads "Chase at 2:32 PM": the
+  sender and the time the message was created, in the grid's time zone, as the clock is shown. It
+  is the grid time every message already carries, so nothing more is sent. A message from before
+  the grid had the time shows the name alone (owner, 2026-10-09).
+- **An alert and a message notification share the screen** (owner, 2026-10-09). A notification
+  that arrived while an alert was up was drawn over the top of it, and the alert's flashing
+  border over the notification, so neither could be read. While both are showing, the
+  notification has the strip across the top and the alert lays itself out in the space below,
+  giving up a location line before it gives up a line of its message. The notification says
+  "Opens after Read", since only Read closes an alert, waits there instead of timing out behind
+  it, and is an ordinary notification again once the alert is read. With only one of them
+  showing, each has the screen as before.
+- The module's `+ERR=12` and `+ERR=19` are counted as what they are - a packet that arrived
+  broken, which on a shared channel is a collision - instead of being taken for a refused send
+  when they arrive while a send's own reply is awaited. The part used to be transmitted twice.
+- **An alert heals itself, like the rest of what the grid knows (D48).** An SOS or an all clear
+  was a one-off event: an AP out of reach when it passed never learned of it, and when a link came
+  up the APs shared presence, names, positions and settings again but never the alert. Each AP
+  now keeps the newest urgent broadcast whole and gives it to its neighbours again when a link
+  comes up and once a minute for the fifteen minutes it counts as active. Each author's newest is
+  remembered by its identity, apart from the duplicate window, so an alert already carried is
+  never delivered twice and an SOS cannot come back after the all clear that answered it. In the
+  LoRa queue a later alert from an author replaces an earlier one still waiting, so the repeats
+  never pile up.
+- **A handheld that joins an AP is told of the alert in progress**, or of the all clear that
+  ended it: on registering over Wi-Fi, and on being taken up over LoRa. On the bench two
+  handhelds moved to another AP a few seconds after an SOS - the ordinary balancing between APs -
+  and were never told of it. One a handheld has already had falls to its own duplicate window,
+  so it is shown once however often the handheld moves.
+- An alert still goes whatever the air is doing, on every try; its slow retries are spread at
+  random so their rhythm is nobody else's. Making an alert's resends wait their turn was tried
+  and taken out the same day: with a voice note crossing, an SOS sat behind it for 36 s.
+- The once-a-minute repeat of an alert is not an emergency the second time. On LoRa it goes
+  only where Wi-Fi is not reaching a peer, at a message's rank, and waits its turn: sent with an
+  alert's right of way, the repeats cut into whatever was on the air for a quarter of an hour
+  after every alert, and a voice note crossing then lost half its packets.
+- **The LoRa band is chosen by region name, and the default is North America** (owner,
+  2026-10-09): `LG_LORA_REGION` in `firmware/common/lg_lora_wire.h` is `LG_LORA_REGION_US915`
+  (915 MHz) unless set to `LG_LORA_REGION_EU868` (868.5 MHz), in place of a bare frequency. Every
+  board in a grid must be built for the same region. It is not yet a setting of the grid: a
+  region chosen once at setup and adopted by every device is the form it should take.
+
 ### Housekeeping listens before it speaks, and a handheld that walks out of Wi-Fi is found in seconds
 
 Found by driving the boards over their serial consoles with the Wi-Fi backbone cut (no demo), and

@@ -70,6 +70,14 @@ static int8_t s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set t
 #define HH_ANSWER_TURN_MS 1900u
 #define LORA_ACK_B64_CHARS  60u    /* an acknowledgement on the air: one sealed part of about 52 characters */
 #define ACK_AFTER_PARITY_MS 150u   /* air left after a sender's parity before a late turn answers */
+/* Alerts (2026-10-09, see LORA_ALERT_TRIES): after its third try an unanswered alert goes again
+ * this much later each time, not at once. And an AP relaying what it heard over LoRa waits for the
+ * answers its sender is collecting, then takes a turn of its own: relayed in the same instant by
+ * every AP that heard it, an SOS trampled its own acknowledgements and the all clear behind it. */
+#define ALERT_RETRY_SLOW_MS 8000u
+#define ALERT_RETRY_SPREAD_MS 4000u   /* and a random share of this more, so its rhythm is nobody else's */
+#define RELAY_WAIT_MS       2000u
+#define RELAY_TURN_MS       2500u
 #define AIR_HOLD_MARGIN_MS 300u
 #define AIR_HOLD_CAP_MS   8000u
 #define ACK_TURN_MS       500u
@@ -267,6 +275,21 @@ static bool parse_or_count(char *line, lora_at_t *at)
     return false;
 }
 
+/*
+ * +ERR=12 and +ERR=19 are the module saying a packet it was RECEIVING came in broken - a failed
+ * checksum, a bad header - which on a shared channel means two transmissions overlapped. They
+ * arrive whenever that happens, including while this driver waits for the +OK of its own send,
+ * and were taken there for the send being refused: the part was transmitted a second time and the
+ * timing after it ran from the wrong moment (2026-10-09). They are counted as what they are, and
+ * they are the one sign of a collision this module gives.
+ */
+static uint32_t s_rx_broken;
+
+static bool is_rx_error(int err)
+{
+    return err == 12 || err == 19;
+}
+
 /* The module said +READY while a reply to something else was awaited: it restarted by itself,
  * most likely in the middle of its own transmission, and is back on factory settings - the band
  * among them, which it keeps only when told to. The task loop sees this and sets it up again. */
@@ -294,6 +317,12 @@ static bool at_wait(lora_at_kind_t want, uint32_t timeout_ms, char *value, size_
         }
         if (at.kind == LORA_AT_RCV) {
             handle_rcv(&at);
+            continue;
+        }
+        if (at.kind == LORA_AT_ERR && is_rx_error(at.err)) {
+            s_rx_broken++;
+            L.last_rx_ms = app_now_ms();   /* somebody was on the air until now */
+            L.heard_part = true;
             continue;
         }
         if (at.kind == LORA_AT_ERR && want != LORA_AT_ERR) {
@@ -702,7 +731,11 @@ static bool transmit_a_part(unsigned *fails)
      * the air. Acknowledgements are never held: held behind a sender's resend stream, the ack that
      * would stop the stream never went, the sender resent, and the hold renewed - Everest put 31
      * frames on the air while Denali, hearing every one, answered 4 (2026-10-08). */
-    if (!slot->alert && !slot->is_ack && slot->part == 0u && (int32_t)(now - L.air_busy_until_ms) < 0) {
+    /* An alert goes whatever the air is doing, on every try. Making its resends wait their turn
+     * was tried on 2026-10-09 and taken out the same day: with a voice note crossing, an SOS sat
+     * behind it for 36 s. What an alert needed was not manners but persistence (LORA_ALERT_TRIES). */
+    bool at_once = slot->alert;
+    if (!at_once && !slot->is_ack && slot->part == 0u && (int32_t)(now - L.air_busy_until_ms) < 0) {
         if (!L.holding_for_air) {
             L.holding_for_air = true;
             L.held_for_air++;
@@ -712,7 +745,7 @@ static bool transmit_a_part(unsigned *fails)
     }
     /* And the receivers need PART_GAP_MIN_MS of quiet after each packet, ours included, or they
      * miss the next one; the task keeps listening meanwhile. An alert or an ack goes at once. */
-    if (!slot->alert && !slot->is_ack && (int32_t)(now - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
+    if (!at_once && !slot->is_ack && (int32_t)(now - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
         unlock();
         return false;
     }
@@ -790,7 +823,10 @@ static bool transmit_a_part(unsigned *fails)
         }
         uint32_t done = app_now_ms();
         uint32_t listen = turns * ACK_TURN_MS + ACK_MARGIN_MS;
-        if (lora_txq_sent(&L.txq, slot, done + listen + rand_ms(ACK_RESEND_SPAN_MS))) {
+        /* An alert past its third try keeps going, at a pace the channel can carry. */
+        uint32_t slow = slot->alert && slot->tries + 1u >= LORA_TX_TRIES
+                            ? ALERT_RETRY_SLOW_MS + rand_ms(ALERT_RETRY_SPREAD_MS) : 0u;
+        if (lora_txq_sent(&L.txq, slot, done + listen + slow + rand_ms(ACK_RESEND_SPAN_MS))) {
             L.listen_until_ms = done + listen;
         }
         L.frames_out++;
@@ -977,6 +1013,21 @@ static bool queue_sealed_hh(uint16_t dest, bool alert, const uint8_t *frame, siz
  * how long to wait for this AP's turn before sending it.
  */
 static bool s_rank_as_message;   /* core task only: the next frame queued is a heartbeat, see heartbeat() */
+static uint32_t s_start_extra_ms;   /* core task only: the next frames queued are a relay, and wait their turn */
+static uint32_t s_alerts_stood_down;   /* an SOS still in the queue when its author's all clear came */
+/*
+ * Core task only: what is being flooded now is an alert said AGAIN, the once-a-minute repeat that
+ * lets an AP which missed it catch up (D48). It is not an emergency the second time. It goes on
+ * LoRa only where Wi-Fi is not reaching a peer, and takes its turn like a message - sent with an
+ * alert's right of way, three of them a minute cut into whatever was on the air for a quarter of
+ * an hour after every alert, and a voice note crossing then lost half its packets (2026-10-09).
+ */
+static bool s_repeat;
+
+void lora_note_repeat(bool on)
+{
+    s_repeat = on;
+}
 
 static bool queue_sealed_for(uint16_t dest, bool alert, const uint8_t *frame, size_t len, uint16_t await,
                              uint32_t ack_after_ms)
@@ -989,7 +1040,8 @@ static bool queue_sealed_for(uint16_t dest, bool alert, const uint8_t *frame, si
      * same housekeeping to say at the same instant, the first to speak is heard by the rest,
      * which then hold for it instead of all starting together. */
     uint32_t start_in = is_ack ? ack_after_ms
-                        : rank < LORA_RANK_MESSAGE ? rand_ms(SPARE_JITTER_MS) : rand_ms(BACKOFF_MAX_MS);
+                        : s_start_extra_ms + (rank < LORA_RANK_MESSAGE ? rand_ms(SPARE_JITTER_MS)
+                                                                       : rand_ms(BACKOFF_MAX_MS));
     lock();
     lora_txq_slot_t *slot = lora_txq_reserve_ranked(&L.txq, dest, rank, L.msg_id, need,
                                                     app_now_ms() + start_in);
@@ -1003,6 +1055,27 @@ static bool queue_sealed_for(uint16_t dest, bool alert, const uint8_t *frame, si
         slot->is_ack = is_ack;
         if (!is_ack && await != 0u && lora_frame_wants_ap_ack(frame, len)) {
             lora_txq_want_ack(slot, lg_rd32(slot->data + 8), await);   /* the outer header's sequence number */
+        }
+        lg_env_t e;
+        if (!is_ack && slot->alert && lg_env_decode(frame, len, &e) == LG_OK) {
+            /*
+             * An alert is marked with its author, and a later one from the same author takes the
+             * place of an earlier one still waiting here: the all clear stands the SOS down in this
+             * queue too, and an alert said again each minute (D48) never piles up behind itself.
+             * The core passes on nothing older than what it has carried from an author, so what is
+             * queued later is never the older of the two.
+             */
+            slot->tag = e.origin_id;
+            for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
+                lora_txq_slot_t *old = &L.txq.slots[i];
+                if (old != slot && old->in_use && old->alert && !old->sending && old->tag == e.origin_id &&
+                    old->order < slot->order) {
+                    lora_txq_release(&L.txq, old);
+                    s_alerts_stood_down++;
+                    ESP_LOGI(TAG, "[LORA] An all clear stood down its author's alert in the send queue (%" PRIu32
+                             " so far)", s_alerts_stood_down);
+                }
+            }
         }
     }
     unlock();
@@ -1309,7 +1382,7 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
         L.gave_way++;
         return;
     }
-    bool needed = policy == LORA_SEND_ALWAYS || force;
+    bool needed = (policy == LORA_SEND_ALWAYS && !s_repeat) || force;
     for (uint16_t i = 0; i < LG_MAX_NODES && !needed; i++) {
         if (L.peers[i].up && i != except_node && !lgbb_link_acked(i, app_now_ms())) {
             needed = true;
@@ -1342,7 +1415,12 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
     }
 #endif
     L.force_once = false;
-    bool alert = policy == LORA_SEND_ALWAYS;
+    bool alert = policy == LORA_SEND_ALWAYS && !s_repeat;
+    bool as_message = policy == LORA_SEND_ALWAYS && s_repeat;   /* a repeat: a message's rank and manners */
+    s_rank_as_message = as_message;
+    /* A relay of what just came in over LoRa waits for its sender's answers, then its own turn. */
+    s_start_extra_ms = L.relaying && L.relay_src == except_node && except_node < LG_MAX_NODES
+                           ? RELAY_WAIT_MS + (ack_turn(except_node, L.index) - 1u) * RELAY_TURN_MS : 0u;
     if (L.broadcast_ok && reachable > 1u) {
         uint16_t all = 0;   /* one transmission, and every AP it is for answers in its own turn (D104) */
         for (uint16_t i = 0; i < LG_MAX_NODES; i++) {
@@ -1351,6 +1429,8 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
             }
         }
         (void)queue_sealed_for(LORA_ADDR_BROADCAST, alert, frame, len, all, 0);
+        s_start_extra_ms = 0;
+        s_rank_as_message = false;
         return;
     }
     for (uint16_t i = 0; i < LG_MAX_NODES; i++) {
@@ -1358,6 +1438,8 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
             (void)queue_sealed_for((uint16_t)LORA_ADDR_AP(i), alert, frame, len, (uint16_t)(1u << i), 0);
         }
     }
+    s_start_extra_ms = 0;
+    s_rank_as_message = false;
 }
 
 /*
@@ -1823,6 +1905,7 @@ void lora_print(void)
     printf("  floods not repeated because their sender reaches every peer here: %" PRIu32 "\n", L.relays_spared);
     printf("  heartbeats that waited for room in the queue: %" PRIu32 "\n", L.hb_waited);
     printf("  module lines that parsed as nothing: %" PRIu32 "\n", s_at_noise);
+    printf("  packets that arrived broken (two transmissions overlapped): %" PRIu32 "\n", s_rx_broken);
     printf("  sends held while another's frame was mid-air: %" PRIu32 "\n", L.held_for_air);
     printf("  messages taken over from ESP-NOW when it could not deliver them: %" PRIu32 "\n", L.took_over);
     printf("  messages the queue had no room for (the rest of its drops were routine): %" PRIu32 "\n",
