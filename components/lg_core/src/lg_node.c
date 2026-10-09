@@ -1717,12 +1717,26 @@ bool lg_node_restore_name(lg_node_t *n, const lg_name_t *name)
 
 void lg_node_announce_presence(lg_node_t *n)
 {
-    for (size_t i = 0; i < LG_MAX_DEVICES; i++) {
+    /*
+     * Whoever led the last announcement goes last in this one (2026-10-09). Every record is flooded
+     * each time, which over Wi-Fi is all that matters. A LoRa link has room for the first one or two
+     * and lets the rest give way, and in table order those were the same handhelds every minute:
+     * the others were never announced across a LoRa-only link at all, and a message to them from
+     * the far side was refused as unknown.
+     */
+    size_t start = n->presence_lead % LG_MAX_DEVICES;
+    bool led = false;
+    for (size_t k = 0; k < LG_MAX_DEVICES; k++) {
+        size_t i = (start + k) % LG_MAX_DEVICES;
         const lg_presence_entry_t *p = &n->presence[i];
         /* A handheld held over LoRa alone is announced like one with a session (D48): an AP that
          * restarted, or missed the claim, would otherwise not learn of it until the handheld moved. */
         if (p->in_use && p->node == n->self && (p->state == LG_PRES_ONLINE || p->state == LG_PRES_LORA)) {
             flood_presence(n, p);
+            if (!led) {
+                led = true;
+                n->presence_lead = (uint16_t)((i + 1u) % LG_MAX_DEVICES);
+            }
         }
     }
 }

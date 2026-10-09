@@ -250,6 +250,160 @@ static size_t make_frame(uint8_t type, uint8_t scope, uint16_t flags, uint8_t *o
     return n > 0 ? (size_t)n : 0u;
 }
 
+static void txq_setup(lora_txq_t *q, bool with_large);   /* defined with the queue tests below */
+
+/*
+ * The parity part (2026-10-09): exactly one lost data part is rebuilt at the receiver, the lost
+ * LAST part included - its true length travels in the parity - and everything that is not
+ * exactly that heals nothing.
+ */
+static void test_parity(void)
+{
+    static uint8_t payload[300];
+    uint8_t part[LORA_PART_RAW_WIRE];
+    uint8_t parity[LORA_PART_RAW_WIRE];
+    lora_asm_t a;
+    lora_asm_slot_t *slot = NULL;
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        payload[i] = (uint8_t)(i * 7u + 3u);
+    }
+    const size_t len3 = 3u * LORA_SLICE_MAX - 10u;
+
+    /* Built and parsed; refused by yesterday's parser, so a mixed bench degrades gracefully. */
+    size_t pn = lora_parity_build(PEER_ONE, 21, payload, len3, parity, sizeof(parity));
+    CHECK_EQ(pn, LORA_PART_RAW_WIRE);
+    lora_part_t p;
+    CHECK(lora_parity_parse(parity, pn, &p));
+    CHECK_EQ(p.part, 3);
+    CHECK_EQ(p.of, 3);
+    CHECK_EQ(p.slice_len, LORA_PARITY_SLICE);
+    CHECK_EQ(p.slice[0], len3 - 2u * LORA_SLICE_MAX);   /* the last part's true length rides first */
+    CHECK(!lora_part_parse(parity, pn, &p));
+    CHECK(!lora_parity_parse(parity, pn - 1u, &p));
+    CHECK_EQ(lora_parity_build(PEER_ONE, 21, payload, 40, parity, sizeof(parity)), 0);   /* one part: none */
+
+    /* A lost middle part is rebuilt the moment the parity lands. */
+    asm_setup(&a, true);
+    size_t n = build(part, sizeof(part), PEER_ONE, 21, 0, 3, payload, len3);
+    CHECK_EQ(lora_asm_feed(&a, 1000, part, n, &slot), LORA_ASM_NEED_MORE);
+    n = build(part, sizeof(part), PEER_ONE, 21, 2, 3, payload, len3);
+    CHECK_EQ(lora_asm_feed(&a, 1100, part, n, &slot), LORA_ASM_NEED_MORE);
+    pn = lora_parity_build(PEER_ONE, 21, payload, len3, parity, sizeof(parity));
+    CHECK_EQ(lora_asm_feed(&a, 1200, parity, pn, &slot), LORA_ASM_COMPLETE);
+    CHECK(slot != NULL && slot->total == len3);
+    CHECK(memcmp(slot->data, payload, len3) == 0);
+    CHECK_EQ(a.healed, 1);
+    lora_asm_done(&a, slot);
+
+    /* A lost LAST part too, and the parity may arrive before the heal is possible. */
+    asm_setup(&a, true);
+    n = build(part, sizeof(part), PEER_ONE, 22, 0, 3, payload, len3);
+    CHECK_EQ(lora_asm_feed(&a, 2000, part, n, &slot), LORA_ASM_NEED_MORE);
+    pn = lora_parity_build(PEER_ONE, 22, payload, len3, parity, sizeof(parity));
+    CHECK_EQ(lora_asm_feed(&a, 2100, parity, pn, &slot), LORA_ASM_NEED_MORE);   /* two still missing */
+    CHECK_EQ(lora_asm_feed(&a, 2150, parity, pn, &slot), LORA_ASM_DUPLICATE);   /* one parity per set */
+    n = build(part, sizeof(part), PEER_ONE, 22, 1, 3, payload, len3);
+    CHECK_EQ(lora_asm_feed(&a, 2200, part, n, &slot), LORA_ASM_COMPLETE);       /* heals the last part */
+    CHECK(slot != NULL && slot->total == len3);
+    CHECK(memcmp(slot->data, payload, len3) == 0);
+    CHECK_EQ(a.healed, 1);
+    lora_asm_done(&a, slot);
+
+    /* A two-part frame: its short last part plus the parity rebuild the whole payload. */
+    asm_setup(&a, true);
+    const size_t len2 = LORA_SLICE_MAX + 30u;
+    n = build(part, sizeof(part), PEER_ONE, 23, 1, 2, payload, len2);
+    CHECK_EQ(lora_asm_feed(&a, 3000, part, n, &slot), LORA_ASM_NEED_MORE);
+    pn = lora_parity_build(PEER_ONE, 23, payload, len2, parity, sizeof(parity));
+    CHECK_EQ(lora_asm_feed(&a, 3100, parity, pn, &slot), LORA_ASM_COMPLETE);
+    CHECK(slot != NULL && slot->total == len2);
+    CHECK(memcmp(slot->data, payload, len2) == 0);
+    lora_asm_done(&a, slot);
+
+    /* A set that completed on its own lets its parity go by; so does a set nothing arrived of. */
+    asm_setup(&a, true);
+    for (uint8_t i = 0; i < 3; i++) {
+        n = build(part, sizeof(part), PEER_ONE, 24, i, 3, payload, len3);
+        CHECK_EQ(lora_asm_feed(&a, 4000 + i, part, n, &slot), i == 2 ? LORA_ASM_COMPLETE : LORA_ASM_NEED_MORE);
+    }
+    pn = lora_parity_build(PEER_ONE, 24, payload, len3, parity, sizeof(parity));
+    lora_asm_slot_t *late = NULL;
+    CHECK_EQ(lora_asm_feed(&a, 4100, parity, pn, &late), LORA_ASM_NEED_MORE);
+    CHECK(late == NULL);
+    lora_asm_done(&a, slot);
+    pn = lora_parity_build(PEER_TWO, 77, payload, len3, parity, sizeof(parity));
+    CHECK_EQ(lora_asm_feed(&a, 4200, parity, pn, &late), LORA_ASM_NEED_MORE);
+    CHECK_EQ(a.healed, 0);
+
+    /* The queue marks what earns a parity part: a message of two parts or more. */
+    lora_txq_t q;
+    txq_setup(&q, false);
+    lora_txq_slot_t *s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 31, LORA_SLICE_MAX + 20u, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, LORA_SLICE_MAX + 20u));
+    CHECK(s->parity);
+    lora_txq_release(&q, s);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 32, LORA_SLICE_MAX + 20u, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, 60));
+    CHECK(!s->parity);   /* one part needs no parity */
+    lora_txq_release(&q, s);
+    s = lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 33, LORA_SLICE_MAX + 20u, 0);
+    CHECK(s != NULL && lora_txq_commit(&q, s, LORA_SLICE_MAX + 20u));
+    CHECK(!s->parity);   /* routine repeats itself soon anyway */
+    lora_txq_release(&q, s);
+}
+
+/*
+ * 2026-10-09: what someone said goes before housekeeping, whichever was queued first, and takes
+ * the radio from a routine transfer under way, as an alert does. An acknowledgement does not:
+ * it is not held by the gap that follows a part, and would land on a receiver still recovering.
+ */
+static void test_queue_rank(void)
+{
+    lora_txq_t q;
+    txq_setup(&q, false);
+    const size_t two = LORA_SLICE_MAX + 20u;   /* two parts */
+    lora_txq_slot_t *r = lora_txq_reserve_ranked(&q, 2, LORA_RANK_ROUTINE, 1, two, 0);
+    CHECK(r != NULL && lora_txq_commit(&q, r, two));
+    lora_txq_slot_t *m = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 2, 40, 0);
+    CHECK(m != NULL && lora_txq_commit(&q, m, 40));
+    CHECK(lora_txq_peek(&q, 0) == m);          /* queued second, sent first */
+    lora_txq_release(&q, m);
+    CHECK(lora_txq_peek(&q, 0) == r);
+
+    /* A routine transfer under way gives the radio to a message between two of its parts... */
+    r->sending = true;
+    r->part = 1;
+    m = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 3, two, 0);
+    CHECK(m != NULL && lora_txq_commit(&q, m, two));
+    CHECK(lora_txq_peek(&q, 0) == m);
+    m->sending = true;
+    m->part = 1;
+    CHECK(lora_txq_peek(&q, 0) == m);          /* ... which keeps it until it is done ... */
+    lora_txq_release(&q, m);
+    CHECK(lora_txq_peek(&q, 0) == r);          /* ... and the routine one carries on where it was */
+    CHECK_EQ(r->part, 1);
+
+    /* An acknowledgement owed waits for the transfer under way, then goes before anything else. */
+    lora_txq_slot_t *a = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 4, 16, 0);
+    CHECK(a != NULL && lora_txq_commit(&q, a, 16));
+    a->is_ack = true;
+    m = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 5, 40, 0);
+    CHECK(m != NULL && lora_txq_commit(&q, m, 40));
+    CHECK(lora_txq_peek(&q, 0) == m);          /* the message takes the radio from the routine frame */
+    lora_txq_release(&q, m);
+    CHECK(lora_txq_peek(&q, 0) == r);          /* the acknowledgement alone does not */
+    lora_txq_release(&q, r);
+    CHECK(lora_txq_peek(&q, 0) == a);
+
+    /* Of the same rank, still the oldest first. */
+    txq_setup(&q, false);
+    lora_txq_slot_t *first = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 6, 40, 0);
+    CHECK(first != NULL && lora_txq_commit(&q, first, 40));
+    lora_txq_slot_t *second = lora_txq_reserve_ranked(&q, 2, LORA_RANK_MESSAGE, 7, 40, 0);
+    CHECK(second != NULL && lora_txq_commit(&q, second, 40));
+    CHECK(lora_txq_peek(&q, 0) == first);
+}
+
 static void test_policy(void)
 {
     static uint8_t frame[LORA_SMALL_MAX];
@@ -869,6 +1023,8 @@ void test_lora(void)
     test_base64();
     test_parts();
     test_reassembly();
+    test_parity();
+    test_queue_rank();
     test_policy();
     test_queue();
     test_ack();

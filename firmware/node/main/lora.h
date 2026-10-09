@@ -127,7 +127,9 @@ void lora_offer(uint16_t node, const uint8_t *frame, size_t len, bool wifi_ok);
  * key rather than the backbone key. `wifi_ok` is whether that handheld has a working session here.
  * Does nothing with no module fitted.
  */
-void lora_offer_handheld(uint32_t device, const uint8_t *frame, size_t len, bool wifi_ok);
+/* `holder` is the AP the grid believes this handheld is reachable through (its presence entry's
+ * node): that AP sends at once, and any other AP sending the same answer waits its turn after it. */
+void lora_offer_handheld(uint32_t device, const uint8_t *frame, size_t len, bool wifi_ok, uint16_t holder);
 
 /* Core task: like lora_offer, for a frame being flooded to every AP except one. */
 void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len);
@@ -149,6 +151,10 @@ void lora_request_reset(void);
 
 /* Console: send one AT command and log what comes back, for bring-up. Any task. */
 void lora_request_at(const char *command);
+
+/* Console, bring-up: one raw broadcast of `chars` generated payload characters (12..250,
+ * clamped), tagged so a witness's log names it; 0 sends the encoding-alphabet probe. Any task. */
+void lora_request_probe(unsigned chars, const char *tag);
 
 /* D98: transmit power, one of LG_LORA_POWER_FULL, _MEDIUM, _LOW; kept across restarts. */
 void lora_set_power(int dbm);

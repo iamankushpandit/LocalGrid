@@ -174,6 +174,7 @@ typedef struct {
     /* Voice (D61) keeps out of the text dedup: its sequences carry LG_VOICE_SEQ_BIT, which would
      * push a text window past every text retransmission. Indexed by roster user index. */
     lg_voice_seen_t     voice_seen[LG_MAX_DEVICES];
+    uint16_t            presence_lead;          /* where the next presence announcement starts: see lg_node_announce_presence */
     uint32_t            voice_refused_ms[LG_MAX_DEVICES];
     bool                has_voice_refused[LG_MAX_DEVICES];
     /* D68, all indexed by roster user index and kept in RAM only. */

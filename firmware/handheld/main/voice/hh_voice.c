@@ -339,11 +339,12 @@ static void synth(int16_t *pcm, size_t n)
  */
 #define C2_SPACING_MS     9000
 /*
- * A talker with no Wi-Fi session sends each packet twice (its frames are broadcast, no AP owes
- * it an answer), and two copies are ~14 s of channel: spaced at 9 s its own four-slot queue
- * filled and evicted the very redundancy the second copy was for. Spaced for what is queued.
+ * A talker with no Wi-Fi session pays more channel per packet: its packet is broadcast with no
+ * acknowledgement, so it rides as one copy plus its parity part (2026-10-09) - four paced parts,
+ * about 9 s of channel. Spaced for what is actually queued, or its own four-slot queue fills and
+ * evicts the very redundancy it is paying for, which is how a talk once arrived 1 packet in 3.
  */
-#define C2_SPACING_LORA_MS 15000
+#define C2_SPACING_LORA_MS 12000
 #define NOTE_STRAGGLE_MS  3000      /* after the last packet has come, how long to wait for a missing one */
 #define NOTE_GIVE_UP_MS   16000     /* no packet for this long: play what there is. A second over the widest
                                        spacing above, so a note still flowing is never cut into fragments */

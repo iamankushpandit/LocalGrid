@@ -178,6 +178,35 @@ bool lora_part_parse(const uint8_t *in, size_t len, lora_part_t *out);
 /* How many parts a payload of this length needs, or 0 if it is beyond the format's ceiling. */
 size_t lora_part_count(size_t payload_len);
 
+/*
+ * The parity part (2026-10-09). A multi-part message-rank frame is followed by one extra part
+ * carrying the XOR of every data slice zero-padded to LORA_SLICE_MAX, so a receiver that lost
+ * exactly one part rebuilds it on the spot instead of waiting a resend round trip - on a channel
+ * where that trip costs eight seconds, this is the difference between late and lost. Its header
+ * is an ordinary part header with part == of, which firmware from before this change never
+ * accepts: an AP's decode buffer stops it at 91 raw bytes with a loud garbled-part warning, and
+ * the parser would refuse part == of regardless - so a mixed bench degrades gracefully (old
+ * firmware just never heals), but its warning counts read as loss until it is reflashed, which
+ * is worth knowing before reading a sweep on a half-flashed grid. Its slice starts with one
+ * byte naming the final data part's true length, because a rebuilt LAST part has no other way to
+ * know where the payload ends, and the XOR of padded slices follows. At 91 raw bytes it rides in
+ * 124 base64 characters, which the 2026-10-08 length sweep measured clean (24/24; the module's
+ * cliff starts near 130).
+ */
+#define LORA_PARITY_SLICE   (LORA_SLICE_MAX + 1u)                 /* last_len byte + the XOR block */
+#define LORA_PART_RAW_WIRE  (LORA_PART_HDR + LORA_PARITY_SLICE)   /* 91: the largest part on the air */
+#define LORA_PART_B64_WIRE  (((LORA_PART_RAW_WIRE + 2u) / 3u) * 4u)   /* 124 characters, measured clean */
+
+_Static_assert(LORA_PART_B64_WIRE == 124u, "the parity part rides in the 124 characters the sweep cleared");
+
+/* Writes the parity part for a whole payload into out. Returns its length, 0 on a bad argument
+ * (a payload of one part takes no parity). */
+size_t lora_parity_build(uint8_t peer, uint8_t id, const uint8_t *payload, size_t payload_len,
+                         uint8_t *out, size_t cap);
+
+/* Parses a parity part. Returns false for anything else, data parts included. */
+bool lora_parity_parse(const uint8_t *in, size_t len, lora_part_t *out);
+
 /* ---- reassembly ---- */
 
 #define LORA_ASM_SLOTS       3u
@@ -202,6 +231,7 @@ size_t lora_part_count(size_t payload_len);
 typedef struct {
     bool     in_use;
     bool     ready;         /* complete, and handed to the caller until lora_asm_done */
+    bool     have_parity;   /* the set's parity part arrived; its slice is in `parity` */
     uint8_t  peer;
     uint8_t  id;
     uint8_t  of;
@@ -212,12 +242,14 @@ typedef struct {
     uint32_t last_ms;       /* when the most recent part of this set arrived */
     uint8_t *data;
     size_t   cap;
+    uint8_t  parity[LORA_PARITY_SLICE];
 } lora_asm_slot_t;
 
 typedef struct {
     lora_asm_slot_t slots[LORA_ASM_SLOTS];
     uint32_t        timeouts;      /* incomplete sets given up */
     uint32_t        dropped;       /* parts refused: malformed, duplicate, oversized, or no slot */
+    uint32_t        healed;        /* parts rebuilt from a parity part instead of a resend */
 } lora_asm_t;
 
 typedef enum {
@@ -336,6 +368,7 @@ bool   lora_ack_parse(const uint8_t *in, size_t len, uint32_t *seq);
 typedef struct {
     bool     in_use;
     bool     alert;        /* rule 1 traffic: never dropped to make room, never made to wait */
+    bool     parity;       /* a parity part follows the data: message rank, two parts or more */
     uint8_t  rank;         /* LORA_RANK_*: what gives way to what when the queue is full */
     bool     sending;      /* parts of it are already on the air: never evicted, resumed in place */
     uint16_t dest;         /* LoRa address (docs/lora.md's address plan) */

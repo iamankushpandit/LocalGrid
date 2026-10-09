@@ -5,6 +5,89 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Housekeeping listens before it speaks, and a handheld that walks out of Wi-Fi is found in seconds
+
+Found by driving the boards over their serial consoles with the Wi-Fi backbone cut (no demo), and
+by an audit of the handheld's radio driver against the AP's.
+
+- **"Room to spare" now listens to the air.** It used to look only at an AP's own queue, so three
+  APs that lost the Wi-Fi backbone together each saw a short queue, each decided the air was free,
+  and all began multi-part housekeeping in the same instant: a text sat 15 s behind it, then lost
+  its first part and its parity to a receiver that was itself transmitting, and 6 of 8 texts
+  crossed. Housekeeping now goes one frame at a time, only into air the AP has heard silent for
+  four seconds, starts a random moment later than a message would, and waits out the receivers'
+  quiet after anybody's packet. What gives way repeats itself within a minute.
+- **The send queue is what-matters-first, not oldest-first.** A message goes before routine
+  traffic whichever was queued first, and takes the radio from a routine transfer between two of
+  its parts, as an alert always could; the routine frame carries on afterwards. An acknowledgement
+  still never interrupts a transfer. An AP's heartbeat is queued as a message for the same
+  reason: behind a talk's packets it waited three minutes and the link was called dead mid-talk.
+- **Presence announcements take turns.** An AP announced its handhelds in table order once a
+  minute; a LoRa link has room for the first one or two, so the same ones crossed every time and
+  the rest never did - a message to them from the far side of a LoRa-only link was refused as
+  unknown. Each announcement now starts one past the record that led the last, half a period
+  out of step with the grid-state timer that used to take the room first.
+- **A handheld that walks out of Wi-Fi range is reachable in seconds, not minutes.** Its first
+  announcement over LoRa was ignored by every AP - the one it was on still believed in the Wi-Fi
+  session for 15-30 s - and the next was two minutes later, or eight. Until an AP has answered
+  over LoRa since the session went, it now announces every 20 s; an announcement the link did not
+  take is offered again in two seconds.
+- **A LoRa module that restarts by itself is set up again on a handheld**, as it always was on an
+  AP. A handheld threw the module's `+READY` away and went on sending into a radio on its factory
+  settings, every send answered `+OK`, until someone restarted the handheld.
+- **The APs answer a LoRa-only handheld in turn.** Its frames are broadcast, so every AP in
+  earshot answered - in the same instant, released by the same hold - and the handheld heard a
+  collision, showed its message as not taken, and sent it again. The AP that holds the handheld
+  answers first and each other AP a turn behind it, counted from when the air is free.
+- **An SOS from a handheld on LoRa alone carries its trail** even when no AP has been heard over
+  LoRa yet. The position needs a Wi-Fi session and the trail waited for an answer, so an emergency
+  in the first minutes out of Wi-Fi range went out with no location.
+- An AP skips a frame's parity part when everyone who was to acknowledge the frame already has:
+  a handheld answers inside the gap before it.
+- Known and not changed here: a handheld stays with the AP that first claimed it over LoRa until
+  it joins Wi-Fi again or that AP restarts, even if it walks out of that AP's LoRa reach and into
+  another's; and a handheld re-offers an unanswered message after 10 s, which the paced channel
+  can now exceed, so a second copy is sometimes sent.
+
+### A lost LoRa part heals itself, and every part gets 400 ms of the channel back
+
+- **The parity part.** A message of two parts or more is followed by one extra part carrying the
+  XOR of its data slices, with the last part's true length in its first byte. A receiver that lost
+  exactly one part - the last one included - rebuilds it on the spot instead of waiting for a
+  resend, which on this channel is the difference between late and lost. It rides in 124
+  characters, which the 2026-10-08 length sweep measured clean. Routine traffic carries none: it
+  repeats itself soon anyway. Both radio drivers send it, both reassemblers use it, and the log
+  says when a part was rebuilt.
+- Firmware from before this change drops a parity part (an AP says so with a garbled-part
+  warning), so a half-flashed grid still works but never heals: flash every board.
+- What the parity changed around it, found by an adversarial review before any board ran it: a
+  radio that hears a multi-part frame now holds the air one slot longer, for the parity (the hold
+  used to lapse exactly as it went out); and a parity that fails to send no longer cancels the
+  acknowledgement wait and resend of a frame that was fully out.
+- An acknowledgement's place beside the parity took two tries. The first turns answer at once,
+  as they did before there was a parity: they are over before it starts, and a sender that has
+  its answer skips the parity altogether. Only a turn that would run into the parity waits, and
+  for all of it - the gap, the sender's longest random start, the part. The first version moved
+  every turn behind the parity and left the random start out of the sum, so the answer landed on
+  the parity's last 300 ms: on the bench every frame that had arrived whole was sent three times,
+  and two voice packets held a link for fifty seconds while the ones queued behind were refused.
+- A handheld sends its own voice-note packet once, with its parity, instead of twice blind: less
+  air for more protection, and its own queue no longer evicts the second copy. It spaces note
+  packets 12 s apart with no Wi-Fi session.
+- **The quiet gap is 1100 ms, not 1500** (both drivers). A finer sweep - two alternating senders,
+  one witness, twelve pairs a point - found full 120-character parts 32 of 32 with 1000 ms or more
+  of quiet and about 78% at 400-800 ms. The first measurement had only established "about 1.5 s".
+- The same sweep, for the next stage (`docs/lora-first-class.md`): at spreading factor 8 there is
+  no length cliff up to 192 characters and 200-character parts recover at shorter gaps, so the
+  ~130-character ceiling is airtime, not a character count; and Z85's alphabet with a literal
+  `+RCV=` inside the payload arrives byte-exact. Neither is used yet: spreading factor 8 costs
+  about 2.5 dB of link budget and wants a field walk first.
+- `lora probe <chars|z85> [tag]` on an AP sends one raw broadcast of a generated payload, and an
+  AP that is `lora off` logs every raw packet it hears: the bring-up pair those sweeps were made
+  with.
+- `docs/lora-first-class.md`: the staged plan for making LoRa a first-class carrier, with the
+  literature checked against it.
+
 ### A voice note survives everything the bench could throw at it, and housekeeping yields the air
 
 An owner's report - a note playing one packet of three and never replaying whole - led to an

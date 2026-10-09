@@ -2675,6 +2675,34 @@ static void test_voice_catch_up(void)
     sim_destroy(s);
 }
 
+/*
+ * 2026-10-09: each presence announcement starts one past the record that led the last one. Over
+ * Wi-Fi every record crosses anyway; over a link with room for only the first one or two (LoRa)
+ * this is what gives every local handheld its turn instead of the same ones every minute.
+ */
+static void test_presence_rotation(void)
+{
+    sim_t *s = make_chain();
+    if (s == NULL) {
+        return;
+    }
+    lg_node_t *n = &s->nodes[0].node;   /* Dad and Ranger are both on this AP */
+    size_t leader[3];
+    for (int pass = 0; pass < 3; pass++) {
+        lg_node_announce_presence(n);
+        CHECK(sim_pump(s));
+        leader[pass] = (size_t)((n->presence_lead + LG_MAX_DEVICES - 1u) % LG_MAX_DEVICES);
+        const lg_presence_entry_t *p = &n->presence[leader[pass]];
+        CHECK(p->in_use && p->node == n->self);
+    }
+    CHECK(leader[0] != leader[1]);    /* the other one's turn */
+    CHECK_EQ(leader[2], leader[0]);   /* and round again */
+    /* Nothing was lost to the reordering: the far AP still knows where both of them are. */
+    CHECK_EQ(lg_node_presence_state(&s->nodes[2].node, cl(s, DAD)->device), LG_PRES_ONLINE);
+    CHECK_EQ(lg_node_presence_state(&s->nodes[2].node, cl(s, RANGER)->device), LG_PRES_ONLINE);
+    sim_destroy(s);
+}
+
 static void test_voice_refusals(void)
 {
     sim_t *s = make_chain();
@@ -3732,6 +3760,7 @@ void test_messaging(void)
     test_voice_direct();
     test_voice_duplicates_and_order();
     test_voice_catch_up();
+    test_presence_rotation();
     test_voice_refusals();
     test_voice_keeps_text_fresh();
 }

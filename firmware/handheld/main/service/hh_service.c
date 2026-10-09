@@ -252,6 +252,7 @@ static struct {
      */
     uint32_t  wifi_off_until_ms;
     uint32_t  lora_announce_ms;     /* D80: when this handheld last said it is reachable over LoRa */
+    uint32_t  lora_alone_ms;        /* when the Wi-Fi session last went away and left LoRa alone */
     bool      lora_announced;       /* false until the first one, which goes out without waiting */
     bool      send_failed;
     bool      dirty;
@@ -779,9 +780,13 @@ static void trail_body(lg_trail_t *out)
     }
 }
 
-static void trail_send(uint32_t now)
+/* `even_unheard` is for an emergency: the trail goes on the air although no AP has been heard
+ * over LoRa yet. Without it an SOS from a handheld that had just left Wi-Fi went out with no
+ * location at all - the position needs a session, and the trail waited for an answer that the
+ * first minutes on LoRa alone do not have (2026-10-09). */
+static void trail_send(uint32_t now, bool even_unheard)
 {
-    if (tr.off || tr.n == 0 || (s.link != HH_LINK_ONLINE && !hh_lora_has_peer())) {
+    if (tr.off || tr.n == 0 || (!even_unheard && s.link != HH_LINK_ONLINE && !hh_lora_has_peer())) {
         return;
     }
     lg_trail_t t;
@@ -873,7 +878,7 @@ static void trail_step(uint32_t now)
     uint32_t since = now - tr.sent_ms;
     if ((tr.due && online) || !tr.sent_any || (tr.changed && since >= (online ? TRAIL_SEND_MS : TRAIL_SEND_LORA_MS)) ||
         since >= (online ? TRAIL_RESEND_MS : TRAIL_RESEND_LORA_MS)) {
-        trail_send(now);
+        trail_send(now, false);
     }
 }
 
@@ -984,7 +989,7 @@ static void trail_test(uint8_t steps)
         (void)trail_add(lat - dlat, lon - dlon, (uint32_t)now_s - (uint32_t)back * 8u);
     }
     ESP_LOGI("TIME", "[GPS] Trail test: a made-up walk of %u steps, %u kept", steps, tr.n);
-    trail_send(now_ms());
+    trail_send(now_ms(), false);
 }
 
 /* EV_GPS: the clock follows a fresh fix, and the screens hear about a change. */
@@ -2206,7 +2211,7 @@ static void drain_send_queue(void)
         }
         if (req.urgent && req.scope == LG_SCOPE_BROADCAST) {
             (void)send_own_position(now_ms());   /* D65: where the emergency is, just ahead of it */
-            trail_send(now_ms());                /* D99: and how they got there */
+            trail_send(now_ms(), true);          /* D99: and how they got there, heard or not */
         }
         uint16_t flags = LG_FLAG_ACK_REQUESTED | (req.urgent ? LG_FLAG_URGENT : 0) |
                          (req.all_clear ? LG_FLAG_ALL_CLEAR : 0);
@@ -2371,6 +2376,9 @@ static void apply_wifi_switch(uint32_t now)
  */
 bool hh_service_lora_ui(hh_lora_ui_t *out);   /* defined below; the radio's own facts */
 
+#define LORA_ANNOUNCE_FAST_MS      20000u    /* until an AP has answered over LoRa since the session went */
+#define LORA_ANNOUNCE_FAST_FOR_MS  180000u   /* ... and for no longer than this: after it, the slow rate */
+
 static void lora_announce(uint32_t now)
 {
     hh_lora_ui_t l;
@@ -2399,18 +2407,38 @@ static void lora_announce(uint32_t now)
      * a handheld that has never heard an AP announces at the normal rate; the backing off applies
      * only once one has been heard and then lost, where a slower retry is a fair trade.
      */
-    uint32_t every = HH_LORA_HEARTBEAT_MS;
-    if (l.heard_s != UINT32_MAX && !l.peer) {
-        every *= 4u;   /* it was there and went quiet: try less often, but keep trying */
+    if (!s.lora_announced) {
+        s.lora_alone_ms = now;   /* the session has just gone: LoRa is alone from here */
     }
+    /*
+     * Walking out of Wi-Fi range (2026-10-09). The first announcement goes within seconds of the
+     * loss, and every AP ignores it: the AP this handheld was on still believes in the Wi-Fi
+     * session for another 15-30 s, and no AP claims a handheld that one of them holds as online.
+     * The next used to be two minutes later - eight, if an AP had been heard over LoRa earlier and
+     * had aged out - and for all that time nothing could be sent to this handheld. So until some AP
+     * has answered over LoRa since the session went, it says so every LORA_ANNOUNCE_FAST_MS: the
+     * second or third lands after the AP has let the session go. One short part each.
+     */
+    bool answered = l.heard_s != UINT32_MAX &&
+                    (uint64_t)l.heard_s * 1000u < (uint64_t)(now - s.lora_alone_ms);
+    uint32_t every = HH_LORA_HEARTBEAT_MS;
+    if (!answered && now - s.lora_alone_ms < LORA_ANNOUNCE_FAST_FOR_MS) {
+        every = LORA_ANNOUNCE_FAST_MS;
+    }
+    /* After that, every HH_LORA_HEARTBEAT_MS whether or not an AP has been heard. It used to slow
+     * to a quarter of that once an AP had been heard and lost, to spare the battery: but that is a
+     * handheld walking back into range, which then stayed unreachable for up to eight minutes, and
+     * one half-second part every two minutes is not what drains a handheld (2026-10-09). */
     if (s.lora_announced && now - s.lora_announce_ms < every) {
         return;
     }
-    s.lora_announce_ms = now;
     s.lora_announced = true;
     int8_t pct = hh_service_battery_percent();
     if (lg_client_lora_announce(&s.client, pct < 0 ? (uint8_t)LG_BATTERY_UNKNOWN : (uint8_t)pct)) {
+        s.lora_announce_ms = now;
         ESP_LOGI(TAG, "[MSG] Announced over LoRa (no Wi-Fi session)");
+    } else {
+        s.lora_announce_ms = now - every + 2000u;   /* it was not taken: again in two seconds, not in two minutes */
     }
 }
 

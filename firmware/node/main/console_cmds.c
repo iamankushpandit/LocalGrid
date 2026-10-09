@@ -188,6 +188,13 @@ static int cmd_lora(int argc, char **argv)
         printf("Frames for every AP go %s\n", on ? "once to the broadcast address" : "once to each peer");
         return 0;
     }
+    if (argc >= 3 && strcmp(argv[1], "probe") == 0) {
+        /* Bring-up, like `lora at`: a raw broadcast the measurement tools pace and count. */
+        unsigned chars = strcmp(argv[2], "z85") == 0 ? 0u : (unsigned)strtoul(argv[2], NULL, 10);
+        lora_request_probe(chars, argc > 3 ? argv[3] : NULL);
+        printf("Probe queued (%s chars); witnesses log it as \"Heard while off\"\n", argv[2]);
+        return 0;
+    }
     if (argc >= 3 && strcmp(argv[1], "at") == 0) {
         /* Bring-up only: whether this firmware's broadcast address works is a question only the
          * module can answer, and this is how to ask it. Nothing here touches a key or a message. */
@@ -203,7 +210,7 @@ static int cmd_lora(int argc, char **argv)
         return 0;
     }
     printf("usage: lora | lora send [text] | lora off [seconds] | lora on | lora reset"
-           " | lora broadcast on|off | lora at <AT command>\n");
+           " | lora broadcast on|off | lora at <AT command> | lora probe <chars|z85> [tag]\n");
     return 1;
 }
 

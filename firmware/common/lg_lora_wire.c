@@ -138,6 +138,52 @@ bool lora_part_parse(const uint8_t *in, size_t len, lora_part_t *out)
     return true;
 }
 
+size_t lora_parity_build(uint8_t peer, uint8_t id, const uint8_t *payload, size_t payload_len,
+                         uint8_t *out, size_t cap)
+{
+    size_t of = lora_part_count(payload_len);
+    if (out == NULL || payload == NULL || of < 2u || cap < LORA_PART_RAW_WIRE) {
+        return 0;
+    }
+    size_t last_len = payload_len - (of - 1u) * LORA_SLICE_MAX;
+    out[0] = LORA_MAGIC;
+    out[1] = peer;
+    out[2] = id;
+    out[3] = (uint8_t)of;   /* one past the last data part: old parsers refuse it, new ones heal */
+    out[4] = (uint8_t)of;
+    out[LORA_PART_HDR] = (uint8_t)last_len;
+    for (size_t j = 0; j < LORA_SLICE_MAX; j++) {
+        uint8_t x = 0;
+        for (size_t k = 0; k < of; k++) {
+            size_t at = k * LORA_SLICE_MAX + j;
+            if (at < payload_len) {
+                x ^= payload[at];   /* the short last slice contributes zeros past its end */
+            }
+        }
+        out[LORA_PART_HDR + 1u + j] = x;
+    }
+    return LORA_PART_RAW_WIRE;
+}
+
+bool lora_parity_parse(const uint8_t *in, size_t len, lora_part_t *out)
+{
+    if (in == NULL || out == NULL || len != LORA_PART_RAW_WIRE || in[0] != LORA_MAGIC) {
+        return false;
+    }
+    uint8_t of = in[4];
+    if (in[3] != of || of < 2u || of > LORA_PARTS_MAX) {
+        return false;
+    }
+    out->peer = in[1];
+    out->from = LORA_PEER_INDEX(in[1]);
+    out->id = in[2];
+    out->part = of;
+    out->of = of;
+    out->slice = in + LORA_PART_HDR;
+    out->slice_len = len - LORA_PART_HDR;
+    return true;
+}
+
 /* ---- reassembly ---- */
 
 void lora_asm_init(lora_asm_t *a)
@@ -212,18 +258,60 @@ static bool have_all(const lora_asm_slot_t *s)
     return true;
 }
 
+/*
+ * With the set's parity in hand and exactly one data part missing, rebuilds that part in place:
+ * every byte of the missing slice is the parity byte XOR the same byte of every other slice,
+ * the short last slice counting as zeros past its true length - which the parity's first byte
+ * names, since a missing LAST part has no other way to say where the payload ends.
+ */
+static bool asm_heal(lora_asm_t *a, lora_asm_slot_t *s)
+{
+    int missing = -1;
+    for (uint8_t i = 0; i < s->of; i++) {
+        if (!have_bit(s, i)) {
+            if (missing >= 0) {
+                return false;   /* two parts gone: one parity heals one */
+            }
+            missing = i;
+        }
+    }
+    uint16_t last_len = s->parity[0];
+    if (missing < 0 || last_len == 0u || last_len > LORA_SLICE_MAX ||
+        (s->last_len != 0u && s->last_len != last_len)) {
+        return false;   /* nothing missing, or a parity that disagrees with the last part it saw */
+    }
+    uint8_t *dest = s->data + (size_t)missing * LORA_SLICE_MAX;
+    for (size_t j = 0; j < LORA_SLICE_MAX; j++) {
+        uint8_t x = s->parity[1u + j];
+        for (uint8_t k = 0; k < s->of; k++) {
+            if ((int)k == missing || (k + 1u == s->of && j >= last_len)) {
+                continue;
+            }
+            x ^= s->data[(size_t)k * LORA_SLICE_MAX + j];
+        }
+        dest[j] = x;
+    }
+    set_bit(s, (uint8_t)missing);
+    if ((uint8_t)missing + 1u == s->of) {
+        s->last_len = last_len;
+    }
+    a->healed++;
+    return true;
+}
+
 lora_asm_result_t lora_asm_feed(lora_asm_t *a, uint32_t now_ms, const uint8_t *part, size_t len,
                                 lora_asm_slot_t **out)
 {
     *out = NULL;
     lora_part_t p;
-    if (!lora_part_parse(part, len, &p)) {
+    bool parity = lora_parity_parse(part, len, &p);
+    if (!parity && !lora_part_parse(part, len, &p)) {
         a->dropped++;
         return LORA_ASM_BAD;
     }
     /* Every part but the last is a full slice, so a part's place in the payload is its number. */
-    bool last = p.part + 1u == p.of;
-    if (!last && p.slice_len != LORA_SLICE_MAX) {
+    bool last = !parity && p.part + 1u == p.of;
+    if (!parity && !last && p.slice_len != LORA_SLICE_MAX) {
         a->dropped++;
         return LORA_ASM_BAD;
     }
@@ -247,6 +335,31 @@ lora_asm_result_t lora_asm_feed(lora_asm_t *a, uint32_t now_ms, const uint8_t *p
             break;
         }
     }
+    if (parity) {
+        /* The parity is sent after the data, so a set it could help has a slot already; with
+         * every data part lost there is nothing one parity could rebuild anyway. */
+        if (s == NULL) {
+            return LORA_ASM_NEED_MORE;
+        }
+        if (s->of != p.of) {
+            a->dropped++;
+            return LORA_ASM_BAD;
+        }
+        if (s->have_parity) {
+            a->dropped++;
+            return LORA_ASM_DUPLICATE;
+        }
+        memcpy(s->parity, p.slice, LORA_PARITY_SLICE);
+        s->have_parity = true;
+        s->last_ms = now_ms;
+        if (!asm_heal(a, s) || !have_all(s)) {
+            return LORA_ASM_NEED_MORE;
+        }
+        s->total = (uint16_t)((size_t)(s->of - 1u) * LORA_SLICE_MAX + s->last_len);
+        s->ready = true;
+        *out = s;
+        return LORA_ASM_COMPLETE;
+    }
     if (s == NULL) {
         /* The smallest free slot that holds it, so a two-part frame cannot take the large slot
          * away from a transfer that needs it. */
@@ -262,6 +375,7 @@ lora_asm_result_t lora_asm_feed(lora_asm_t *a, uint32_t now_ms, const uint8_t *p
         }
         s->in_use = true;
         s->ready = false;
+        s->have_parity = false;
         s->peer = p.peer;
         s->id = p.id;
         s->of = p.of;
@@ -284,7 +398,7 @@ lora_asm_result_t lora_asm_feed(lora_asm_t *a, uint32_t now_ms, const uint8_t *p
     if (last) {
         s->last_len = (uint16_t)p.slice_len;
     }
-    if (!have_all(s)) {
+    if (!have_all(s) && !(s->have_parity && asm_heal(a, s))) {
         return LORA_ASM_NEED_MORE;
     }
     s->total = (uint16_t)((size_t)(s->of - 1u) * LORA_SLICE_MAX + s->last_len);
@@ -533,6 +647,7 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
     }
     slot->in_use = true;
     slot->alert = rank >= LORA_RANK_ALERT;
+    slot->parity = false;
     slot->rank = rank;
     slot->sending = false;
     slot->dest = dest;
@@ -619,6 +734,9 @@ bool lora_txq_commit(lora_txq_t *q, lora_txq_slot_t *slot, size_t len)
     }
     slot->len = (uint16_t)len;
     slot->of = (uint8_t)of;
+    /* A message of two parts or more earns its parity part (2026-10-09): one lost part heals at
+     * the receiver with no resend round trip. Routine traffic repeats itself soon anyway. */
+    slot->parity = slot->rank >= LORA_RANK_MESSAGE && of >= 2u;
     return true;
 }
 
@@ -643,7 +761,8 @@ lora_txq_slot_t *lora_txq_peek(lora_txq_t *q, uint32_t now_ms)
 
 lora_txq_slot_t *lora_txq_peek_for(lora_txq_t *q, uint32_t now_ms, bool listening)
 {
-    lora_txq_slot_t *best = NULL;
+    lora_txq_slot_t *top = NULL;       /* the most urgent frame that is not an acknowledgement */
+    lora_txq_slot_t *ack = NULL;       /* the oldest acknowledgement owed */
     lora_txq_slot_t *sending = NULL;
     for (size_t i = 0; i < LORA_TXQ_SLOTS; i++) {
         lora_txq_slot_t *c = &q->slots[i];
@@ -672,27 +791,38 @@ lora_txq_slot_t *lora_txq_peek_for(lora_txq_t *q, uint32_t now_ms, bool listenin
         if (listening && !c->alert && !c->is_ack) {
             continue;
         }
-        if (c->sending) {
-            sending = c;
+        if (c->sending && (sending == NULL || c->rank > sending->rank)) {
+            sending = c;   /* of two transfers under way, the one that took the radio from the other */
         }
-        if (best == NULL) {
-            best = c;
-        } else if (c->alert != best->alert) {
-            best = c->alert ? c : best;
-        } else if (c->is_ack != best->is_ack) {
-            best = c->is_ack ? c : best;   /* an answer somebody is waiting for, before the next message (D104) */
-        } else if (c->order < best->order) {
-            best = c;
+        if (c->is_ack && !c->alert) {
+            if (ack == NULL || c->order < ack->order) {
+                ack = c;
+            }
+            continue;
+        }
+        /*
+         * What someone said, before housekeeping; of the same rank, the oldest (2026-10-09). The
+         * queue used to be oldest first whatever it held, so a text queued behind three multi-part
+         * state frames waited fifteen seconds for them.
+         */
+        if (top == NULL || c->rank > top->rank || (c->rank == top->rank && c->order < top->order)) {
+            top = c;
         }
     }
     /*
-     * An alert takes the radio from a transfer already in progress; anything else waits for that
-     * transfer to finish, so parts never interleave without a reason.
+     * A transfer under way keeps the radio, so parts never interleave without a reason - except
+     * from something that outranks it: an alert from anything, a message from a routine frame,
+     * which carries on afterwards where it was, each part naming its own place. An acknowledgement
+     * never interrupts: it is not held by the gap that follows a part, and would land on a
+     * receiver still recovering from it.
      */
-    if (sending != NULL && (best == NULL || !best->alert)) {
-        return sending;
+    if (sending != NULL) {
+        return top != NULL && top->rank > sending->rank ? top : sending;
     }
-    return best;
+    if (top != NULL && top->alert) {
+        return top;
+    }
+    return ack != NULL ? ack : top;   /* an answer somebody is waiting for, before the next message (D104) */
 }
 
 bool lora_txq_alert_due(const lora_txq_t *q, uint32_t now_ms)

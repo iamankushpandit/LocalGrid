@@ -186,8 +186,9 @@ static void io_to_client(void *ctx, uint32_t device, const uint8_t *frame, size_
 {
     (void)ctx;
     sess_send(device, frame, len);
-    if (lg_node_presence_state(&g_app.core, device) == LG_PRES_LORA) {
-        lora_offer_handheld(device, frame, len, false);
+    const lg_presence_entry_t *p = lg_node_presence(&g_app.core, device);
+    if (p != NULL && p->state == LG_PRES_LORA) {
+        lora_offer_handheld(device, frame, len, false, p->node);   /* its holder first, the rest in turn */
     }
 }
 
@@ -1262,7 +1263,9 @@ static void core_task(void *arg)
             grid_state_announce();
             (void)lg_node_announce_groups(&g_app.core);   /* an AP that missed a change catches up */
         }
-        static uint32_t last_presence;
+        /* Half a period out of step with the grid-state timer above: on a LoRa link the two
+         * used to fall due together, grid state took the room, and no presence crossed. */
+        static uint32_t last_presence = 0u - (LG_PRESENCE_ANNOUNCE_MS / 2u);
         if (now - last_presence >= LG_PRESENCE_ANNOUNCE_MS) {
             last_presence = now;
             lg_node_announce_presence(&g_app.core);   /* D48: a missed presence flood heals within a minute */
