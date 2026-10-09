@@ -122,6 +122,7 @@ static struct {
     uint32_t air_busy_until_ms;   /* somebody's multi-part frame is mid-flight: hold non-alert sends */
     uint32_t held_for_air;
     uint32_t last_tx_end_ms;      /* when this handheld's own last transmission finished */
+    uint32_t air_hold_started_ms; /* when the current hold episode began: the cap counts from here */
 } L;
 
 static void lock(void)   { if (L.lock != NULL) { xSemaphoreTake(L.lock, portMAX_DELAY); } }
@@ -348,21 +349,31 @@ static void handle_rcv(const lora_at_t *at)
         L.parts_dropped++;
         return;
     }
+    lora_part_t ph;
+    bool parsed = lora_part_parse(raw, n, &ph);
+    lora_asm_slot_t *slot = NULL;
+    lora_asm_result_t r = lora_asm_feed(&L.asmb, now_ms(), raw, n, &slot);
     /* Carrier sense at the protocol layer, as on the APs (2026-10-08): a part with more to come
      * means the air is taken for that much longer, and transmitting into it loses a part for
-     * everyone. Only an alert may interrupt. */
-    lora_part_t ph;
-    if (lora_part_parse(raw, n, &ph) && ph.part + 1u < ph.of) {
+     * everyone. Bounded per episode, and a duplicate part arms nothing, or a steady stream of
+     * resends held this radio open without end. Only an alert or an ack may interrupt. */
+    if (parsed && ph.part + 1u < ph.of && r != LORA_ASM_DUPLICATE) {
         uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
         uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS) + AIR_HOLD_MARGIN_MS;
-        wait = wait > AIR_HOLD_CAP_MS ? AIR_HOLD_CAP_MS : wait;
-        uint32_t until = now_ms() + wait;
+        uint32_t at_ms = now_ms();
+        if ((int32_t)(at_ms - L.air_busy_until_ms) >= 0) {
+            L.air_hold_started_ms = at_ms;   /* a new episode, not an extension */
+        }
+        uint32_t until = at_ms + wait;
+        uint32_t cap = L.air_hold_started_ms + AIR_HOLD_CAP_MS;
+        if ((int32_t)(until - cap) > 0) {
+            until = cap;
+        }
         if ((int32_t)(until - L.air_busy_until_ms) > 0) {
             L.air_busy_until_ms = until;
         }
     }
-    lora_asm_slot_t *slot = NULL;
-    if (lora_asm_feed(&L.asmb, now_ms(), raw, n, &slot) != LORA_ASM_COMPLETE) {
+    if (r != LORA_ASM_COMPLETE) {
         return;   /* lora_asm_feed counts everything it refused, oversize included */
     }
     lock();

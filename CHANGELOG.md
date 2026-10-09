@@ -5,6 +5,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### The air hold is bounded per episode, and hellos list heard peers
+
+- The mid-flight hold was a ratchet: re-armed by every non-final part heard - resends and a
+  talker's broadcast packets included - with the cap bounding each arming, never the sequence.
+  Parts arriving under 2.6 s apart held a radio open without end. The hold is now capped per
+  episode from when it first began, and a duplicate part arms nothing.
+- A mutually dead LoRa pair could never relink while ESP-NOW was off: hellos listed only up
+  peers, and a link rises only when the other side's hello lists this AP with its current boot.
+  Hellos now list heard peers, so the LoRa mesh confirms itself without Wi-Fi's help.
+
 ### Discovery hellos run fast after a restart, so the LoRa mesh is whole in seconds, not minutes
 
 - The one flaky chapter left ("Cut the Wi-Fi between access points") failed with every radio

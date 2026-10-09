@@ -181,6 +181,7 @@ static struct {
     bool     holding_for_air;
     uint32_t last_tx_end_ms;  /* when this AP's own last transmission finished */
     uint32_t configured_at_ms; /* when the module last came up: discovery hellos run fast from here */
+    uint32_t air_hold_started_ms; /* when the current hold episode began: the cap counts from here */
     bool     heard_any;
     uint8_t  restarts;
     int8_t   rssi, snr;
@@ -456,29 +457,40 @@ static void handle_rcv(const lora_at_t *at)
     /* Every piece of a multi-part frame is named as it arrives: the one trace that says where a
      * frame died when only some of it ever came (2026-10-08). */
     lora_part_t ph;
-    if (lora_part_parse(raw, n, &ph)) {
+    bool parsed = lora_part_parse(raw, n, &ph);
+    if (parsed) {
         ESP_LOGI(TAG, "[LORA] Part %u/%u of %u from peer 0x%02X, %u chars, RSSI %d dBm, SNR %d",
                  (unsigned)(ph.part + 1u), (unsigned)ph.of, (unsigned)ph.id, (unsigned)ph.peer,
                  (unsigned)at->len, (int)L.rssi, (int)L.snr);
-        /*
-         * Carrier sense at the protocol layer (2026-10-08). The radios have none of their own, and a
-         * receiver that transmits while somebody's multi-part frame is mid-flight is deaf for a part
-         * of it: with three-part frames on the bench, one witness kept 8 of 8 while the other, busier,
-         * kept 3 of 8. The header says how many parts are still coming, so everything that hears one
-         * waits that much airtime before its own non-alert transmissions.
-         */
-        if (ph.part + 1u < ph.of) {
-            uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
-            uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS) + AIR_HOLD_MARGIN_MS;
-            wait = wait > AIR_HOLD_CAP_MS ? AIR_HOLD_CAP_MS : wait;
-            uint32_t until = app_now_ms() + wait;
-            if ((int32_t)(until - L.air_busy_until_ms) > 0) {
-                L.air_busy_until_ms = until;
-            }
-        }
     }
     lora_asm_slot_t *slot = NULL;
     lora_asm_result_t r = lora_asm_feed(&L.asmb, app_now_ms(), raw, n, &slot);
+    /*
+     * Carrier sense at the protocol layer (2026-10-08). The radios have none of their own, and a
+     * receiver that transmits while somebody's multi-part frame is mid-flight is deaf for a part of
+     * it. The header says how many parts are still coming, so everything that hears one waits that
+     * much airtime before its own non-alert transmissions - but boundedly: the first version
+     * extended the hold on every part heard, each arming capped but the sequence not, and a steady
+     * stream of parts arriving under 2.6 s apart (resends, a talker's packets) held a radio open
+     * without end. The hold is now capped per episode from when it first began, and a duplicate
+     * part - a resend of something already whole here - arms nothing.
+     */
+    if (parsed && ph.part + 1u < ph.of && r != LORA_ASM_DUPLICATE) {
+        uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
+        uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS) + AIR_HOLD_MARGIN_MS;
+        uint32_t at_ms = app_now_ms();
+        if ((int32_t)(at_ms - L.air_busy_until_ms) >= 0) {
+            L.air_hold_started_ms = at_ms;   /* a new episode, not an extension */
+        }
+        uint32_t until = at_ms + wait;
+        uint32_t cap = L.air_hold_started_ms + AIR_HOLD_CAP_MS;
+        if ((int32_t)(until - cap) > 0) {
+            until = cap;
+        }
+        if ((int32_t)(until - L.air_busy_until_ms) > 0) {
+            L.air_busy_until_ms = until;
+        }
+    }
     if (r == LORA_ASM_OVERSIZE) {
         static uint32_t said;
         L.refused_big++;
@@ -1166,12 +1178,19 @@ void lora_offer_flood(uint16_t except_node, const uint8_t *frame, size_t len)
     }
 }
 
-/* The peers backbone.c lists in its HELLO, so a LoRa-only link can be confirmed both ways. */
+/*
+ * The peers backbone.c lists in its HELLO, so a LoRa-only link can be confirmed both ways. HEARD
+ * peers, not only up ones: a link comes up when the other side's hello lists this AP, so two APs
+ * that both hold the other merely as heard - fresh boots, or a pair that both timed out - could
+ * never confirm again without ESP-NOW's neighbour list to vouch for them (found 2026-10-08: the
+ * LoRa mesh only ever converged once the Wi-Fi backbone was also alive). Listing a stale boot is
+ * harmless: the listed AP compares it to its own current boot and simply stays down.
+ */
 static size_t extra_peers(uint16_t *nodes, uint32_t *boots, size_t max)
 {
     size_t n = 0;
     for (uint16_t i = 0; i < LG_MAX_NODES && n < max; i++) {
-        if (L.peers[i].up) {
+        if (L.peers[i].heard) {
             nodes[n] = i;
             boots[n] = L.peers[i].boot;
             n++;
