@@ -1069,9 +1069,9 @@ static bool voice_live_for_lora_only(lg_node_t *n, const lg_env_t *e)
     return p != NULL && p->state == LG_PRES_LORA;
 }
 
-/* Takes a voice frame if it is the newest from its author; the table never touches text dedup.
- * A compact packet (D95) is also taken out of order through the catch-up window: a resent one
- * arriving after its successors is the resend working, not a duplicate - the listener's note
+/* Takes a live voice frame if it is the newest from its author; the table never touches text
+ * dedup. A compact packet (D95) is taken in whatever order it comes, once (lg_body.h): a resent
+ * one arriving after its successors is the resend working, not a duplicate - the listener's note
  * was waiting for exactly that packet. The same packet twice is still dropped, so a radio
  * duplicate is never relayed twice over a bridge that pays seconds of air for it. */
 static bool voice_take(lg_node_t *n, const lg_env_t *e)

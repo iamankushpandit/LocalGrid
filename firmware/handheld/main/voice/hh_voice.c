@@ -332,27 +332,30 @@ static void synth(int16_t *pcm, size_t n)
 #define C2_PRIORITY       3         /* below capture and playback (4): live talk is never held up by this */
 #define C2_PCM_BUFFER     (FRAME_SAMPLES * 5u * sizeof(int16_t))   /* half a second of samples waiting */
 /*
- * Between packets. A packet is three 120-character parts since 2026-10-08, and the radios leave
- * 1.5 s of quiet air after each transmission, so one packet is about 8 s of airtime with its
- * acknowledgement; packets offered faster than that piled up in an AP's four-slot queue and the
- * older ones were evicted - a talk arrived 1 packet in 3. Late and in one piece is the deal (D95).
+ * Between packets. A packet is three LoRa parts (124 characters each, about two thirds of a
+ * second on the air at SF9 and 125 kHz), so one hop between APs is about 3 s with its random
+ * starts and its acknowledgement, and this leaves a second hop or one resend its room. Packets offered faster
+ * than the air carries them pile up in an AP's four-slot queue and the older ones are evicted - a
+ * talk once arrived 1 packet in 3. Late and in one piece is the deal (D95). It was 9000 while a
+ * packet was three parts with a second and more of quiet after each (2026-10-08).
  */
-#define C2_SPACING_MS     9000
+#define C2_SPACING_MS     6000
 /*
  * A talker with no Wi-Fi session pays more channel per packet: its packet is broadcast with no
- * acknowledgement, so it rides as one copy plus its parity part (2026-10-09) - four paced parts,
- * about 9 s of channel. Spaced for what is actually queued, or its own four-slot queue fills and
- * evicts the very redundancy it is paying for, which is how a talk once arrived 1 packet in 3.
+ * acknowledgement, so it rides as one copy plus its parity part (2026-10-09) - four parts, about
+ * 4 s - and the AP that holds it then passes it on, about 3 s more. Spaced for what is actually
+ * queued, or its own four-slot queue fills and evicts the very redundancy it is paying for, which
+ * is how a talk once arrived 1 packet in 3. It was 12000 while a packet was four paced parts.
  */
-#define C2_SPACING_LORA_MS 12000
+#define C2_SPACING_LORA_MS 9000
 #define NOTE_STRAGGLE_MS  3000      /* after the last packet has come, how long to wait for a missing one */
-#define NOTE_GIVE_UP_MS   16000     /* no packet for this long: play what there is. A second over the widest
-                                       spacing above, so a note still flowing is never cut into fragments */
+#define NOTE_GIVE_UP_MS   13000     /* no packet for this long: play what there is. Four seconds over the
+                                       widest spacing above, so a note still flowing is never cut into fragments */
 #define NOTE_BUSY_WAIT_MS 70000     /* a live talk may legally hold the speaker MAX_TALK_MS (60 s): a finished
                                        note outwaits it rather than being freed unheard */
 /*
  * The owner's replay (2026-10-08): a partial note stays open, and when the rest lands it is played
- * once more, whole. Packets cross about nine seconds apart, and a lost one is resent behind the
+ * once more, whole. Packets cross six to nine seconds apart, and a lost one is resent behind the
  * others, so the wait is paced by the air, not by a clock: the note keeps waiting while packets are
  * still arriving, and gives up only after this much quiet. A first wait of 25 s expired with the
  * rest still on the way - a note played one packet of three and never got its replay.
@@ -411,7 +414,7 @@ static void c2_send(uint16_t index, uint8_t flags, uint8_t *pkt, size_t data)
 /*
  * Encodes the talk as it is spoken and sends the packets C2_SPACING_MS apart.
  *
- * Spaced, because the frame is two LoRa parts of about 0.65 s each and every radio on the way has a
+ * Spaced, because the frame is three LoRa parts, about 2 s on the air, and every radio on the way has a
  * queue of four: sent as fast as they were spoken (one every 1.12 s) the first test on the bench lost
  * two packets of five to a full queue, on a channel that was otherwise idle. At this spacing nothing
  * waits behind anything, on the talker's radio or on an AP relaying to a listener's. The talk therefore
@@ -471,7 +474,8 @@ static void c2_encode_task(void *arg)
             c2_send(sent, last ? LG_VOICE_END : 0, pk[sent].body, pk[sent].len);
             sent_end = last;
             sent++;
-            /* With no Wi-Fi session each packet goes twice, so the spacing covers both copies. */
+            /* With no Wi-Fi session each packet is followed by its parity part and passed on by an
+             * AP, so the spacing covers both. */
             next_ms = now_ms() + (hh_service_wifi_session() ? C2_SPACING_MS : C2_SPACING_LORA_MS);
         }
     }
@@ -581,6 +585,7 @@ static void c2_play_task(void *arg)
         }
     }
     bool replayed = false;
+    bool again_whole = false;   /* the second pass is the whole note, not just what came late */
     uint16_t played_any = 0;   /* which packets some pass has actually played (C2_PACKETS_MAX <= 16) */
     for (;;) {
         n->closed = true;
@@ -622,7 +627,7 @@ static void c2_play_task(void *arg)
         if (c != NULL && pcm != NULL) {
             ESP_LOGI(TAG, "[MSG] Hearing device %" PRIu32 " (%s %" PRIu32 "), a note%s", n->author,
                      n->scope == LG_SCOPE_GROUP ? "group" : n->scope == LG_SCOPE_BROADCAST ? "everyone" : "1:1",
-                     n->target, replayed ? ", whole this time" : "");
+                     n->target, !replayed ? "" : again_whole ? ", whole this time" : ", again with what came late");
             lg_bsp_audio_cue(LG_CUE_TALK);
             vTaskDelay(pdMS_TO_TICKS(PREBUFFER_MS));
             if (lg_bsp_audio_voice_start() == ESP_OK) {
@@ -659,7 +664,8 @@ static void c2_play_task(void *arg)
                  ", slowest decode %" PRIu32 " ms, stack left %u%s%s",
                  n->talk, n->author, packets, missing, bytes, crc, worst_ms,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL), n->last >= 0 ? "" : ", no last packet",
-                 replayed ? ", replayed whole after the rest arrived" : "");
+                 !replayed ? "" : again_whole ? ", replayed whole after the rest arrived"
+                                              : ", replayed with what came late; it never became whole");
         /*
          * The owner's replay (2026-10-08): what came played as it came, but packets missing when the
          * note went quiet can still arrive - the AP sends an unacknowledged one again, and they are
@@ -683,6 +689,7 @@ static void c2_play_task(void *arg)
             (unplayed > 0 || live_missing > 0 || n->last < 0)) {
             if (n->last >= 0 && live_missing == 0) {
                 replayed = true;   /* whole already - the rest landed during the pass */
+                again_whole = true;
                 continue;
             }
             n->closed = false;
@@ -700,8 +707,19 @@ static void c2_play_task(void *arg)
                 }
             }
             n->closed = true;
-            if (whole) {
+            /* Whole, and it plays once more from the top. Or the wait is over and it never became
+             * whole, and packets came in during it that no pass has played: they are played too,
+             * with what is there. Until 2026-10-09 only a whole note earned a second pass, so a
+             * note that got three of its four packets after its first played one of them. */
+            unsigned late = 0;
+            for (int i = 0; i < (int)C2_PACKETS_MAX; i++) {
+                if (n->have[i] && (played_any & (uint16_t)(1u << i)) == 0u) {
+                    late++;
+                }
+            }
+            if (whole || (late > 0 && !n->yield)) {
                 replayed = true;
+                again_whole = whole;
                 continue;
             }
         }

@@ -159,6 +159,14 @@ void lora_request_at(const char *command);
  * clamped), tagged so a witness's log names it; 0 sends the encoding-alphabet probe. Any task. */
 void lora_request_probe(unsigned chars, const char *tag);
 
+/* Console, bring-up: `count` probes of `chars` characters with exactly `gap_ms` of quiet after
+ * each one's +OK, timed on the LoRa task and numbered behind `tag`. Any task. */
+void lora_request_burst(unsigned count, unsigned chars, uint32_t gap_ms, const char *tag);
+
+/* Console, bring-up: while this AP is `lora off`, answer every probe whose text starts with `on`
+ * with one of `chars` characters, `delay_ms` after its line arrived. NULL or "" stops it. Any task. */
+void lora_request_echo(unsigned chars, uint32_t delay_ms, const char *on);
+
 /* D98: transmit power, one of LG_LORA_POWER_FULL, _MEDIUM, _LOW; kept across restarts. */
 void lora_set_power(int dbm);
 int  lora_power(void);

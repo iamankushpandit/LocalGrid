@@ -9,13 +9,22 @@
  * Wire format of one part (docs/lora.md, "Frames on the air").
  *
  * A sealed payload (backbone.c's outer 12 bytes + ciphertext + tag) is cut into slices of at most
- * LORA_SLICE_MAX bytes. Each slice gets a five-byte header in front of it:
+ * LORA_SLICE_MAX bytes. Each slice gets a six-byte header in front of it:
  *
- *   0  u8  magic  LORA_MAGIC ('L')
+ *   0  u8  magic  LORA_MAGIC
  *   1  u8  sender: kind in the high nibble (0 an AP, 1 a handheld), index in the low nibble
  *   2  u8  message number, so parts of different payloads never mix
  *   3  u8  part number, 0-based
  *   4  u8  part count, 1..LORA_PARTS_MAX
+ *   5  u8  who it is for: 0 everyone, otherwise that radio's place in the address plan below
+ *          (1 + index for an AP, 100 + device number for a handheld)
+ *
+ * The sixth byte (2026-10-09) is there so that every part can be sent to the module's broadcast
+ * address. The module hides from a radio whatever is addressed to another one, and has no carrier
+ * sense, so an AP could not know that its two neighbours were in the middle of a frame and
+ * transmitted over it: on the bench, with three APs in one room, that was where most parts were
+ * still being lost once the radios themselves had stopped losing them. Now every radio hears
+ * every part, takes the ones that are for it, and keeps off the air for the rest of the others.
  *
  * The sender is a whole byte because handhelds get modules later (docs/lora.md, "Ready for
  * handhelds later"): nothing here needs a format change when they do. This firmware only ever
@@ -49,40 +58,57 @@
 extern "C" {
 #endif
 
-#define LORA_MAGIC          0x4Cu   /* 'L' */
-#define LORA_PART_HDR       5u
 /*
- * 120 base64 characters is what one AT+SEND carries; they decode to exactly 90 bytes with no
- * padding, of which five are the header.
- *
- * The first sketch carried 180 (docs/lora.md). Measured on the bench on 2026-10-08 (RYLR998
- * firmware V1.2.4, SF9 BW125, 868.5 MHz, RSSI -43 dBm, SNR 9, quiet channel), delivery fell off a
- * cliff with payload length: 124 characters or less arrived 24 of 24, 132 arrived 11 of 12, 140
- * arrived 2 of 12, and 180 almost never - module behaviour, not the air, and exactly the range a
- * sealed text message landed in. 120 keeps one measured step of margin below the cliff.
+ * 'M'. It was 'L' while the header was five bytes and a part did not say who it was for (until
+ * 2026-10-09). A board still on that format is refused at the first byte: without this the two
+ * would hear each other and each read the other's parts one byte out of place, which looks
+ * exactly like an unreliable radio.
  */
-#define LORA_PART_B64_MAX   120u
-#define LORA_PART_RAW_MAX   90u
-#define LORA_SLICE_MAX      (LORA_PART_RAW_MAX - LORA_PART_HDR)   /* 85 */
-#define LORA_PARTS_MAX      74u
-
+#define LORA_MAGIC          0x4Du
+#define LORA_PART_HDR       6u
+#define LORA_DEST_ALL       0u      /* header byte 5: for every radio that hears it */
+/*
+ * A part carries 85 bytes of payload: with the six-byte header 91 bytes, 124 characters of
+ * base64, about two thirds of a second on the air at SF9 and 125 kHz. The parity part (below) is
+ * one byte longer and the same 124 characters.
+ *
+ * What bounds it is time on the air, not characters (LG_LORA_AIR_CEILING_MS, at the end of this
+ * file). The module carries 240 characters in one AT+SEND, and from 2026-10-09 18:00 to 20:00 a
+ * part was 240: probes sent back to back had arrived 40 of 40 at that length. Sent the way real
+ * traffic is sent, one packet after seconds of silence, 200 and 240 characters arrived 1 of 32
+ * and 1 of 56 - broken, the module's own checksum failing - while 120, 140 and 160 arrived 28 of
+ * 28, 31 of 32 and 55 of 56, at 5 dBm and at 22 dBm alike. A packet from rest is good for a little
+ * under a second on the air. A faster radio setting can carry more in a part (240 characters are
+ * 0.3 s at SF9 and 500 kHz); the assert at the end of this file is what says whether it may.
+ */
+#define LORA_SLICE_MAX      85u
+#define LORA_PART_RAW_MAX   (LORA_PART_HDR + LORA_SLICE_MAX)             /* 91 */
+#define LORA_PART_B64_MAX   (((LORA_PART_RAW_MAX + 2u) / 3u) * 4u)       /* 124 */
 /*
  * The payload ceiling the owner settled (docs/lora.md, "Push-to-talk over LoRa") is 6 KB: a
- * 30-second Codec2 voice note at 1200 bit/s, with headroom. 74 parts of 85 bytes hold 6290, which
+ * 30-second Codec2 voice note at 1200 bit/s, with headroom. 73 parts of 85 bytes hold 6205, which
  * is that ceiling rounded up to whole parts, so the wire format never has to change for one.
  * Anything larger is refused with a reason, never truncated.
  */
-#define LORA_PAYLOAD_MAX    (LORA_PARTS_MAX * LORA_SLICE_MAX)   /* 6290 */
+#define LORA_PARTS_MAX      ((6144u + LORA_SLICE_MAX - 1u) / LORA_SLICE_MAX)   /* 73 */
+#define LORA_PAYLOAD_MAX    (LORA_PARTS_MAX * LORA_SLICE_MAX)                  /* 6205 */
 
 /*
- * Every frame the grid sends today is under 300 bytes. Slots of this size hold all of them, and
+ * Every frame the grid sends today is under 320 bytes. Slots of this size hold all of them, and
  * cost a few kilobytes of always-there memory; the 6 KB slots that a voice note would need are
- * taken once at start-up, and only on an AP that actually has a module (lora.c).
+ * taken once at start-up, and only on an AP that actually has a module (lora.c). A whole number
+ * of parts, because reassembly takes a set only if all its parts would fit the slot at full size:
+ * a queue slot that accepts more than a reassembly slot can take back sends frames nobody keeps.
  */
-#define LORA_SMALL_MAX      512u
+#define LORA_SMALL_PARTS    6u
+#define LORA_SMALL_MAX      (LORA_SMALL_PARTS * LORA_SLICE_MAX)   /* 510 */
 
 _Static_assert(LORA_PAYLOAD_MAX >= 6144u, "the owner's ceiling is 6 KB");
-_Static_assert(LORA_PART_HDR + LORA_SLICE_MAX == LORA_PART_RAW_MAX, "a part fills one AT+SEND");
+_Static_assert(LORA_PART_B64_MAX <= 240u, "a part fits one AT+SEND");
+_Static_assert(LORA_SLICE_MAX <= 255u, "the parity part carries the last part's length in one byte");
+_Static_assert(LORA_PARTS_MAX <= 255u, "the part number and count are one byte each");
+_Static_assert(LORA_PAYLOAD_MAX <= 65535u, "a slot's length is sixteen bits");
+_Static_assert(LORA_SMALL_MAX >= 288u + 12u + 16u, "a small slot holds the largest sealed frame");
 
 /* ---- the radio, and the address plan (D71, D77) ---------------------------------------------
  *
@@ -120,7 +146,33 @@ _Static_assert(LORA_PART_HDR + LORA_SLICE_MAX == LORA_PART_RAW_MAX, "a part fill
 #define LG_LORA_BW_CODE      7
 #define LG_LORA_CR_CODE      1
 #define LG_LORA_PREAMBLE     12
+/* The module's bandwidth codes: 7 is 125 kHz, 8 is 250, 9 is 500. */
+#define LG_LORA_BW_HZ        (LG_LORA_BW_CODE == 7 ? 125000u : LG_LORA_BW_CODE == 8 ? 250000u : 500000u)
+_Static_assert(LG_LORA_BW_CODE >= 7 && LG_LORA_BW_CODE <= 9, "the module knows bandwidth codes 7, 8 and 9");
+_Static_assert(LG_LORA_SF >= 7 && LG_LORA_SF <= (LG_LORA_BW_CODE == 7 ? 9 : LG_LORA_BW_CODE == 8 ? 10 : 11),
+               "the module allows SF7-9 at 125 kHz, SF7-10 at 250 and SF7-11 at 500");
 #define LG_LORA_POWER_DBM    22          /* AT+CRFOP, 0..22 */
+/*
+ * AT+NETWORKID: 18, the module's factory value, and nothing else.
+ *
+ * Until 2026-10-09 every grid took one of 3..15 from its discriminator, so that a module from
+ * another grid would be ignored by the radio itself. Measured that day on three APs side by side
+ * (SF9, 125 kHz, 915 MHz, 5 dBm, RSSI -40, one AP sending 60 packets of 120 characters with nothing
+ * else on the air, the two others counting): on 18 both heard 60 of 60, three runs of three; on
+ * 14, 3 and 9 they heard 43 to 56 of 60, each missing different packets, with no error from the
+ * module - the packet simply never came out of it. One packet in six, lost in silence, between
+ * radios centimetres apart, is what most "LoRa lost a part" on this bench had underneath it: the
+ * quiet a receiver seemed to need after a packet, the resends, and a length limit that looked
+ * tighter than it is. The module's guide allows the preamble to be set only on 18 and pins it to
+ * 12 on every other ID; whatever it does differently there, 18 is the setting its receiver was
+ * built around.
+ *
+ * What is given up: the radio no longer tells one LocalGrid from another, or from a stranger's
+ * module left on factory settings. Nothing depended on it. Every frame is sealed with the grid's
+ * own key and a part that does not open is dropped (D71, D77); a stranger's packet costs the air
+ * it occupies, as it always did, and now the moment it takes to refuse.
+ */
+#define LG_LORA_NETWORK_ID   18
 /*
  * How strongly the LoRa radio transmits (D98). Full is what reaches furthest and is the default. The
  * lower two exist for one situation: devices close together - on one table, in one room - where a
@@ -150,6 +202,7 @@ static inline const char *lg_lora_power_name(int dbm)
 #define LG_LORA_ADDR_BROADCAST   0u
 #define LG_LORA_ADDR_AP(i)       ((uint16_t)((i) + 1u))
 #define LG_LORA_ADDR_HANDHELD(d) ((uint16_t)(100u + (d)))
+_Static_assert(100u + LG_MAX_DEVICES <= 255u, "a part names who it is for in one byte");
 
 /* ---- base64 ---- */
 
@@ -179,6 +232,7 @@ typedef struct {
     uint8_t        id;          /* message number */
     uint8_t        part;        /* 0-based */
     uint8_t        of;          /* 1..LORA_PARTS_MAX */
+    uint8_t        dest;        /* LORA_DEST_ALL, or the one radio it is for */
     const uint8_t *slice;       /* into the caller's buffer */
     size_t         slice_len;
 } lora_part_t;
@@ -193,29 +247,38 @@ size_t lora_part_build(uint8_t peer, uint8_t id, uint8_t part, uint8_t of, const
 /* Parses header + slice. Returns false for anything that is not one of our parts. */
 bool lora_part_parse(const uint8_t *in, size_t len, lora_part_t *out);
 
+/* A part is built for everyone; this names the one radio it is for instead. `part` is what
+ * lora_part_build or lora_parity_build wrote, `dest` a place in the address plan. */
+static inline void lora_part_set_dest(uint8_t *part, uint16_t dest)
+{
+    part[5] = (uint8_t)dest;
+}
+
+/* Whether a part with this destination byte is for the radio at `address`. */
+static inline bool lora_part_is_for(uint8_t dest, uint16_t address)
+{
+    return dest == LORA_DEST_ALL || dest == (uint8_t)address;
+}
+
 /* How many parts a payload of this length needs, or 0 if it is beyond the format's ceiling. */
 size_t lora_part_count(size_t payload_len);
 
 /*
- * The parity part (2026-10-09). A multi-part message-rank frame is followed by one extra part
- * carrying the XOR of every data slice zero-padded to LORA_SLICE_MAX, so a receiver that lost
- * exactly one part rebuilds it on the spot instead of waiting a resend round trip - on a channel
- * where that trip costs eight seconds, this is the difference between late and lost. Its header
- * is an ordinary part header with part == of, which firmware from before this change never
- * accepts: an AP's decode buffer stops it at 91 raw bytes with a loud garbled-part warning, and
- * the parser would refuse part == of regardless - so a mixed bench degrades gracefully (old
- * firmware just never heals), but its warning counts read as loss until it is reflashed, which
- * is worth knowing before reading a sweep on a half-flashed grid. Its slice starts with one
- * byte naming the final data part's true length, because a rebuilt LAST part has no other way to
- * know where the payload ends, and the XOR of padded slices follows. At 91 raw bytes it rides in
- * 124 base64 characters, which the 2026-10-08 length sweep measured clean (24/24; the module's
- * cliff starts near 130).
+ * The parity part (2026-10-09). A message-rank frame of two parts or more that nobody will
+ * acknowledge is followed by one extra part carrying the XOR of every data slice zero-padded to
+ * LORA_SLICE_MAX, so a receiver that lost exactly one part rebuilds it on the spot. A frame that
+ * is acknowledged takes none (lora_txq_want_ack): it is sent again until it is answered, and a
+ * parity sent every time cost more air than a resend sent when one is needed. Its header is an
+ * ordinary part header with part == of. Its slice starts with one byte naming the final data
+ * part's true length, because a rebuilt LAST part has no other way to know where the payload
+ * ends, and the XOR of padded slices follows. At 92 raw bytes it is the same 124 characters as a
+ * full data part.
  */
 #define LORA_PARITY_SLICE   (LORA_SLICE_MAX + 1u)                 /* last_len byte + the XOR block */
-#define LORA_PART_RAW_WIRE  (LORA_PART_HDR + LORA_PARITY_SLICE)   /* 91: the largest part on the air */
-#define LORA_PART_B64_WIRE  (((LORA_PART_RAW_WIRE + 2u) / 3u) * 4u)   /* 124 characters, measured clean */
+#define LORA_PART_RAW_WIRE  (LORA_PART_HDR + LORA_PARITY_SLICE)   /* 92: the largest part on the air */
+#define LORA_PART_B64_WIRE  (((LORA_PART_RAW_WIRE + 2u) / 3u) * 4u)   /* 124 characters */
 
-_Static_assert(LORA_PART_B64_WIRE == 124u, "the parity part rides in the 124 characters the sweep cleared");
+_Static_assert(LORA_PART_B64_WIRE <= 240u, "the parity part, the largest there is, fits one AT+SEND");
 
 /* Writes the parity part for a whole payload into out. Returns its length, 0 on a bad argument
  * (a payload of one part takes no parity). */
@@ -366,7 +429,19 @@ bool lora_frame_wants_ap_ack(const uint8_t *frame, size_t len);
 size_t lora_ack_build(uint32_t seq, uint8_t *out, size_t cap);
 bool   lora_ack_parse(const uint8_t *in, size_t len, uint32_t *seq);
 
-#define LORA_TX_TRIES  3u      /* times a frame that wants an acknowledgement goes on the air before it is given up */
+/*
+ * Times a frame that wants an acknowledgement goes on the air before it is given up. A message
+ * given up between two APs is a message lost: nothing behind it sends it again, so more tries
+ * look like the obvious cure. Five were tried on 2026-10-09 and taken out the same evening: on
+ * the bench, with the Wi-Fi backbone cut, frames given up went from 11 to 9 in a run, and
+ * messages the four-slot queue had no room for went from 1 to 16 - a frame waiting on its fourth
+ * and fifth try was holding the slot the next message needed. More tries need a queue that lets
+ * a frame past its third try give way to a newcomer, or more slots; until then, three.
+ * A frame past LORA_TRIES_CLOSE tries, should the limit ever be raised above it, waits a random
+ * few seconds more before each further one.
+ */
+#define LORA_TX_TRIES    3u
+#define LORA_TRIES_CLOSE 3u
 /*
  * An alert is not given up after three. On 2026-10-09 an all clear sent nine seconds after its SOS
  * went out three times into the SOS's own echo - every AP relaying and answering at once - was
@@ -410,6 +485,7 @@ typedef struct {
     uint16_t await;        /* bit n set: AP n has not acknowledged it yet. 0: none is wanted */
     uint32_t seq;          /* the sealed frame's outer sequence number, which an acknowledgement names */
     uint32_t tag;          /* the driver's own mark; 0 when it has none. An AP marks an alert with its author */
+    uint8_t  yield_to;     /* the driver's too: 1 + the AP whose transmission makes this frame needless, or 0 */
     uint8_t *data;
     size_t   cap;
 } lora_txq_slot_t;
@@ -554,10 +630,78 @@ bool lora_at_parse(char *line, lora_at_t *out);
 
 /*
  * Time on the air of one LoRa transmission of `payload_chars` characters, in milliseconds,
- * rounded up, for the settings docs/lora.md names: SF9, BW 125 kHz, CR 4/5, preamble 12,
- * explicit header, CRC on. Semtech's formula (SX1276 datasheet 4.1.1.7), in integers.
+ * rounded up, for the radio setting above (LG_LORA_SF, LG_LORA_BW_CODE, LG_LORA_CR_CODE,
+ * LG_LORA_PREAMBLE), explicit header, CRC on. Semtech's formula (SX1276 datasheet 4.1.1.7), in
+ * integers.
  */
 uint32_t lora_airtime_ms(size_t payload_chars);
+
+/*
+ * The same, as a constant expression, in microseconds: so that what a radio setting does to the
+ * longest part can stop a build, not surprise a field trip.
+ */
+#define LG_LORA_SYM_US        ((uint32_t)(((uint64_t)1000000u << LG_LORA_SF) / LG_LORA_BW_HZ))
+#define LG_LORA_AIRTIME_US(n) \
+    (((4u * LG_LORA_PREAMBLE + 17u) * LG_LORA_SYM_US) / 4u + \
+     (8u + ((8u * (n) + 44u - 1u) / (4u * LG_LORA_SF)) * (LG_LORA_CR_CODE + 4u)) * LG_LORA_SYM_US)
+/*
+ * How long one packet may be on the air. Measured 2026-10-09 on network ID 18, three APs side by
+ * side, each packet sent after three seconds of silence, at SF9 and 125 kHz: 0.69 s (120
+ * characters) 28 of 28, 0.80 s (140) 31 of 32, 0.88 s (160) 55 of 56, 1.07 s (200) 1 of 32,
+ * 1.26 s (240) 1 of 56 - the rest arriving broken - and the same at 22 dBm as at 5. Back to back,
+ * with no silence between them, the long ones arrive, which is how they passed the first test and
+ * were shipped for two hours. 0.8 s leaves the measured edge alone.
+ */
+#define LG_LORA_AIR_CEILING_MS 800u
+_Static_assert(LG_LORA_AIRTIME_US(LORA_PART_B64_WIRE) <= LG_LORA_AIR_CEILING_MS * 1000u,
+               "the longest part is too long on the air at this radio setting: a smaller LORA_SLICE_MAX, "
+               "or a faster setting");
+
+/* ---- pacing, shared by both drivers ---------------------------------------------------------
+ *
+ * Each driver kept its own copy of these until 2026-10-09, and both copies were built on "a
+ * receiver needs a second of quiet after a packet". It does not: that was the network-ID loss
+ * (LG_LORA_NETWORK_ID). Measured on ID 18 with probes the firmware timed, SF9 at 125 kHz: the same
+ * sender back to back with no quiet at all, 120 and 240 characters, heard 23-24 of 24; an answer
+ * sent 20 ms after a packet, heard by a third radio 24 of 24 and by the radio that had just
+ * finished transmitting 23 of 24. So the radio sets no pace of its own. What is left is the pace
+ * the boards and the people need: a moment for whoever heard a packet to take its line from the
+ * module and say so before the next one lands, and room for an answer before the next frame.
+ */
+#define LG_LORA_BACKOFF_MAX_MS    300u   /* the random wait before every transmission: no carrier sense */
+#define LG_LORA_PART_GAP_MS       150u   /* a sender's pause after each of its own transmissions */
+/* What a listener allows for each part still to come: the pause and the longest random start. */
+#define LG_LORA_AIR_PART_GAP_MS   (LG_LORA_PART_GAP_MS + LG_LORA_BACKOFF_MAX_MS)
+#define LG_LORA_ACK_CHARS         60u    /* an acknowledgement on the air: one sealed part of about 52 characters */
+/* One acknowledgement, start to finish: its time on the air, and the module and the boards. */
+#define LG_LORA_ACK_TURN_MS       (lora_airtime_ms(LG_LORA_ACK_CHARS) + 120u)
+/* Nobody starts a frame on the heels of a packet it heard: that moment is the answer's. Housekeeping
+ * keeps well clear; it is never worth the next thing a person sends. */
+#define LG_LORA_ANSWER_QUIET_MS   LG_LORA_ACK_TURN_MS
+#define LG_LORA_ROUTINE_QUIET_MS  1100u
+/*
+ * An alert waits for a frame in flight and its answers like a message does - but only this long,
+ * and then it goes whatever the air is doing. Sent at once into a frame whose parts follow each
+ * other 150 ms apart, it lands on a sender that is transmitting and cannot hear, and on receivers
+ * that lose both: on the bench an SOS sent during a voice note reached the note's sender on its
+ * fourth try, 13 s late (2026-10-09). A frame is over in two or three seconds, and the moment
+ * after it is the one moment its sender is certain to be listening.
+ */
+#define LG_LORA_ALERT_PATIENCE_MS 4000u
+
+/* ---- bring-up ---- */
+
+/* What a witness prints beside the start of a probe it heard (`lora off` on a bench board), so
+ * the measuring tool knows all of it arrived without the whole of it crossing the console. */
+static inline unsigned lora_probe_sum(const char *text, size_t len)
+{
+    unsigned sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum = (sum * 31u + (unsigned char)text[i]) & 0xFFFFu;
+    }
+    return sum;
+}
+#define LORA_PROBE_TEXT_SHOWN 24   /* of a probe's characters a witness prints */
 
 #ifdef __cplusplus
 }

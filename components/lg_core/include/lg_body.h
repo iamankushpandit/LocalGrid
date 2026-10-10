@@ -337,14 +337,32 @@ size_t lg_voice_hdr_enc(const lg_voice_hdr_t *h, uint8_t *out);
  * reserved != 0, and any other length. out may be NULL to check only. */
 bool   lg_voice_hdr_dec(const uint8_t *body, size_t len, lg_voice_hdr_t *out);
 
-/* The newest voice frame seen from one author: voice is only ever played forward, so a frame
- * no newer than this within the same boot is dropped. seq 0 means none seen (voice seqs carry
- * LG_VOICE_SEQ_BIT, so they are never 0). `recent` remembers which of the 16 sequences just
- * below the newest were also seen, for the compact catch-up below. */
+/*
+ * What has been seen of one author's voice. seq 0 means no live frame seen (voice seqs carry
+ * LG_VOICE_SEQ_BIT, so they are never 0).
+ *
+ * Live frames and compact note packets (D95) are remembered apart, because they are late in
+ * different ways. Live voice is only ever played forward: a frame no newer than the newest is
+ * silence that already passed, and is dropped. A compact packet is the opposite: late and in one
+ * piece is its whole deal, and one that needed a second try over a slow radio arrives after the
+ * packet that followed it. So for compact packets the last few taken are remembered one by one,
+ * and anything from the author's current boot that is not among them is taken.
+ *
+ * Until 2026-10-09 a late compact packet was taken only if it lay within 16 sequence numbers of
+ * the newest, in the one sequence the author's live frames also draw from - ten of those a
+ * second. A note's first packet leaves during the talk and its second after it, some thirty
+ * numbers on, so a first packet that needed a resend always fell outside: the AP that had carried
+ * it across LoRa dropped it as too old, and the note could never be whole. On the bench it was
+ * one note in three.
+ */
+#define LG_VOICE_COMPACT_KEEP 8u
 typedef struct {
     uint32_t boot;
     uint32_t seq;
-    uint16_t recent;
+    uint32_t cboot;                           /* the boot the compact packets below came from */
+    uint16_t compact[LG_VOICE_COMPACT_KEEP];  /* the low half of each one's sequence number */
+    uint8_t  cn;                              /* how many of them are in use */
+    uint8_t  cat;                             /* where the next one goes */
 } lg_voice_seen_t;
 
 static inline bool lg_voice_newer(const lg_voice_seen_t *s, uint32_t boot, uint32_t seq)
@@ -353,39 +371,50 @@ static inline bool lg_voice_newer(const lg_voice_seen_t *s, uint32_t boot, uint3
 }
 
 /*
- * Whether a voice frame may be taken. Live frames go strictly forward: late ones are silence
- * that already passed. A compact note packet (D95) may arrive AFTER a newer one - it is the
- * acknowledged resend crossing a slow radio, and the whole point of the resend - so with
- * catch_up it is accepted when it falls inside the window and was not seen before; an exact
- * duplicate still falls away, because its bit is already set.
+ * Whether a voice frame may be taken. `compact` is the envelope's LG_FLAG_COMPACT. A live frame
+ * must be newer than the newest live frame. A compact packet must not be one already taken, nor
+ * come from a boot of the author's that a later one has replaced; it is not asked to be newer
+ * than anything, and it moves no live frame's place in line.
  */
-static inline bool lg_voice_check(const lg_voice_seen_t *s, uint32_t boot, uint32_t seq, bool catch_up)
+static inline bool lg_voice_check(const lg_voice_seen_t *s, uint32_t boot, uint32_t seq, bool compact)
 {
-    if (lg_voice_newer(s, boot, seq)) {
-        return true;
+    if (!compact) {
+        return lg_voice_newer(s, boot, seq);
     }
-    if (!catch_up || boot != s->boot || seq == s->seq) {
-        return false;
+    if ((s->seq != 0u && boot < s->boot) || (s->cn != 0u && boot < s->cboot)) {
+        return false;   /* that boot is over */
     }
-    uint32_t back = s->seq - seq;
-    return back <= 16u && (s->recent & (uint16_t)(1u << (back - 1u))) == 0u;
+    if (s->cn != 0u && boot == s->cboot) {
+        for (uint8_t i = 0; i < s->cn; i++) {
+            if (s->compact[i] == (uint16_t)seq) {
+                return false;   /* the same packet again: by another path, or its radio copy twice */
+            }
+        }
+    }
+    return true;
 }
 
-/* Commits what lg_voice_check allowed, keeping the window aligned to the newest sequence. */
-static inline bool lg_voice_take(lg_voice_seen_t *s, uint32_t boot, uint32_t seq, bool catch_up)
+/* Commits what lg_voice_check allowed. */
+static inline bool lg_voice_take(lg_voice_seen_t *s, uint32_t boot, uint32_t seq, bool compact)
 {
-    if (!lg_voice_check(s, boot, seq, catch_up)) {
+    if (!lg_voice_check(s, boot, seq, compact)) {
         return false;
     }
-    if (lg_voice_newer(s, boot, seq)) {
-        uint32_t ahead = (s->seq == 0u || boot > s->boot) ? 17u : seq - s->seq;   /* 17: a clean window */
-        s->recent = (uint16_t)(ahead > 16u ? 0u
-                    : (ahead == 16u ? 0u : (uint32_t)s->recent << ahead) | (1u << (ahead - 1u)));
+    if (!compact) {
         s->boot = boot;
         s->seq  = seq;
         return true;
     }
-    s->recent |= (uint16_t)(1u << (s->seq - seq - 1u));
+    if (s->cn == 0u || boot != s->cboot) {
+        s->cboot = boot;   /* a new boot starts clean */
+        s->cn = 0;
+        s->cat = 0;
+    }
+    s->compact[s->cat] = (uint16_t)seq;
+    s->cat = (uint8_t)((s->cat + 1u) % LG_VOICE_COMPACT_KEEP);
+    if (s->cn < LG_VOICE_COMPACT_KEEP) {
+        s->cn++;
+    }
     return true;
 }
 

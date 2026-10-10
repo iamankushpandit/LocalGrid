@@ -114,6 +114,7 @@ size_t lora_part_build(uint8_t peer, uint8_t id, uint8_t part, uint8_t of, const
     out[2] = id;
     out[3] = part;
     out[4] = of;
+    out[5] = LORA_DEST_ALL;
     memcpy(out + LORA_PART_HDR, slice, slice_len);
     return LORA_PART_HDR + slice_len;
 }
@@ -133,6 +134,7 @@ bool lora_part_parse(const uint8_t *in, size_t len, lora_part_t *out)
     out->id = in[2];
     out->part = part;
     out->of = of;
+    out->dest = in[5];
     out->slice = in + LORA_PART_HDR;
     out->slice_len = len - LORA_PART_HDR;
     return true;
@@ -151,6 +153,7 @@ size_t lora_parity_build(uint8_t peer, uint8_t id, const uint8_t *payload, size_
     out[2] = id;
     out[3] = (uint8_t)of;   /* one past the last data part: old parsers refuse it, new ones heal */
     out[4] = (uint8_t)of;
+    out[5] = LORA_DEST_ALL;
     out[LORA_PART_HDR] = (uint8_t)last_len;
     for (size_t j = 0; j < LORA_SLICE_MAX; j++) {
         uint8_t x = 0;
@@ -179,6 +182,7 @@ bool lora_parity_parse(const uint8_t *in, size_t len, lora_part_t *out)
     out->id = in[2];
     out->part = of;
     out->of = of;
+    out->dest = in[5];
     out->slice = in + LORA_PART_HDR;
     out->slice_len = len - LORA_PART_HDR;
     return true;
@@ -663,6 +667,7 @@ lora_txq_slot_t *lora_txq_reserve_ranked(lora_txq_t *q, uint16_t dest, uint8_t r
     slot->await = 0;
     slot->seq = 0;
     slot->tag = 0;
+    slot->yield_to = 0;
     txq_recount(q);
     return slot;
 }
@@ -672,6 +677,12 @@ void lora_txq_want_ack(lora_txq_slot_t *slot, uint32_t seq, uint16_t await)
     if (slot != NULL && slot->in_use) {
         slot->seq = seq;
         slot->await = await;
+        if (await != 0u) {
+            /* It is sent again until it is answered, so it takes no parity part (2026-10-09). The
+             * parity went out after every such frame, was as long as its longest part, and sat
+             * exactly where the answer was due: the receiver had to wait it out before answering. */
+            slot->parity = false;
+        }
     }
 }
 
@@ -976,17 +987,20 @@ bool lora_at_parse(char *line, lora_at_t *out)
 uint32_t lora_airtime_ms(size_t payload_chars)
 {
     /*
-     * SF 9, BW 125 kHz, CR 4/5, preamble 12, explicit header, CRC on, low-data-rate optimise off.
-     * Symbol time is exactly 4096 us at these settings.
-     *   n_payload = 8 + max(ceil((8*PL - 4*SF + 28 + 16) / (4*SF)) * 5, 0)
-     *   preamble  = 12 + 4.25 symbols
+     * The radio setting named in lg_lora_wire.h, explicit header, CRC on, low-data-rate optimise
+     * off (a symbol is under 16 ms at every setting the module allows a network ID other than 18).
+     * This was written out for SF9 at 125 kHz alone until 2026-10-09, and every timer built on it
+     * would have been wrong by the same factor at any other setting.
+     *   symbol    = 2^SF / bandwidth
+     *   n_payload = 8 + max(ceil((8*PL - 4*SF + 28 + 16) / (4*SF)) * (CR + 4), 0)
+     *   preamble  = LG_LORA_PREAMBLE + 4.25 symbols
      */
-    const uint32_t sym_us = 4096u;
-    long num = (long)(8u * payload_chars) - 4 * 9 + 28 + 16;
-    long den = 4 * 9;
+    const uint32_t sym_us = (uint32_t)(((uint64_t)1000000u << LG_LORA_SF) / LG_LORA_BW_HZ);
+    long num = (long)(8u * payload_chars) - 4 * LG_LORA_SF + 28 + 16;
+    long den = 4 * LG_LORA_SF;
     long steps = num > 0 ? (num + den - 1) / den : 0;
-    uint32_t n_payload = 8u + (uint32_t)(steps > 0 ? steps * 5 : 0);
-    /* Preamble in quarter symbols: 12 * 4 + 17 = 65. */
-    uint32_t us = (65u * sym_us) / 4u + n_payload * sym_us;
+    uint32_t n_payload = 8u + (uint32_t)(steps > 0 ? steps * (LG_LORA_CR_CODE + 4) : 0);
+    /* Preamble in quarter symbols: 4 * preamble + 17. */
+    uint32_t us = ((4u * LG_LORA_PREAMBLE + 17u) * sym_us) / 4u + n_payload * sym_us;
     return (us + 999u) / 1000u;
 }

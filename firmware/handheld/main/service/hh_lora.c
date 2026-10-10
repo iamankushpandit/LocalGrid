@@ -45,12 +45,15 @@ static int s_power_dbm = LG_LORA_POWER_FULL;   /* D98: what AT+CRFOP is set to *
 #define SEND_TIMEOUT_MS   8000u    /* one full part is about a second of airtime, plus the module */
 #define DETECT_TRIES      3u
 #define PART_TRIES        3u
-#define BACKOFF_MAX_MS    300u     /* random wait before every transmission: no carrier sense */
-/* How long another sender's remaining parts keep this radio quiet, and the quiet the module needs
- * between packets as a receiver (as on the APs: 1100 since the 2026-10-09 gap sweep - full parts
- * were clean at 1000 ms and degraded below 800). */
-#define PART_GAP_MIN_MS   1100u
-#define AIR_PART_GAP_MS   1200u
+#define BACKOFF_MAX_MS    LG_LORA_BACKOFF_MAX_MS   /* random wait before every transmission: no carrier sense */
+/* Pacing, the same numbers the APs use (lg_lora_wire.h has them and what they were measured
+ * from). The second of quiet this driver left after every packet until 2026-10-09 answered a
+ * loss that the module's network ID was causing; a receiver needs none. */
+#define PART_GAP_MIN_MS   LG_LORA_PART_GAP_MS
+#define AIR_PART_GAP_MS   LG_LORA_AIR_PART_GAP_MS
+#define ANSWER_QUIET_MS   LG_LORA_ANSWER_QUIET_MS
+#define ROUTINE_QUIET_MS  LG_LORA_ROUTINE_QUIET_MS
+#define ACK_TAIL_PAD_MS   100u    /* on top of the parts a sender is still to send, before it is answered */
 #define AIR_HOLD_MARGIN_MS 300u
 #define AIR_HOLD_CAP_MS   8000u
 #define RETRY_MIN_MS      800u
@@ -79,6 +82,7 @@ typedef struct {
     lora_asm_slot_t *slot;
     int8_t           rssi;
     int8_t           snr;
+    uint16_t         tail_ms;   /* how long its sender is still transmitting the rest of it */
 } rx_entry_t;
 
 static struct {
@@ -117,13 +121,14 @@ static struct {
     uint32_t heard_ms;       /* last frame in, 0 never */
 
     int8_t   rssi, snr;
-    uint32_t frames_out, frames_in, parts_out, parts_in, parts_dropped;
+    uint32_t frames_out, frames_in, parts_out, parts_in, parts_dropped, parts_other;
     uint32_t refused_type, retries, airtime_ms, restarts;
     uint32_t acks_out;   /* D109: acknowledgements sent to an AP for a frame it is waiting to hear about */
     uint32_t air_busy_until_ms;   /* somebody's multi-part frame is mid-flight: hold non-alert sends */
     uint32_t held_for_air;
     uint32_t last_tx_end_ms;      /* when this handheld's own last transmission finished */
     uint32_t last_rx_ms;          /* when the module last handed over a packet from anybody */
+    uint32_t answer_quiet_ms;     /* how long after that packet its answers are still due */
     bool     heard_part;          /* ... which it has, at least once since this handheld started */
     uint32_t air_hold_started_ms; /* when the current hold episode began: the cap counts from here */
 } L;
@@ -224,6 +229,7 @@ static bool at_wait(lora_at_kind_t want, uint32_t timeout_ms, char *value, size_
         if (at.kind == LORA_AT_ERR && is_rx_error(at.err)) {
             s_rx_broken++;
             L.last_rx_ms = now_ms();   /* somebody was on the air until now */
+            L.answer_quiet_ms = ANSWER_QUIET_MS;
             L.heard_part = true;
             continue;
         }
@@ -366,6 +372,42 @@ int hh_lora_power(void)
 
 /* ---- receive ---- */
 
+/* A data part of a frame of two parts or more was heard, ours or anyone's (as on the APs): the
+ * air is taken for the parts still to come, and for the parity part where the frame ends with
+ * one. The answers that follow a frame are answer_quiet_for()'s to keep clear of. */
+static void air_hold_for(const lora_part_t *ph)
+{
+    if (ph->of < 2u) {
+        return;
+    }
+    uint32_t more = (uint32_t)(ph->of - ph->part - 1u);
+    uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS) + AIR_HOLD_MARGIN_MS;
+    if (LORA_PEER_KIND(ph->peer) == LORA_PEER_HANDHELD) {
+        wait += lora_airtime_ms(LORA_PART_B64_WIRE) + AIR_PART_GAP_MS;   /* only a handheld's ends with a parity */
+    }
+    uint32_t at_ms = now_ms();
+    if ((int32_t)(at_ms - L.air_busy_until_ms) >= 0) {
+        L.air_hold_started_ms = at_ms;   /* a new episode, not an extension */
+    }
+    uint32_t until = at_ms + wait;
+    uint32_t cap = L.air_hold_started_ms + AIR_HOLD_CAP_MS;
+    if ((int32_t)(until - cap) > 0) {
+        until = cap;
+    }
+    if ((int32_t)(until - L.air_busy_until_ms) > 0) {
+        L.air_busy_until_ms = until;
+    }
+}
+
+/* How long after a heard part its answers are still coming (as on the APs). A handheld does not
+ * know how many APs there are: a part from an AP for everyone is given two answers' room, which
+ * is a grid of three. */
+static uint32_t answer_quiet_for(const lora_part_t *ph)
+{
+    bool flood = ph != NULL && ph->dest == LORA_DEST_ALL && LORA_PEER_KIND(ph->peer) == LORA_PEER_AP;
+    return (flood ? 2u : 1u) * ANSWER_QUIET_MS;
+}
+
 static void handle_rcv(const lora_at_t *at)
 {
     static uint8_t raw[LORA_PART_RAW_WIRE];   /* the parity part is one byte past a full data part */
@@ -375,9 +417,15 @@ static void handle_rcv(const lora_at_t *at)
     L.snr = (int8_t)(at->snr < -128 ? -128 : at->snr > 127 ? 127 : at->snr);
     if (L.off) {
         L.parts_dropped++;   /* the chaos hook: the radio hears, we pretend not to */
+        /* Bring-up, as on the APs: while off a handheld is a witness the measuring tools read.
+         * It is the handhelds' radios, on other boards and supplies, that have to hear (2026-10-09). */
+        ESP_LOGI(TAG, "[LORA] Heard while off: %u chars \"%.*s\", sum %04X, RSSI %d, SNR %d",
+                 (unsigned)at->len, (int)(at->len < LORA_PROBE_TEXT_SHOWN ? at->len : LORA_PROBE_TEXT_SHOWN),
+                 at->data, lora_probe_sum(at->data, at->len), at->rssi, at->snr);
         return;
     }
     L.last_rx_ms = now_ms();   /* the air was in use until this moment, whoever it was for */
+    L.answer_quiet_ms = answer_quiet_for(NULL);
     L.heard_part = true;
     size_t n = lora_b64_decode(at->data, at->len, raw, sizeof(raw));
     if (n == 0) {
@@ -386,6 +434,19 @@ static void handle_rcv(const lora_at_t *at)
     }
     lora_part_t ph;
     bool parsed = lora_part_parse(raw, n, &ph);
+    bool parity = !parsed && lora_parity_parse(raw, n, &ph);
+    if (parsed || parity) {
+        L.answer_quiet_ms = answer_quiet_for(&ph);
+    }
+    if ((parsed || parity) && !lora_part_is_for(ph.dest, L.address)) {
+        /* Somebody else's, heard because every part goes to the broadcast address now (as on the
+         * APs, lg_lora_wire.h): the air is in use and more of it may be coming. None of it is kept. */
+        L.parts_other++;
+        if (parsed) {
+            air_hold_for(&ph);
+        }
+        return;
+    }
     uint32_t healed_before = L.asmb.healed;
     lora_asm_slot_t *slot = NULL;
     lora_asm_result_t r = lora_asm_feed(&L.asmb, now_ms(), raw, n, &slot);
@@ -396,25 +457,8 @@ static void handle_rcv(const lora_at_t *at)
      * means the air is taken for that much longer, and transmitting into it loses a part for
      * everyone. Bounded per episode, and a duplicate part arms nothing, or a steady stream of
      * resends held this radio open without end. Only an alert or an ack may interrupt. */
-    if (parsed && ph.of >= 2u && r != LORA_ASM_DUPLICATE) {
-        uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
-        /* One more slot beyond the data for the parity part that follows a multi-part message
-         * (2026-10-09), as on the APs: the last data part used to arm nothing, and every hold
-         * lapsed right as the frame's one recovery part went on the air. */
-        uint32_t wait = more * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS)
-                      + lora_airtime_ms(LORA_PART_B64_WIRE) + AIR_PART_GAP_MS + AIR_HOLD_MARGIN_MS;
-        uint32_t at_ms = now_ms();
-        if ((int32_t)(at_ms - L.air_busy_until_ms) >= 0) {
-            L.air_hold_started_ms = at_ms;   /* a new episode, not an extension */
-        }
-        uint32_t until = at_ms + wait;
-        uint32_t cap = L.air_hold_started_ms + AIR_HOLD_CAP_MS;
-        if ((int32_t)(until - cap) > 0) {
-            until = cap;
-        }
-        if ((int32_t)(until - L.air_busy_until_ms) > 0) {
-            L.air_busy_until_ms = until;
-        }
+    if (parsed && r != LORA_ASM_DUPLICATE) {
+        air_hold_for(&ph);
     }
     if (r != LORA_ASM_COMPLETE) {
         return;   /* lora_asm_feed counts everything it refused, oversize included */
@@ -430,16 +474,30 @@ static void handle_rcv(const lora_at_t *at)
     e->slot = slot;
     e->rssi = L.rssi;
     e->snr = L.snr;
+    /* Made whole by a part that is not its last - a resend's first part filling the hole an
+     * earlier try left - while its AP goes on to send the rest and can hear nothing: the answer
+     * waits those parts out, or it is never heard and the frame comes a third time (as on the APs). */
+    uint32_t tail = 0;
+    if (parsed && ph.part + 1u < ph.of) {
+        uint32_t more = (uint32_t)(ph.of - ph.part - 1u);
+        size_t last_len = slot->total - (size_t)(ph.of - 1u) * LORA_SLICE_MAX;
+        tail = (more - 1u) * (lora_airtime_ms(LORA_PART_B64_MAX) + AIR_PART_GAP_MS)
+             + lora_airtime_ms(((LORA_PART_HDR + last_len + 2u) / 3u) * 4u) + AIR_PART_GAP_MS + ACK_TAIL_PAD_MS;
+    }
+    e->tail_ms = (uint16_t)(tail > 60000u ? 60000u : tail);
     L.rx_count++;
     unlock();
 }
 
 /* ---- transmit ---- */
 
-static bool send_part(uint16_t dest, const char *b64, size_t b64_len)
+/* Always to the broadcast address: the part itself says who it is for (lg_lora_wire.h), and
+ * everyone else needs to hear that the air is in use. */
+static bool send_part(const char *b64, size_t b64_len)
 {
-    static char cmd[40 + LORA_PART_B64_MAX];
-    snprintf(cmd, sizeof(cmd), "AT+SEND=%u,%u,%.*s", (unsigned)dest, (unsigned)b64_len, (int)b64_len, b64);
+    static char cmd[40 + LORA_PART_B64_WIRE];
+    snprintf(cmd, sizeof(cmd), "AT+SEND=%u,%u,%.*s", (unsigned)LG_LORA_ADDR_BROADCAST, (unsigned)b64_len,
+             (int)b64_len, b64);
     at_write(cmd);
     L.airtime_ms += lora_airtime_ms(b64_len);
     int err = 0;
@@ -453,7 +511,8 @@ static bool send_part(uint16_t dest, const char *b64, size_t b64_len)
     return false;
 }
 
-static bool send_one(uint16_t dest, uint8_t id, const uint8_t *payload, size_t len, size_t part, size_t of)
+static bool send_one(uint16_t dest, uint8_t id, const uint8_t *payload, size_t len, size_t part, size_t of,
+                     bool is_ack)
 {
     static uint8_t raw[LORA_PART_RAW_WIRE];
     static char    b64[LORA_PART_B64_WIRE + 1];
@@ -473,6 +532,9 @@ static bool send_one(uint16_t dest, uint8_t id, const uint8_t *payload, size_t l
         size_t slice = len - off > LORA_SLICE_MAX ? LORA_SLICE_MAX : len - off;
         plen = lora_part_build(peer, id, (uint8_t)part, (uint8_t)of, payload + off, slice, raw, sizeof(raw));
     }
+    if (plen != 0) {
+        lora_part_set_dest(raw, dest);
+    }
     size_t blen = plen != 0 ? lora_b64_encode(raw, plen, b64, sizeof(b64) - 1u) : 0u;
     if (blen == 0) {
         return false;
@@ -480,13 +542,15 @@ static bool send_one(uint16_t dest, uint8_t id, const uint8_t *payload, size_t l
     b64[blen] = '\0';
     for (unsigned attempt = 0; attempt < PART_TRIES; attempt++) {
         /* No carrier sense in this module, and every AP shares the channel: wait a short random
-         * time before each transmission, and longer and randomly again after a failure. */
-        vTaskDelay(pdMS_TO_TICKS(attempt == 0 ? rand_ms(BACKOFF_MAX_MS)
+         * time before each transmission, and longer and randomly again after a failure. An
+         * acknowledgement goes at once: its AP is listening for it for a time both ends worked
+         * out, and a random wait on top slid it past that. */
+        vTaskDelay(pdMS_TO_TICKS(attempt == 0 ? (is_ack ? 0u : rand_ms(BACKOFF_MAX_MS))
                                               : RETRY_MIN_MS + rand_ms(RETRY_SPAN_MS)));
         if (attempt > 0) {
             L.retries++;
         }
-        if (send_part(dest, b64, blen)) {
+        if (send_part(b64, blen)) {
             return true;
         }
     }
@@ -536,23 +600,29 @@ static bool transmit_a_part(unsigned *fails)
 {
     lock();
     lora_txq_slot_t *s = lora_txq_peek(&L.txq, now_ms());
-    if (s != NULL && !s->alert && !s->is_ack && s->part == 0u &&
+    /* An alert waits for a frame in flight and its answers like a message, but only
+     * LG_LORA_ALERT_PATIENCE_MS from when it was due; then it goes whatever the air is doing
+     * (as on the APs, lg_lora_wire.h). */
+    bool at_once = s != NULL && s->alert && (int32_t)(now_ms() - (s->due_ms + LG_LORA_ALERT_PATIENCE_MS)) >= 0;
+    if (s != NULL && !at_once && !s->is_ack && s->part == 0u &&
         (int32_t)(now_ms() - L.air_busy_until_ms) < 0) {
         L.held_for_air++;   /* somebody's frame is mid-flight: wait for the air, keep listening */
         unlock();
         return false;
     }
-    /* Receivers need PART_GAP_MIN_MS of quiet after each packet, ours included (as on the APs).
+    /* A moment after each of our own packets for the boards that heard it (as on the APs).
      * An acknowledgement is never held: the sender is listening for it right now. */
-    if (s != NULL && !s->alert && !s->is_ack && (int32_t)(now_ms() - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
+    if (s != NULL && !at_once && !s->is_ack && (int32_t)(now_ms() - (L.last_tx_end_ms + PART_GAP_MIN_MS)) < 0) {
         unlock();
         return false;
     }
-    /* A routine frame - a position, a ping - also waits out that quiet after anybody else's
-     * packet before it starts (as on the APs, 2026-10-09): never worth costing the radios around
-     * it the next thing a person sends. */
-    if (s != NULL && s->rank < LORA_RANK_MESSAGE && s->part == 0u && L.heard_part &&
-        now_ms() - L.last_rx_ms < PART_GAP_MIN_MS) {
+    /* Nothing starts on the heels of a packet this radio heard (as on the APs, 2026-10-09): that
+     * moment belongs to whoever is answering it. A message waits one answer's length; a routine
+     * frame - a position, a ping - waits longer, never worth costing the radios around it the
+     * next thing a person sends. */
+    if (s != NULL && !at_once && !s->is_ack && s->part == 0u && L.heard_part &&
+        now_ms() - L.last_rx_ms < (s->rank < LORA_RANK_MESSAGE && L.answer_quiet_ms < ROUTINE_QUIET_MS
+                                       ? ROUTINE_QUIET_MS : L.answer_quiet_ms)) {
         unlock();
         return false;
     }
@@ -561,7 +631,7 @@ static bool transmit_a_part(unsigned *fails)
         return false;
     }
     s->sending = true;
-    bool ok = send_one(s->dest, s->id, s->data, s->len, s->part, s->of);
+    bool ok = send_one(s->dest, s->id, s->data, s->len, s->part, s->of, s->is_ack);
     lock();
     L.last_tx_end_ms = now_ms();
     if (!ok && s->part < s->of) {
@@ -699,6 +769,13 @@ static void lora_task(void *arg)
             if (lora_at_parse(line, &at)) {
                 if (at.kind == LORA_AT_RCV) {
                     handle_rcv(&at);
+                } else if (at.kind == LORA_AT_ERR && is_rx_error(at.err)) {
+                    /* A broken packet heard while listening is the same sign of a collision it is
+                     * while waiting on a send, and was neither counted nor timed from here. */
+                    s_rx_broken++;
+                    L.last_rx_ms = now_ms();
+                    L.answer_quiet_ms = ANSWER_QUIET_MS;
+                    L.heard_part = true;
                 } else if (at.kind == LORA_AT_READY) {
                     /*
                      * The module restarted by itself - a dip in its supply while transmitting at
@@ -715,6 +792,10 @@ static void lora_task(void *arg)
                 }
             }
         }
+        /* Sets nobody finished are given up here, on the task that fills them, as on the APs. The
+         * service task used to do it with no lock, while this task could be copying a part into
+         * the very set being freed (2026-10-09). */
+        (void)lora_asm_expire(&L.asmb, now_ms());
     }
 }
 
@@ -741,11 +822,12 @@ esp_err_t hh_lora_start(int rx_gpio, int tx_gpio, int rst_gpio, uint32_t device,
     L.snr = 0;
 
     /*
-     * The network ID must match the APs' exactly, and theirs is 3 + (first discriminator byte mod
-     * 13) (firmware/node/main/lora.c). A handheld holds the discriminator and never the backbone
-     * key, so it computes the same number without holding anything it should not.
+     * The network ID must match the APs' exactly. It is the module's own default for every grid
+     * (lg_lora_wire.h): on the IDs a discriminator used to pick, the module's receiver silently
+     * missed one packet in six (2026-10-09).
      */
-    L.networkid = (uint8_t)(3u + discriminator[0] % 13u);
+    (void)discriminator;
+    L.networkid = LG_LORA_NETWORK_ID;
 
     /* D77: the handheld LoRa key, and the boot counter already committed to NVS by the service. */
     lglh_init(&L.seal, key, LGLH_SENDER_HH((uint16_t)device), boot);
@@ -841,7 +923,7 @@ static void note_peer(uint16_t ap, uint32_t now)
  * D109: tell AP `ap` that its frame sealed as `seq` arrived here. Six bytes sealed with the handheld LoRa
  * key, sent at once and ahead of anything waiting: the AP listens for it for about a second.
  */
-static void queue_ack(uint16_t ap, uint32_t seq)
+static void queue_ack(uint16_t ap, uint32_t seq, uint32_t tail_ms)
 {
     uint8_t body[LORA_ACK_LEN];
     if (lora_ack_build(seq, body, sizeof(body)) == 0u) {
@@ -849,7 +931,8 @@ static void queue_ack(uint16_t ap, uint32_t seq)
     }
     lock();
     lora_txq_slot_t *s = lora_txq_reserve_ranked(&L.txq, LG_LORA_ADDR_AP(ap), LORA_RANK_MESSAGE, ++L.next_id,
-                                                 LGLH_OUTER_LEN + sizeof(body) + LG_AEAD_TAG_LEN, now_ms() + rand_ms(80u));
+                                                 LGLH_OUTER_LEN + sizeof(body) + LG_AEAD_TAG_LEN,
+                                                 now_ms() + tail_ms + rand_ms(80u));
     int sealed = s != NULL ? lglh_seal(&L.seal, s->data, s->cap, body, sizeof(body)) : -1;
     if (s != NULL && (sealed <= 0 || !lora_txq_commit(&L.txq, s, (size_t)sealed))) {
         lora_txq_release(&L.txq, s);
@@ -873,7 +956,6 @@ void hh_lora_poll(uint32_t now)
         L.off_until_ms = 0;
         ESP_LOGW(TAG, "[LORA] Back on");
     }
-    (void)lora_asm_expire(&L.asmb, now);
 
     /* Hand over whatever arrived. The slot is read where it lies and then given back. */
     for (;;) {
@@ -903,7 +985,7 @@ void hh_lora_poll(uint32_t now)
             size_t plain = e.slot->total - LGLH_OUTER_LEN - LG_AEAD_TAG_LEN;
             if (LGLH_KIND(from) == LGLH_KIND_AP && LGLH_INDEX(from) < LG_MAX_NODES &&
                 lora_frame_wants_ap_ack(frame, plain)) {
-                queue_ack(LGLH_INDEX(from), seq);
+                queue_ack(LGLH_INDEX(from), seq, e.tail_ms);
             }
         }
         lora_asm_done(&L.asmb, e.slot);
@@ -923,7 +1005,7 @@ void hh_lora_poll(uint32_t now)
         L.heard_ms = now != 0 ? now : 1u;
         note_peer(ap, now);
         if (ap < LG_MAX_NODES && lora_frame_wants_ap_ack(frame, flen)) {
-            queue_ack(ap, lg_rd32(e.slot->data + 8));   /* D109: answered before it is handled */
+            queue_ack(ap, lg_rd32(e.slot->data + 8), e.tail_ms);   /* D109: answered before it is handled */
         }
         if (L.on_frame != NULL) {
             L.on_frame(frame, flen, ap);

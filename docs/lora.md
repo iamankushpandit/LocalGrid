@@ -28,8 +28,10 @@ design:
 - `AT+SEND=<address>,<length>,<data>` takes **text**, ends at a newline, and separates fields with
   commas, so raw binary cannot be sent. Frames are **base64** (about a third larger) and split.
 - A received frame arrives unsolicited as `+RCV=<address>,<length>,<data>,<rssi>,<snr>`.
-- Addressing: every AP sets `AT+ADDRESS=<AP index>` and a shared `AT+NETWORKID`, so a stray module
-  from another network is ignored before we even look at the bytes.
+- Addressing: every AP sets `AT+ADDRESS=<AP index>`, and `AT+NETWORKID=18`, the module's factory value.
+  A grid used to take a network ID of its own (3..15) so that a stray module was ignored by the radio;
+  on those IDs the module's receiver silently loses about one packet in six (D113, measured 2026-10-09),
+  so a stray module's packets are now refused when they fail to open with the grid's key instead.
 - The module's own AES (`AT+CPIN`) is **not** relied on. LocalGrid seals the backbone itself, with
   the same key and nonce rules as ESP-NOW (`docs/DESIGN_REVIEW.md`), so the link is safe even if
   the module's encryption is weak, absent, or misconfigured.
@@ -124,38 +126,59 @@ brownouts rise after fitting it, give the module its own 3.3 V supply and join t
 ## Frames on the air
 
 A backbone frame (up to 288 bytes today, `BB_FRAME_MAX` allows more) is sealed exactly as it is
-for ESP-NOW, then split into slices of at most **85 bytes**. Each slice gets a five-byte header,
+for ESP-NOW, then split into slices of at most **85 bytes**. Each slice gets a six-byte header,
 and header and slice are base64-encoded **together** into the one token `AT+SEND` carries:
 
 | Field | Size | Meaning |
 |---|---|---|
-| magic | 1 | `0x4C` ('L') |
+| magic | 1 | `0x4D`. It was `0x4C` while the header was five bytes; the two formats refuse each other at the first byte |
 | sender | 1 | kind in the high nibble (0 an AP, 1 a handheld), index in the low nibble |
 | id | 1 | message number, so parts of different payloads never mix |
 | part | 1 | part number, 0-based |
-| of | 1 | part count, 1 to 74 |
-| — | — | the five bytes above plus the slice are base64: **120 characters**, exactly one `AT+SEND` |
+| of | 1 | part count, 1 to 73 |
+| for | 1 | who it is for: 0 everyone, 1 + index an AP, 100 + device number a handheld |
+| — | — | the six bytes above plus the slice are base64: at most **124 characters**, exactly one `AT+SEND` |
 
-**Three things here differ from the first sketch, and this is the record of why.**
+**Every part goes to the module's broadcast address** (2026-10-09), and the sixth byte says who it
+is for. The module hides from a radio whatever is addressed to another, and has no carrier sense,
+so an AP could not know its two neighbours were mid-frame and transmitted over them. Now every
+radio hears every part: it keeps the ones that are for it, and for the rest it stays off the air
+while the frame and its answers go by (`Heard 1/2 of 15 from peer 0x00 for 0x02` in an AP's log).
+
+**A part is 124 characters, because a packet must be short on the air, not short in characters**
+(measured 2026-10-09, network ID 18, each packet sent after three seconds of silence, SF9 at
+125 kHz): 120 characters (0.69 s) arrived 28 of 28, 140 (0.80 s) 31 of 32, 160 (0.88 s) 55 of 56,
+200 (1.07 s) 1 of 32 and 240 (1.26 s) 1 of 56 - the rest arriving broken, and the same at 22 dBm
+as at 5. Sent back to back with no silence between them, the long ones arrive, so a burst test
+does not show the limit: parts were 240 characters for two hours on the strength of one, and one
+in six of them arrived. `LG_LORA_AIR_CEILING_MS` now stops a build whose longest part would be
+more than 0.8 s on the air at its radio setting. A sealed text is two parts, a compact voice
+packet three.
+
+**The parity part.** A message of two parts or more that nobody acknowledges - a handheld's
+frames go to every AP and none of them answers at the link - is followed by one more part, the XOR
+of its slices, so a receiver that lost exactly one part rebuilds it. A frame that is acknowledged
+(AP to AP, D104; AP to a handheld, D109) takes none: it is sent again until it is answered.
+
+**Four things here differ from the first sketch, and this is the record of why.**
 
 1. **The header is base64-encoded with the slice, not sent beside it.** `AT+SEND` takes text that
    ends at a newline and separates its fields with commas, and a raw header byte can be either.
    One base64 token keeps every byte on the air text-safe and keeps the fields exactly as listed.
-   120 characters decode to 90 bytes with no padding: 5 of header and 85 of payload. The first
-   sketch carried 180 characters; measured on the bench on 2026-10-08, the RYLR998 (firmware
-   V1.2.4) delivered 124-character payloads 24 of 24 and 140-character payloads 2 of 12, on a
-   quiet channel at SNR 9, so a part stays one measured step below that cliff.
+   124 characters decode to 91 bytes: 6 of header and 85 of payload; the parity part is one byte
+   longer and the same 124 characters.
 2. **The sender is a whole byte** (owner, "Ready for handhelds later"), so a handheld peer needs no
    format change. The low nibble limits a handheld's index to 0-15; devices above that would need
    a second byte, which is a change to make before handhelds get modules, not after.
-3. **The part number and the count are whole bytes**, so the format carries 74 parts, which is
-   6290 bytes: the owner's 6 KB voice-note ceiling with room to spare. Nibbles would have capped it
+3. **The part number and the count are whole bytes**, so the format carries 73 parts, which is
+   6205 bytes: the owner's 6 KB voice-note ceiling with room to spare. Nibbles would have capped it
    at 15 parts and made voice notes a breaking change.
+4. **The destination is in the part, not in the module's address** (above).
 
 A receiver joins the parts and hands the result to the same code that handles an ESP-NOW frame. A
 part that arrives twice is ignored; a payload whose seal fails is dropped and counted. A set is
 given up when **no new part has arrived for 10 s** - an idle timeout, not ten seconds from the
-first part, because 74 parts are nearly a minute of airtime - or after 180 s in total.
+first part, because 73 parts are nearly a minute of airtime - or after 180 s in total.
 
 **What an AP has room for.** The format carries 6 KB; the memory to hold one is not free. Every
 buffer is taken **once, the first time a module answers**, and never again, so the heap cannot
@@ -284,7 +307,7 @@ must not need a breaking change when it happens, so two things are settled now:
 
 - **Address plan.** The module's address identifies the peer: **1-16 are APs** (1 + the AP index; address 0 stays free as the broadcast address, which the bench proved on 2026-09-20 is not shareable with a real peer),
   **100 + device number are handhelds** (so device 1 is 101), and the rest are reserved. Every
-  LocalGrid module shares one network ID derived from the grid's discriminator.
+  LocalGrid module uses network ID 18, the module's factory value (D113).
 - **The part header carries a peer byte, not a nibble**: `kind (high nibble: 0 AP, 1 handheld) |
   index (low nibble)` becomes a full byte, so a handheld peer needs no format change.
 
@@ -471,7 +494,7 @@ doubles to a minute.
 AT                      three times, 1 s apart: is anything there at all?
 AT+VER?                 for the log and the admin page
 AT+ADDRESS=<AP index>   0 for MAIN, 1 NORTH, 2 SOUTH
-AT+NETWORKID=<3..15>    3 + (first byte of the grid discriminator mod 13)
+AT+NETWORKID=18         the module's factory value; 3..15 lose one packet in six (D113)
 AT+BAND=915000000       the region's band: LG_LORA_REGION in firmware/common/lg_lora_wire.h, North America by default (Europe: 868500000)
 AT+PARAMETER=9,7,1,12   SF9, BW 125 kHz, CR 4/5, preamble 12
 AT+CRFOP=22             22 dBm; 14 or 5 if the device was told `lora power medium|low` (D98)
@@ -479,10 +502,25 @@ AT+MODE=0               transceiver
 AT+ADDRESS?  AT+NETWORKID?  AT+PARAMETER?    read back, and log what is really set
 ```
 
-At these settings one full part (120 characters) is **about 0.65 s on the air**, so a 288-byte
-frame is four parts, roughly **2.6 s** plus a random backoff of up to 0.3 s before each; that is
-about **110 bytes a second** of sealed frame, or 0.9 kbit/s. A 6 KB payload would be 74 parts, near
-48 s. Airtime is added up per transmission and reported.
+At these settings one full part (124 characters) is **about 0.67 s on the air**, so a 288-byte
+frame is four parts, roughly **2.7 s** on the air, with a pause of 0.15 s and a random start of up
+to 0.3 s between them; that is about **90 bytes a second** of sealed frame, or 0.7 kbit/s. A 6 KB
+payload would be 73 parts, near a minute and a half. Airtime is added up per transmission and
+reported.
+
+**Pacing** (`firmware/common/lg_lora_wire.h`, measured 2026-10-09 with `lora burst` and `lora echo`).
+A receiver needs no quiet between packets: the same sender's arrive back to back, and an answer
+sent 20 ms after a packet is heard by everyone, the radio that had just finished transmitting
+included. (The second and more of quiet left after every packet until then answered a loss the
+network ID was causing, D113.) What the firmware leaves is for the boards and for each other:
+150 ms after each of its own packets; before starting a frame, one answer's length (about 0.5 s)
+for every radio that will answer the packet it just heard; and housekeeping only into air that has
+been silent for seconds. Every wait that depends on how long a part or an answer is on the air is
+computed from `lora_airtime_ms()`, which follows the radio setting, so a faster setting needs no
+retuning by hand. An alert waits for a frame in flight and its answers too, but four seconds at
+most, and then goes whatever the air is doing. A frame that is acknowledged goes up to three times
+(twelve for an alert), each AP taking its turn before a resend so that two frames that collided
+do not collide again (D114).
 
 ## Chaos testing it
 

@@ -5,6 +5,124 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### LoRa: every radio hears every packet, and nothing waits for a quiet the radio never needed
+
+With the radios no longer losing packets by themselves (the entry below), what was still lost on
+the bench was lost to our own transmissions landing on each other. This is the protocol half.
+Every board must be flashed together: the part format changed, and old and new refuse each other.
+
+- **Every part goes to the broadcast address and says who it is for.** The module hides from a
+  radio whatever is addressed to another, and has no carrier sense, so an AP could not know its
+  two neighbours were mid-frame and transmitted over them - traced on the bench as a voice
+  packet's first parts lost twice running while the third AP sent housekeeping. The part header
+  has a sixth byte naming the radio it is for (0 for everyone), every part is sent to address 0,
+  and a radio that hears a part for somebody else keeps none of it and stays off the air while
+  the frame and its answers go by. The magic byte changed with the header (0x4D).
+- **No second of silence after every packet.** A sender now leaves 150 ms after its own packets,
+  not 1100. Before starting a frame a radio waits one answer's length for every radio that will
+  answer the packet it just heard; housekeeping still waits for seconds of silence. The numbers
+  live once, in `lg_lora_wire.h`, for both drivers, and every wait that depends on how long a
+  part or an answer is on the air is computed from the radio setting.
+- **A frame that is acknowledged carries no parity part.** It is sent again until it is
+  answered; the parity went out after every such frame and sat exactly where the answer was due.
+  Only a handheld's frames, which no AP acknowledges at the link, still end with one.
+- **Acknowledgements land where the sender can hear them.** They no longer take the random start
+  every other transmission takes, so each stays in the turn both ends worked out. And when a
+  resend's first part completes a set the receiver was holding, the answer waits for the sender
+  to finish the rest: answered at once, it arrived while the sender was still transmitting and
+  the frame came a third time.
+- **Resends take turns.** Two APs whose frames collided both went unanswered and both sent
+  again a random 0-600 ms apart, with frames longer than that: they collided again, three times,
+  and both gave up. Each AP's wait before a resend now includes its place among the APs present.
+- **One AP deals with a LoRa-only handheld's frame, not three.** Its frames go to everyone, so
+  every AP in earshot answered it and passed its message on, all starting within 300 ms of each
+  other. Each AP now has a turn for both, the handheld's holder first, and an AP that hears the
+  holder act drops its own copies (alerts excepted: an alert is never left to somebody else).
+- **A late voice-note packet is no longer thrown away as too old.** A note's first packet leaves
+  during the talk and its second after it, some thirty of the author's voice numbers later; one
+  that needed a resend and arrived second fell outside a window of sixteen, on the AP that had
+  just carried it across LoRa and on the handheld, and the note could never be whole. Note
+  packets are now remembered one by one, apart from live voice, and taken in any order, once.
+  And a note that never becomes whole plays what arrived after its first pass instead of nothing.
+- **An alert waits for a frame in flight to end, four seconds at most, then goes ahead of
+  everything.** It used to go at once on every try, which worked while a second of silence
+  followed every part: the alert could land in it. With parts 150 ms apart it landed on a sender
+  that was transmitting and could not hear, and an SOS sent during a voice note reached the
+  note's sender on its fourth try, 13.6 s late. With the wait, 1.2 s and 1.7 s in two runs.
+- Voice-note packets are spaced 6 s apart from a talker on Wi-Fi and 9 s from one on LoRa alone
+  (were 9 and 12, sized for a second and more of silence after every part).
+- The handheld's LoRa task, not its service task, gives up unfinished sets: the service task did
+  it with no lock while the LoRa task could be copying a part into the same set.
+- `lora burst` refuses to run unless that AP's LoRa is off, and a probe's `+OK` is waited for as
+  long as a transmission can take.
+
+**Tried and taken out the same evening.** Parts of 240 characters (the entry below says why).
+And five tries for a message instead of three: frames given up between APs went from 11 to 9 in a
+run while messages the four-slot queue had no room for went from 1 to 16, because a frame waiting
+on a fourth and fifth try held the slot the next message needed.
+
+**Bench, 2026-10-09, Wi-Fi backbone cut, 915 MHz, nine boards in one room**, the same run
+morning and evening, times from the console command to the other handheld's log.
+
+| | morning, commit a345837 | evening, 5 dBm | evening, final build, 22 dBm |
+|---|---|---|---|
+| texts across the LoRa bridge | 8 of 8, median 15.8 s | 8 of 8, median 4.2 s | 7 of 8, median 4.7 s |
+| voice notes across it, byte for byte | 2 of 3 | 3 of 3 | 3 of 3 |
+| texts from a handheld on LoRa alone | 4 of 4, median 20.2 s | 4 of 4, median 13.3 s | not run |
+| texts to it | 3 of 4 | 3 of 4 | not run |
+| a voice note to it | none whole | whole | not run |
+| a voice note from it | whole | 3 packets of 4 | not run |
+| an SOS during a voice note, slowest handheld | 5.5 s | 13.6 s, then 1.2 s and 1.7 s with the alert wait | 1.5 s |
+| lost parts healed by parity (a count of collisions) | 65 | 25 | 0 |
+
+**Not fixed.** A voice-note packet from a handheld on LoRa alone that is lost to a collision
+stays lost: nothing acknowledges a handheld's frames at the link. The first text to such a
+handheld straight after it has been sending was lost in every run. Between APs a frame is still
+given up after three tries (about ten in a sixteen-minute run under this traffic, and the one
+text of eight above). Housekeeping still starts into a message it cannot hear beginning.
+
+On-board tests: `LG_TESTS: 4805 checks, 0 failures`.
+
+### LoRa lost one packet in six to a module setting, and no longer does
+
+The owner, with every board in one room: "Right now, the things are in the same room. And it
+doesn't work. Does that mean that LoRa is bad? Or is there something wrong with how we are using
+it?" It was how we were using it, and it was one setting.
+
+- **The module's network ID is 18, its factory value, on every grid (D113).** Each grid used to
+  take one of 3..15 from its discriminator, so that the radio itself would ignore another grid's
+  modules. On those IDs the module's receiver silently never reports about one packet in six.
+  Measured on three APs side by side, one sending 60 packets of 120 characters with nothing else
+  on the air and the two others counting: on ID 18 both heard 60 of 60, three runs of three,
+  alternated with runs on 14, 3 and 9 where they heard 43 to 56 of 60 - each missing different
+  packets, in clusters, with no error from the module. Every frame is sealed with the grid's own
+  key, so a part from another grid is refused when it is opened, as it always was; the radio just
+  no longer does the refusing.
+- **"A receiver needs a second of quiet after a packet" was that loss, read as a trend.** On ID
+  18 the same sender's packets arrive back to back with no quiet at all between them, 23-24 of
+  24, and an answer sent 20 ms after a packet is heard by a third radio 24 of 24 and by the radio
+  that had just finished transmitting 23 of 24.
+- **The length limit is real, and it is time on the air.** A packet sent after three seconds of
+  silence, on ID 18: 120 characters (0.69 s) 28 of 28, 140 (0.80 s) 31 of 32, 160 (0.88 s) 55 of
+  56, 200 (1.07 s) 1 of 32, 240 (1.26 s) 1 of 56, the rest arriving broken, at 22 dBm as at 5.
+  Back to back, the long ones arrive - which is how 240-character parts passed a first test that
+  evening, were flashed, and delivered one in six in real traffic before being withdrawn two
+  hours later. A part is 124 characters, and `LG_LORA_AIR_CEILING_MS` stops a build whose longest
+  part would be more than 0.8 s on the air at its radio setting.
+- **Probes the firmware times** (`lora burst <count> <chars> <gap ms> [tag]`, and
+  `lora echo <chars> <delay ms> <prefix>` to answer them, on an AP's console). The measurements
+  above could not be made with probes paced from a laptop, which are good to a tenth of a second,
+  and the AP also held its radio task a second after every `lora probe`, so probes closer than
+  that overwrote one another unseen - which is how a missing packet came to look like a receiver
+  needing quiet. A witness (`lora off`) prints the start of what it heard and a sum over all of
+  it, not 240 characters; a handheld that is `lora off` is now a witness too.
+- **A broken packet heard while idle is counted.** `+ERR=12` and `+ERR=19` were recognised only
+  while a send was waiting for its `+OK`; one that arrived while the radio was just listening was
+  dropped without a count or a time, on APs and handhelds both.
+- `lora_airtime_ms()` follows the radio setting in `lg_lora_wire.h` instead of having SF9 at
+  125 kHz written into it, and the build refuses a spreading factor the module does not allow at
+  the chosen bandwidth. `lora at <query>` prints the module's whole answer, not its name alone.
+
 ### An all clear always arrives, and an alert says when it was sent
 
 The owner heard it on the bench: an SOS drill would not stop. With the Wi-Fi backbone cut, the

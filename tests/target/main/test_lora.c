@@ -71,7 +71,7 @@ static size_t build(uint8_t *out, size_t cap, uint8_t peer, uint8_t id, uint8_t 
 
 static void test_parts(void)
 {
-    static uint8_t payload[300];
+    static uint8_t payload[3u * LORA_SLICE_MAX];   /* three parts' worth, whatever a part holds */
     for (size_t i = 0; i < sizeof(payload); i++) {
         payload[i] = (uint8_t)(i ^ 0x5Au);
     }
@@ -101,6 +101,28 @@ static void test_parts(void)
     CHECK_EQ(p.of, 3);
     CHECK_EQ(p.slice_len, LORA_SLICE_MAX);
     CHECK(memcmp(p.slice, payload + LORA_SLICE_MAX, LORA_SLICE_MAX) == 0);
+
+    /* A part is built for everyone, and can be told who it is for; the slice is untouched. */
+    CHECK_EQ(p.dest, LORA_DEST_ALL);
+    CHECK(lora_part_is_for(p.dest, LG_LORA_ADDR_AP(0)) && lora_part_is_for(p.dest, LG_LORA_ADDR_HANDHELD(9)));
+    lora_part_set_dest(part, LG_LORA_ADDR_AP(2));
+    CHECK(lora_part_parse(part, n, &p));
+    CHECK_EQ(p.dest, LG_LORA_ADDR_AP(2));
+    CHECK(lora_part_is_for(p.dest, LG_LORA_ADDR_AP(2)));
+    CHECK(!lora_part_is_for(p.dest, LG_LORA_ADDR_AP(1)) && !lora_part_is_for(p.dest, LG_LORA_ADDR_HANDHELD(2)));
+    CHECK(memcmp(p.slice, payload + LORA_SLICE_MAX, LORA_SLICE_MAX) == 0);
+    lora_part_set_dest(part, LG_LORA_ADDR_HANDHELD(LG_MAX_DEVICES));   /* the furthest place in the plan */
+    CHECK(lora_part_parse(part, n, &p) && lora_part_is_for(p.dest, LG_LORA_ADDR_HANDHELD(LG_MAX_DEVICES)));
+    {
+        static uint8_t two[2u * LORA_SLICE_MAX];
+        uint8_t par[LORA_PART_RAW_WIRE];
+        memset(two, 0x3C, sizeof(two));
+        size_t pn = lora_parity_build(PEER_ONE, 4, two, sizeof(two), par, sizeof(par));
+        lora_part_t q;
+        CHECK(pn == LORA_PART_RAW_WIRE && lora_parity_parse(par, pn, &q) && q.dest == LORA_DEST_ALL);
+        lora_part_set_dest(par, LG_LORA_ADDR_AP(1));
+        CHECK(lora_parity_parse(par, pn, &q) && q.dest == LG_LORA_ADDR_AP(1));
+    }
 
     /* A handheld's part parses as a handheld's, so the format is ready for one (docs/lora.md). */
     n = build(part, sizeof(part), (uint8_t)(LORA_PEER_HANDHELD | 3u), 1, 0, 1, payload, 40);
@@ -144,7 +166,7 @@ static void asm_setup(lora_asm_t *a, bool with_large)
 static void test_reassembly(void)
 {
     static lora_asm_t a;
-    static uint8_t payload[300];
+    static uint8_t payload[3u * LORA_SLICE_MAX];   /* three parts' worth, whatever a part holds */
     uint8_t part[LORA_PART_RAW_MAX];
     lora_asm_slot_t *slot = NULL;
 
@@ -259,7 +281,7 @@ static void txq_setup(lora_txq_t *q, bool with_large);   /* defined with the que
  */
 static void test_parity(void)
 {
-    static uint8_t payload[300];
+    static uint8_t payload[3u * LORA_SLICE_MAX];   /* three parts' worth, whatever a part holds */
     uint8_t part[LORA_PART_RAW_WIRE];
     uint8_t parity[LORA_PART_RAW_WIRE];
     lora_asm_t a;
@@ -406,7 +428,7 @@ static void test_queue_rank(void)
     /*
      * An alert nobody answers is not given up after three tries (2026-10-09): an all clear lost
      * three times in its own SOS's echo left four handhelds sounding an alarm that had been stood
-     * down. It goes LORA_ALERT_TRIES times; a message still goes three.
+     * down. It goes LORA_ALERT_TRIES times; a message goes LORA_TX_TRIES.
      */
     txq_setup(&q, false);
     lora_txq_slot_t *al = lora_txq_reserve_ranked(&q, LG_LORA_ADDR_BROADCAST, LORA_RANK_ALERT, 8, 40, 0);
@@ -849,14 +871,23 @@ static void test_round_trip(void)
 
 static void test_airtime(void)
 {
-    /* SF9, BW125, CR4/5, preamble 12. A full 120-character part is about two thirds of a second;
-     * four of them, plus the random backoff, are the couple of seconds docs/lora.md promises for
-     * one 288-byte frame. */
+    /* The formula is checked where its answer is known by heart: SF9 at 125 kHz, CR 4/5, preamble
+     * 12 puts 120 characters on the air for 653 ms and 240 for 1206. And the constant expression
+     * that guards the build agrees with the function, to the millisecond it rounds up to. */
     uint32_t full = lora_airtime_ms(LORA_PART_B64_MAX);
-    CHECK(full > 500 && full < 800);
+#if LG_LORA_SF == 9 && LG_LORA_BW_CODE == 7 && LG_LORA_CR_CODE == 1 && LG_LORA_PREAMBLE == 12
+    CHECK_EQ(lora_airtime_ms(120), 653);
+    CHECK_EQ(lora_airtime_ms(240), 1206);
+#endif
+    for (size_t n = 1; n <= 240u; n += 7u) {
+        CHECK_EQ(lora_airtime_ms(n), (LG_LORA_AIRTIME_US(n) + 999u) / 1000u);
+    }
+    /* A part sent from rest must be under about a second on the air (lg_lora_wire.h). */
+    CHECK(lora_airtime_ms(LORA_PART_B64_WIRE) <= LG_LORA_AIR_CEILING_MS);
     CHECK(lora_airtime_ms(8) < full);
     CHECK(lora_airtime_ms(0) > 0);   /* the preamble and header cost something on their own */
-    CHECK(lora_airtime_ms(240) > full);
+    CHECK(lora_airtime_ms(LORA_PART_B64_MAX / 2u) < full);
+    CHECK(lora_airtime_ms(LORA_PART_B64_WIRE) >= full);   /* the parity part is the longest there is */
     /* A 6 KB voice note is LORA_PARTS_MAX of them: under a minute of airtime, which is why its
      * reassembly timeout has to be an idle one and not ten seconds from the first part. */
     CHECK(LORA_PARTS_MAX * full < LORA_ASM_MAX_MS);
@@ -953,10 +984,12 @@ static void test_ack(void)
     CHECK(!s->waiting);
     CHECK_EQ(q.resent, 1);
     CHECK(lora_txq_sent(&q, s, 2000));
-    CHECK(lora_txq_peek(&q, 2000) == s);
-    CHECK_EQ(q.resent, 2);
-    CHECK(lora_txq_sent(&q, s, 3000));             /* the third time */
-    CHECK(lora_txq_peek(&q, 3000) == NULL);        /* and no fourth */
+    for (unsigned k = 2; k < LORA_TX_TRIES; k++) {
+        CHECK(lora_txq_peek(&q, 2000 + k) == s);
+        CHECK_EQ(q.resent, k);
+        CHECK(lora_txq_sent(&q, s, 2000 + k));     /* ... to the last time */
+    }
+    CHECK(lora_txq_peek(&q, 3000 + LORA_TX_TRIES) == NULL);   /* and not once more */
     CHECK_EQ(q.unacked, 1);
     CHECK_EQ(q.depth, 0);
 

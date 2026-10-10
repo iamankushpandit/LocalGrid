@@ -195,6 +195,33 @@ static int cmd_lora(int argc, char **argv)
         printf("Probe queued (%s chars); witnesses log it as \"Heard while off\"\n", argv[2]);
         return 0;
     }
+    if (argc >= 5 && strcmp(argv[1], "burst") == 0) {
+        /* Bring-up: probes the firmware itself times, for gaps a person or a script cannot keep. */
+        unsigned count = (unsigned)strtoul(argv[2], NULL, 10);
+        unsigned chars = (unsigned)strtoul(argv[3], NULL, 10);
+        unsigned gap = (unsigned)strtoul(argv[4], NULL, 10);
+        if (!lora_is_off()) {
+            /* It holds the radio task until the last probe has gone: only on a radio set aside. */
+            printf("A burst needs this AP's LoRa off first: lora off <seconds>\n");
+            return 1;
+        }
+        lora_request_burst(count, chars, gap, argc > 5 ? argv[5] : NULL);
+        printf("Burst queued: %u probes of %u chars, %u ms of quiet after each\n", count, chars, gap);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "echo") == 0) {
+        if (argc >= 5) {
+            unsigned chars = (unsigned)strtoul(argv[2], NULL, 10);
+            unsigned delay = (unsigned)strtoul(argv[3], NULL, 10);
+            lora_request_echo(chars, delay, argv[4]);
+            printf("While off, probes starting \"%s\" are answered with %u chars after %u ms\n", argv[4], chars,
+                   delay);
+        } else {
+            lora_request_echo(0, 0, NULL);
+            printf("Echo off\n");
+        }
+        return 0;
+    }
     if (argc >= 3 && strcmp(argv[1], "at") == 0) {
         /* Bring-up only: whether this firmware's broadcast address works is a question only the
          * module can answer, and this is how to ask it. Nothing here touches a key or a message. */
@@ -210,7 +237,8 @@ static int cmd_lora(int argc, char **argv)
         return 0;
     }
     printf("usage: lora | lora send [text] | lora off [seconds] | lora on | lora reset"
-           " | lora broadcast on|off | lora at <AT command> | lora probe <chars|z85> [tag]\n");
+           " | lora broadcast on|off | lora at <AT command> | lora probe <chars|z85> [tag]"
+           " | lora burst <count> <chars> <gap ms> [tag] | lora echo <chars> <delay ms> <prefix> | lora echo off\n");
     return 1;
 }
 

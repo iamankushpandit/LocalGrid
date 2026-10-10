@@ -2608,26 +2608,46 @@ static void test_voice_duplicates_and_order(void)
  */
 static void test_voice_catch_up(void)
 {
-    /* The window itself, straight on the table. */
+    /* What is remembered, straight on the table. */
     lg_voice_seen_t w = { 0 };
     CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 10u, true));      /* first sight */
     CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 13u, true));      /* forward, skipping two */
     CHECK(!lg_voice_check(&w, 1, LG_VOICE_SEQ_BIT | 13u, true));    /* the newest again: a duplicate */
-    CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 12u, true));      /* catch-up, once */
+    CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 12u, true));      /* late, once */
     CHECK(!lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 12u, true));     /* and only once */
     CHECK(lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 11u, true));      /* the other gap */
-    CHECK(!lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 10u, true));     /* taken before the jump: remembered */
-    CHECK(!lg_voice_check(&w, 1, LG_VOICE_SEQ_BIT | 12u, false));   /* live never looks back */
+    CHECK(!lg_voice_take(&w, 1, LG_VOICE_SEQ_BIT | 10u, true));     /* the first one: remembered */
+    /*
+     * The case the bench found (2026-10-09). A note's first packet leaves during the talk, at
+     * about the twelfth of the author's voice numbers; its second leaves after the talk, when ten
+     * live frames a second have used thirty more. The first needs a resend and lands second. A
+     * window of sixteen numbers called it too old, on the AP and on the handheld.
+     */
     lg_voice_seen_t e = { 0 };
-    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 100u, true));
-    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 116u, true));     /* 16 ahead: 100 sits at the edge */
-    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 100u, true));    /* and is remembered there */
-    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 101u, true));     /* 15 back, never seen: taken */
-    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 133u, true));     /* 17 ahead: a clean window */
-    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 116u, true));    /* beyond the window: too old */
-    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 117u, true));     /* 16 back, inside and unseen */
-    CHECK(lg_voice_take(&e, 2, LG_VOICE_SEQ_BIT | 5u, true));       /* a new boot starts clean */
-    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 999u, true));    /* the boot before is over */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 46u, true));      /* the second packet, first */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 12u, true));      /* the first, 34 numbers behind it */
+    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 12u, true));     /* its radio copy again */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 47u, true));
+    CHECK(!lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 46u, true));
+    /* Live voice keeps its own place in line, and still only goes forward. */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 30u, false));     /* a live frame older than every note packet */
+    CHECK(!lg_voice_check(&e, 1, LG_VOICE_SEQ_BIT | 30u, false));   /* the same one again */
+    CHECK(!lg_voice_check(&e, 1, LG_VOICE_SEQ_BIT | 29u, false));   /* live never looks back */
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 31u, false));
+    CHECK(lg_voice_take(&e, 1, LG_VOICE_SEQ_BIT | 13u, true));      /* and a note packet is not held to it */
+    /* Only the last few are remembered: enough for every path a packet can come by twice. */
+    lg_voice_seen_t k = { 0 };
+    for (uint32_t i = 0; i <= LG_VOICE_COMPACT_KEEP; i++) {
+        CHECK(lg_voice_take(&k, 3, LG_VOICE_SEQ_BIT | (200u + i), true));
+    }
+    CHECK(!lg_voice_check(&k, 3, LG_VOICE_SEQ_BIT | 201u, true));   /* still among them */
+    CHECK(lg_voice_check(&k, 3, LG_VOICE_SEQ_BIT | 200u, true));    /* the oldest has been let go */
+    /* A new boot starts clean, and the boot before it is over - for note packets and for live. */
+    CHECK(lg_voice_take(&k, 4, LG_VOICE_SEQ_BIT | 5u, true));
+    CHECK(!lg_voice_take(&k, 3, LG_VOICE_SEQ_BIT | 999u, true));
+    CHECK(lg_voice_take(&k, 4, LG_VOICE_SEQ_BIT | 6u, false));
+    CHECK(lg_voice_take(&k, 5, LG_VOICE_SEQ_BIT | 1u, false));      /* live from a boot after that */
+    CHECK(!lg_voice_take(&k, 4, LG_VOICE_SEQ_BIT | 7u, true));      /* a note packet from the one it replaced */
 
     sim_t *s = make_chain();
     if (s == NULL) {
